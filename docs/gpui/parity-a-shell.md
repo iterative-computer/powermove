@@ -1,0 +1,818 @@
+# Part A — app shell parity inventory
+
+Reference: committed `main` at `d9a98ea5a7db1df245627eb0246713a53452a9b8`. Read with git object commands in the GPUI worktree; no builds or tests executed. Checkboxes are rewrite obligations, not completed implementation. Acceptance entries quote committed behavioral test names; they are source contracts, not a claim that tests currently pass. Paths are relative to repository root. Editor panel internals belong to the companion inventory, except shell menus, shortcuts and extension contracts.
+
+Native menu accelerators below retain source spelling; Cmd/Ctrl means both registrations. “None displayed” is distinct from an editor shortcut. Native role shortcuts/labels are delegated to Electron/macOS rather than hardcoded. Absence notes are bounded to the inspected sources and must not be read as proposed features.
+
+## 1. Windows and app lifecycle
+
+- [ ] Editor windows: Allow multiple independent editor windows containing ordered project tabs; one project cannot be owned by two windows. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Window focus: Menu targets and Dock activation use the most recently focused live editor; revealing restores minimized windows. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Initial dimensions: Create 1440×900 windows with a 980×640 minimum and cascade additional windows. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Chrome: Hidden-inset titlebar retains traffic lights at x14/y15; sidebar vibrancy follows active-window state. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Fullscreen: Notify the renderer on enter/leave fullscreen so titlebar space formerly reserved for traffic lights is reclaimed. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Restore migration: Read window-tab sessions, older one-project windows, then legacy open tabs; deduplicate known IDs with 12-window/40-tab bounds. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Launch restoration: Default to reopening only the last active project from the last focused window; retain other projects in Recents. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Restoration opt-out: Start on Projects when restoreWindows is false. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Project ownership: Opening an already-owned project raises its owner rather than creating competing autosaves. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Tab reorder: Deduplicate requested tab order and retain omitted owned tabs at the end; never add/drop ownership through reorder. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Tab tear-off: Move a tab into a new window or another window's title strip; topmost hit window wins and strip drop band is 56 pixels. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Single instance: Request an application lock; route .pmv arguments and deep links from later processes into the first process. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Quiet duplicate launch: A macOS second launch with no project or link must not steal focus. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Finder/Dock documents: Queue open-file events before readiness so opening a .pmv during startup is not lost. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Deep links: Queue powermove:// open-url before ready; packaged builds claim the scheme, development builds only with explicit opt-in. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] External links: Route supported external HTTP(S) navigation through the system browser rather than arbitrary editor windows. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Last window: Closing the last editor exits the process; closing one of multiple windows leaves the others running. — `apps/desktop/src/main/index.ts`, `apps/desktop/src/main/windows.ts`
+- [ ] Close preparation: Await pending imports and recovery writes before committing a close; cancellation preserves the editing session. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Unsaved close: Offer Save, Don’t Save and Cancel; a cancelled Save leaves the window open. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Unchanged close: Skip save prompts for unchanged local documents. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Discard untitled: Remove a never-saved discarded project from Recents and recovery even through the final flush. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Multi-window quit: Cancelling a later window does not discard an earlier window's approved but still-open project. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Failed recovery flush: Keep edits open and allow Quit to be retried after a failed recovery write. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] Renderer crash: Offer recovery, reload latest saved project, and allow closing without waiting on the dead renderer. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] MCP crash continuity: Keep external MCP connection usable across editor crash and renderer reload. — `apps/desktop/src/main/editor-close.ts`, `apps/desktop/src/main/renderer-recovery.ts`, `apps/desktop/src/main/project-save.ts`
+- [ ] App updates: Check and present update state through the shell, with download/install progress and failure handling. — `apps/desktop/src/main/updates.ts`, `apps/desktop/src/renderer/src/shell/app-updates.ts`, `apps/desktop/src/renderer/src/shell/WhatsNew.svelte`
+- [ ] Update restart: Coordinate update installation with editor close/save preparation. — `apps/desktop/src/main/updates.ts`, `apps/desktop/src/renderer/src/shell/app-updates.ts`, `apps/desktop/src/renderer/src/shell/WhatsNew.svelte`
+- [ ] What’s New: Present version-specific release changes and persist seen/dismissed state. — `apps/desktop/src/main/updates.ts`, `apps/desktop/src/renderer/src/shell/app-updates.ts`, `apps/desktop/src/renderer/src/shell/WhatsNew.svelte`
+- [ ] Runtime updates: Track runtime updates independently of app document content. — `apps/desktop/src/main/updates.ts`, `apps/desktop/src/renderer/src/shell/app-updates.ts`, `apps/desktop/src/renderer/src/shell/WhatsNew.svelte`
+- [ ] Acceptance background-autosave: Untitled recovery, named background save, conflicts, retry and safe version copy. — `apps/desktop/e2e/background-autosave.spec.ts`
+- [ ] Acceptance background-autosave: Two heavy projects retain pending writes through tab switches, undo, redo and crash. — `apps/desktop/e2e/background-autosave.spec.ts`
+- [ ] Acceptance project-startup: Restart opens only the previously active project tab. — `apps/desktop/e2e/project-startup.spec.ts`
+- [ ] Acceptance project-startup: Restart restores one project from the last focused window. — `apps/desktop/e2e/project-startup.spec.ts`
+- [ ] Acceptance project-startup: Turning off project restoration starts on Projects without opening another recent project. — `apps/desktop/e2e/project-startup.spec.ts`
+- [ ] Acceptance project-startup: An old single-autosave profile restores its only project. — `apps/desktop/e2e/project-startup.spec.ts`
+- [ ] Acceptance quit: Quit exits the process after saving the editing session. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: Closing the last window exits the process. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: Quit exits after discarding unsaved edits. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: Closing one of two windows keeps the other window open. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: Repeated Quit can be cancelled while preparation waits for imports. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: A failed recovery flush keeps edits open and allows Quit to be retried. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance quit: Cancelling a later window preserves an earlier approved unsaved project. — `apps/desktop/e2e/quit.spec.ts`
+- [ ] Acceptance renderer-crash: Offers recovery after an editor process crashes and restores its latest saved project. — `apps/desktop/e2e/renderer-crash.spec.ts`
+- [ ] Acceptance renderer-crash: A crashed editor can close without waiting for a save from the missing process. — `apps/desktop/e2e/renderer-crash.spec.ts`
+- [ ] Acceptance renderer-crash: The external MCP connection survives editor crash and reload without timing out. — `apps/desktop/e2e/renderer-crash.spec.ts`
+- [ ] Acceptance shell: Boots the Svelte chrome while the dock panels stay live. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Opens projects from the library and switches between them from the title menu. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Closing a project shows its neighbour, and closing the last shows Projects. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Relaunch opens the active document while retaining the others in Recents. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: A tab moves to a window of its own, and one project is never a tab in two windows. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: A project handed to another window joins the end of its open projects. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Tools lead on the left and the project is titled in the middle, however many are open. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Keeps a usable window drag area with many projects and overlays. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Switching back to a project resumes it from memory instead of reloading it. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance shell: Renames the project in place from the titlebar. — `apps/desktop/e2e/shell.spec.ts`
+- [ ] Acceptance window-drag-region: The agent overlay leaves the titlebar grab area draggable. — `apps/desktop/e2e/window-drag-region.spec.ts`
+
+## 2. Native menus and context menus
+
+- [ ] View › Zoom In: CommandOrControl+=; dispatch `zoomIn` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Zoom Out: CommandOrControl+-; dispatch `zoomOut` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Actual Size: CommandOrControl+1; dispatch `actualSize` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Fit Composition: CommandOrControl+0; dispatch `fitComposition` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Show/Hide Layer Controls: CommandOrControl+Shift+H; dispatch `toggleLayerControls` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Settings…: CommandOrControl+,; dispatch `settings` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › New Project: CommandOrControl+Alt+N; dispatch `newProject` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Open Project…: CommandOrControl+O; dispatch `open` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Close Tab: CommandOrControl+W; dispatch `closeTab` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Save Project: CommandOrControl+S; dispatch `save` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Save Project As…: CommandOrControl+Shift+S; dispatch `saveAs` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Import Media…: CommandOrControl+I; dispatch `import` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Export…: CommandOrControl+E; dispatch `export` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Undo: CommandOrControl+Z; dispatch `contextUndo` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Redo: CommandOrControl+Shift+Z; dispatch `contextRedo` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Cut: CommandOrControl+X; dispatch `contextCut` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Copy: CommandOrControl+C; dispatch `contextCopy` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Paste: CommandOrControl+V; dispatch `contextPaste` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Select All: CommandOrControl+A; dispatch `contextSelectAll` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Duplicate Layers: CommandOrControl+D; dispatch `duplicate` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Split at Playhead: CommandOrControl+Shift+D; dispatch `split` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Bring Forward: CommandOrControl+]; dispatch `bringForward` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Send Backward: CommandOrControl+[; dispatch `sendBackward` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Bring to Front: CommandOrControl+Shift+]; dispatch `bringToFront` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Send to Back: CommandOrControl+Shift+[; dispatch `sendToBack` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Composition › New Composition…: CommandOrControl+N; dispatch `newComposition` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Composition › Composition Settings…: CommandOrControl+Alt+K; dispatch `compositionSettings` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › Pre-compose…: CommandOrControl+Shift+C; dispatch `precompose` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Window › Show Next Tab: Control+Tab; dispatch `nextTab` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Window › Show Previous Tab: Control+Shift+Tab; dispatch `previousTab` to the editor (context* commands target the focused window); template has no per-document enabled predicate. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › About: system role; native About role. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Services: system role; system Services submenu. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Hide: ⌘H; native hide role. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Hide Others: ⌥⌘H; native hideOthers role. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Show All: none explicit; native unhide role. — `apps/desktop/src/main/menu.ts`
+- [ ] Powermove › Quit: ⌘Q; native quit role with close preparation. — `apps/desktop/src/main/menu.ts`
+- [ ] File › New Window: ⇧⌘N; enabled only when window actions exist. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Close Window: ⇧⌘W; enabled only when window actions exist. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Import Image Sequence…: none; dispatch importSequence. — `apps/desktop/src/main/menu.ts`
+- [ ] File › Import Folder…: none; dispatch importFolder. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Text: none displayed; dispatch newText. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Solid: none displayed; dispatch newSolid. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Shape Layer: none displayed; dispatch newShape. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Null Object: none displayed; dispatch newNull. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Adjustment Layer: none displayed; dispatch newAdjustment. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Camera: none displayed; dispatch 3d.add-camera. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › New › Light: none displayed; dispatch 3d.add-light. — `apps/desktop/src/main/menu.ts`
+- [ ] Layer › Release Pre-comp: none; dispatch releasePrecomp. — `apps/desktop/src/main/menu.ts`
+- [ ] Edit › Delete: none displayed; dispatch contextDelete. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Toggle Full Screen: system role; native togglefullscreen role. — `apps/desktop/src/main/menu.ts`
+- [ ] View › Reload / Toggle Developer Tools: system roles; development builds only. — `apps/desktop/src/main/menu.ts`
+- [ ] Window › Minimize / Zoom: system roles; native minimize and zoom roles. — `apps/desktop/src/main/menu.ts`
+- [ ] Window › Move Tab to New Window: none; enabled only when window actions exist. — `apps/desktop/src/main/menu.ts`
+- [ ] Window › Bring All to Front: system role; native front role. — `apps/desktop/src/main/menu.ts`
+- [ ] Help › Powermove Help: none; open https://trypowermove.com; Help role supplies system menu search. — `apps/desktop/src/main/menu.ts`
+- [ ] Menu routing: Do not let displayed native equivalents preempt renderer-owned field and repeat policy; gate matching Cmd/Ctrl chords before native dispatch. — `apps/desktop/src/main/menu.ts`, `apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts`
+- [ ] Command availability: Native command items generally remain enabled in the template; actual selection/project/field availability is enforced by renderer command handling. — `apps/desktop/src/main/menu.ts`, `apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts`
+- [ ] Separators and order: Preserve group separators and top-level order Powermove, File, Edit, Composition, Layer, View, Window, Help. — `apps/desktop/src/main/menu.ts`, `apps/desktop/src/renderer/src/legacy/ui/shortcuts.ts`
+- [ ] Panel header context: Maximize Panel/Restore Panel Size (backtick), Add Panel as Tab submenu, Open in New Window, Close Panel, Close Other Panels in Group, extension contributions. — `apps/desktop/src/renderer/src/layout/menu.ts`
+- [ ] Panel menu eligibility: Exclude headless/viewer tabs, toolbar, library:false and popped-out panels from Add Panel as Tab; hide Close Panel for viewer and show Close Others only for groups. — `apps/desktop/src/renderer/src/layout/menu.ts`
+- [ ] Panel menu extensions: Gather panel:context asynchronously with panelId/dockId and preserve clicked target through delayed results. — `apps/desktop/src/renderer/src/layout/menu.ts`
+- [ ] Project title menu: List checked open projects, New Project (⌥⌘N), All Projects… (⌘P), Rename Project… (F2), Move to New Window, Close Project (⌘W), Close Other Projects. — `apps/desktop/src/renderer/src/shell/Titlebar.svelte`
+- [ ] Title menu availability: Disable rename while opening; Move to New Window and Close Other Projects require at least two open projects. — `apps/desktop/src/renderer/src/shell/Titlebar.svelte`
+- [ ] Recent project context: Open, Open in New Window, Save, Save As…, Rename…, Duplicate, Move to Trash…; current project Open is disabled. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`
+- [ ] Recent window eligibility: Show Open in New Window only with multiwindow support and disable moving the sole active tab. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`
+- [ ] Trashed project context: Restore and Delete Forever… replace the normal project actions. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`
+- [ ] Media showProjectMenu: Context menu contains New Composition…, New Folder, Import Media…, Import Folder…; action predicates and optional items follow the clicked asset/folder/composition. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Media showFolderMenu: Context menu contains Open, Rename, New Folder Inside, Import Folder Into…, Move Out of Folder, Delete Folder; action predicates and optional items follow the clicked asset/folder/composition. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Media showCompMenu: Context menu contains Open in Timeline, Add to Timeline, Composition Settings…, Duplicate, Delete Composition…; action predicates and optional items follow the clicked asset/folder/composition. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Media showAssetMenu: Context menu contains Delete Selected Media…, Download from Cloud, Add to Timeline, New Composition from Media, Reveal in Finder, Move Out of Folder, Delete Media…; action predicates and optional items follow the clicked asset/folder/composition. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Text selection menu: Non-password selections get Look Up on macOS and Search with Google; noneditable selected text gets Copy only after those services. — `apps/desktop/src/main/text-context-menu.ts`
+- [ ] Editable text menu: Undo, Redo, Cut, Copy, Paste, Select All use native editFlags; composer Undo/Redo use attachment-preserving custom history. — `apps/desktop/src/main/text-context-menu.ts`
+- [ ] Spelling menu: Prepend up to five suggestions or disabled No Guesses Found, then Learn Spelling for editable misspellings. — `apps/desktop/src/main/text-context-menu.ts`
+- [ ] Native text services: Open menu with the originating services frame for macOS Writing Tools, Services and Look Up; never route selection copying to layers. — `apps/desktop/src/main/text-context-menu.ts`
+
+- [ ] Media asset optional actions: Replace Media…/Relink Missing Media… uses replacement picker; include dynamic Play/Pause preview labels and cloud state actions. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Layer context scope: Right-click layer in viewer/timeline uses shared selected-layer menu; mutating rows disable for protected/locked selection. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer structure menu: Rename… (single selection), Duplicate ⌘D, Group Layers ⌘G, Ungroup Layers ⇧⌘G (groups), Pre-compose… ⇧⌘C, Release Pre-comp (single precomp). — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer text and mask menus: All-text selection offers Split Text into Layers; valid multiple selection offers Use Bottom Layer as Mask; Move to Group lists Outside Groups and eligible groups. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer parenting menu: Link Layers offers None and candidate layer names, checked for current parent and excluding invalid cycles. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer timing menu: Timing submenu offers Split at Playhead ⇧⌘D, Trim In/Out to Playhead (disabled outside relevant span), Fit to Composition. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer switch menu: Video offers Mute/Unmute Audio and Separate Audio; Hide/Show, Solo/Unsolo, Lock/Unlock/Unlock Group follow selected state; eligible layers offer 3D Layer and precomps Continuously Rasterize. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Layer deletion menu: Delete ⌫ disables when selection cannot be edited; preserve extension layer:context contributions. — `apps/desktop/src/renderer/src/legacy/ui/layer-menu.ts`
+- [ ] Viewer empty context: Paste, Select All Layers (disabled with no layers), Fit Composition in View, Composition Settings… plus viewer:context contributions. — `apps/desktop/src/extensions/viewer/viewer.ts`
+- [ ] Timeline column context: Layer Name and Link Layers checked/disabled; Layer Numbers and Switches toggle; Show All After Effects Columns enables both. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline graph context: Value Graph/Speed Graph checks current mode; Fit Selected Curves disabled without graph; Merge Selected Curves requires at least two series; Show Layer Bars with Graph toggles combined view. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline key context: Edit Value…, Keyframe Velocity…, Scale Keyframes…, easing presets, Hold Keyframe(s), Copy Keyframe(s), Delete Keyframe(s). — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline track context: Add Keyframe Here, Paste Keyframes Here, Clear All Keyframes (disabled for empty track), Separate Dimensions with checked state. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Timeline background/ruler context: Remove Marker on marker; Add Marker Here disabled if marker exists; Start/End Work Area at context position, Reset Work Area, Switch to Layer/Track Timeline. — `apps/desktop/src/extensions/timeline/timeline.ts`
+- [ ] Easing curve context: Save Preset…, Mirror Curve, Reset Curve, Input Coordinates toggle; library background offers Import Presets…, Export Library…, Panel Settings. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+- [ ] Easing action context: Copy/Paste/Apply controls expose target-section menus; preset and group context menus support library organization. — `apps/desktop/src/renderer/src/panels/EasingPanel.svelte`
+
+## 3. Keyboard shortcuts and customization
+
+- [ ] Cmd/Ctrl+k: Run `palette` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+k: Run `agent` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+,: Run `settings` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+z: Run `undo` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+z: Run `redo` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+y: Run `newSolid` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+y: Run `newShape` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+t: Run `toolText` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+t: Run `toolText` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+d: Run `duplicate` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+d: Run `split` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+c: Run `copyLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+c: Run `precompose` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+g: Run `groupLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+g: Run `ungroupLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+v: Run `contextPaste` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+a: Run `selectAll` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+a: Run `deselect` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+i: Run `import` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+i: Run `import` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+s: Run `save` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+s: Run `saveAs` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+o: Run `open` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+o: Run `open` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+e: Run `export` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+e: Run `export` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+p: Run `projects` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+n: Run `newComposition` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+alt+n: Run `newProject` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+alt+y: Run `newAdjustment` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+alt+k: Run `compositionSettings` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+b: Run `split` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+x: Run `cutLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+h: Run `toggleLayerControls` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+l: Run `lockSelectedLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+l: Run `unlockAllLayers` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+up: Run `selectPreviousLayer` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+down: Run `selectNextLayer` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+up: Run `extendSelectionPreviousLayer` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+down: Run `extendSelectionNextLayer` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+=: Run `zoomIn` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift++: Run `zoomIn` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+-: Run `zoomOut` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+0: Run `fitComposition` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+1: Run `actualSize` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+alt+home: Run `centerAnchor` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+]: Run `bringForward` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+[: Run `sendBackward` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+]: Run `bringToFront` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Cmd/Ctrl+shift+[: Run `sendToBack` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] space: Run `play` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] home: Run `gotoStart` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] end: Run `gotoEnd` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+home: Run `gotoWorkIn` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+end: Run `gotoWorkOut` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] pageup: Run `prevFrame` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] pagedown: Run `nextFrame` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] backspace: Run `delete` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] delete: Run `delete` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] escape: Run `deselect` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] v / Shift+v: Run `toolSelect` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] h / Shift+h: Run `toolHand` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] z / Shift+z: Run `toolZoom` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] w / Shift+w: Run `toolRotate` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] y / Shift+y: Run `toolAnchor` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] q / Shift+q: Run `toolShape` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] g / Shift+g: Run `toolPen` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] b / Shift+b: Run `workIn` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] n / Shift+n: Run `workOut` in editor context; priority 100; field/repeat/loose-modifier exceptions are listed below. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+left: Run `nudgeKeyframes`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+right: Run `nudgeKeyframes`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+shift+left: Run `nudgeKeyframes`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+shift+right: Run `nudgeKeyframes`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+pageup: Run `stepFrames`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+pagedown: Run `stepFrames`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] `: Run `maximizePanel`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] j: Run `prevVisibleEvent`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] k: Run `nextVisibleEvent`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+j: Run `timeline.adjacentKeyframe:prev`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+k: Run `timeline.adjacentKeyframe:next`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] i: Run `gotoLayerIn`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] o: Run `gotoLayerOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] [: Run `moveLayerIn`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] ]: Run `moveLayerOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+[: Run `trimIn`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+]: Run `trimOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+home: Run `moveLayerInToStart`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] alt+end: Run `moveLayerOutToEnd`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] .: Run `zoomIn`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] ,: Run `zoomOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] /: Run `actualSize`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+/: Run `fitComposition`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+f3: Run `graph`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] f9: Run `easyEase`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] shift+f9: Run `easyEaseIn`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] cmd+shift+f9: Run `easyEaseOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] ctrl+shift+f9: Run `easyEaseOut`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] cmd+`: Run `timeline.revealAll`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] ctrl+`: Run `timeline.revealAll`; explicit args in source preserve step direction, frame count or reveal behavior. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Arrow nudges: Bare arrows move selection 1 unit; Shift+arrows move 10 units; both repeat while held. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Primary frame keys: Cmd+Left/Right steps frames; Ctrl+Left/Right selects adjacent keyframe; Cmd/Ctrl+Shift+Left/Right steps ±10 frames. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Property reveal: P/S/R/T/A/U/M/F/E/L run timeline.revealProperty:<key>; Shift variant adds to revealed properties. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Field exceptions: Save, Save As, Settings and context Paste work in fields; Escape in a field runs blurField at priority 50 without editor deselection. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Held-key policy: Only nextFrame, prevFrame, stepFrames, nudgeSelection and nudgeKeyframes explicitly repeat in this keymap. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Loose modifier policy: Legacy MOD_CHORDS selectively accept extra modifiers; export/new-project/new-composition are exact, as are PRO_CHORDS. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Keymap customization: Built-in keymap is replaceable as an extension; runtime bind/unbind/list expose command, args, priority, inFields, repeat and looseModifiers. — `apps/desktop/src/extensions/keymap-default/keymap.ts`
+- [ ] Shortcut dispatch: Normalize chords and arbitrate registered bindings with focus/field/repeat policy rather than a second native shortcut executor. — `apps/desktop/src/renderer/src/kernel/host.ts`, `apps/desktop/src/renderer/src/kernel/keychord.ts`
+- [ ] Custom shortcut settings: No dedicated user keybinding editor is established by SettingsScreen; extension API is the evidenced customization surface. — `apps/desktop/src/renderer/src/kernel/host.ts`, `apps/desktop/src/renderer/src/kernel/keychord.ts`
+
+- [ ] Agent composer keys: Enter sends, Shift+Enter inserts newline; repeated Enter ignored; IME composition bypasses submission; slash menu Up/Down wraps and Enter/Tab selects, Escape dismisses. — `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`
+- [ ] Agent text focus: Cmd/Ctrl+A selects draft and Cmd/Ctrl+V stays in native paste path; Escape follows composer-specific dismissal behavior. — `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`
+- [ ] Settings local keys: Up/Down/Home/End navigate visible sidebar sections; Escape or exact Cmd/Ctrl+, dismisses; Settings stops editor key propagation. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Titlebar local keys: F2 starts project rename; Enter commits and Escape cancels while keeping focus local to rename. — `apps/desktop/src/renderer/src/shell/Titlebar.svelte`
+- [ ] Media list local keys: Cmd/Ctrl+A selects media, arrows/Home/End navigate, Enter adds, Space previews, Delete/Backspace deletes, Escape clears; folder Enter opens and rename Enter/Escape commits/cancels. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+
+## 4. Projects, compositions, settings, onboarding and About
+
+- [ ] Project library: Provide project cards/list navigation, search, pagination, recent file state and Trash actions. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] New project form: Ask name, resolution, custom width/height, frame rate, duration and background before creating; Cancel preserves current document. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Resolution presets: Offer 3840×2160, 1920×1080, 1280×720, 1080×1920, 1080×1350, 1080×1080 and Custom. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Project composition settings: Edit live name, resolution, size, frame rate (1–240), duration, color depth and background; unsupported depth choices are disabled. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Project export defaults: Persist format, scaled/custom output size, export frame rate, range, quality, motion blur, audio and transparent background. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Save destination: Save writes editable .pmv, reuses its destination, and Save As changes the tracked destination. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Save safety: Cancellation, failed writes and external modification conflicts retain unsaved state; inactive project saves preserve live edits. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Portable document: Save/open preserve editable source, media, history and project layout; large media are streamed with bounded memory. — `apps/desktop/src/renderer/src/legacy/ui/projects.ts`, `apps/desktop/src/renderer/src/legacy/ui/project-settings.ts`
+- [ ] Settings sections: Project and Memory appear only with a project; App sections are General, Accounts, Transcription, Extensions and Storage. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Settings entry: Open one shared Settings screen from any entry point; default to Project when available, otherwise General. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Settings search: Filter live settings across sections and extension details, highlight matches and announce count/no matches. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Settings navigation: Continuous scrolling tracks active section; arrow keys/Home/End navigate sidebar; Done, Escape or Cmd/Ctrl+, close and restore focus. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] General appearance: Choose Match system (default), Light or Dark. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] General workspace: Bring my workspace closes Settings and hands After Effects workspace transfer to agent; failures remain retryable. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] General playback: Preview memory choices Off, 128 MB, 256 MB, 512 MB, 1 GB, 2 GB; default 256 MB persisted per profile. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] General media: Automatically download cloud media defaults off and persists. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] General windows: Reopen last project on launch defaults on and appears only with multiwindow support. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Accounts profile: Show avatar, handle/email; offer Choose Handle when missing, Sign Out, Sign In and Delete Account. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Remember installs: Account toggle defaults on; disabling deletes remembered install list, failures restore toggle. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Account deletion: Delete account keeps published extensions under the handle; display success/failure. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Accounts providers: Host ChatGPT and Claude subscriptions, API/local model connection, and Other agent apps. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Memory enable: Use project memory defaults on; turning off retains notes but hides them from agents and autosaves without a revision/Undo step. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Memory sections: Show Goal, Rules, Open items, Decisions, Rejected ideas and Feedback sorted newest first with author/date/resolved state. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`
+- [ ] Storage summary: Show calculation/error states, total bytes, per-category usage and storage folder. — `apps/desktop/src/renderer/src/settings/StorageSettings.svelte`, `apps/desktop/src/main/storage-management.ts`
+- [ ] Storage cleanup: Preview reclaimable storage before cleanup; preserve project data and persist automatic-cleanup and older-backup-budget preferences. — `apps/desktop/src/renderer/src/settings/StorageSettings.svelte`, `apps/desktop/src/main/storage-management.ts`
+- [ ] Onboarding: Gate first launch before normal startup; introduce workspace transfer, agent connection, timeline preference and transcription setup. — `apps/desktop/src/renderer/src/onboarding/welcome.ts`, `apps/desktop/src/renderer/src/onboarding/AgentStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TimelineStep.svelte`, `apps/desktop/src/renderer/src/onboarding/WorkspaceStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TranscriptionStep.svelte`
+- [ ] Timeline onboarding: Allow choosing track timeline before entering editor. — `apps/desktop/src/renderer/src/onboarding/welcome.ts`, `apps/desktop/src/renderer/src/onboarding/AgentStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TimelineStep.svelte`, `apps/desktop/src/renderer/src/onboarding/WorkspaceStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TranscriptionStep.svelte`
+- [ ] Onboarding model download: Start selected transcription model download and continue it after onboarding closes. — `apps/desktop/src/renderer/src/onboarding/welcome.ts`, `apps/desktop/src/renderer/src/onboarding/AgentStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TimelineStep.svelte`, `apps/desktop/src/renderer/src/onboarding/WorkspaceStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TranscriptionStep.svelte`
+- [ ] About and licenses: Native About uses app metadata; preserve bundled Geist/Inter font and Phosphor notices (no separate licenses screen established). — `apps/desktop/src/renderer/src/onboarding/welcome.ts`, `apps/desktop/src/renderer/src/onboarding/AgentStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TimelineStep.svelte`, `apps/desktop/src/renderer/src/onboarding/WorkspaceStep.svelte`, `apps/desktop/src/renderer/src/onboarding/TranscriptionStep.svelte`
+- [ ] Acceptance large-store-startup: Opens with a large recovery tree and preserves every record. — `apps/desktop/e2e/large-store-startup.spec.ts`
+- [ ] Acceptance memory-history-persistence: Compact history preserves pixels, every action, and pending redo through pressure and relaunch. — `apps/desktop/e2e/memory-history-persistence.spec.ts`
+- [ ] Acceptance memory-settings: Settings › Memory lists the project notes and switches agent access on and off. — `apps/desktop/e2e/memory-settings.spec.ts`
+- [ ] Acceptance menu-save: Routes both the renderer accelerator and native menu item to PM.cmd. — `apps/desktop/e2e/menu-save.spec.ts`
+- [ ] Acceptance new-composition-menu: Right-click menus create a composition and preserve the current project on cancel. — `apps/desktop/e2e/new-composition-menu.spec.ts`
+- [ ] Acceptance onboarding-timeline-mode: Onboarding lets a new user choose the track timeline before opening the editor. — `apps/desktop/e2e/onboarding-timeline-mode.spec.ts`
+- [ ] Acceptance persistence: Keeps an imported project and its edits when closed immediately. — `apps/desktop/e2e/persistence.spec.ts`
+- [ ] Acceptance persistence: Saves a project and restores it after relaunch. — `apps/desktop/e2e/persistence.spec.ts`
+- [ ] Acceptance project-close-unchanged: Closing an unchanged local project skips the save prompt, while edits still prompt. — `apps/desktop/e2e/project-close-unchanged.spec.ts`
+- [ ] Acceptance project-close-unchanged: Don’t Save removes a never-saved project from Recents and recovery across restart. — `apps/desktop/e2e/project-close-unchanged.spec.ts`
+- [ ] Acceptance project-close-unchanged: Don’t Save on window close survives the final recovery flush. — `apps/desktop/e2e/project-close-unchanged.spec.ts`
+- [ ] Acceptance project-document-worker: A large native document validates outside main and remains editable, undoable, and saveable. — `apps/desktop/e2e/project-document-worker.spec.ts`
+- [ ] Acceptance project-file-media: Saved project files restore imported video without the original session media. — `apps/desktop/e2e/project-file-media.spec.ts`
+- [ ] Acceptance project-file-media: Saved project files restore imported audio without the original session media. — `apps/desktop/e2e/project-file-media.spec.ts`
+- [ ] Acceptance project-file-media: Leaving a local project for another and coming back keeps imported audio. — `apps/desktop/e2e/project-file-media.spec.ts`
+- [ ] Acceptance project-file-media: Local recovery keeps imported audio after closing and relaunching Powermove. — `apps/desktop/e2e/project-file-media.spec.ts`
+- [ ] Acceptance project-file-media: Media library items reveal their original file in Finder. — `apps/desktop/e2e/project-file-media.spec.ts`
+- [ ] Acceptance project-files-memory: Opening a large native project releases its main-process document after import. — `apps/desktop/e2e/project-files-memory.spec.ts`
+- [ ] Acceptance project-loading: Loading placeholders never bleed through Projects. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-loading: A hidden window finishes loading keyframe-heavy projects without timer delays. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-loading: Opening a large stored project allows input and paint between loading steps. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-loading: Closing the pending tab cancels its load and repeated clicks join the same open. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-loading: All open tabs retain their document, Undo state and cached artwork. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-loading: A newer tab choice wins over an unfinished open and failures release the editor. — `apps/desktop/e2e/project-loading.spec.ts`
+- [ ] Acceptance project-panel-persistence: Restores each project layout after quit and when reopening its saved file. — `apps/desktop/e2e/project-panel-persistence.spec.ts`
+- [ ] Acceptance project-save-inactive: Saving an inactive tab preserves live edits after a local recovery write fails. — `apps/desktop/e2e/project-save-inactive.spec.ts`
+- [ ] Acceptance project-save-large-history: Large undo history survives autosave, native Save, and relaunch. — `apps/desktop/e2e/project-save-large-history.spec.ts`
+- [ ] Acceptance project-save-large-media: Saves and reopens owned media larger than 256 MiB while retaining bounded prior versions. — `apps/desktop/e2e/project-save-large-media.spec.ts`
+- [ ] Acceptance project-save: Command+S writes real files, reuses the destination, saves from a field, and Save As changes it. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Native Open preserves editable source and subsequent saves update the opened file. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Projects screen exposes file state and saves active, duplicated, and opened projects independently. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Open on Home starts a blank project from media. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Cancel, disk-write failures, and external modifications never clear unsaved changes. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Renderer and native window close honor Cancel and cancelled Save. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Save on native window close writes the document before closing. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: Native Quit honors Cancel without closing the editing session. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-save: A project opened from Finder while the editor is still loading is not dropped. — `apps/desktop/e2e/project-save.spec.ts`
+- [ ] Acceptance project-settings: Settings › Project edits the live composition and its export settings. — `apps/desktop/e2e/project-settings.spec.ts`
+- [ ] Acceptance project-settings: New project asks for the settings that matter before creating. — `apps/desktop/e2e/project-settings.spec.ts`
+- [ ] Acceptance project-settings: Settings opens once, whichever entry point asks for it. — `apps/desktop/e2e/project-settings.spec.ts`
+- [ ] Acceptance project-streaming: Opens and saves media beyond 1 GiB with bounded main-process memory. — `apps/desktop/e2e/project-streaming.spec.ts`
+- [ ] Acceptance project-streaming: Portable Export uses native streaming and honors a cancelled file picker. — `apps/desktop/e2e/project-streaming.spec.ts`
+- [ ] Acceptance projects-drop: Dropping a project opens it once and keeps the previous composition intact. — `apps/desktop/e2e/projects-drop.spec.ts`
+- [ ] Acceptance projects-drop: Unsupported and empty drops leave Projects and the current project unchanged. — `apps/desktop/e2e/projects-drop.spec.ts`
+- [ ] Acceptance settings-motion: Settings section travel settles quickly and manual wheel input owns scrolling. — `apps/desktop/e2e/settings-motion.spec.ts`
+- [ ] Acceptance settings-motion: Settings retargeting, dismissal, trackpad deltas, and reduced motion remain responsive. — `apps/desktop/e2e/settings-motion.spec.ts`
+- [ ] Acceptance settings-scroll: Settings is a continuous page with section navigation and highlighted search. — `apps/desktop/e2e/settings-scroll.spec.ts`
+- [ ] Acceptance settings-scroll: Settings search follows live extensions into their details and works without a project. — `apps/desktop/e2e/settings-scroll.spec.ts`
+- [ ] Acceptance storage-settings: Storage previews cleanup, preserves project data, persists preferences and works in both themes. — `apps/desktop/e2e/storage-settings.spec.ts`
+- [ ] Settings control Provider: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control Address: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control API key: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control Model: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control Images: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control This model supports images: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Settings control Extensions: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Extension details: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Search extensions: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Filter extensions: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Extension type: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Close extension details: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Installed: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Status: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control About: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Setup: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Files: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Settings control Remove: Retain named account/provider/extension control and its live connection/availability state. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+
+- [ ] Subscription connection states: Show Checking, Connect/Retry, Waiting, Connected/Disconnect and Restart needed with account identity/error detail; disable action where unavailable. — `apps/desktop/src/renderer/src/legacy/ui/chatgpt-settings.ts`
+- [ ] Compatible provider presets: Offer Ollama, LM Studio, llama.cpp server, Jan, OpenRouter, OpenAI, Anthropic, Google Gemini, Groq, DeepSeek, xAI, Mistral and Other compatible service. — `apps/desktop/src/shared/compatible-provider.ts`
+- [ ] Compatible address validation: Accept HTTPS APIs and loopback HTTP; normalize bare address or chat/completions endpoint; reject credentials/query/hash in URL. — `apps/desktop/src/shared/compatible-provider.ts`
+- [ ] Compatible model discovery: Fetch provider models, hide models without tools, retain manually entered model, refresh list, show missing-server/download actions and saved-key state. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Compatible image support: Persist This model supports images capability with address/model/key connection settings. — `apps/desktop/src/renderer/src/legacy/ui/compatible-settings.ts`
+- [ ] Extension settings categories: Group Effects, Panels, Appearance, Layer types, Media, Editor tools and Other extensions; provide search/status/type filters and Clear filters. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Extension status states: Show Off, Active, Replaced, Update needed, Needs setup, Needs full access and Needs attention with detail. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+- [ ] Extension details actions: Show Installed/Status/About/Setup/Files/Remove sections; allow enable toggle, setup, Show in Finder and inline Delete confirmation/cancel/error. — `apps/desktop/src/renderer/src/legacy/ui/extension-settings.ts`
+
+## 5. Layout, panels and workspaces
+
+- [ ] Dock model: Arrange panel groups across left/center/right/bottom with viewer center and resizable split areas. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Dock gestures: Drag panel headers/grips into edge splits or tab groups with drop target/ghost preview; Escape cancels. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Panel stacks: Tabbed groups retain active tab, permit reordering, and can close one panel or others in group. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Split constraints: Resize linked splitter pairs respecting minimums; overfilled side panels remain usable between titlebar/status bar. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Maximize panel: Backtick maximizes the panel under pointer and restores its previous layout. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Mount continuity: Retain panel/viewer hosts during layout/workspace moves so media and panel state are not reset. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Panel visibility: Remember explicit close/hide across restart and workspace changes; restore through registry/layout APIs. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Floating panels: Eligible panels open in native windows, retain edits, and return to layout when closed. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Popout security: Only allow named editor-owned panel windows, not arbitrary window.open targets. — `apps/desktop/src/renderer/src/layout/model.ts`, `apps/desktop/src/renderer/src/layout/Dock.svelte`, `apps/desktop/src/renderer/src/layout/DockLayout.svelte`, `apps/desktop/src/renderer/src/layout/Splitter.svelte`
+- [ ] Workspace library: Browse All workspaces, Built in and Saved by you; apply presets and save customized layouts as new workspaces. — `apps/desktop/src/renderer/src/legacy/ui/library.ts`, `apps/desktop/src/renderer/src/library/LibraryScreen.svelte`, `apps/desktop/src/renderer/src/layout/install.ts`
+- [ ] Panel library: Browse All panels and categorized shelves; open a live panel from its preview and return without replacing its document. — `apps/desktop/src/renderer/src/legacy/ui/library.ts`, `apps/desktop/src/renderer/src/library/LibraryScreen.svelte`, `apps/desktop/src/renderer/src/layout/install.ts`
+- [ ] Workspace persistence: Store each project's layout through file saves and app relaunch; retain custom workspace and hidden-panel state. — `apps/desktop/src/renderer/src/legacy/ui/library.ts`, `apps/desktop/src/renderer/src/library/LibraryScreen.svelte`, `apps/desktop/src/renderer/src/layout/install.ts`
+- [ ] Preview scheduling: Render nearby library previews, lazy-load while scrolling, refresh cached previews on reopen and cancel queued work on close. — `apps/desktop/src/renderer/src/legacy/ui/library.ts`, `apps/desktop/src/renderer/src/library/LibraryScreen.svelte`, `apps/desktop/src/renderer/src/layout/install.ts`
+- [ ] Panel previews: Contain tall scrollable panel content without changing the live panel's geometry or scroll state. — `apps/desktop/src/renderer/src/legacy/ui/library.ts`, `apps/desktop/src/renderer/src/library/LibraryScreen.svelte`, `apps/desktop/src/renderer/src/layout/install.ts`
+- [ ] Acceptance dock-layout: Keeps overfilled side panels usable between the titlebar and status bar. — `apps/desktop/e2e/dock-layout.spec.ts`
+- [ ] Acceptance dock-layout: Keeps panel and viewer hosts alive across layout and workspace moves. — `apps/desktop/e2e/dock-layout.spec.ts`
+- [ ] Acceptance library-preview-fit: Library previews contain tall panel content without changing the live panel. — `apps/desktop/e2e/library-preview-fit.spec.ts`
+- [ ] Acceptance library-preview-fit: Built-in Library previews fit their scrollable content. — `apps/desktop/e2e/library-preview-fit.spec.ts`
+- [ ] Acceptance library-transitions: Opening and returning from a panel keeps the shelves and restores its live panel. — `apps/desktop/e2e/library-transitions.spec.ts`
+- [ ] Acceptance library-transitions: Quick Back and reopen leave one editor and no abandoned flying cover. — `apps/desktop/e2e/library-transitions.spec.ts`
+- [ ] Acceptance panel-popout: A panel opens in a native window, keeps edits, and returns to the layout. — `apps/desktop/e2e/panel-popout.spec.ts`
+- [ ] Acceptance panel-popout: Only named panel windows from the editor are allowed. — `apps/desktop/e2e/panel-popout.spec.ts`
+- [ ] Acceptance panel-visibility: Keeps a closed panel hidden across relaunch and workspace changes. — `apps/desktop/e2e/panel-visibility.spec.ts`
+- [ ] Acceptance panel-workflow: Drawing a box notes every touched panel and sends that focus with the prompt. — `apps/desktop/e2e/panel-workflow.spec.ts`
+- [ ] Acceptance workspace-import: Settings workspace transfer creates, loads and arranges an original extension without editing the project. — `apps/desktop/e2e/workspace-import.spec.ts`
+- [ ] Acceptance workspace-import: Settings transfer from home keeps the request ready while the agent needs sign-in. — `apps/desktop/e2e/workspace-import.spec.ts`
+- [ ] Acceptance workspace-import: Settings transfer stays retryable when the handoff is unavailable or fails. — `apps/desktop/e2e/workspace-import.spec.ts`
+
+## 6. Overlays and progress
+
+- [ ] Modal focus: Trap modal focus, make covered content inert, support dismissal and restore previous focus. — `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/overlays/modal.ts`, `apps/desktop/src/renderer/src/overlays/inert.ts`
+- [ ] Async actions: Keep dialog input and error visible if an asynchronous action fails; allow retry. — `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/overlays/modal.ts`, `apps/desktop/src/renderer/src/overlays/inert.ts`
+- [ ] Confirmations: Use native confirmation bridge where available with cancel-safe results; guard stale project-bound dialogs. — `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/overlays/modal.ts`, `apps/desktop/src/renderer/src/overlays/inert.ts`
+- [ ] Modal API: Extensions may provide title, DOM/string body, width and primary/nonprimary action buttons with close handle. — `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/overlays/modal.ts`, `apps/desktop/src/renderer/src/overlays/inert.ts`
+- [ ] Menus: Support anchored/coordinate positioning, separators, headers, checks, disabled rows, submenus and asynchronous contributions. — `apps/desktop/src/renderer/src/overlays/Menu.svelte`, `apps/desktop/src/renderer/src/overlays/menu-rules.ts`, `apps/desktop/src/renderer/src/overlays/Palette.svelte`
+- [ ] Menu positioning: Keep menus inside available viewport; a single option near the bottom must not gain a spurious scrollbar. — `apps/desktop/src/renderer/src/overlays/Menu.svelte`, `apps/desktop/src/renderer/src/overlays/menu-rules.ts`, `apps/desktop/src/renderer/src/overlays/Palette.svelte`
+- [ ] Palette: Search commands and extension providers; show category/shortcut and execute eligible selected result with keyboard navigation. — `apps/desktop/src/renderer/src/overlays/Menu.svelte`, `apps/desktop/src/renderer/src/overlays/menu-rules.ts`, `apps/desktop/src/renderer/src/overlays/Palette.svelte`
+- [ ] Palette providers: Allow asynchronous query providers with command availability predicates and AE terminology search. — `apps/desktop/src/renderer/src/overlays/Menu.svelte`, `apps/desktop/src/renderer/src/overlays/menu-rules.ts`, `apps/desktop/src/renderer/src/overlays/Palette.svelte`
+- [ ] Toasts: Stack status/error notices, timed or persistent, with optional actions and independent trailing close control. — `apps/desktop/src/renderer/src/overlays/Toasts.svelte`, `apps/desktop/src/renderer/src/shell/TaskPill.svelte`, `apps/desktop/src/renderer/src/overlays/ProjectGhost.svelte`
+- [ ] Toast keyboard: Allow keyboard dismissal; action availability is independent of close-button disabled state. — `apps/desktop/src/renderer/src/overlays/Toasts.svelte`, `apps/desktop/src/renderer/src/shell/TaskPill.svelte`, `apps/desktop/src/renderer/src/overlays/ProjectGhost.svelte`
+- [ ] Progress tasks: Show persistent import/download/storage work with cancel and terminal success/failure cleanup. — `apps/desktop/src/renderer/src/overlays/Toasts.svelte`, `apps/desktop/src/renderer/src/shell/TaskPill.svelte`, `apps/desktop/src/renderer/src/overlays/ProjectGhost.svelte`
+- [ ] Project loading: Show theme-aware project/panel ghost only in editor while loading; never bleed it through Projects. — `apps/desktop/src/renderer/src/overlays/Toasts.svelte`, `apps/desktop/src/renderer/src/shell/TaskPill.svelte`, `apps/desktop/src/renderer/src/overlays/ProjectGhost.svelte`
+- [ ] Tooltips: Retain action titles, keyboard hints and accessible labels across shell and extension controls. — `apps/desktop/src/renderer/src/overlays/Toasts.svelte`, `apps/desktop/src/renderer/src/shell/TaskPill.svelte`, `apps/desktop/src/renderer/src/overlays/ProjectGhost.svelte`
+- [ ] Acceptance error-presentation: Agent errors and app failures remain readable, inspectable and dismissible. — `apps/desktop/e2e/error-presentation.spec.ts`
+- [ ] Acceptance error-presentation: Failed asynchronous dialog actions keep the input and allow another attempt. — `apps/desktop/e2e/error-presentation.spec.ts`
+- [ ] Acceptance error-presentation: Sending a message leaves the saved Takes archive untouched and keeps Undo available. — `apps/desktop/e2e/error-presentation.spec.ts`
+- [ ] Acceptance overlays: Runs a palette command and manages modal focus and toast lifetime. — `apps/desktop/e2e/overlays.spec.ts`
+- [ ] Acceptance select-menu-layout: A single-option menu fits without a scrollbar near the bottom edge. — `apps/desktop/e2e/select-menu-layout.spec.ts`
+- [ ] Acceptance toast-error: Notification close buttons stay at the trailing edge and dismiss by mouse or keyboard. — `apps/desktop/e2e/toast-error.spec.ts`
+- [ ] Acceptance toast-error: Notification actions remain usable when the separate close button is disabled. — `apps/desktop/e2e/toast-error.spec.ts`
+- [ ] Acceptance toast-error: The error toast matches the status toast it stacks with. — `apps/desktop/e2e/toast-error.spec.ts`
+
+## 7. Library/media browser and import
+
+- [ ] Media browser: List compositions, nested media folders and assets with previews, status, search/filter and selection. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Media row keys: Arrow keys wrap selection; Home/End jump; Enter adds, Space previews, Delete/Backspace deletes, Escape clears; nested buttons keep Enter/Space. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Folder keys: Enter opens, Delete/Backspace removes folder, Escape clears; inline rename commits Enter and cancels Escape. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Media selection: Support Cmd-click toggles, Shift ranges, marquee selection with autoscroll and batch actions. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Media folders: Create/rename/move/delete folders; deleting moves contents up and never deletes original disk files. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Folder drops: Move selected media as a batch with one Undo; reject folder cycles; external folder drops import into target. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Option folder drop: Option keeps individual files in a folder rather than treating the drop as an image sequence. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Source preview: Double-click available assets previews them; offline double-click downloads cloud assets or opens replacement picker. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Picker imports: Native media, folder and image-sequence pickers share durable importer and project-bound progress. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Image sequences: Recognize numbered frames, choose frame rate, warn about gaps and offer still import/cancel; reimport replaces missing frames. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] URL media: Extension assets.importUrl requires assets+network permissions and must remain bound to originating project. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Finder paste: Import copied Finder media and clipboard image bytes at playhead with timeline Undo/Redo. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Media replacement: Replace/relink retains asset ID, referencing layers, timing, animation and folder; validate same media kind and preserve original on failure. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Offline sources: Differentiate missing from changed source files; recover from original local source when cached bytes disappear. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Linked media: Retain original links across saves/restarts; offer relink when missing while portable saves include required media. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Cloud placeholders: Allow defer/download in place and optional automatic restoration; never silently treat placeholders as valid bytes. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Import cancellation: Keep Cancel visible until native work settles, clear task, allow another batch and prevent late imports landing in another project. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Durability: Imported playable media survives removal of source and app restart; converted proxies remain durable. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Supported import families: Handle video/audio, still and animated images, editable SVG, image sequences and registered model importers; preserve alpha and source metadata. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Referenced deletion: Confirm once for batch deletion, block locked/unsupported references, provide one Undo and reject stale dialogs after project switch. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Reveal original: Media library reveals the original source file in Finder. — `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`, `apps/desktop/src/renderer/src/legacy/core/media.ts`
+- [ ] Acceptance cloud-media: Cloud media can be deferred, downloaded in place, and automatically restored. — `apps/desktop/e2e/cloud-media.spec.ts`
+- [ ] Acceptance import-animated-image: A still image in an animatable container still imports as an image. — `apps/desktop/e2e/import-animated-image.spec.ts`
+- [ ] Acceptance import-cloud: Cloud imports show download state, use fresh bytes, and clear failed tasks. — `apps/desktop/e2e/import-cloud.spec.ts`
+- [ ] Acceptance import-converted-formats: A Matroska video converts on import and plays both of its colours. — `apps/desktop/e2e/import-converted-formats.spec.ts`
+- [ ] Acceptance import-graded-footage: HDR footage is tone mapped once so the editor shows SDR levels. — `apps/desktop/e2e/import-graded-footage.spec.ts`
+- [ ] Acceptance import-graded-footage: BT.2020 log footage keeps its code values for grading. — `apps/desktop/e2e/import-graded-footage.spec.ts`
+- [ ] Acceptance import-image-sequence: Sequence import warns about gaps and permits importing individual stills or cancelling. — `apps/desktop/e2e/import-image-sequence.spec.ts`
+- [ ] Acceptance import-image-sequence: Reimport replaces missing frames, preserves the frame rate and insertion time, and allows cancellation. — `apps/desktop/e2e/import-image-sequence.spec.ts`
+- [ ] Acceptance import-mp4: Keeps imported video playable after the source is removed and the app closes. — `apps/desktop/e2e/import-mp4.spec.ts`
+- [ ] Acceptance import-mp4: Imports H.264/AAC media and renders its green frame. — `apps/desktop/e2e/import-mp4.spec.ts`
+- [ ] Acceptance import-mp4: Plays an imported soundtrack and separates it from the timeline context menu. — `apps/desktop/e2e/import-mp4.spec.ts`
+- [ ] Acceptance import-mp4: Mutes a video soundtrack from the timeline and the inspector. — `apps/desktop/e2e/import-mp4.spec.ts`
+- [ ] Acceptance import-progress: Single-file imports show persistent progress through storage and clear it on success or failure. — `apps/desktop/e2e/import-progress.spec.ts`
+- [ ] Acceptance import-progress: Switching projects during import removes progress without adding media to the new project. — `apps/desktop/e2e/import-progress.spec.ts`
+- [ ] Acceptance import-progress: A successful import reads as success even when the file is named like a failure. — `apps/desktop/e2e/import-progress.spec.ts`
+- [ ] Acceptance import-progress: Cancel stays visible while native work settles, then allows the next batch. — `apps/desktop/e2e/import-progress.spec.ts`
+- [ ] Acceptance import-prores-alpha: Imports ProRes 4444 with transparency and restores playable media. — `apps/desktop/e2e/import-prores-alpha.spec.ts`
+- [ ] Acceptance import-prores: Converts ProRes once, presents video frames, and restores the durable proxy. — `apps/desktop/e2e/import-prores.spec.ts`
+- [ ] Acceptance import-svg: @viewer imports SVG as durable editable Shape paths and preserves its source. — `apps/desktop/e2e/import-svg.spec.ts`
+- [ ] Acceptance linked-media-storage: Links originals through import, save, restart, missing-source recovery and relinking; exports remain portable. — `apps/desktop/e2e/linked-media-storage.spec.ts`
+- [ ] Acceptance local-media-recovery: Distinguishes changed source files from missing files and clears errors after recovery. — `apps/desktop/e2e/local-media-recovery.spec.ts`
+- [ ] Acceptance media-bulk-selection: Drag a selection box, delete media, and undo the whole batch in both themes. — `apps/desktop/e2e/media-bulk-selection.spec.ts`
+- [ ] Acceptance media-bulk-selection: Command-click and Shift-click select media; referenced bulk deletion confirms once. — `apps/desktop/e2e/media-bulk-selection.spec.ts`
+- [ ] Acceptance media-bulk-selection: A selection box scrolls through long media lists and Escape clears selection. — `apps/desktop/e2e/media-bulk-selection.spec.ts`
+- [ ] Acceptance media-deletion-project: A stale media deletion dialog cannot delete media after switching projects. — `apps/desktop/e2e/media-deletion-project.spec.ts`
+- [ ] Acceptance media-folder-drag: Dragging selected media into a folder moves the batch and one Undo restores it. — `apps/desktop/e2e/media-folder-drag.spec.ts`
+- [ ] Acceptance media-intelligence: Generate Captions puts the spoken words on the caption track in composition time. — `apps/desktop/e2e/media-intelligence.spec.ts`
+- [ ] Acceptance media-intelligence: The agent watches, listens to and captions the clip through the live tool bridge. — `apps/desktop/e2e/media-intelligence.spec.ts`
+- [ ] Acceptance media-intelligence: Without a model, Generate Captions asks for one and dismissing changes nothing. — `apps/desktop/e2e/media-intelligence.spec.ts`
+- [ ] Acceptance media-intelligence: An imported SRT edits, round-trips as SRT and WebVTT, burns into a frame and rides along an export. — `apps/desktop/e2e/media-intelligence.spec.ts`
+- [ ] Acceptance media-intelligence: The Mixer shows the speech clip, its meters move while it plays and its fader is undoable. — `apps/desktop/e2e/media-intelligence.spec.ts`
+- [ ] Acceptance media-keyboard: Media action buttons retain native Enter and Space activation. — `apps/desktop/e2e/media-keyboard.spec.ts`
+- [ ] Acceptance media-paste: Pastes a clipboard image at the playhead and supports undo and redo. — `apps/desktop/e2e/media-paste.spec.ts`
+- [ ] Acceptance media-replacement: Replacement uses the import picker, progress, and image sequence flow. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] Acceptance media-replacement: Replacement picker remains bound to its original project. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] Acceptance media-replacement: Right-click replacement preserves layers, renders new pixels, undoes/redoes, and survives portable save. — `apps/desktop/e2e/media-replacement.spec.ts`
+- [ ] Acceptance media-replacement: Replacement picker cancellation and unreadable or incompatible files leave media intact. — `apps/desktop/e2e/media-replacement.spec.ts`
+
+## 8. Agent, external MCP and CLI
+
+- [ ] Agent placement: Titlebar launcher opens agent popover; pin/drag docks it and floating grip moves/cancels/docks the same conversation. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Agent provider: Choose Codex/ChatGPT, Claude or configured compatible API/local provider with model/capability-aware options. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Agent access: Separate planning inspection from project editing and app extension work; preserve attached project context. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Conversation durability: Persist transcripts, titles, threads, drafts and attachments across switches, file opens and relaunch without cross-thread leakage. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Run continuity: Continue runs through tab/project switching; restore live streaming when returning. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Composer: Preserve multiline draft, caret, wrapped scrolling, file-only drafts, inline attachment positions and two-step deletion. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Composer shortcuts: Slash menu supports keyboard and pointer selection/dismissal; Cmd+A and native clipboard operate on draft/text. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Attachments: Accept images and binary files, remove individually, transmit original bytes, open fitted image preview and restore focus with Escape. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Streaming: Append text in place, preserve reasoning during steering and keep completed replies above follow-up draft/result. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Markdown: Render rich prose throughout conversation, activity, questions and results in light/dark with narrow-width wrapping. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Approvals and questions: Present agent approval requests and structured questions with explicit choices and native error recovery. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Threads: Create/select background/planning threads, show compact running badge, preserve visible chat/draft and expose Stop. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Working timer: Show working duration during active turns with stable lifecycle across completion/stopping. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Activity: Display tool/thought/subagent rows in place, retain results, expose Stop and avoid horizontal overflow. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Visual replies: Persist sandboxed interactive HTML attachments with compact preview, expand/replay/keyboard controls and live theme tokens. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Visual reply security: Block host privileges, networking, file access, forms/navigation and tool messages from generated scripts. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Review and undo: Review real resulting frames without moving paused playhead; retain edits on capture failure and state verification limits. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Extension repair: Stage changes, validate and publish locally; automatic repair/reverification is bounded and undoable. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] Agent media: List/import/replace/manage assets directly with durable verification, locks, normal Undo and explicit rollback limits. — `apps/desktop/src/renderer/src/panels/AgentPanel.svelte`, `apps/desktop/src/renderer/src/panels/agent/Composer.svelte`, `apps/desktop/src/renderer/src/shell/AgentLauncher.svelte`
+- [ ] External MCP entry: --powermove-mcp runs fixed app-owned stdio entry without Electron RunAsNode or caller-supplied scripts. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] External MCP discovery: Use loopback authenticated bridge and private connection descriptor; never place discovery credential in client configuration. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] External MCP sessions: Pin one project/session per connection; require finish before changing projects and drain children on close. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] External MCP finish: commit:true retains normal Undo edits; false/disconnect attempts guarded rollback, while published extensions/exported files remain. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] Hidden host: Allow headless editor and media imports without file pickers; tools requiring pixels still need render capability. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] MCP tool union: Expose EXTERNAL_MCP_TOOLS plus POWERMOVE_AGENT_TOOLS including orchestration tools; capabilities can depend on host configuration. — `apps/desktop/src/main/agent-tools/external-entry.ts`, `apps/desktop/src/main/agent-tools/external-server.ts`, `apps/desktop/src/main/agent-tools/external-session.ts`
+- [ ] MCP `list_projects`: List saved projects and the current project in this Powermove host. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `create_project`: Create and open a new empty video project without a dialog. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `open_project`: Open a saved project by ID from list_projects. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `start_session`: Start a project or app tool session, pinned to the currently open project. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `publish_extensions`: Validate, compile, secret-scan and atomically promote declared staged extension changes, then reload them. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `import_media_to_timeline`: Import a host-local video, audio, image or model file through Powermove's media importer. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `finish_session`: Finish this session: commit keeps live edits in normal Undo history; false rolls back guarded edits. — `apps/desktop/src/main/agent-tools/external-spec.ts`
+- [ ] MCP `publish_visual_reply`: Publish a self-contained interactive HTML visual attachment in this run’s thread before your final text. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_timeline`: Read compact layer strips in visual stack order, with selection, frame positions, timing, source ranges, group/parent links, visibility, solo and locks. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `edit_layer_strips`: Atomic human-style timeline gestures on explicit layerIds. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `manage_project`: Manage the project library without dialogs: list, create and open in this window, rename, duplicate, save a durable local checkpoint, trash a closed project, or restore it. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `save_project`: Save the current composition as an editable .pmv using Powermove's project packer, including its media. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `export_video`: Render the current project to MP4 (default) or ProRes with its audio. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_3d_scene`: Read the composition’s individual 3D model, light and camera layers with IDs, geometry, textured PBR materials, camera, environment, and keyframe channel paths. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `edit_3d`: Create and edit individual 3D model, light and camera layers in the normal timeline. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `fork_builtin_extension`: Copy a shipped built-in extension into this run's isolated extension staging directory, rewrite it as a user fork, and retain a pristine merge base. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_project_state`: Honor the project memory index (goal, rules, open items and latest decisions); use project_memory for details. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `project_memory`: Read or write this project's memory: the goal, standing rules, decisions and rejected ideas that explain why the video looks as it does. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `list_media`: List project media with stable asset IDs, missing/failed/loading/cloud status, durable storage status, original source paths, fingerprints, folders and layer references (including locks and nested compositions). — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `replace_media`: Replace or relink one existing media asset from an absolute local file path. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `import_media`: Import a local media file into durable project media without adding timeline layers or packaging bytes into extension code. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `manage_media`: Manage project media with normal editor Undo: rename one asset, move assetIds to folderId (null = root), delete assets, create_folder/rename_folder/delete_folder, or move_folder with folderId and parentId (null = root). — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `select_layers`: Select existing layers by their IDs from get_project_state, or clear selection with an empty array. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `inspect_creative_workspace`: Read a saved After Effects workspace on this computer: panel names, tab groups, relative bounds, visibility and an inventory of user and third-party script panels, CEP extensions and compiled plugins. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `set_panel_layout`: Save and activate a NEW named Powermove workspace with ordered panels in left, center, right and bottom docks. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_panel_layout`: Read the live Powermove dock and panel layout, including registered panel ids and titles. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `inspect_creative_extension`: Inspect one installed After Effects tool by its opaque toolId from inspect_creative_workspace. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `open_panel`: Open or expand a registered Powermove panel, restoring its saved position. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_panel_state`: Read visible panel text and semantic controls with fresh refs, labels, values and select options. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `interact_panel`: Use an observed panel control: click a button, fill a text field, select an option, or press a supported key. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `capture_panel`: Capture a real image of any visible built-in or extension panel, including canvases. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `computer_use_panel`: Send real Chromium mouse, drag, wheel or keyboard input to an observed panel, including custom canvases, sliders and outline drawing. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `get_workspace_state`: Read live project identity, selection, panel layout and recent renderer errors for troubleshooting. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `render_frames`: Render one to five frames from the live composition. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `apply_commands`: simplify_keyframes {scope:project|layers|properties, targets?:layerIds, properties?:[{layerId,path}]} removes only verified redundant keys, returns before/after counts, and keeps locked layers and expressions. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `edit_video`: Edit real video/audio timeline clips. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `rollback_changes`: Roll back every live composition edit made by this agent run, without touching earlier project work. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `validate_effect`: Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `stage_fork_rebase`: Stage a stale user fork for a three-way rebase onto the built-in version shipped by this Powermove app. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `probe_media`: Read a video or audio asset's technical metadata without decoding: container, duration, bitrate, and per stream codec/profile, width×height, fps, pixel format, alpha, rotation, audio channels/layout/sample rate/bitrate. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `sample_media_frames`: Decode real frames from SOURCE footage (the asset's own pixels, not the composition) and return them as images. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `media_contact_sheet`: One image: a grid of timecode-labelled thumbnails, the cheapest way to see a whole clip or the live composition at once. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `media_waveform`: Listen to an asset's or clip's audio: silent ranges (ffmpeg silencedetect, below silenceThresholdDb for at least minSilence seconds; defaults -40 dB, 0.4 s), integrated loudness (LUFS), loudness range, true/sample peak, RMS and a clipping flag, plus a waveform image with silences shaded. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `transcribe_media`: Transcribe speech on this Mac. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `check_project`: Lint the live composition for structural problems the editor can prove: spans where no layer is visible (only the background shows), layers that never show (opacity 0 throughout, outside the composition or work area, zero duration), missing, failed, offline or cloud-only media, clips that play past the end of their media, and audio driven over full scale by its gain. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_search`: Search the Powermove Store for published extensions (effects, transitions, panels, themes, commands, layers, tools). — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_extension`: Read a Store extension's detail by handle and slug: description, declared permissions, verified publisher, install count, and its full release history (each with a releaseId and version). — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_source`: Read a published release's source before installing it. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_library`: List the store extensions installed on this Mac: local id, name, version, permissions, whether enabled, any available update, and whether each is yours to publish. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_install`: Download and install a Store extension into this Mac. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_update`: Update an installed store extension to its latest release. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_uninstall`: Remove an installed store extension by its local id (from store_library). — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_publish_prepare`: Dry-run a publish of a local extension without publishing: returns the coordinate, suggested version, tree hash, file count/size, whether it is a first publish, and any blocking or waivable secret/permission findings. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `store_publish`: Publish a local extension to the Powermove Store. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `generate_captions`: Transcribe the speech of audio/video layers on this Mac and add the result as a new captions layer on top, mapped through each clip's trim, speed and time remapping and split into readable cues. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `export_captions`: Read a captions layer as SubRip (srt) or WebVTT (vtt) text in composition time, for a sidecar file. — `apps/desktop/src/main/agent-tools/spec.ts`
+- [ ] MCP `task_send`: Steer an active subagent with follow-up instructions and/or change its provider, model or reasoning effort. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_launch`: Start a separate ordinary conversation in this project, visible in the thread picker. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_list`: List ordinary conversations in this project, with their current run IDs and settings. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_read`: Read paginated messages and the latest run state of an ordinary thread in this project. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_send`: Send a follow-up to an ordinary thread in this project. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_watch`: Watch a specific run of an ordinary thread. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_unwatch`: Remove this agent’s watch without interrupting the watched thread. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] MCP `thread_cancel`: Stop the current run and its subagents in an ordinary thread in this project. — `apps/desktop/src/main/agent-tools/orchestration-spec.ts`
+- [ ] CLI serve: Run browser-accessible host; default port 4747, bind 0.0.0.0, profile ~/.powermove and exports ~/Powermove. — `packages/cli/README.md`
+- [ ] CLI lifecycle: install registers user launchd/systemd service, reinstall updates, status reports address, logs reads logs and uninstall removes service. — `packages/cli/README.md`
+- [ ] CLI options: Support --port, --host, --user-data, --exports, --token and --http; default HTTPS self-signed with remembered access token. — `packages/cli/README.md`
+- [ ] CLI MCP: mcp-install-browser prepares hidden browser; mcp runs stdio hidden host with ~/.powermove-headless default; --connect targets existing profile. — `packages/cli/README.md`
+- [ ] Remote reconnect: Reconnect interrupted browser sessions, replay pending edits and resume agent streams. — `packages/cli/README.md`
+- [ ] Remote documents: Host owns shared document/media/fonts, devices keep their own Undo, and host agent runs continue after browser closes. — `packages/cli/README.md`
+- [ ] Remote exports: Write on host and download to browser; source/npx update paths may present a manual command. — `packages/cli/README.md`
+- [ ] Acceptance agent-attachment-preview: Agent image attachments open a fitted preview and Escape returns focus. — `apps/desktop/e2e/agent-attachment-preview.spec.ts`
+- [ ] Acceptance agent-canvas-capture: Agent frame capture preserves the displayed canvas before the next animation frame. — `apps/desktop/e2e/agent-canvas-capture.spec.ts`
+- [ ] Acceptance agent-canvas-capture: Offscreen captures match opaque presentation without resizing or replacing a zoomed preview. — `apps/desktop/e2e/agent-canvas-capture.spec.ts`
+- [ ] Acceptance agent-canvas-capture: Autosave persists during panning and captures its thumbnail after navigation settles. — `apps/desktop/e2e/agent-canvas-capture.spec.ts`
+- [ ] Acceptance agent-composer-deletion: Clearing composer lines preserves only intentional newlines and keeps the caret in place. — `apps/desktop/e2e/agent-composer-deletion.spec.ts`
+- [ ] Acceptance agent-composer-shortcuts: Slash shortcuts support keyboard selection, dismissal, pointer selection, and multiline drafts. — `apps/desktop/e2e/agent-composer-shortcuts.spec.ts`
+- [ ] Acceptance agent-composer-shortcuts: Inline file tokens preserve their place, bytes, and two-step deletion in the desktop editor. — `apps/desktop/e2e/agent-composer-shortcuts.spec.ts`
+- [ ] Acceptance agent-composer-shortcuts: File-only drafts keep their caret and new text on the same line. — `apps/desktop/e2e/agent-composer-shortcuts.spec.ts`
+- [ ] Acceptance agent-computer-use: Agent bridge captures and draws on a real extension canvas with native input. — `apps/desktop/e2e/agent-computer-use.spec.ts`
+- [ ] Acceptance agent-connection-layout: Connection setup owns the empty panel and stays usable when resized. — `apps/desktop/e2e/agent-connection-layout.spec.ts`
+- [ ] Acceptance agent-context-review: Live discovery reaches late layers and all keyframes in a large composition. — `apps/desktop/e2e/agent-context-review.spec.ts`
+- [ ] Acceptance agent-context-review: Composition only reviews and repairs with the generation settings after a picker change. — `apps/desktop/e2e/agent-context-review.spec.ts`
+- [ ] Acceptance agent-context-review: A composition edit reviews final frames with the original settings after a picker change. — `apps/desktop/e2e/agent-context-review.spec.ts`
+- [ ] Acceptance agent-context-review: Capture failure preserves applied edits and reports the verification limit. — `apps/desktop/e2e/agent-context-review.spec.ts`
+- [ ] Acceptance agent-extension-recovery: Agent extension changes are isolated, recorded, and recoverable through the app bridge. — `apps/desktop/e2e/agent-extension-recovery.spec.ts`
+- [ ] Acceptance agent-media-handoff: Generated PNGs reach the timeline and continuation groups and renders the actual layers. — `apps/desktop/e2e/agent-media-handoff.spec.ts`
+- [ ] Acceptance agent-media-management: Agent replaces missing media directly, preserves animation, verifies storage, and supports Undo/retry. — `apps/desktop/e2e/agent-media-management.spec.ts`
+- [ ] Acceptance agent-media-management: Agent imports without timeline layers and manages folders/deletion with native Undo and lock guards. — `apps/desktop/e2e/agent-media-management.spec.ts`
+- [ ] Acceptance agent-media-management: Agent replacement failures and interrupted work leave the original intact and can be retried. — `apps/desktop/e2e/agent-media-management.spec.ts`
+- [ ] Acceptance agent-media-tools: The agent watches and listens to imported footage through the media tools. — `apps/desktop/e2e/agent-media-tools.spec.ts`
+- [ ] Acceptance agent-mod-capabilities: A real mod supplies import defaults and Properties controls with automatic cleanup. — `apps/desktop/e2e/agent-mod-capabilities.spec.ts`
+- [ ] Acceptance agent-models: Sol 6.1 and Astra selections reach the request and Claude selections preserve capabilities. — `apps/desktop/e2e/agent-models.spec.ts`
+- [ ] Acceptance agent-orchestrated-threads: Model-created threads preserve the visible chat and draft, deduplicate launches, and expose native thread controls. — `apps/desktop/e2e/agent-orchestrated-threads.spec.ts`
+- [ ] Acceptance agent-orchestrated-threads: A launched planning thread keeps inspection access and can be stopped from its normal composer. — `apps/desktop/e2e/agent-orchestrated-threads.spec.ts`
+- [ ] Acceptance agent-orchestrated-threads: The parent can read and answer a blocked background thread without interrupting it. — `apps/desktop/e2e/agent-orchestrated-threads.spec.ts`
+- [ ] Acceptance agent-panel-tools: Agent opens and uses an extension panel through its real controls. — `apps/desktop/e2e/agent-panel-tools.spec.ts`
+- [ ] Acceptance agent-panel: Fills its column when docked alone and keeps its resized height beside another panel. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: Opens under the titlebar launcher, never in a dock, and follows the window. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: Dragging the launcher docks the agent; closing the panel returns it to the popover. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: Dragging re-pins a closed agent and keeps it visible after restarting. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: The floating grip moves, cancels and docks the same conversation. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: The pin button keeps the conversation in the workspace. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-panel: Composer submit → progress → result phase, all through the Svelte UI. — `apps/desktop/e2e/agent-panel.spec.ts`
+- [ ] Acceptance agent-project-persistence: Agent history follows a saved project across file opens, project switches, and relaunch. — `apps/desktop/e2e/agent-project-persistence.spec.ts`
+- [ ] Acceptance agent-project-timeline: Recovered strip gestures share Undo and library operations retain independent projects. — `apps/desktop/e2e/agent-project-timeline.spec.ts`
+- [ ] Acceptance agent-prompt-glow: Prompt halo sits outside the message bubble and stays within the panel. — `apps/desktop/e2e/agent-prompt-glow.spec.ts`
+- [ ] Acceptance agent-redesign: Studio agent keeps suggestions, steering, activity and narrow layouts usable. — `apps/desktop/e2e/agent-redesign.spec.ts`
+- [ ] Acceptance agent-result-presentation: Agent results preserve work above the reply and omit file and external activity panels. — `apps/desktop/e2e/agent-result-presentation.spec.ts`
+- [ ] Acceptance agent-result-presentation: A completed response stays visible when the user sends a follow-up. — `apps/desktop/e2e/agent-result-presentation.spec.ts`
+- [ ] Acceptance agent-revision-recovery: A stale agent run refreshes, applies a complete batch, and preserves interleaved user Undo. — `apps/desktop/e2e/agent-revision-recovery.spec.ts`
+- [ ] Acceptance agent-streaming: Streamed text stays inline and keeps existing nodes as chunks arrive. — `apps/desktop/e2e/agent-streaming.spec.ts`
+- [ ] Acceptance agent-subagents: Subagents update in place, expose results and Stop, and fit native light and dark panels. — `apps/desktop/e2e/agent-subagents.spec.ts`
+- [ ] Acceptance agent-threads: Background run badge stays compact when creating and switching threads. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Command+A selects the full agent composer draft. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Selected agent text copies and pastes normally without copying layers. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Steering stays in the active run and preserves the transcript before it. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Hidden renderer switches threads, keeps drafts, and restores history after relaunch. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Background app is never visible or focused, but can draw and accept input. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Thread transcripts and titles survive a hidden relaunch without leaking into another thread. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-threads: Agent run survives clicking another project tab and resumes on return. — `apps/desktop/e2e/agent-threads.spec.ts`
+- [ ] Acceptance agent-tool-runtime: The app-owned MCP entrypoint lists live tools without Electron Node mode. — `apps/desktop/e2e/agent-tool-runtime.spec.ts`
+- [ ] Acceptance agent-undo-redo: Selecting a layer after Undo keeps the completed agent run available to Redo. — `apps/desktop/e2e/agent-undo-redo.spec.ts`
+- [ ] Acceptance agent-video-editing: Agent cuts imported footage, reviews decoded frames, and undoes the run. — `apps/desktop/e2e/agent-video-editing.spec.ts`
+- [ ] Acceptance agent-visual-replies: Visual replies publish, interact, expand, replay and reopen in their durable thread. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: Generated scripts cannot access host privileges, send tool messages or navigate. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: CSP blocks resource requests and external navigation from generated scripts. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: Visual replies resize within bounds and malformed publication fails clearly. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: The real provider run publishes through its authenticated MCP session. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: Attachments preserve interaction while the response adds pages and remain compact at narrow widths. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-visual-replies: Visual attachment chrome matches native modal tokens in light and dark and supports keyboard controls. — `apps/desktop/e2e/agent-visual-replies.spec.ts`
+- [ ] Acceptance agent-width: Agent content wraps without horizontal scroll at narrow and normal widths. — `apps/desktop/e2e/agent-width.spec.ts`
+- [ ] Acceptance chatgpt-connection: Settings reads a ChatGPT subscription through the real main-process bridge. — `apps/desktop/e2e/chatgpt-connection.spec.ts`
+- [ ] Acceptance chatgpt-connection: Connect opens the trusted ChatGPT browser flow and enters waiting state. — `apps/desktop/e2e/chatgpt-connection.spec.ts`
+- [ ] Acceptance chatgpt-connection: Large images and files cross the real renderer-to-main agent boundary. — `apps/desktop/e2e/chatgpt-connection.spec.ts`
+- [ ] Acceptance chatgpt-connection: Claude subscription status and structured runs cross the real hidden app boundary. — `apps/desktop/e2e/chatgpt-connection.spec.ts`
+- [ ] Acceptance compatible-provider: Connects a local model, streams chat, recovers after a broken stream and remembers the connection. — `apps/desktop/e2e/compatible-provider.spec.ts`
+- [ ] Acceptance compatible-provider: Provider models, reasoning, and flat error actions remain usable in a narrow panel. — `apps/desktop/e2e/compatible-provider.spec.ts`
+- [ ] Acceptance prompt-attachments: Floating prompt attaches images and binary files, removes them, and sends their contents. — `apps/desktop/e2e/prompt-attachments.spec.ts`
+
+## 9. Cloud/account, Store and extension compatibility
+
+- [ ] Cloud identity: Sign in through trusted account flow, choose handle and show account profile/sign-out/deletion states. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Store browse: Browse/search extension catalog with artwork fallback and extension detail disclosures. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Store installation: Install/update extensions with declared permission/trust review; optionally remember installed list on account. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Store publication: Select extension and show full publish panel through preparation, icon crop, metadata, cancellation and reopening. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Publish validation: Check ownership, provenance, sandbox compatibility and staged source before publishing; keep errors actionable. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Store forks: Preserve upstream identity and fork metadata; full-access installs remain off until accepted and can revoke trust later. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Sync boundary: Account remembered installs and Store publication are evidenced; remote-host live sync is separate from a claimed general cloud project-sync product. — `apps/desktop/src/renderer/src/cloud/account.ts`, `apps/desktop/src/main/cloud/auth.ts`, `apps/desktop/src/renderer/src/store/StoreScreen.svelte`, `apps/desktop/src/renderer/src/store/PublishSheet.svelte`
+- [ ] Extension versions: Accept apiVersion 1, 2 and 3; newer versions remain unloaded with needs-update state. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Extension locations: Discover built-in, user and project extensions; built-ins are read-only and must be forked for editing. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Extension manifests: Retain id/name/version/entry/contributes/replaces/dependsOn/forkedFrom/author/features/integrates plus vars/permissions/links rules. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Compilation: Load relative TS/JS/MJS/Svelte/CSS and allowed Svelte client modules; reject npm imports/path escapes. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Activation lifetime: All registrations are owned/disposable, overrides by same ID restore previous registration on disable and dependency/replacement order is respected. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Extension reload: Watch user source, compile and hot-reload panels in place without replacing document/window/docking. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Fault containment: Activation errors disable/report extension; two runtime errors in 10 seconds auto-disable; sandbox hangs/crashes are isolated. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Sandbox processes: Untrusted Store extensions use separate processes/opaque views with host panel chrome, theme and keyboard integration. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Sandbox permissions: Preserve network, clipboard, assets, project:write and full-access; versions 1/2 cannot declare permissions. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Read access: Project snapshots/selection/time/transport reads need no permission; without network data cannot leave sandbox. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Clipboard gate: Write only, focused extension panel with recent genuine user input; max 500000 characters and once per second; no clipboard read API. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] External links: Up to five declared HTTPS origins with network and recent user action can open without prompt; other destinations use consent rules. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Variables: apiVersion 2+ declares up to 32 values; masked secrets stored outside extension source and delivered only for declared keys. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Variable editing: Set Up/Variables saves any subset, reloads extension, and optional deletion accompanies extension removal; missing values do not block activation. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Fork updates: Three-way rebase preserves custom edits, validates before install, offers Undo and hands conflicts to agent; failures retain previous copy. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Update compatibility: Persist app-version extension health/dismissals and show Review extensions notices; never silently rewrite/delete custom work. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] Theme cleanup: Disable/remove/reload fully reverses owned CSS/tokens/root attributes/workspace appearance while preserving later user changes. — `apps/desktop/docs/EXTENSIONS.md`, `apps/desktop/src/main/extensions/index.ts`, `apps/desktop/src/renderer/src/kernel/loader.ts`
+- [ ] PanelsAPI: Preserve extension-facing contract: `register`, `list`, `open`, `close`, `isOpen`, `refresh`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] CommandsAPI: Preserve extension-facing contract: `register`, `run`, `has`, `list`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] KeybindingsAPI: Preserve extension-facing contract: `bind`, `unbind`, `list`, `chordOf`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] EffectsAPI: Preserve extension-facing contract: `supportsTemporalInputs`, `supportsVersions`, `supportsSpatialSampling`, `supportsLayerInputs`, `supportsInputSubframes`, `supportsSourceRasters`, `supportsSourceOwners`, `supportsTypedReferences`, `supportsBrushGeometry`, `supportsLutAssets`, `supportsOwnerValidity`, `parameterDefault`, `register`, `list`, `get`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] TransitionsAPI: Preserve extension-facing contract: `register`, `list`, `get`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ExtensionLayersAPI: Preserve extension-facing contract: `register`, `list`, `get`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Scene3DAPI: Preserve extension-facing contract: `isGroup`, `getView`, `setView`, `onViewChange`, `getNavigationMode`, `setNavigationMode`, `onNavigationChange`, `createNavigation`, `frame`, `getMode`, `setMode`, `getSpace`, `setSpace`, `onGizmoChange`, `createGizmo`, `prepareImport`, `convert`, `createScene`, `createObject`, `createLight`, `edit`, `describe`, `selection`, `select`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] AssetsAPI: Preserve extension-facing contract: `pick`, `import`, `importUrl`, `get`, `readText`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ThemeAPI: Preserve extension-facing contract: `register`, `activate`, `active`, `list`, `scheme`, `setScheme`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] PaletteAPI: Preserve extension-facing contract: `registerProvider`, `open`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] MenusAPI: Preserve extension-facing contract: `contribute`, `collect`, `gather`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] StatusAPI: Preserve extension-facing contract: `register`, `list`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ProjectAPI: Preserve extension-facing contract: `get`, `latest`, `revision`, `apply`, `selection`, `select`, `time`, `setTime`, `play`, `pause`, `playing`, `undo`, `redo`, `snapshot`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] AnimAPI: Preserve extension-facing contract: `ev`, `evP`, `active`, `findProp`, `allProps`, `hasKeyAt`, `setKey`, `setKeyOn`, `removeKey`, `applyEaseTo`, `wouldCycle`, `resolveContent`, `expressionErrors`, `version`, `touch`, `worldMatrix`, `localMatrix`, `transformParentMatrix`, `mul`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ModelAPI: Preserve extension-facing contract: `P`, `CH`, `KF`, `BLENDS`, `TYPE_META`, `MASK_SHAPES`, `mkLayer`, `mkMask`, `mkProject`, `cloneLayer`, `normalizeFill`, `layerDefinition`, `curComp`, `layer`, `byName`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] SelectionAPI: Preserve extension-facing contract: `get`, `layers`, `first`, `keys`, `chan`, `set`, `select`, `resolveSelectedKeys`, `keySelectionActive`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] GroupsAPI: Preserve extension-facing contract: `ancestors`, `transformRoots`, `bounds`, `span`, `expand`, `normalizeStack`, `moveToGroup`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] TransportAPI: Preserve extension-facing contract: `time`, `setTime`, `play`, `pause`, `toggle`, `playing`, `step`, `quality`, `perf`, `invalidate`, `previewResolution`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] HistoryAPI: Preserve extension-facing contract: `do`, `begin`, `commit`, `cancel`, `undo`, `redo`, `external`, `selection`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] EditAPI: Preserve extension-facing contract: `apply`, `begin`, `commit`, `cancel`, `dispatch`, `mutate`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] InspectorAPI: Preserve extension-facing contract: `registerSection`, `sections`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] MediaAPI: Preserve extension-facing contract: `registerImportDefaults`, `getImportDefaults`, `timing`, `importFiles`, `commandForAsset`, `audio`, `assets`, `fonts`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] RenderAPI: Preserve extension-facing contract: `gl`, `raster`, `textLayout`, `renderFrameTo`, `snapshot`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] UIStateAPI: Preserve extension-facing contract: `timelineVersion`, `getLayerCollapsed`, `setLayerCollapsed`, `getGroupCollapsed`, `setGroupCollapsed`, `getKeyHandles`, `setKeyHandles`, `getFxOpen`, `setFxOpen`, `getReveal`, `setReveal`, `getShaderMeta`, `setShaderMeta`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ControlsAPI: Preserve extension-facing contract: `Segmented`, `NumField`, `ColorField`, `FillField`, `RampField`, `PointField`, `SliderField`, `Disclosure`, `FontField`, `SelectField`, `TextField`, `ToggleField`, `Row`, `Section`, `binding`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] UIAPI: Preserve extension-facing contract: `controls`, `toast`, `confirm`, `openExternal`, `copy`, `menu`, `modal`, `icon`, `drag`, `closeMenus`, `showLayerMenu`, `showParentMenu`, `beginParentPick`, `openShaderEditor`, `gesture`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] DndAPI: Preserve extension-facing contract: `ASSET_MIME`, `FX_MIME`, `startAssetDrag`, `mediaDrag`, `hasAssetDrag`, `hasFileDrag`, `hasMediaDrag`, `readAssetDrag`, `hasFxDrag`, `readFxDrag`, `applyFxDrop`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] WorkspaceAPI: Preserve extension-facing contract: `current`, `mutate`, `hasPanel`, `addPanel`, `movePanel`, `removePanel`, `hidePanel`, `restorePanel`, `refresh`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] UtilAPI: Preserve extension-facing contract: `round`, `clamp`, `lerp`, `snapF`, `tc`, `parseTc`, `uid`, `hex2rgb`, `rgb2hex`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] EaseAPI: Preserve extension-facing contract: . — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Space3DAPI: Preserve extension-facing contract: `CHANNELS_3D`, `local3D`, `parent3D`, `world3D`, `is3DLayer`, `perspectiveAmount`, `planeMatrix`, `projectPoint`, `inversePlane`, `planeContains`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ServicesAPI: Preserve extension-facing contract: `register`, `get`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] StorageAPI: Preserve extension-facing contract: `get`, `set`, `delete`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] EventsAPI: Preserve extension-facing contract: `on`, `emit`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] ExtensionsAPI: Preserve extension-facing contract: `list`, `fork`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`, `rebase`, `setUp`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] VarsAPI: Preserve extension-facing contract: `get`, `has`, `keys`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] HostAPI: Preserve extension-facing contract: `pm`, `state`, `mount`, `haptic`. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Contribution locations: titlebar:right, panel:context, layer:context, timeline:context and viewer:context accept synchronous or asynchronous menu contributions. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Inspector contribution: Register conditional sections after content/transform/effects with build and disposal lifecycle. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Panel contribution metadata: Support component/build/header, size/min, flush/noscroll/fitContent/headless, hideMoveHandle/moveSlot, icon and library preview metadata. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Status contribution: Register left/right computed text items with title and click handler. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Svelte compatibility: Retain Svelte 5 component mount/reactivity and DOM build contracts; a Rust-only reimplementation cannot execute third-party panels without a compatibility runtime. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Services and hooks: Preserve owned service override registry and typed event subscriptions/emits; sandbox custom events are namespaced. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Trusted host bridge: Existing trusted built-ins/forks can access host.pm, state, Svelte mount and alignment haptics; compatibility includes these escape hatches. — `apps/desktop/src/renderer/src/kernel/api.ts`
+- [ ] Acceptance extension-remote-media-ownership: A delayed extension URL import cannot land in a different project. — `apps/desktop/e2e/extension-remote-media-ownership.spec.ts`
+- [ ] Acceptance extension-sandbox-isolation: Each store extension gets its own process and a spinning one is killed without touching the rest. — `apps/desktop/e2e/extension-sandbox-isolation.spec.ts`
+- [ ] Acceptance extension-sandbox-menus: A sandboxed context-menu item acts on the layer that was right-clicked. — `apps/desktop/e2e/extension-sandbox-menus.spec.ts`
+- [ ] Acceptance extension-sandbox-perf: Store extensions that do not read the project cost playback nothing, and readers share one snapshot per change. — `apps/desktop/e2e/extension-sandbox-perf.spec.ts`
+- [ ] Acceptance extension-sandbox: Store code runs in an opaque iframe and network permission controls fetch. — `apps/desktop/e2e/extension-sandbox.spec.ts`
+- [ ] Acceptance extension-sandbox: A store extension’s Svelte panel renders in its own view iframe with host chrome and keys. — `apps/desktop/e2e/extension-sandbox.spec.ts`
+- [ ] Acceptance extension-sandbox: A sandboxed Svelte panel follows the playhead and the project through reactive api reads. — `apps/desktop/e2e/extension-sandbox.spec.ts`
+- [ ] Acceptance extension-sandbox: A sandboxed panel submits its form, fetches data: URLs, and survives blocked loads. — `apps/desktop/e2e/extension-sandbox.spec.ts`
+- [ ] Acceptance extensions: Replaces panel source in place without changing the document, window, or docking. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: A user extension activates, contributes a command and an effect, and survives disable. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: Timeline replacements swap with the built-in timeline without corrupting the live panel. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: Settings explains an override and deletes it while restoring the built-in panel. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: A broken extension is contained: the app boots and reports the failure. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: Built-in mods panel is registered. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance extensions: Turning the built-in timeline off and on restores its live panel in place. — `apps/desktop/e2e/extensions.spec.ts`
+- [ ] Acceptance store-icons: Loads Store icons in the built desktop app and keeps artwork when an image fails. — `apps/desktop/e2e/store-icons.spec.ts`
+- [ ] Acceptance store-publish-panel: Selecting an extension opens a full publish panel through preparation, cancellation, and reopening. — `apps/desktop/e2e/store-publish-panel.spec.ts`
+
+## 10. Transcription, haptics, notifications, accessibility, themes and localization
+
+- [ ] Transcription catalog: Show downloaded/available models with language filtering, model detail meters and download state/progress. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Model lifecycle: Download, select/use, cancel and remove local models; report unavailability on unsupported hosts. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Spoken language: Choose detection or supported explicit language; English-only models expose English rather than false autodetection. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Model storage: Show downloaded-model usage and local storage controls. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Word timestamps: Caption generation asks for a word-timed model when active model only supplies phrase timestamps. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Model request sheet: Focused editor presents model picker with reason for agent/caption requests; dismissing must not alter project. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Transcription engine: Run transcription on this Mac in utility process; agent and captions use shared service/cache. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Caption file settings: Retain SRT/WebVTT import/export and caption generation model/language choices; detailed caption editing is companion inventory. — `apps/desktop/src/renderer/src/transcription/TranscriptionSettings.svelte`, `apps/desktop/src/renderer/src/transcription/ModelSheet.svelte`, `apps/desktop/src/main/transcription/service.ts`
+- [ ] Alignment haptic: Use native macOS alignment feedback for snap/alignment events, trusted senders only, at least 80 ms apart. — `apps/desktop/src/main/haptics.ts`, `packages/macos-haptics/src/addon.mm`
+- [ ] Optional hardware: Haptic failures never interrupt gestures; native addon is optional where unavailable. — `apps/desktop/src/main/haptics.ts`, `packages/macos-haptics/src/addon.mm`
+- [ ] Agent completion: Play bundled Little Victory (Deep) notification sound for completed runs. — `apps/desktop/src/main/agent-notifications.ts`, `apps/desktop/src/renderer/src/panels/agent/notification-preferences.ts`
+- [ ] Agent questions: Send notification with the actual question and completion sound; native notification activation must return to relevant work. — `apps/desktop/src/main/agent-notifications.ts`, `apps/desktop/src/renderer/src/panels/agent/notification-preferences.ts`
+- [ ] Accessible names: Preserve semantic dialogs, buttons, navigation/regions, selection/pressed/current state and progressbar values with meaningful labels. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`, `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Keyboard focus: Maintain visible focus, tab order, modal focus restoration and native text services without editor shortcut leakage. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`, `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Reduced motion: Respect prefers-reduced-motion in settings travel/library/agent motion; stop animations promptly when preference changes. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`, `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Localization baseline: UI strings are predominantly English; locale-aware dates/formatting exist, but no translation catalog/language preference is established. — `apps/desktop/src/renderer/src/settings/SettingsScreen.svelte`, `apps/desktop/src/renderer/src/overlays/Modal.svelte`, `apps/desktop/src/renderer/src/panels/AssetsPanel.svelte`
+- [ ] Theme modes: System/light/dark propagate across native window material, renderer controls, panels, overlays and extension views. — `packages/tokens/tokens.css`, `apps/desktop/src/main/theme.ts`, `apps/desktop/src/main/system-accent.ts`, `apps/desktop/src/renderer/src/kernel/theme-apply.ts`
+- [ ] Token compatibility: Preserve public CSS token names, light/dark values, typography/spacing/control geometry, semantic colors and duration/easing families. — `packages/tokens/tokens.css`, `apps/desktop/src/main/theme.ts`, `apps/desktop/src/main/system-accent.ts`, `apps/desktop/src/renderer/src/kernel/theme-apply.ts`
+- [ ] System accent: Follow system accent plumbing while retaining explicit/custom theme overrides. — `packages/tokens/tokens.css`, `apps/desktop/src/main/theme.ts`, `apps/desktop/src/main/system-accent.ts`, `apps/desktop/src/renderer/src/kernel/theme-apply.ts`
+- [ ] Theme lifecycle: Unapply root attributes/CSS/tokens and workspace appearance completely across reload, workspace switches and restart. — `packages/tokens/tokens.css`, `apps/desktop/src/main/theme.ts`, `apps/desktop/src/main/system-accent.ts`, `apps/desktop/src/renderer/src/kernel/theme-apply.ts`
+- [ ] Acceptance theme-lifecycle: Theme appearance fully un-applies across workspaces, toggles, reload and restart. — `apps/desktop/e2e/theme-lifecycle.spec.ts`
+- [ ] Acceptance theme-toggle: System appearance repaints the timeline and respects an explicit preference. — `apps/desktop/e2e/theme-toggle.spec.ts`
+- [ ] Acceptance transcription: The download sheet downloads a model, closes itself, and Settings manages it. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] Acceptance transcription: Captions ask for a word-timed model when the one in use only times phrases. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] Acceptance transcription: Main asks the focused editor for a model with a reason. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] Acceptance transcription: A real Parakeet Unified EN model transcribes speech in the utility process. — `apps/desktop/e2e/transcription.spec.ts`
+- [ ] Acceptance transcription: Onboarding starts the chosen model download and it finishes after onboarding. — `apps/desktop/e2e/transcription.spec.ts`
+
+- [ ] Token family bg: Keep public names and light/dark or shared values: `--bg-window`, `--bg-rail`, `--bg-panel`, `--bg-panel-2`, `--bg-sunken`, `--bg-row`, `--bg-row-hi`, `--bg-field`, `--bg-float`. — `packages/tokens/tokens.css`
+
+- [ ] Token family tx: Keep public names and light/dark or shared values: `--tx`, `--tx-2`, `--tx-3`, `--tx-4`, `--tx-label`, `--tx-value`. — `packages/tokens/tokens.css`
+
+- [ ] Token family accent: Keep public names and light/dark or shared values: `--accent`, `--accent-hover`, `--accent-dim`, `--accent-tx`. — `packages/tokens/tokens.css`
+
+- [ ] Token family line: Keep public names and light/dark or shared values: `--line`, `--line-2`, `--line-strong`. — `packages/tokens/tokens.css`
+
+- [ ] Token family r-: Keep public names and light/dark or shared values: `--r-base`, `--r-xs`, `--r-sm`, `--r-md`, `--r-lg`, `--r-xl`, `--r-pill`. — `packages/tokens/tokens.css`
+
+- [ ] Token family fs: Keep public names and light/dark or shared values: `--fs-xs`, `--fs-sm`, `--fs-md`, `--fs-lg`, `--fs-xl`. — `packages/tokens/tokens.css`
+
+- [ ] Token family f-: Keep public names and light/dark or shared values: `--f-ui`, `--f-mono`. — `packages/tokens/tokens.css`
+
+- [ ] Token family dur: Keep public names and light/dark or shared values: `--dur-1`, `--dur-2`, `--dur-3`. — `packages/tokens/tokens.css`
+
+- [ ] Token family ease: Keep public names and light/dark or shared values: `--ease`, `--ease-io`. — `packages/tokens/tokens.css`
+
+- [ ] Token family shadow: Keep public names and light/dark or shared values: `--shadow-raise`, `--shadow-panel`, `--shadow-lift`, `--shadow-float`. — `packages/tokens/tokens.css`
+
+## Native mapping notes
+
+These are proposed platform mappings, not descriptions of the current Electron implementation. Use standard macOS 26 AppKit components for system chrome and GPUI for dense editing content. Apple says standard AppKit controls adopt the current appearance automatically; toolbars provide Liquid Glass grouping. See [Adopting Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass) and [Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos).
+
+1. **Lifecycle:** AppKit NSApplication/NSWindow and document/open-event coordination; preserve explicit Powermove ownership/save/restore rules rather than relying on automatic document restoration defaults. Use native titlebar, NSToolbar and fullscreen behavior.
+2. **Menus:** AppKit NSMenu/NSMenuItem and responder-chain validation; native text context menus/services. Preserve renderer-era command context and enabled rules through a shared command router.
+3. **Keyboard:** AppKit key equivalents for app/window commands; GPUI focus-aware command dispatch for editor gestures; bridge extension keybinding precedence, text input and repeat without double execution.
+4. **Projects/settings:** GPUI project library and document forms; AppKit Settings window, native About panel, NSOpenPanel/NSSavePanel and document-modal sheets. Keep setting semantics and cancel behavior unchanged.
+5. **Layout:** GPUI docking, tab stacks, splits, workspace previews and persistence; AppKit windows for popouts with clear ownership and standard window controls.
+6. **Overlays:** AppKit NSAlert/sheets for destructive or document decisions and NSPopover for chrome-anchored controls; GPUI command palette, inline notices, tooltips and editor-specific progress. Keep keyboard/focus semantics consistent.
+7. **Media:** AppKit file panels, Finder reveal, pasteboard and file promises/drop integration; GPUI browser, folders, thumbnails, import progress, sequence choices and offline state.
+8. **Agents:** GPUI conversation/composer/thread surfaces; native notifications and AppKit attachment sheets. Preserve sandboxed web content for interactive HTML replies and external automation protocol compatibility independently of UI framework.
+9. **Extensions/cloud:** GPUI Store/account/library surfaces with native permission/credential dialogs. Keep a JS/Svelte compatibility runtime and isolated web views for existing third-party panels; GPUI alone does not supply this ABI. Do not rewrite public extension contracts into Rust-only APIs.
+10. **System integration:** AppKit appearance/accessibility, NSHapticFeedbackManager and UserNotifications; expose GPUI elements through macOS accessibility with real labels/actions. Map tokens to native appearance while retaining CSS token compatibility for extensions; honor reduced motion/transparency and keep glass on navigation/chrome without obscuring editing content.

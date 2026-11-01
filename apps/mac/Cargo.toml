@@ -1,0 +1,35 @@
+# Powermove for Mac: the native app (docs/gpui/architecture.md).
+# GPUI draws the editor; AppKit supplies Liquid Glass chrome, menus,
+# sheets and windows. Its own workspace so engine-only builds never
+# compile GPUI; it links engine crates by path.
+[workspace]
+
+[package]
+name = "powermove-mac"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "powermove"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "runtime_shaders"] }
+raw-window-handle = "0.6"
+async-channel = "2.5"
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+debug = "line-tables-only"
