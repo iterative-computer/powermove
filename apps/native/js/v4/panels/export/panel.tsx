@@ -1,0 +1,509 @@
+import type { ComponentChildren } from "preact";
+import { useLayoutEffect, useReducer } from "preact/hooks";
+import type { SurfaceEvent } from "../../src";
+import * as UI from "../../src/components";
+import { ExportModel, isProgress, progress, type Options } from "./model";
+import {
+  colorNote,
+  descriptions,
+  fields,
+  formats,
+  kinds,
+  kindOf,
+  qualities,
+  rates,
+  rows,
+  sidecars,
+} from "./spec";
+const { token } = UI;
+const text = {
+  color: token("colors.text"),
+  fontSize: token("typography.body"),
+};
+const detail = {
+  color: token("colors.muted"),
+  fontSize: token("typography.minimum"),
+};
+
+/** Neutral structural wrapper until the kit's sheet form-row recipe lands.
+ * API-GAP: InspectorRow hard-codes inspector metrics/checkbox alignment. Do not
+ * substitute those metrics for sheet_inset, sheet_value_column or row+inset. */
+function FormRow(props: {
+  name: keyof typeof rows;
+  help?: string;
+  children: ComponentChildren;
+}) {
+  const [label, help] = rows[props.name];
+  return (
+    <div
+      role="group"
+      label={label}
+      id={`export.row.${props.name}`}
+      metadata={{
+        export: {
+          recipe: "sheet-form-row",
+          valueColumn: "metrics.sheet_value_column",
+          minHeight: ["metrics.row", "metrics.inset"],
+          checkboxAlignment: "trailing",
+        },
+      }}
+    >
+      <text style={text}>{label}</text>
+      <text style={detail}>{props.help ?? help}</text>
+      {props.children}
+    </div>
+  );
+}
+function Group(props: { label: string; children: ComponentChildren }) {
+  // API-GAP: settings-card recipe owns light/dark fill and summed radius.
+  return (
+    <div
+      role="group"
+      label={props.label}
+      metadata={{ export: { recipe: "settings-group" } }}
+    >
+      <text
+        role="heading"
+        style={{
+          color: token("colors.text"),
+          fontSize: token("typography.title"),
+        }}
+      >
+        {props.label}
+      </text>
+      {props.children}
+    </div>
+  );
+}
+/** The kit has no push-button yet. ToolbarItem is an explicitly provisional,
+ * neutral action placeholder; the native adapter must use NSButton here. */
+function Action(props: {
+  label: string;
+  id: string;
+  disabled?: boolean;
+  primary?: boolean;
+  onClick: () => void;
+}) {
+  const { primary, ...rest } = props;
+  return (
+    <UI.ToolbarItem
+      {...rest}
+      metadata={{ export: { nativeControl: "NSButton", default: !!primary } }}
+    />
+  );
+}
+export interface ExportSheetProps {
+  model: ExportModel;
+  anchor: number;
+}
+export function ExportSheet({ model, anchor }: ExportSheetProps) {
+  const [, update] = useReducer((n) => n + 1, 0);
+  useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
+  const s = model.state;
+  const p = s.project;
+  if (
+    !p ||
+    !model.open ||
+    s.run.phase === "done" ||
+    s.run.phase === "cancelled"
+  )
+    return null;
+  const o = model.options;
+  const busy = model.locked;
+  const watch = (job: Promise<unknown>) => {
+    void job.catch(() => update(null));
+  };
+  const edit = <K extends keyof Options>(key: K, value: Options[K]) => {
+    model.set(key, value);
+    watch(model.refreshPlan());
+  };
+  const help = (key: keyof typeof rows) =>
+    key === "audio" && !p.hasAudio
+      ? "No audio layers in this project."
+      : key === "captionsSidecar" && p.captionLayers > 1
+        ? "Also write one subtitle file per captions layer beside the video."
+        : rows[key][1];
+  const select = (
+    key: keyof Options,
+    options: UI.Option[],
+    row: keyof typeof rows = key as keyof typeof rows,
+  ) => (
+    <FormRow name={row} help={help(row)}>
+      <UI.PopUpButton
+        id={`export.${key}`}
+        label={rows[row][0]}
+        title={help(row)}
+        metadata={
+          key === "format"
+            ? {
+                export: {
+                  optionSubtitles: Object.fromEntries(
+                    formats
+                      .filter((f) => !s.capabilities[f.v].available)
+                      .map((f) => [f.v, s.capabilities[f.v].reason ?? ""]),
+                  ),
+                },
+              }
+            : undefined
+        }
+        binding={s.bindings[key]}
+        value={o[key]}
+        options={options}
+        disabled={busy}
+        onChange={(e) => edit(key, e.value as Options[typeof key])}
+      />
+    </FormRow>
+  );
+  const toggle = (key: "mblur" | "audio" | "alpha" | "captionsBurn") => (
+    <FormRow name={key} help={help(key)}>
+      <UI.Checkbox
+        id={`export.${key}`}
+        label={rows[key][0]}
+        title={help(key)}
+        binding={s.bindings[key]}
+        value={o[key]}
+        disabled={busy || (key === "audio" && !p.hasAudio)}
+        onChange={(e) => edit(key, e.value as boolean)}
+      />
+    </FormRow>
+  );
+  const keyboard = (e: SurfaceEvent) => {
+    if (
+      e.key === "Escape" ||
+      e.key === "Enter" ||
+      (e.metaKey && e.key === ".")
+    ) {
+      e.stopPropagation();
+      watch(model.key(e.key!, !!e.metaKey, !!e.shiftKey));
+    }
+  };
+  const progressSheet = isProgress(s.run);
+  return (
+    <UI.SheetAnchor
+      id="export.sheet"
+      label="Export"
+      anchor={anchor}
+      open
+      // No substitute for missing wide-sheet/inset tokens. Metadata is a request,
+      // not a claim the current kit interprets these properties.
+      metadata={{
+        export: {
+          width: "metrics.sheet_width_wide",
+          inset: "metrics.sheet_inset",
+          dismissOutside: false,
+          dismissEscape: !progressSheet,
+          initialFocus: progressSheet ? null : "export.kind",
+        },
+      }}
+      focusRequest={progressSheet ? undefined : "export.kind"}
+      onKeyDown={keyboard}
+      preventDefault={{ keydown: ["Enter", "Escape", "."] }}
+    >
+      <text
+        role="heading"
+        style={{
+          color: token("colors.text"),
+          fontSize: token("typography.heading"),
+        }}
+      >
+        {progressSheet ? `Exporting “${p.name}”` : "Export"}
+      </text>
+      {progressSheet ? (
+        <>
+          {s.run.phase === "rendering" && s.run.preview ? (
+            <frame
+              resource={s.run.preview}
+              metadata={{ export: { aspect: [p.width, p.height] } }}
+              style={{
+                background: token("colors.viewer"),
+                borderRadius: token("metrics.control_radius"),
+              }}
+            />
+          ) : null}
+          {s.run.phase === "failed" ? (
+            <text
+              label={`Export failed: ${s.run.message}`}
+              metadata={{
+                export: {
+                  symbol: "exclamationmark.triangle.fill",
+                  announce: "polite",
+                },
+              }}
+              style={{ ...text, color: token("colors.danger") }}
+            >{`Export failed: ${s.run.message}`}</text>
+          ) : (
+            <>
+              <UI.ProgressRow
+                id="export.progress"
+                label="Export progress"
+                value={progress(s.run).value}
+                title={progress(s.run).eta}
+                metadata={{
+                  export: {
+                    valueDescription:
+                      progress(s.run).ax ?? progress(s.run).leading,
+                  },
+                }}
+              />
+              <text style={{ ...text, fontVariantNumeric: "tabular-nums" }}>
+                {progress(s.run).leading}
+              </text>
+              {progress(s.run).eta ? (
+                <text
+                  style={{
+                    color: token("colors.secondary"),
+                    fontSize: token("typography.body"),
+                  }}
+                >
+                  {progress(s.run).eta}
+                </text>
+              ) : null}
+            </>
+          )}
+          <div
+            role="group"
+            label="Export"
+            metadata={{ export: { recipe: "sheet-footer" } }}
+          >
+            {s.run.phase === "failed" ? (
+              <>
+                <Action
+                  id="export.close"
+                  label="Close"
+                  onClick={() => watch(model.closeFailure())}
+                />
+                <Action
+                  id="export.retry"
+                  label="Try Again"
+                  primary
+                  disabled={model.pending}
+                  onClick={() => watch(model.retry())}
+                />
+              </>
+            ) : (
+              <Action
+                id="export.cancel"
+                label={s.run.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+                disabled={s.run.phase === "cancelling"}
+                onClick={() => watch(model.cancel())}
+              />
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <UI.SegmentedControl
+            id="export.kind"
+            label="Export type"
+            value={model.kind}
+            options={kinds}
+            disabled={busy}
+            onChange={(kind) => {
+              model.chooseKind(kind as "video" | "images" | "project");
+              watch(model.refreshPlan());
+            }}
+          />
+          <text
+            style={{
+              color: token("colors.secondary"),
+              fontSize: token("typography.reading"),
+            }}
+          >
+            {descriptions[model.kind]}
+          </text>
+          {model.kind === "project" ? (
+            <Group label="Keep Every Layer Editable">
+              <text
+                style={{
+                  color: token("colors.secondary"),
+                  fontSize: token("typography.reading"),
+                }}
+              >
+                Save a portable Powermove project with its media, effects,
+                keyframes and composition settings.
+              </text>
+              {["Editable layers", "Original media", "Animation & effects"].map(
+                (label) => (
+                  <text
+                    key={label}
+                    style={{
+                      ...detail,
+                      background: token("colors.panel_secondary"),
+                    }}
+                  >
+                    {label}
+                  </text>
+                ),
+              )}
+            </Group>
+          ) : (
+            <>
+              <Group label="Output">
+                {select(
+                  "format",
+                  formats
+                    .filter((f) => kindOf(f.v) === model.kind)
+                    .map((f) => ({
+                      ...f,
+                      disabled: !s.capabilities[f.v].available,
+                    })),
+                )}
+                {fields[o.format].includes("scale")
+                  ? select("scale", [
+                      ...([0.5, 1, 2] as const).map((scale, i) => ({
+                        v: scale,
+                        label: `${["Half", "Full", "2×"][i]} · ${Math.round(p.width * scale)}×${Math.round(p.height * scale)}`,
+                      })),
+                      { v: "custom", label: "Custom size…" },
+                    ])
+                  : null}
+                {o.scale === "custom" ? (
+                  <FormRow name="size">
+                    {(["width", "height"] as const).map((axis, i) => (
+                      <div key={axis}>
+                        {i ? <text style={text}>×</text> : null}
+                        <UI.NumberField
+                          id={`export.${axis}`}
+                          label="Size"
+                          title={rows.size[1]}
+                          value={model.size[axis]}
+                          binding={s.bindings[axis]}
+                          min={16}
+                          max={8192}
+                          step={1}
+                          unit="px"
+                          disabled={busy}
+                          metadata={{ export: { axis } }}
+                          onChange={(e) => {
+                            model.customSize(axis, Number(e.value));
+                            if (!model.error) watch(model.refreshPlan());
+                          }}
+                        />
+                      </div>
+                    ))}
+                    <text metadata={{ export: { symbol: "link" } }} />
+                    {model.error ? (
+                      <text
+                        style={{ ...detail, color: token("colors.danger") }}
+                      >
+                        {model.error}
+                      </text>
+                    ) : null}
+                  </FormRow>
+                ) : null}
+                {fields[o.format].includes("fps") ? select("fps", rates) : null}
+                {fields[o.format].includes("range")
+                  ? select("range", [
+                      {
+                        v: "work",
+                        label: p.hasWorkArea
+                          ? "Work area"
+                          : "Work area · not set",
+                      },
+                      { v: "all", label: "Full composition" },
+                    ])
+                  : null}
+                {fields[o.format].includes("quality")
+                  ? select("quality", qualities)
+                  : null}
+              </Group>
+              <Group label="Rendering">
+                {fields[o.format].includes("mblur") ? toggle("mblur") : null}
+                {fields[o.format].includes("audio") ? toggle("audio") : null}
+                {fields[o.format].includes("alpha") ? toggle("alpha") : null}
+              </Group>
+              {p.captionLayers ? (
+                <Group label="Captions">
+                  {toggle("captionsBurn")}
+                  {model.kind === "video"
+                    ? select("captionsSidecar", sidecars)
+                    : null}
+                </Group>
+              ) : null}
+              <Group label="Presets">
+                <FormRow name="preset">
+                  <UI.PopUpButton
+                    id="export.preset"
+                    label="Saved Preset"
+                    title={rows.preset[1]}
+                    binding={s.bindings.preset}
+                    value={model.chosenPreset}
+                    disabled={busy}
+                    options={[
+                      { v: "", label: "Choose Preset" },
+                      ...s.presets.map((p) => ({ v: p.id, label: p.name })),
+                    ]}
+                    onChange={(e) => watch(model.choosePreset(String(e.value)))}
+                  />
+                </FormRow>
+                <FormRow name="presetSave">
+                  <UI.TextField
+                    id="export.presetName"
+                    label="Save as Preset"
+                    title={rows.presetSave[1]}
+                    binding={s.bindings.presetName}
+                    value={model.presetName}
+                    disabled={busy}
+                    metadata={{ export: { placeholder: "Preset name" } }}
+                    onInput={(e) => model.namePreset(String(e.value ?? ""))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.stopPropagation();
+                        watch(model.savePreset());
+                      }
+                    }}
+                    preventDefault={{ keydown: ["Enter"] }}
+                  />
+                  <Action
+                    id="export.savePreset"
+                    label="Save"
+                    disabled={busy || !model.presetName.trim() || !!model.error}
+                    onClick={() => watch(model.savePreset())}
+                  />
+                </FormRow>
+                <text style={detail}>{colorNote}</text>
+              </Group>
+            </>
+          )}
+          <div
+            role="group"
+            label="Export"
+            metadata={{
+              export: {
+                recipe: "sheet-footer",
+                height: ["metrics.control", "metrics.inset", "metrics.inset"],
+              },
+            }}
+          >
+            <text
+              id="export.summary"
+              label={p.summary}
+              metadata={{ export: { announce: "polite" } }}
+              style={{
+                color: token("colors.secondary"),
+                fontSize: token("typography.body"),
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {p.summary}
+            </text>
+            {p.note ? <text style={detail}>{p.note}</text> : null}
+            <Action
+              id="export.cancel"
+              label="Cancel"
+              disabled={busy}
+              onClick={() => watch(model.cancel())}
+            />
+            <Action
+              id="export.start"
+              label={model.actionLabel}
+              primary
+              disabled={!model.canExport}
+              onClick={() => watch(model.start())}
+            />
+          </div>
+        </>
+      )}
+    </UI.SheetAnchor>
+  );
+}

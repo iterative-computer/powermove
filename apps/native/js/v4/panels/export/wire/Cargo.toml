@@ -1,0 +1,11 @@
+# Test-only AccessKit/wire inspector; no production app dependency.
+[package]
+name = "pm-export-panel-wire"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+pm-surface = { path = "../../../../../crates/surface" }
+pm-design = { path = "../../../../../crates/design" }
+serde_json = "1"
