@@ -136,7 +136,8 @@ fn main() -> anyhow::Result<()> {
         );
     }
     anyhow::ensure!(
-        std::fs::read_to_string("/tmp/pm-shots/gui.lock").is_ok_and(|s| s.trim() == "s3"),
+        std::fs::read_to_string("/tmp/pm-shots/gui.lock")
+            .is_ok_and(|s| matches!(s.trim(), "s3" | "engsvc2")),
         "Acquire S3 GUI lock with run.sh before opening windows"
     );
     let device = render::metal_device(&gpu);

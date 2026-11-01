@@ -35,6 +35,7 @@ pub fn metal_device(gpu: &Gpu) -> metal::Device {
     }
 }
 pub struct Engine {
+    pub mastering: crate::color::Mastering,
     gpu: Gpu,
     renderer: Renderer,
     metal: metal::Device,
@@ -81,6 +82,7 @@ impl Engine {
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(Self {
+            mastering: Default::default(),
             // Use the producer's actual queue. Metal tracks the shared source
             // texture between producer and consumer command buffers. No CPU
             // completion wait or cross-queue race is needed (§3.3 / N8).
@@ -291,7 +293,8 @@ impl Engine {
         let pass = command.new_render_command_encoder(desc);
         pass.set_render_pipeline_state(&self.pipeline);
         pass.set_fragment_texture(0, Some(&source));
-        let params = overlays.params();
+        let mut params = overlays.params();
+        params.output = self.mastering.params()?;
         pass.set_fragment_bytes(
             0,
             size_of_val(&params) as u64,
@@ -495,5 +498,95 @@ mod lifetime_tests {
         event.set_signaled_value(1);
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
+    }
+    #[test]
+    fn encoded_hdr_outputs_match_independent_f64_reference() {
+        use crate::color::{self, Mastering};
+        use pm_color::tonemap::{hlg_oetf, pq_eotf, pq_inverse_eotf};
+        let mut engine = Engine::new(Gpu::new("mastering-reference").unwrap()).unwrap();
+        let value = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let comp = value.get("compId").unwrap().as_str().unwrap().to_owned();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(value)),
+                1,
+            )),
+            comp,
+            media: Default::default(),
+            content: 1,
+        };
+        let size = Size::new(160, 90);
+        let reference = engine.export(&scene, Ticks::ZERO, size).unwrap();
+        for mode in [
+            Mastering::Pq {
+                source_peak: 1000.,
+                target_peak: 203.,
+            },
+            Mastering::Pq {
+                source_peak: 1000.,
+                target_peak: 1000.,
+            },
+            Mastering::Hlg {
+                source_peak: 1000.,
+                target_peak: 1000.,
+            },
+        ] {
+            engine.mastering = mode;
+            let sub = engine
+                .frame(
+                    &scene,
+                    Ticks::ZERO,
+                    Output {
+                        width: 160,
+                        height: 90,
+                        display: 0,
+                        headroom: 1.,
+                    },
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let u = mode.params().unwrap();
+            let mut worst = 0_f64;
+            for (actual, encoded) in sub.pixels().iter().zip(reference.chunks_exact(4)) {
+                let a = encoded[3] as f64;
+                if a < 0.999 {
+                    continue;
+                }
+                let p = color::p3(encoded);
+                let mut c = [
+                    0.753833 * p[0] + 0.198597 * p[1] + 0.047570 * p[2],
+                    0.045744 * p[0] + 0.941777 * p[1] + 0.012479 * p[2],
+                    -0.001210 * p[0] + 0.017602 * p[1] + 0.983609 * p[2],
+                ]
+                .map(|v| v * 203.);
+                if u[2] < u[1] {
+                    c = c
+                        .map(|n| pq_eotf(pm_color::tonemap::eetf(pq_inverse_eotf(n), u[1] as f64)));
+                }
+                let expected = if u[0] == 1. {
+                    c.map(pq_inverse_eotf)
+                } else {
+                    let c = c.map(|v| (v / 1000.).max(0.));
+                    let y = 0.2627 * c[0] + 0.6780 * c[1] + 0.0593 * c[2];
+                    c.map(|v| {
+                        hlg_oetf(if y > 0. {
+                            v * y.powf(1. / 1.2 - 1.)
+                        } else {
+                            0.
+                        })
+                    })
+                };
+                for (a, b) in actual.iter().zip(expected) {
+                    worst = worst.max((a - b).abs());
+                }
+            }
+            assert!(worst < 0.002, "{mode:?}: max signal error {worst}");
+        }
     }
 }

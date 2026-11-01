@@ -94,3 +94,38 @@ fn child_export_cancel_does_not_publish_partial_output() {
         "temporary output not cleaned up"
     );
 }
+
+#[test]
+fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let activity = Arc::new(AtomicBool::new(true));
+    let mut child = ExportHandle::start_scheduled(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request(dir.path().join("deferred"), 1),
+        activity.clone(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        child.status().progress,
+        0.,
+        "export submitted while interactive"
+    );
+    activity.store(false, Ordering::Release);
+    assert_eq!(child.wait().unwrap().state, JobState::Done);
+    activity.store(true, Ordering::Release);
+    child = ExportHandle::start_scheduled(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request(dir.path().join("cancel-deferred"), 1),
+        activity,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    child.cancel().unwrap();
+    assert_eq!(child.wait().unwrap().state, JobState::Cancelled);
+    assert!(!dir.path().join("cancel-deferred").exists());
+}

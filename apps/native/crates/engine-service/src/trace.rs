@@ -22,3 +22,50 @@ pub struct Trace {
 pub fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime()
 }
+
+/// Opt-in diagnostic writer. It never blocks the presenter and streams NDJSON
+/// so AppKit termination cannot strand the entire report behind service Drop.
+pub(crate) struct Recorder {
+    sender: Option<std::sync::mpsc::SyncSender<serde_json::Value>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Recorder {
+    pub fn open(path: std::ffi::OsString) -> anyhow::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        let (sender, rx) = std::sync::mpsc::sync_channel::<serde_json::Value>(1024);
+        let thread = std::thread::Builder::new()
+            .name("pm-viewer-trace".into())
+            .spawn(move || {
+                use std::io::Write;
+                for row in rx {
+                    if serde_json::to_writer(&mut file, &row).is_err()
+                        || file.write_all(b"\n").and_then(|_| file.flush()).is_err()
+                    {
+                        eprintln!("Viewer diagnostic trace write failed");
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+        })
+    }
+    pub fn record(&self, row: serde_json::Value) -> bool {
+        self.sender.as_ref().unwrap().try_send(row).is_ok()
+    }
+}
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}

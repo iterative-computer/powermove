@@ -5,6 +5,7 @@ pub mod jobs;
 pub mod layers;
 pub mod policy;
 mod render;
+pub mod resources;
 pub mod trace;
 pub mod transport;
 
@@ -61,6 +62,7 @@ pub struct OverlayGeometry {
 pub(crate) struct OverlayParams {
     count: u32,
     pad: [u32; 3],
+    output: [f32; 4],
     lines: [OverlayLine; 64],
 }
 impl OverlayGeometry {
@@ -79,6 +81,7 @@ impl OverlayGeometry {
         let mut p = OverlayParams {
             count: self.lines.len() as u32,
             pad: [0; 3],
+            output: [0.; 4],
             lines: [OverlayLine::default(); 64],
         };
         p.lines[..self.lines.len()].copy_from_slice(&self.lines);
@@ -136,6 +139,9 @@ pub struct FrameReport {
     pub display_host_seconds: Option<f64>,
     pub completion_host_seconds: Option<f64>,
     pub pixels: Option<Vec<[f64; 3]>>,
+    pub worker_to_completion_ms: Option<f64>,
+    pub input_host_seconds: Option<f64>,
+    pub audio_host_seconds: Option<f64>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
@@ -161,6 +167,9 @@ struct View {
     desired_rate: pm_protocol::common::PlaybackRate,
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
+    input: Option<f64>,
+    mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
 }
 impl View {
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
@@ -192,10 +201,12 @@ struct State {
     next: u64,
     content: u64,
     stop: bool,
+    subscribers: Vec<async_channel::Sender<()>>,
 }
 struct Shared {
     state: Mutex<State>,
     wake: Condvar,
+    interactive: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -203,6 +214,14 @@ struct Shared {
 pub struct Viewer {
     id: u64,
     shared: Arc<Shared>,
+}
+impl State {
+    fn notify(&mut self) {
+        self.subscribers.retain(|s| !s.is_closed());
+        for s in &self.subscribers {
+            let _ = s.try_send(());
+        }
+    }
 }
 impl Viewer {
     fn edit(&self, f: impl FnOnce(&mut View) -> Result<()>) -> Result<()> {
@@ -212,6 +231,9 @@ impl Viewer {
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         f(v)?;
+        self.shared
+            .interactive
+            .store(true, std::sync::atomic::Ordering::Release);
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -259,7 +281,13 @@ impl Viewer {
     }
     /// Interactive scrubbing pauses and immediately requests the exact frame.
     pub fn scrub(&self, time: Ticks) -> Result<()> {
+        self.scrub_at(time, trace::now())
+    }
+    /// NSEvent.timestamp in monotonic host seconds; preserve event origin.
+    pub fn scrub_at(&self, time: Ticks, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
         self.edit(|v| {
+            v.input = Some(input);
             // Replace an unconsumed scrub pair atomically, even under a burst
             // of HID input. A pause can never be accepted without its seek.
             if matches!(
@@ -360,6 +388,49 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Generation pin seam. Nonempty runtime requirements fail until P2 exists.
+    pub fn resources(&self, snapshot: Arc<resources::ResourceSnapshot>) -> Result<()> {
+        snapshot.validate()?;
+        let mut state = self.shared.state.lock().unwrap();
+        state.content += 1;
+        let content = state.content;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        ensure!(
+            snapshot.generation >= v.resources.generation,
+            "stale resource generation"
+        );
+        if v.resources.generation != snapshot.generation {
+            v.resources = snapshot;
+            v.content = content;
+            v.stamp.generation += 1;
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            self.shared
+                .interactive
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.shared.wake.notify_one();
+        }
+        Ok(())
+    }
+
+    /// Main-thread only: change the layer label and shader policy atomically.
+    /// Use explicit mastering peaks; dynamic headroom never edits authored light.
+    pub fn mastering(&self, main: objc2::MainThreadMarker, mode: color::Mastering) -> Result<()> {
+        mode.params()?;
+        self.edit(|v| {
+            if let Some(layer) = &v.config.layer {
+                layers::mastering_space(main, layer, mode)?;
+            }
+            v.mastering = mode;
+            v.stamp.generation += 1;
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
     pub fn capture_next(&self) -> Result<()> {
         self.edit(|v| {
             v.capture = true;
@@ -378,6 +449,9 @@ impl Viewer {
             .map(|v| v.status.clone())
             .unwrap_or_default()
     }
+    pub fn identity(&self) -> u64 {
+        self.id
+    }
     pub fn stamp(&self) -> Option<Stamp> {
         self.shared
             .state
@@ -388,7 +462,9 @@ impl Viewer {
             .map(|v| v.stamp)
     }
     pub fn retire(&self) {
-        self.shared.state.lock().unwrap().views.remove(&self.id);
+        let mut state = self.shared.state.lock().unwrap();
+        state.views.remove(&self.id);
+        state.notify();
         self.shared.wake.notify_one();
     }
 }
@@ -418,6 +494,7 @@ impl EngineService {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
+            interactive: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
         });
@@ -439,6 +516,17 @@ impl EngineService {
             v.dirty = true;
         }
         self.shared.wake.notify_one();
+    }
+    /// Share with ExportHandle::start_scheduled; true defers new export bands.
+    pub fn export_activity(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.shared.interactive.clone()
+    }
+    /// Coalesced status edges. Read status() after every wake; idle is silent.
+    pub fn notifications(&self) -> async_channel::Receiver<()> {
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(());
+        self.shared.state.lock().unwrap().subscribers.push(tx);
+        rx
     }
     pub fn metal_device(&self) -> &metal::DeviceRef {
         &self.device
@@ -494,8 +582,12 @@ impl EngineService {
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus::default(),
                 phase: None,
+                input: None,
+                mastering: Default::default(),
+                resources: Arc::default(),
             },
         );
+        state.notify();
         self.shared.wake.notify_one();
         Ok(Viewer {
             id,
@@ -506,6 +598,9 @@ impl EngineService {
 impl Drop for EngineService {
     fn drop(&mut self) {
         self.shared.state.lock().unwrap().stop = true;
+        self.shared
+            .interactive
+            .store(false, std::sync::atomic::Ordering::Release);
         self.shared.wake.notify_one();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -518,17 +613,26 @@ struct Runtime {
     content: u64,
     interval: f64,
     next: f64,
-    last_time: Option<Ticks>,
 }
 struct Flight {
     id: u64,
     stamp: Stamp,
     time: Ticks,
     submission: render::Submission,
+    input: Option<f64>,
+    audio_host: Option<f64>,
 }
 fn run(mut engine: render::Engine, shared: Arc<Shared>) {
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
+    let recorder =
+        std::env::var_os("PM_ENGINE_TRACE").and_then(|path| match trace::Recorder::open(path) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                eprintln!("Viewer diagnostic trace unavailable: {error}");
+                None
+            }
+        });
     let mut cursor = 0;
     loop {
         let mut state = shared.state.lock().unwrap();
@@ -559,6 +663,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                     continue;
                 }
                 let t = f.submission.trace.lock().unwrap();
+                if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.time.get(),"cache_hit":t.cache_hit,
+                        "generation":f.stamp.generation,"gpu_ok":t.gpu_ok})) {
+                    v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
+                }
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.time,
@@ -567,6 +676,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                         == metal::MTLCommandBufferStatus::Completed,
                     display_host_seconds: t.display.filter(|t| *t > 0.),
                     completion_host_seconds: (t.completed > 0.).then_some(t.completed),
+                    worker_to_completion_ms: (t.completed > 0.)
+                        .then_some((t.completed - t.worker_start) * 1000.),
+                    input_host_seconds: f.input,
+                    audio_host_seconds: f.audio_host,
                     pixels: f
                         .submission
                         .readback
@@ -574,6 +687,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                         .map(|_| f.submission.pixels()),
                 });
             }
+            state.notify();
         }
         if state.stop {
             break;
@@ -592,6 +706,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
         }
         let now = trace::now();
         let mut work = None;
+        let mut changed = false;
         let mut ids: Vec<_> = state.views.keys().copied().collect();
         ids.sort_by_key(|id| (*id <= cursor, *id));
         for id in ids {
@@ -624,7 +739,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                     content: v.content,
                     interval: 1. / 60.,
                     next: now,
-                    last_time: None,
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
@@ -636,11 +750,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                 r.revision = v.stamp.revision;
                 r.content = v.content;
             }
+            changed |= !v.commands.is_empty() || v.status.clock.is_none();
             while let Some(cmd) = v.commands.pop_front() {
                 r.transport.command(cmd, (now * 1e6) as i64);
-                r.last_time = None;
             }
             let sample = r.transport.poll((now * 1e6) as i64);
+            changed |= v
+                .status
+                .clock
+                .as_ref()
+                .is_none_or(|old| old.rate != sample.rate || old.state != sample.state);
             v.status.clock = Some(sample);
             v.desired_rate = r.transport.rate();
             v.status.audio_fallback = r.transport.fallback;
@@ -664,7 +783,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             } else {
                 None
             };
-            if flights.len() >= 3 || flights.iter().any(|f| f.id == id) {
+            if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 2 {
                 continue;
             }
             if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - interval) {
@@ -680,10 +799,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             let time =
                 Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
             r.next = due.unwrap_or(now) + interval;
-            if !v.dirty && r.last_time == Some(time) {
-                continue;
-            }
-            r.last_time = Some(time);
             v.dirty = false;
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
@@ -707,17 +822,52 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                 std::mem::take(&mut v.capture),
                 time,
                 due,
+                v.mastering,
+                v.input.take(),
+                r.transport
+                    .clock
+                    .following()
+                    .then(|| r.transport.clock.host_at(time.get()))
+                    .flatten()
+                    .map(|t| t / 1e6),
             ));
             break;
         }
-        if let Some((id, stamp, scene, output, layer, overlays, provider, capture, time, due)) =
-            work
+        shared.interactive.store(
+            !flights.is_empty()
+                || work.is_some()
+                || state
+                    .views
+                    .values()
+                    .any(|v| v.dirty || !v.commands.is_empty())
+                || runtime.values().any(|r| r.transport.running()),
+            std::sync::atomic::Ordering::Release,
+        );
+        if changed {
+            state.notify();
+        }
+        if let Some((
+            id,
+            stamp,
+            scene,
+            output,
+            layer,
+            overlays,
+            provider,
+            capture,
+            time,
+            due,
+            mastering,
+            input,
+            audio_host,
+        )) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
                 ..Default::default()
             }));
+            engine.mastering = mastering;
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, time))
                 .and_then(|overlays| {
@@ -751,17 +901,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                             stamp,
                             time,
                             submission: s,
+                            input,
+                            audio_host,
                         });
                     }
                     Ok(None) => {
                         v.status.no_drawable += 1;
                         v.dirty = true;
+                        v.input = input;
                     }
                     Err(e) => {
                         v.status.error = Some(e.to_string());
                     }
                 }
             }
+            state.notify();
         } else {
             let busy = !flights.is_empty() || runtime.values().any(|r| r.transport.running());
             let _ = shared
@@ -795,6 +949,11 @@ impl Headless {
         let mut h = Self::new()?;
         h.engine.set_fonts(fonts);
         Ok(h)
+    }
+    pub fn mastering(&mut self, mode: color::Mastering) -> Result<()> {
+        mode.params()?;
+        self.engine.mastering = mode;
+        Ok(())
     }
     pub fn frame(
         &mut self,

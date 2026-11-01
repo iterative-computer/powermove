@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned-toolchain build; only the shared target, stop own build below 4 GiB."""
+"""Pinned-toolchain build; only the shared target, stop own build below 6 GiB."""
 import os, signal, subprocess, sys
 from pathlib import Path
 os.chdir(Path(__file__).resolve().parent / "isolated")
@@ -12,18 +12,18 @@ if os.environ.get('PM_FFMPEG_DIR'):
 def free():
     s = os.statvfs('/')
     return s.f_bavail * s.f_frsize
-if free() < 4 * 1024**3:
-    sys.exit('S3 STOP: less than 4 GiB free')
-p = subprocess.Popen(['cargo', *sys.argv[1:]], start_new_session=True)
+if free() < 6 * 1024**3:
+    sys.exit('S3 STOP: less than 6 GiB free')
+p = subprocess.Popen(['cargo', '+1.96.1', *sys.argv[1:]], start_new_session=True)
 try:
     while True:
         try:
             sys.exit(p.wait(timeout=1))
         except subprocess.TimeoutExpired:
-            if free() < 4 * 1024**3:
+            if free() < 6 * 1024**3:
                 os.killpg(p.pid, signal.SIGTERM)
                 p.wait(timeout=10)
-                sys.exit('S3 STOP: own build stopped below 4 GiB free')
+                sys.exit('S3 STOP: own build stopped below 6 GiB free')
 except BaseException:
     if p.poll() is None:
         os.killpg(p.pid, signal.SIGTERM)

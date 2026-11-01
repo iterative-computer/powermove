@@ -17,7 +17,10 @@ with log.open('w') as output:
     process = subprocess.Popen(['zsh', 'apps/native/spikes/s3/run.sh', '--seconds=12', *[a for a in sys.argv[1:] if a != '--cached'], '--report=' + prefix + '.json'], stdout=output, stderr=output)
     try:
         # Acquisition retries every 30 s inside run.sh; do not steal its lock.
+        deadline = time.monotonic() + 660
         while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("S3 window readiness timed out; inspect " + str(log))
             match = re.search(r'S3 window_id=(\d+)', log.read_text())
             if match:
                 break

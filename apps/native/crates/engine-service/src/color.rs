@@ -99,3 +99,42 @@ mod tests {
         assert!(p3(&[2., 2., 2., 1.])[0] > 1.);
     }
 }
+
+/// Explicit mastering output. Default linear P3 preserves working values.
+/// Encoded modes use BT.2020, 203-nit reference white and a stated source peak.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Mastering {
+    #[default]
+    LinearP3,
+    Pq {
+        source_peak: f32,
+        target_peak: f32,
+    },
+    Hlg {
+        source_peak: f32,
+        target_peak: f32,
+    },
+}
+impl Mastering {
+    pub fn params(self) -> anyhow::Result<[f32; 4]> {
+        let (mode, source, target) = match self {
+            Self::LinearP3 => return Ok([0.; 4]),
+            Self::Pq {
+                source_peak,
+                target_peak,
+            } => (1., source_peak, target_peak),
+            Self::Hlg {
+                source_peak,
+                target_peak,
+            } => (2., source_peak, target_peak),
+        };
+        anyhow::ensure!(
+            source.is_finite()
+                && target.is_finite()
+                && (203. ..=10000.).contains(&source)
+                && (203. ..=10000.).contains(&target),
+            "invalid mastering peaks"
+        );
+        Ok([mode, source, target, 203.])
+    }
+}

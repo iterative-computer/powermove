@@ -110,3 +110,186 @@ pub fn screen_output(
         screen.maximumPotentialExtendedDynamicRangeColorComponentValue(),
     ))
 }
+
+use objc2::{DefinedClass, MainThreadOnly, define_class, sel};
+use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
+use std::rc::Rc;
+struct DisplayState {
+    callback: Rc<dyn Fn(f64, f64)>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMEngineDisplayTarget"]
+    #[ivars = DisplayState]
+    struct DisplayTarget;
+    impl DisplayTarget {
+        #[unsafe(method(tick:))]
+        fn tick(&self, link: &CADisplayLink) {
+            (self.ivars().callback)(link.targetTimestamp(), link.targetTimestamp() - link.timestamp());
+        }
+    }
+);
+/// View-bound phase source. Pause on stopped status; resume on command/frame
+/// notification. Retain for the window lifetime; invalidates before target drop.
+pub struct DisplayLink {
+    link: Option<Retained<CADisplayLink>>,
+    _target: Retained<DisplayTarget>,
+}
+impl DisplayLink {
+    pub fn new(view: &objc2_app_kit::NSView, hz: f64, callback: Rc<dyn Fn(f64, f64)>) -> Self {
+        let this = DisplayTarget::alloc(MainThreadMarker::new().unwrap())
+            .set_ivars(DisplayState { callback });
+        let target: Retained<DisplayTarget> = unsafe { msg_send![super(this), init] };
+        let available: bool =
+            unsafe { msg_send![view, respondsToSelector:sel!(displayLinkWithTarget:selector:)] };
+        if !available {
+            return Self {
+                link: None,
+                _target: target,
+            };
+        }
+        let link = unsafe { view.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+        link.setPreferredFrameRateRange(CAFrameRateRange::new(hz as f32, hz as f32, hz as f32));
+        unsafe {
+            link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+        }
+        link.setPaused(true);
+        Self {
+            link: Some(link),
+            _target: target,
+        }
+    }
+    pub fn set_paused(&self, paused: bool) {
+        if let Some(link) = &self.link {
+            link.setPaused(paused);
+        }
+    }
+}
+impl Drop for DisplayLink {
+    fn drop(&mut self) {
+        if let Some(link) = &self.link {
+            link.invalidate();
+        }
+    }
+}
+
+struct PlacementState {
+    window: Retained<objc2_app_kit::NSWindow>,
+    layer: metal::MetalLayer,
+    publish: Rc<dyn Fn(crate::Output)>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMEnginePlacementObserver"]
+    #[ivars = PlacementState]
+    struct PlacementObserver;
+    impl PlacementObserver {
+        #[unsafe(method(screenChanged:))]
+        fn screen_changed(&self, _: Option<&objc2_foundation::NSNotification>) { self.sync(); }
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe(&self, _: Option<&NSString>, _: Option<&AnyObject>, _: Option<&AnyObject>, _: *mut std::ffi::c_void) {
+            self.sync();
+        }
+    }
+);
+impl PlacementObserver {
+    fn sync(&self) {
+        let s = self.ivars();
+        let size = s.layer.drawable_size();
+        if let Some(screen) = s.window.screen()
+            && let Ok((output, _)) = screen_output(
+                MainThreadMarker::new().unwrap(),
+                &screen,
+                size.width.round().max(1.) as u32,
+                size.height.round().max(1.) as u32,
+            )
+        {
+            (s.publish)(output);
+        }
+    }
+}
+/// Synchronous KVO adapter for the shell-owned layer. drawableSize publication
+/// calls Viewer::configure before the shell's CATransaction commits. It does
+/// not move the layer or replace the shell's composition registration.
+pub struct OutputBinding {
+    observer: Retained<PlacementObserver>,
+}
+impl OutputBinding {
+    pub fn new(
+        window: &objc2_app_kit::NSWindow,
+        layer: metal::MetalLayer,
+        publish: Rc<dyn Fn(crate::Output)>,
+    ) -> Self {
+        let this =
+            PlacementObserver::alloc(MainThreadMarker::new().unwrap()).set_ivars(PlacementState {
+                window: unsafe {
+                    Retained::retain(window as *const _ as *mut objc2_app_kit::NSWindow).unwrap()
+                },
+                layer,
+                publish,
+            });
+        let observer: Retained<PlacementObserver> = unsafe { msg_send![super(this), init] };
+        unsafe {
+            let p = observer.ivars().layer.as_ptr() as *mut AnyObject;
+            let _: () = msg_send![p, addObserver:&*observer, forKeyPath:&*NSString::from_str("drawableSize"), options:0_usize, context:std::ptr::null_mut::<std::ffi::c_void>()];
+            for key in ["screen", "backingScaleFactor"] {
+                let _: () = msg_send![window, addObserver:&*observer, forKeyPath:&*NSString::from_str(key), options:0_usize, context:std::ptr::null_mut::<std::ffi::c_void>()];
+            }
+        }
+        unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter()
+                .addObserver_selector_name_object(
+                    &observer,
+                    sel!(screenChanged:),
+                    Some(&NSString::from_str(
+                        "NSApplicationDidChangeScreenParametersNotification",
+                    )),
+                    None,
+                );
+        }
+        Self { observer }
+    }
+    pub fn sync(&self) {
+        self.observer.sync();
+    }
+}
+impl Drop for OutputBinding {
+    fn drop(&mut self) {
+        unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter().removeObserver(&self.observer);
+            let s = self.observer.ivars();
+            let _: () = msg_send![s.layer.as_ptr() as *mut AnyObject, removeObserver:&*self.observer, forKeyPath:&*NSString::from_str("drawableSize")];
+            for key in ["screen", "backingScaleFactor"] {
+                let _: () = msg_send![&*s.window, removeObserver:&*self.observer, forKeyPath:&*NSString::from_str(key)];
+            }
+        }
+    }
+}
+
+pub(crate) fn mastering_space(
+    _: MainThreadMarker,
+    layer: &metal::MetalLayerRef,
+    mode: crate::color::Mastering,
+) -> Result<()> {
+    let name = unsafe {
+        match mode {
+            crate::color::Mastering::LinearP3 => {
+                objc2_core_graphics::kCGColorSpaceExtendedLinearDisplayP3
+            }
+            crate::color::Mastering::Pq { .. } => objc2_core_graphics::kCGColorSpaceITUR_2100_PQ,
+            crate::color::Mastering::Hlg { .. } => objc2_core_graphics::kCGColorSpaceITUR_2100_HLG,
+        }
+    };
+    let space = objc2_core_graphics::CGColorSpace::with_name(Some(name))
+        .ok_or_else(|| anyhow::anyhow!("mastering color space unavailable"))?;
+    unsafe {
+        let _: () = msg_send![class!(CATransaction), begin];
+        let _: () = msg_send![class!(CATransaction), setDisableActions:true];
+        let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setColorspace:&*space];
+        let _: () = msg_send![class!(CATransaction), commit];
+    }
+    Ok(())
+}
