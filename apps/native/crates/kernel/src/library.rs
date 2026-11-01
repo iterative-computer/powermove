@@ -1,7 +1,7 @@
-//! Read path for the v1.2.0 library store (`<profile>/store/<key>.json`).
+//! The v1.2.0 library reader (`<profile>/store/<key>.json`).
 //!
-//! Read-only in this slice: the kernel opens library projects from it; the
-//! write path (slots, journals, compaction, locks) is later P1 work. Key
+//! `LibraryStore` is read-only; the locked, debounced write path is in
+//! [`crate::persistence`], and shell workflows in [`crate::session`]. Key
 //! families follow D-STATE §1 and v1.2.0's `shared/store-keys.ts`
 //! (42 literal keys, 10 dynamic prefixes, ids `[A-Za-z0-9_-]{1,120}`).
 //!
@@ -415,7 +415,7 @@ impl LibraryStore {
 
 /// Per-key value ceilings (`shared/ipc.ts`): the heavy project keys 256 MiB,
 /// `takes` 768 MiB, everything else 32 MiB.
-fn value_limit(key: &str) -> usize {
+pub(crate) fn value_limit(key: &str) -> usize {
     const MIB: usize = 1024 * 1024;
     match key.split_once('.').map_or(key, |(prefix, _)| prefix) {
         "project" | "projectState" | "projectHistory" => 256 * MIB,

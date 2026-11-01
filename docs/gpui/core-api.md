@@ -31,8 +31,9 @@ let receipt = plan.run()?;                                    // worker thread
 store.finish_save(receipt)?;                                  // clears dirty for THAT revision only
 ```
 
-`DocumentStore` is `Send`, owned by the window's thread (wrap it in a GPUI
-entity). `Snapshot` is `Send + Sync`: give it to render, audio and export
+`DocumentStore` is `Send`. In the app it is owned by the kernel actor; the
+UI reads `Published` and sends `KernelHandle` calls. Direct ownership below is
+for single-owner tools/tests. `Snapshot` is `Send + Sync`: give it to render, audio and export
 threads. `SavePlan::run` and `open_project` are the only blocking calls.
 
 ## Reading
@@ -234,7 +235,7 @@ selected layer (`PM.firstSel()`). Selection is never saved and never undone.
 * **Commands** (deliberate, or not yet ported):
   * The spine `SetStaticOpacity` refuses values outside 0–100 and animated
     channels; `PropertyCommand::Set` behaves as the old `set_property`.
-  * The core holds no playhead, selection-derived targets or registries:
+  * The document command layer takes explicit inputs (kernel state owns the playhead and registries):
     commands take `time`, explicit ids, and effect/transition definitions.
     Agent/MCP adapters resolve `$selection`, names and 1-based indexes.
   * No `edits`/`revision` provenance log is written into the project (the
@@ -269,7 +270,12 @@ selected layer (`PM.firstSel()`). Selection is never saved and never undone.
 * **Queries**: no per-revision/time answer cache yet; typed wrappers for
   `textLayout`, 3D picks and `edit.*` kernels, and the interned
   `ev_id`/`ev_batch` fast path for drags are TODO (use `query()` meanwhile).
-* **Not in this crate yet**: media catalog/asset resolution for render and
-  audio, composition switching, keymap/settings, the library write path. The
-  recovery journal and the library read path are in `pm_kernel::journal` and
-  `pm_kernel::library`.
+* **Outside the document command layer**: media catalog/asset resolution for
+  render and audio, composition switching and keymap dispatch. Kernel-owned
+  settings/UI facts/registries live in `pm_kernel::state`; locked library
+  writes in `persistence`; asynchronous shell lifecycle, copy decisions,
+  recovery and rollback compaction in `session` through `KernelHandle::shell`.
+  See [kernel slice 2](../native/kernel.md#slice-2-library-writes-state-and-shell-sessions).
+  `LibraryStore` itself stays read-only. Shell callers must attach an explicit
+  native profile, retain the returned session handle, and present copy/recovery
+  results; the kernel never discovers or migrates a real profile.

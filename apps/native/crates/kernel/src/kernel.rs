@@ -41,8 +41,16 @@ pub enum OpenSource {
     Untitled(Value),
     /// A `.pmv` read by [`crate::open_project`].
     File(OpenedProject),
+    RecoveredFile {
+        opened: OpenedProject,
+        supersedes: Vec<PathBuf>,
+    },
     /// A library slot read by [`crate::library::LibraryStore::load`].
     Library(LibraryProject),
+    LibraryWithFile {
+        lib: LibraryProject,
+        file: crate::project_io::ProjectFile,
+    },
     /// Recovered work ([`Kernel::recover`]); `supersedes` are the sessions
     /// it replaces (deleted once the new session's checkpoint is durable).
     Recovered {
@@ -73,6 +81,7 @@ pub enum KernelFailure {
     NoProject(String),
     AlreadyOpen(String),
     Journal(String),
+    Storage(String),
 }
 
 impl std::fmt::Display for KernelFailure {
@@ -80,6 +89,7 @@ impl std::fmt::Display for KernelFailure {
         match self {
             KernelFailure::NoProject(id) => write!(f, "No open project {id}"),
             KernelFailure::AlreadyOpen(id) => write!(f, "Project {id} is already open"),
+            KernelFailure::Storage(m) => write!(f, "{m}"),
             KernelFailure::Journal(m) => {
                 write!(f, "The recovery journal could not be started: {m}")
             }
@@ -100,6 +110,10 @@ pub struct Kernel {
     config: KernelConfig,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
+    pub(crate) compacting: bool,
+    pub(crate) library: Option<crate::persistence::LibraryWriter>,
+    pub(crate) sessions: BTreeMap<String, crate::session::Session>,
+    pub(crate) state: crate::state::StateSnapshot,
 }
 
 impl Kernel {
@@ -112,6 +126,10 @@ impl Kernel {
             config,
             durability,
             slots: BTreeMap::new(),
+            library: None,
+            compacting: false,
+            sessions: BTreeMap::new(),
+            state: Default::default(),
         }
     }
 
@@ -132,21 +150,62 @@ impl Kernel {
     }
 
     fn project_dir(&self, id: &str) -> Option<PathBuf> {
-        self.config.journal_root.as_ref().map(|r| r.join(id))
+        let durable_id = self
+            .sessions
+            .get(id)
+            .and_then(|s| match &s.destination {
+                crate::session::Destination::Library(id) => Some(id.as_str()),
+                _ => None,
+            })
+            .unwrap_or(id);
+        self.config
+            .journal_root
+            .as_ref()
+            .map(|r| r.join(durable_id))
     }
 
     /// Opens a project under `id` (the library id, or any unique id).
     pub fn open(&mut self, id: &str, source: OpenSource) -> Result<OpenInfo, KernelFailure> {
+        if crate::library::parse_key(&format!("project.{id}")).is_none() {
+            return Err(KernelFailure::Storage("Invalid project id".into()));
+        }
         if self.slots.contains_key(id) {
             return Err(KernelFailure::AlreadyOpen(id.to_owned()));
         }
         let mut supersedes = Vec::new();
         let mut workspace = Value::Null;
         let mut history_error = None;
-        let store = match source {
+        let associated_file = match &source {
+            OpenSource::LibraryWithFile { file, .. } => Some(file.clone()),
+            _ => None,
+        };
+        let mut store = match source {
             OpenSource::Untitled(project) => DocumentStore::new_untitled(project),
-            OpenSource::File(opened) => DocumentStore::open(opened),
-            OpenSource::Library(lib) => {
+            OpenSource::File(opened) => {
+                workspace = opened
+                    .file
+                    .envelope
+                    .workspace
+                    .clone()
+                    .unwrap_or(Value::Null);
+                DocumentStore::open(opened)
+            }
+            OpenSource::RecoveredFile {
+                opened,
+                supersedes: old,
+            } => {
+                workspace = opened
+                    .file
+                    .envelope
+                    .workspace
+                    .clone()
+                    .unwrap_or(Value::Null);
+                supersedes = old;
+                let mut store = DocumentStore::open(opened);
+                store.mark_recovered();
+                store
+            }
+            OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
                 let canonical = model::to_canonical(lib.project);
                 let open_comp = canonical
                     .get("compId")
@@ -161,7 +220,12 @@ impl Kernel {
                         })
                     }
                 };
-                if let Some(ws) = lib.workspace {
+                if let Some(ws) = lib.workspace.or_else(|| {
+                    lib.session
+                        .as_ref()
+                        .and_then(|m| m.get("workspace"))
+                        .cloned()
+                }) {
                     workspace = ws;
                 }
                 DocumentStore::adopt(Document::new(Some(canonical), 1), history)
@@ -175,6 +239,9 @@ impl Kernel {
                 DocumentStore::recovered(recovered.document, recovered.history)
             }
         };
+        if let Some(file) = associated_file {
+            store.inherit_file(file);
+        }
         let base_hash = store
             .current()
             .root()
@@ -222,6 +289,12 @@ impl Kernel {
     /// Closes a project. Its journal is flushed and **kept**: until the
     /// library write path compacts it into the slot, it is the work.
     pub fn close(&mut self, id: &str) -> bool {
+        if let Some(s) = self.sessions.get(id) {
+            let handle = s.handle.clone();
+            return self.shell(crate::session::ShellCall::Close(handle)).is_ok();
+        }
+        self.sessions.remove(id);
+        std::sync::Arc::make_mut(&mut self.state.ui).remove(id);
         match self.slots.remove(id) {
             Some(slot) => {
                 if let Some(j) = &slot.journal {
@@ -233,6 +306,16 @@ impl Kernel {
         }
     }
 
+    pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
+        self.config.journal_root.clone()
+    }
+    pub fn journal_dir(&self, id: &str) -> Option<PathBuf> {
+        self.slots
+            .get(id)?
+            .journal
+            .as_ref()
+            .map(|j| j.dir().to_path_buf())
+    }
     /// The journal base of an open project.
     pub fn base_hash(&self, id: &str) -> Option<&str> {
         self.slots.get(id).map(|s| s.base_hash.as_str())
@@ -285,11 +368,186 @@ impl Kernel {
                 slot.project.push_notice(notice);
             }
         }
+        if workspace_write {
+            let ws = self.project(id).unwrap().workspace().clone();
+            if let Some(ws_id) = ws.get("id").and_then(Value::as_str) {
+                let mut all = self
+                    .state
+                    .settings
+                    .get("workspaces")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(existing) = all
+                    .iter_mut()
+                    .find(|w| w.get("id").and_then(Value::as_str) == Some(ws_id))
+                {
+                    *existing = ws.clone();
+                } else {
+                    all.push(ws.clone());
+                }
+                let tx = crate::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![
+                        crate::state::StateOp::Setting {
+                            key: "workspaces".into(),
+                            value: Some(Value::Array(all)),
+                        },
+                        crate::state::StateOp::Setting {
+                            key: "workspace".into(),
+                            value: Some(Value::from(ws_id)),
+                        },
+                    ],
+                };
+                if let Err(e) = self.state_transaction(tx) {
+                    let notice = Notice::NotDurable {
+                        message: e.to_string(),
+                    };
+                    if let Some(ack) = &mut handled.reply {
+                        ack.notice = Some(notice.clone());
+                    }
+                    self.project_mut(id).unwrap().push_notice(notice);
+                }
+            }
+        }
         Ok(handled)
+    }
+
+    /// Start a new journal base only after its library/file save barrier.
+    pub(crate) fn rebase_journal(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let dir = self.project_dir(id);
+        let library_hash = if let Some(crate::session::Session {
+            destination: crate::session::Destination::Library(slot),
+            ..
+        }) = self.sessions.get(id)
+        {
+            let p = self
+                .library
+                .as_ref()
+                .ok_or_else(|| KernelFailure::Storage("No library".into()))?
+                .store()
+                .load(slot)
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?
+                .ok_or_else(|| KernelFailure::Storage("Saved slot is missing".into()))?;
+            Some(base_hash_of(&p.project))
+        } else {
+            None
+        };
+        let slot = self
+            .slots
+            .get_mut(id)
+            .ok_or_else(|| KernelFailure::NoProject(id.into()))?;
+        let hash = library_hash.unwrap_or_else(|| {
+            slot.project
+                .store()
+                .current()
+                .root()
+                .map(pm_model::hash::canonical_hash)
+                .unwrap_or_default()
+        });
+        if let (Some(d), Some(dir)) = (&self.durability, dir) {
+            if let Some(j) = &slot.journal {
+                j.sync_now()
+                    .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+            }
+            let store = slot.project.store();
+            let state = CheckpointState {
+                revision: store.revision(),
+                document: store.current().clone(),
+                history: store.history().snapshot(),
+                workspace: slot.project.workspace().clone(),
+            };
+            // All old sessions are kept until the new checkpoint is durable.
+            let mut old = journal::sessions(&dir);
+            if let Some(j) = &slot.journal {
+                if !old.contains(&j.dir().to_path_buf()) {
+                    old.push(j.dir().to_path_buf());
+                }
+            }
+            let j = Journal::create(d, &dir, id, &hash, state, old)
+                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+            slot.journal = Some(j);
+        }
+        slot.base_hash = hash;
+        Ok(())
+    }
+    pub fn state(&self) -> &crate::state::StateSnapshot {
+        &self.state
+    }
+    pub fn state_transaction(
+        &mut self,
+        tx: crate::state::StateTransaction,
+    ) -> Result<crate::state::StateAck, KernelFailure> {
+        for op in &tx.ops {
+            if let crate::state::StateOp::Ui { project, .. } = op {
+                if !self.slots.contains_key(project) {
+                    return Err(KernelFailure::NoProject(project.clone()));
+                }
+            }
+        }
+        let (next, changes) = self.state.stage(tx).map_err(KernelFailure::Storage)?;
+        for change in &changes {
+            if let crate::state::StateChange::Setting {
+                key,
+                value: Some(value),
+            } = change
+            {
+                if pm_model::json::to_canonical_string(value).len()
+                    > crate::library::value_limit(key)
+                {
+                    return Err(KernelFailure::Storage(
+                        "Settings value exceeds its size limit".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(writer) = &self.library
+            && changes.iter().any(|c| {
+                matches!(
+                    c,
+                    crate::state::StateChange::Setting { .. }
+                        | crate::state::StateChange::Extensions
+                )
+            })
+        {
+            // Durable state intent before updating legacy slots. On restart this
+            // rolls the settings transaction forward, including deletions.
+            let bytes = pm_model::json::to_canonical_string(&next.durable_value());
+            crate::persistence::atomic_write(
+                &writer
+                    .store()
+                    .dir()
+                    .parent()
+                    .unwrap()
+                    .join("kernel-state.json"),
+                bytes.as_bytes(),
+            )
+            .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+            for change in &changes {
+                if let crate::state::StateChange::Setting { key, value } = change {
+                    match value {
+                        Some(v) => writer.set(key, v.clone()),
+                        None => writer.delete(key),
+                    }
+                    .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+                }
+            }
+            writer
+                .flush()
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        }
+        self.state = next;
+        Ok(crate::state::StateAck {
+            revision: self.state.revision,
+            changes,
+        })
     }
 
     /// Flushes every journal now (clean shutdown, tests).
     pub fn sync_all(&self) {
+        if let Some(writer) = &self.library {
+            let _ = writer.flush();
+        }
         for slot in self.slots.values() {
             if let Some(j) = &slot.journal {
                 let _ = j.sync_now();

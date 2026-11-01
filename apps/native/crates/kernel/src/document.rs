@@ -1490,6 +1490,20 @@ impl DocumentStore {
         DocumentStore::from_parts(ProjectFile::untitled(), document, history, true)
     }
 
+    pub(crate) fn inherit_file(&mut self, file: ProjectFile) {
+        self.file = file;
+    }
+    pub(crate) fn mark_library_saved(&mut self) {
+        self.saved_token = self.state_token;
+        self.emit(StoreEvent::Saved {
+            revision: self.revision(),
+        });
+        self.emit(StoreEvent::DirtyChanged(false));
+    }
+    pub(crate) fn mark_recovered(&mut self) {
+        self.saved_token = next_token();
+    }
+
     /// Every change still in the log, oldest first (published to mirrors).
     pub(crate) fn recent_changes(&self) -> Vec<Arc<Change>> {
         self.log.iter().cloned().collect()

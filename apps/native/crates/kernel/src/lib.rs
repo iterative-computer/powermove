@@ -8,8 +8,8 @@
 //! ## The contract
 //!
 //! * **One store per open project**: [`DocumentStore`]. It lives on the
-//!   thread that owns the window (the GPUI main thread) and is `Send`, not
-//!   shared: wrap it in a GPUI entity, never in a lock other threads wait on.
+//!   kernel actor thread and is `Send`, not shared. Hosts use `KernelHandle`
+//!   and immutable publications; standalone tools may own a store directly.
 //! * **Reading**: [`DocumentStore::snapshot`] returns a [`Snapshot`], an
 //!   `Arc` of the immutable document at one revision. Hand snapshots to
 //!   render, audio and export threads; they never change underneath you.
@@ -46,7 +46,7 @@
 //!
 //! | Thread | May call |
 //! |---|---|
-//! | Owner (GPUI main) | everything on [`DocumentStore`] |
+//! | Owner (kernel actor / standalone tool) | everything on [`DocumentStore`] |
 //! | Background executor | [`project_io::open_project`], [`SavePlan::run`] |
 //! | Render / audio / export | read [`Snapshot`]s they were given |
 //!
@@ -118,3 +118,8 @@ fn assert_thread_bounds() {
     send_sync::<Snapshot>();
     send_sync::<Change>();
 }
+
+pub mod locks;
+pub mod persistence;
+pub mod session;
+pub mod state;

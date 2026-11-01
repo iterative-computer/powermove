@@ -1,11 +1,12 @@
-# pm-kernel: the kernel actor (P1 package 5, first slice)
+# pm-kernel: the kernel actor (P1 package 5, slices 1–2)
 
 Crate: `apps/native/crates/kernel` (package `pm-kernel`). Pure Rust, no GPUI.
 Baseline: plan v6 §3.2 (kernel actor, transactions, history), §6 (library,
 journals keyed to base), §8 (behaviour oracle). "Today" means tag `v1.2.0`.
-Status 2026-11-01: actor, transactions, history, journal, recovery and the
-library read path are implemented and tested; the rest of package 5 is
-listed under [Remaining for P1](#remaining-for-p1).
+Status 2026-11-01: slices 1 and 2 implemented and tested: actor, transactions,
+history, journal, recovery, library reads/writes, locks, state and shell session
+operations. Outstanding integration and history work is listed under
+[Remaining for P1](#remaining-for-p1).
 
 ## Architecture
 
@@ -53,7 +54,11 @@ pm-kernel thread ── Kernel ── slots: { project id → Slot }
 | `kernel` | `Kernel`: open projects (untitled, `.pmv`, library, recovered), run calls, drive the journal |
 | `actor` | The thread, `KernelHandle`, `Pending`, `Published`, `QueryMirror`, events, realm mailboxes |
 | `journal` | Sessions, segments, checkpoints, durability threads, recovery |
-| `library` | Read-only v1.2.0 profile store reader |
+| `library` | Read-only v1.2.0/v1.3 profile store reader |
+| `persistence` | Locked store writer, 150 ms debounce, gzip codec, restartable multi-slot checkpoints, trash |
+| `locks` | PID/heartbeat locks, cloud/file-provider/volume/Electron copy policy |
+| `state` | UI/transport facts, settings/workspaces, contribution stacks and extension metadata |
+| `session` | Shell open/save/save-as/close/duplicate/recents and rollback compaction |
 
 ## The API (C-MATRIX write-admission table → `tx::Call`)
 
@@ -156,8 +161,9 @@ Every `Ack` carries `revision`, `folded: Option<entry>`, `notice`, and the
   (files kept). Without a checkpoint, only the true base document (hash
   checked) is accepted. Adopting recovered work starts a new session that
   supersedes the old one once its first checkpoint is durable.
-* Closing a project keeps its journal: until the library write path compacts
-  it, the journal is the work.
+* Low-level document closes keep their journals. Shell session close first
+  saves/compacts; failure keeps the session open. Old sessions retire only
+  after the new base checkpoint is durable.
 
 ## Library store read path
 
@@ -235,7 +241,7 @@ foreign split, sealing) are covered by the S5 scenario tests instead.
 
 ## Tests
 
-140 passing + 1 ignored smoke test (`cargo test -p pm-kernel`): 98 carried
+Slice 1 contributes 140 passing + 1 ignored smoke test (`cargo test -p pm-kernel`): 98 carried
 over from pm-mac-core (commands, document store, project I/O, the TS writer
 golden parity) and 42 new: 23 transactions (the S5 stub's eight scenarios on
 the real document, history nesting, edit return forms, selective cancel and
@@ -262,12 +268,6 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
 
 ## Remaining for P1
 
-* **Library write path**: slot writes, compaction of journals into
-  `project.<id>`, the `projects` index, journal rebase at save, library lock
-  and `.pmvlock` project locks (30 s stale rule), cloud/read-only volumes as
-  copies.
-* **uiState, registries, settings, extension registry, workspace registry**
-  (§3.2 "it owns"): not started; workspace is per project only.
 * History: parked histories sharing one global budget (`history.ts:460–480`),
   `history.selection`, `mark`/`squash` as calls (agent runs), export pinning
   of extension generations, v4 hot-reload staging (§3.2.1).
@@ -276,6 +276,126 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
 * Realm adapters: the compat page's write barrier (dirty-path diffing, resync
   on refusal) and the JS facades that map onto `Call`; real transport for
   txids and lost acks (S5 channel).
-* Recovery UX in the shell (offer the copy), per-window document binding.
+* Wire `KernelHandle::shell` and state events into the shell, including copy
+  offers, copy/fallback notices, per-window document binding and the explicit
+  `CompactAll` barrier before rollback. No shell files are changed in this slice.
+* The P7 migration/restore coordinator still owns profile selection, TR version
+  verification, media-store/IndexedDB/Keychain transfer and reverse migration.
+  The kernel accepts explicit paths; it does not find or migrate real profiles.
+* Runtime/compat adapters own callback handles, permissions and UI editions;
+  contribution definitions here are JSON facts, not callable runtime objects.
+  Workspace facade adapters supply the callback's resolved `next` object
+  (including the tag's built-in clone/normalization before/after that callback).
 * Async base hashing for very large documents; measured edit → publish
   latency under load.
+
+
+## Slice 2: library writes, state and shell sessions
+
+### Done
+
+`KernelHandle::shell(ShellCall)` returns the existing asynchronous `Pending`
+future. Attach an explicit **native** profile using `AttachLibrary`, then open
+`SessionSource::New`, `Library { profile, project }`, or `File`. `Opened`
+contains a generation-bound `SessionHandle`, `OpenInfo`, `OpenDecision`, and
+`RecoveryResult`. Save, SaveAs and Close require that handle; an old handle
+cannot affect a later reopen. An already-owned source cannot open twice.
+
+* The store writer keeps the exact registered keys and `<key>.json` filenames.
+  Writes debounce per key for 150 ms, exclusive-create a sibling `.tmp-*`,
+  write, fsync, close, rename, and sync the directory. Failed writes remain
+  queued for retry; explicit barriers report errors. Combined `projectState`
+  partial writes preserve history. Unknown slots/fields and quarantine stay.
+* A project save writes `{v, proj}`, `projectHistory`, `projectWorkspace`,
+  `projectMeta`, `projects` rows (`id,name,at,w,h,thumb?`) and `projectTrash`.
+  It clears legacy patches only after durable replacement. A validated,
+  fsynced `library.pending` intent makes interrupted multi-slot saves/trash/
+  restore roll forward on writer reopen. Slots remain ordinary Electron data.
+* `DiskFormat::V1_2` (default) writes plain JSON at every size. Explicit
+  `V1_3` applies the shipped 32 KiB threshold **and** 90% size test, writing
+  `{__powermoveDiskValue:1,encoding:"gzip",bytes,data}`. Both read paths work.
+* `store/library.lock` and `Movie.pmvlock` (for `Movie.pmv`) carry PID and
+  millisecond heartbeat, refreshed every five seconds. Local `flock` gives
+  exclusion during acquisition/reclaim. A dead PID **and** age ≥30 s are both
+  required; malformed locks are refused. Stable inodes avoid unlink/recreate
+  races; orderly release writes PID 0 before releasing the descriptor.
+* Cloud path components (including symlink targets), ancestor
+  `com.apple.file-provider*` xattrs, volume read-only flags/permission bits,
+  and the source profile's Chromium `SingletonLock` produce copy decisions.
+  Unknown/remote Singleton owners are conservatively treated as running.
+  Supplying the Electron profile as the native destination is refused.
+* `StateTransaction` stages an entire batch and checks its expected revision
+  before publishing anything. Settings publish per-key events, persist under
+  their original keys, and keep a native roll-forward state record outside
+  those slots (including deletion and extension metadata). Named workspaces
+  retain the tag's array/object shapes and current/default/trash keys;
+  successful project workspace snapshots upsert the named registry.
+* Per-project `UiState` owns tool/toolShape, timeline graph/pps/scroll/key
+  selection facts, viewer pan/zoom/fit/shown/controls/path/text/source-preview
+  facts, and transport time/playing. Opaque session members survive alongside
+  these facts. Timeline/time/view session data imports and saves in legacy
+  metadata. UI facts and contribution stacks are ephemeral until session save;
+  they never enter document undo or cause a disk fsync per pointer update.
+* Contribution stacks are ordered, owner/generation scoped, support top and
+  buried disposal and reveal the previous provider. Extension metadata records
+  installed/enabled/version/source, while legacy `extensions` stays a Boolean
+  enablement map. Enablement alone does not prove installation; inventory
+  supplies installation/version/source through the transaction API. No runtime.
+* Workspace mutations keep partial writes on callback throw, publish a
+  workspace event, and never dirty or add undo to the document. Their journal
+  records persist even without a document edit. `Published` includes workspace
+  and UI facts; the global immutable state is available through `handle.state()`.
+* Explicit save/close rebases the journal only after saving. Copy journals use
+  the copy's durable slot identity and saved base hash. A mismatched base
+  materializes a named recovery slot and returns `OfferCopy`; current source
+  data remains separate. File-save failure falls back to a recovery slot and
+  reports its id. Embedded media in copies/duplicates is saved into independently
+  verified PMV4 companions under the native profile's `recovery-files`, with
+  the legacy `file.path/savedHash/baselineHash` association in metadata.
+* File sessions also have library snapshots/recents. Duplicate uses live edits
+  when open; trash retains slots/history; restore restores index membership.
+  Reopening an associated external file from recents reacquires its lock and
+  retains in-place saves; a changed saved hash forces a copy. State snapshot
+  maps share `Arc` ownership and copy only the domain a transaction mutates.
+  `CompactAll` saves active sessions and reopens unopened journal owners to
+  compact into their slot or file, preserving trash membership and metadata.
+  Missing/offline originals become copies;
+  unrecoverable journals stay on disk and return an error. No journal is
+  deleted before a replacement checkpoint is durable.
+
+### Decisions and the rules that picked them
+
+| # | Decision | Rule/evidence |
+|---|---|---|
+| K18 | Two explicit disk formats; default plain JSON for v1.2 rollback | N4/§6: v1.2 `acceptSerialized` does only JSON.parse; it cannot decode v1.3 gzip. Claiming one compressed representation works with both would lose work. |
+| K19 | Restartable intent around multi-slot commits, retain old journals until replacement durability | N4: single-file atomic rename cannot make document/history/index changes atomic together. |
+| K20 | Stable lock inode plus flock, PID/heartbeat and conservative copy decisions | §6's 30 s **and** dead PID rule; exclusion must survive two processes reclaiming at once. |
+| K21 | Explicit native destination; foreign libraries always named copies | §6 beta never writes the Electron library. Profile migration/role selection belongs to P7. |
+| K22 | Workspace stays outside document undo, including partial callback failure | N6; v1.2 `workspace.ts:560–589` and C-MATRIX admission row. Resolved callback state is passed to the kernel. |
+| K23 | Registries hold JSON definitions/realm handles, not closures, canvases or DOM | §3.2 authority; C-MATRIX says those live-object/callback semantics remain in the compatibility edition until a full facade exists. |
+| K24 | Keep extension enablement format; store inventory metadata in native state sidecar | N4 rollback keys must stay readable; the tag's `extensions` key is a Boolean map, not an inventory database. |
+| K25 | Generation-bound sessions, independent media copies, recovery fallback, explicit compaction barrier | N4/§6 rollback must include current/untitled work and never overwrite changed/unwritable sources. |
+
+### Verification
+
+**180 passing pm-kernel tests + 1 ignored profile smoke test** (140 existing,
+40 slice-2 tests), plus the `pm-mac-core` re-export crate check. All test profiles
+are temporary. Formatting and `git diff --check` pass. Clippy is not installed
+in the pinned toolchain; no toolchain changes were made.
+
+`tests/tag_store_parity.mjs`, driven by the Rust suite with synthetic inputs,
+reads **actual tagged source via git show**. It compares all 42 static and 10
+dynamic keys; executes v1.2's `persist` body with instrumented filesystem calls
+(write/open/fsync/close/rename); runs v1.2 `getAsync`, `getStateAsync`, history
+unpacking and composition-path realization; and undoes a native edit back to
+its original value. It also executes v1.3 `decodeStorageJSON` against native
+compressed bytes. Rust tests independently reload those values and saved undo.
+Existing byte-for-byte PMV writer golden tests remain green.
+
+Additional tests cover two real processes contending for **both** lock types,
+live heartbeat/inode stability, dead/live/recent lock rules, file-provider xattrs,
+symlinked cloud paths, a sealed read-only volume, older Electron's SingletonLock,
+failed-write retry, interrupted/invalid intents, copy crashes, independent embedded
+media after deleting the original, settings deletion/restart, registry overrides,
+publication/events, save-as, stale sessions, recents/trash/restore/duplicates,
+base mismatch, rebase, and unopened library/file/offline rollback compaction.
