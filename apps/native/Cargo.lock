@@ -3865,6 +3865,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-compat-host"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "gpui-ce",
+ "gpui_ce_macos",
+ "metal",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-web-kit",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "pm-design"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,31 @@
+[package]
+name = "pm-compat-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+gpui = ["dep:gpui_macos"]
+smoke = ["gpui", "dep:gpui", "dep:metal", "dep:raw-window-handle"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-web-kit = "0.3.2"
+objc2-quartz-core = "0.3.2"
+objc2-core-graphics = "0.3.2"
+block2 = "0.6.2"
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", optional = true }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, optional = true }
+metal = { version = "0.33", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[[example]]
+name = "shell-smoke"
+required-features = ["smoke"]
