@@ -46,7 +46,7 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 ## Questions from the inventories (original wording, kept for traceability)
 
 1. **Reference build.** §2 says `renderFrameToAsync`, `snapshotAsync` and `rasterAsync` ship to every apiVersion; at tag `v1.2.0` they don't exist in `RenderAPI`/`makeRender` (only `PM.Export.snapshotAsync`). Which build is the frozen reference for traces? (C-MATRIX Q1)
-2. **Store-wide counts.** C-MATRIX has `NA` for Store counts: no complete Store catalog/source snapshot is in the repo. Provide an authorized snapshot? (C-MATRIX Q2)
+2. **Store-wide counts: answered (2026-11-01).** Anonymous public Store reads covered all 4 current catalog extensions; C-MATRIX records usage/occurrence counts and risk classes, with 0 direct DOM/canvas/WebGL, raster-override, sync-pixel, live-service or `PM.proj`-write users and 4 GLSL-effect users. (C-MATRIX Q2)
 3. **Authored vs fixed.** Where today's code and §3.2.1 differ (async decline replay, literal-false/pre-cancel policy, partial workspace mutations, Promise-returning mutation callbacks), which are authored contract and which are bugs to fix? (C-MATRIX Q3)
 4. **Pro features missing at v1.2.0** (W1): J/K/L shuttle, ripple delete/trim, persistent linked A/V, slide/roll, source-monitor three-point editing. §1 makes them cutover items "if W1 shows any are missing today". Confirm they are new cutover work.
 5. **Eval specs** (§12, open): may anonymised behaviour specs of Chike's panels be used in the v4 eval?
