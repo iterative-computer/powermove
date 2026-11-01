@@ -20,6 +20,72 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "A494",
+            workflow: "W033",
+            title: "MCP union exposes frozen tools and implemented catalog members",
+            run: crate::mcp_cases::union,
+        },
+        Scenario {
+            id: "A503",
+            workflow: "W033",
+            title: "MCP timeline source ranges, stack order, flags, selection and paging",
+            run: crate::mcp_cases::timeline,
+        },
+        Scenario {
+            id: "A505",
+            workflow: "W033",
+            title: "MCP library list/create/open/rename/duplicate/save/trash/restore",
+            run: crate::mcp_cases::manage,
+        },
+        Scenario {
+            id: "A520",
+            workflow: "W032",
+            title: "MCP saved panel layout reads preserve project and app context",
+            run: crate::mcp_cases::layout,
+        },
+        Scenario {
+            id: "W079.shuttle",
+            workflow: "W079",
+            title: "State-dependent J/K/L and actor transport facts",
+            run: crate::pro::shuttle,
+        },
+        Scenario {
+            id: "W080.ripple-delete",
+            workflow: "W080",
+            title: "Ripple delete preserves untargeted tracks; locked refusal and persisted Undo",
+            run: crate::pro::ripple_delete,
+        },
+        Scenario {
+            id: "W080.ripple-trim",
+            workflow: "W080",
+            title: "Ripple trim exact deltas, locks and persisted Undo",
+            run: crate::pro::ripple_trim,
+        },
+        Scenario {
+            id: "W081.roll",
+            workflow: "W081",
+            title: "Roll source continuity, handles and persisted Undo",
+            run: crate::pro::roll,
+        },
+        Scenario {
+            id: "W081.slide",
+            workflow: "W081",
+            title: "Slide compensates neighbors without changing middle source",
+            run: crate::pro::slide,
+        },
+        Scenario {
+            id: "W082.source",
+            workflow: "W082",
+            title: "Three-point insert/overwrite splits preserve source, other tracks and persisted Undo",
+            run: crate::pro::source,
+        },
+        Scenario {
+            id: "W083.links",
+            workflow: "W083",
+            title: "Persistent A/V link, move, bypass, split and unlink",
+            run: crate::pro::links,
+        },
+        Scenario {
             id: "W071.fractional-rate",
             workflow: "W071",
             title: "N3: an authored 29.97 composition rate must remain 29.97",
@@ -483,22 +549,61 @@ fn disconnect() -> Check {
 }
 fn unavailable() -> Check {
     let mut f = Fixture::new()?;
-    for (name, args) in [
-        ("render_frames", json!({"times":[0]})),
-        (
-            "edit_video",
-            json!({"operation":"slip","layerId":"L-missing","sourceIn":5}),
-        ),
-        ("get_workspace_state", json!({})),
-    ] {
+    for spec in pm_mcp::catalog::tools() {
+        let name = spec["name"].as_str().ok_or("catalog name missing")?;
+        if pm_mcp::catalog::IMPLEMENTED.contains(&name) {
+            continue;
+        }
+        let args = pending_arguments(&spec["inputSchema"])?;
+        pm_mcp::catalog::validate(name, &args).map_err(|e| format!("{name}: {e}"))?;
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(
             error["code"], "not_available_in_this_build",
             "{name}: {error}"
         );
-        assert!(error["backing"].is_string());
+        assert_eq!(error["backing"], pm_mcp::catalog::backing(name));
+        assert!(!error["backing"].as_str().unwrap().is_empty());
     }
     Ok(())
+}
+/// Minimal synthetic schema inputs, validated by the production catalog before
+/// dispatch. An unfamiliar schema fails this probe rather than reducing coverage.
+pub fn pending_arguments(schema: &Value) -> Result<Value, String> {
+    if let Some(values) = schema["enum"].as_array() {
+        return values.first().cloned().ok_or("empty enum".into());
+    }
+    match schema["type"].as_str() {
+        Some("object") => {
+            let mut object = serde_json::Map::new();
+            for key in schema["required"].as_array().into_iter().flatten() {
+                let key = key.as_str().ok_or("invalid required key")?;
+                object.insert(key.into(), pending_arguments(&schema["properties"][key])?);
+            }
+            Ok(Value::Object(object))
+        }
+        Some("array") => {
+            let count = schema["minItems"].as_u64().unwrap_or(0);
+            (0..count)
+                .map(|_| pending_arguments(&schema["items"]))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        Some("string") => {
+            let value = match schema["pattern"].as_str() {
+                Some("^[A-Za-z0-9_-]+$") => "synthetic".into(),
+                Some("^[a-z0-9][a-z0-9-]{1,63}$") => "synthetic-extension".into(),
+                Some("^[a-f0-9]{32}$") => "0".repeat(32),
+                Some(pattern) => {
+                    return Err(format!("add a synthetic input for pattern {pattern}"));
+                }
+                None => "x".repeat(schema["minLength"].as_u64().unwrap_or(1) as usize),
+            };
+            Ok(Value::String(value))
+        }
+        Some("boolean") => Ok(json!(false)),
+        Some("number" | "integer") => Ok(schema.get("minimum").cloned().unwrap_or(json!(0))),
+        _ => Err(format!("add a synthetic input for schema {schema}")),
+    }
 }
 fn selection_transient() -> Check {
     let mut f = Fixture::new()?;

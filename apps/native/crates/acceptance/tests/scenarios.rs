@@ -5,6 +5,8 @@ macro_rules! checks {
     )*}
 }
 checks! {
+    mcp_union => "A494", mcp_timeline => "A503", mcp_manage => "A505", mcp_layout => "A520",
+    shuttle => "W079.shuttle", ripple_delete => "W080.ripple-delete", ripple_trim => "W080.ripple-trim", roll => "W081.roll", slide => "W081.slide", source_edit => "W082.source", linked_av => "W083.links",
     composition_settings => "W009.settings", authored_mask => "W048.mask", authored_text => "W049.text", authored_easing => "W061.easing",
     mcp_list => "A495", mcp_create => "A496", mcp_open => "A497",
     mcp_start => "A498", mcp_finish => "A501", mcp_selection => "A517",

@@ -1,6 +1,7 @@
 use pm_acceptance::{
     catalog::Catalog,
-    runner::{Filter, run},
+    runner::{Filter, run_with_runtime},
+    runtime::NativeRuntime,
 };
 use std::path::PathBuf;
 fn main() -> std::process::ExitCode {
@@ -21,6 +22,8 @@ fn cli() -> Result<u8, String> {
     let mut format = "json".to_owned();
     let mut strict = false;
     let mut corpus = vec![];
+    let mut runtime_runner = None;
+    let mut compat_bundle = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -32,6 +35,18 @@ fn cli() -> Result<u8, String> {
                     .ok_or("--format requires json, markdown, e2e-csv or catalog")?
             }
             "--strict" => strict = true,
+            "--runtime-runner" => {
+                runtime_runner = Some(PathBuf::from(
+                    args.next()
+                        .ok_or("--runtime-runner requires executable path")?,
+                ))
+            }
+            "--compat-bundle" => {
+                compat_bundle = Some(PathBuf::from(
+                    args.next()
+                        .ok_or("--compat-bundle requires bundled JS path")?,
+                ))
+            }
             "--corpus" => {
                 let dir = PathBuf::from(args.next().ok_or("--corpus requires a directory")?);
                 if !dir.is_absolute() {
@@ -55,7 +70,7 @@ fn cli() -> Result<u8, String> {
             }
             "--help" => {
                 println!(
-                    "pm-acceptance [--workflow W033] [--case A517] [--strict] [--format json|markdown|e2e-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
+                    "pm-acceptance [--workflow W033] [--case A517] [--strict] [--runtime-runner /path/to/pm-acceptance-runtime] [--compat-bundle /path/to/probes.js] [--format json|markdown|e2e-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
                 );
                 return Ok(0);
             }
@@ -73,7 +88,21 @@ fn cli() -> Result<u8, String> {
         );
         return Ok(0);
     }
-    let report = run(&catalog, &filter, &corpus)?;
+    if compat_bundle.is_some() && runtime_runner.is_none() {
+        return Err("--compat-bundle requires --runtime-runner".into());
+    }
+    let runtime = runtime_runner.map(|executable| NativeRuntime {
+        executable,
+        compat_bundle,
+    });
+    let report = run_with_runtime(
+        &catalog,
+        &filter,
+        &corpus,
+        runtime
+            .as_ref()
+            .map(|r| r as &dyn pm_acceptance::runtime::RuntimeHook),
+    )?;
     match format.as_str() {
         "markdown" => print!("{}", report.markdown()),
         "e2e-csv" => print!("{}", report.e2e_csv()),

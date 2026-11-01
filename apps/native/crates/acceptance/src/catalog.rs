@@ -45,6 +45,15 @@ pub struct LegacySpec {
     pub evidence: String,
     pub conditional_or_skip: bool,
     pub coverage_limit: String,
+    pub native_triage: NativeTriage,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct NativeTriage {
+    pub status: String,
+    pub acceptance_ids: Vec<String>,
+    pub supporting_probe_ids: Vec<String>,
+    pub needs_macos: bool,
+    pub blocked_by: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Catalog {
@@ -148,6 +157,11 @@ impl Catalog {
             "evidence",
             "conditional_or_skip_present",
             "coverage_limit",
+            "triage_status",
+            "acceptance_ids",
+            "supporting_probe_ids",
+            "needs_macos",
+            "blocked_by",
         ];
         if rows
             .first()
@@ -158,7 +172,7 @@ impl Catalog {
         }
         let mut specs = vec![];
         for r in rows.into_iter().skip(1) {
-            if r.len() != 11 {
+            if r.len() != 16 {
                 return Err("invalid triage row length".into());
             }
             specs.push(LegacySpec {
@@ -173,6 +187,25 @@ impl Catalog {
                 evidence: r[8].clone(),
                 conditional_or_skip: boolean(&r[9])?,
                 coverage_limit: r[10].clone(),
+                native_triage: NativeTriage {
+                    status: r[11].clone(),
+                    acceptance_ids: r[12]
+                        .split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    supporting_probe_ids: r[13]
+                        .split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    needs_macos: boolean(&r[14])?,
+                    blocked_by: r[15]
+                        .split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                },
             });
         }
         let catalog = Self {
@@ -210,6 +243,9 @@ impl Catalog {
         for s in &self.specs {
             if !files.insert(&s.file)
                 || s.workflows.is_empty()
+                || s.native_triage.status != "blocked-by"
+                || s.native_triage.acceptance_ids.is_empty()
+                || s.native_triage.blocked_by.is_empty()
                 || s.workflows.iter().any(|w| !ids.contains(w.as_str()))
             {
                 return Err(format!("invalid spec mapping {}", s.file));
