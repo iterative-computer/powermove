@@ -1,9 +1,10 @@
 # MCP and automation core (Phase 1)
 
 Crate: `apps/native/crates/mcp` (`pm-mcp`); binary: `powermove-mcp`.
-Status: **67 tools / 67 schema-identical / 20 standalone bodies + 6 host-backed adapters / 41 pending**.
-`catalog::IMPLEMENTED` contains 26 bodies/adapters; `HOST_BACKED` identifies the
-six that still require an injected engine/export worker. The standalone binary
+Status: **67 tools / 67 schema-identical / 21 standalone bodies + 10 host-backed adapters / 36 pending**.
+`catalog::IMPLEMENTED` contains 31 bodies/adapters; `HOST_BACKED` identifies the
+ten that require an injected engine/export worker, native Store transport or
+explicit shipped extension source root. The standalone binary
 does not fabricate a renderer, decoder, export child or loaded media registry.
 This is the standalone automation core, with an asynchronous adapter to the
 application's kernel actor. It does not yet provide the complete agent runtime,
@@ -38,8 +39,10 @@ Schema identity does not mean that every tool body is implemented.
 
 ## Tool conformance table
 
-“Implemented” means a concrete standalone P1 body; adapter limitations are
-listed below. Every row's input schema, description and name match v1.2.0.
+“Implemented” means a concrete portable body; “Adapter” requires the named
+application capability. Adapter limitations and native binding instructions are
+listed below. The standalone binary does not inject these capabilities. Every
+row's input schema, description and name match v1.2.0.
 
 | Name | Schema identical | Body | Backing / remaining adapter |
 |---|---|---|---|
@@ -47,75 +50,75 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `create_project` | Yes | Implemented | Kernel shell Open(New), Save; synthetic empty project |
 | `open_project` | Yes | Implemented | Kernel shell Open(Library), recovery and locks |
 | `start_session` | Yes | Implemented | Connection state, pinned document identity, isolated workspace |
-| `publish_extensions` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
-| `import_media_to_timeline` | Yes | Pending | Durable media import/version/Undo service |
+| `publish_extensions` | Yes | Pending | V8/Svelte compiler exists; missing complete API pack, source scanner, isolated activation validation and atomic source promotion/reload coordinator |
+| `import_media_to_timeline` | Yes | Pending | ImportQueue/MediaCatalog exist; missing durable original-byte admission, retained versions, media Undo and coordinated timeline placement |
 | `finish_session` | Yes | Implemented | Actor-bound kernel mark/squash/restore + journal publication |
-| `orchestrator_capabilities` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `delegate_task` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `task_status` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `task_cancel` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `task_send` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_launch` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_list` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_read` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_send` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_watch` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_unwatch` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `thread_cancel` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
-| `publish_visual_reply` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
+| `orchestrator_capabilities` | Yes | Pending | pm-agents provider protocols exist; missing root-run/provider/model catalog and application orchestration manager |
+| `delegate_task` | Yes | Pending | Missing root-owned task graph, inherited authority/approvals, provider selection, durable child scope and delivery coordinator |
+| `task_status` | Yes | Pending | Missing root-owned task records, bounded wait and terminal-result acknowledgement coordinator |
+| `task_cancel` | Yes | Pending | Missing root/task ownership, descendant cancellation and provider child draining coordinator |
+| `task_send` | Yes | Pending | Missing task ownership, live steering and interrupt/resume coordinator preserving task/workspace identity |
+| `thread_launch` | Yes | Pending | Missing ordinary conversation creation/run host and inherited project/planning authority |
+| `thread_list` | Yes | Pending | pm-agents conversation persistence exists; missing authorized project-scoped ordinary-thread inventory |
+| `thread_read` | Yes | Pending | Missing authorized project-scoped ordinary-thread read/context adapter |
+| `thread_send` | Yes | Pending | Missing ordinary-thread steering/continuation and model/effort selection coordinator |
+| `thread_watch` | Yes | Pending | Missing run-specific watch ownership and automatic result delivery/resume coordinator |
+| `thread_unwatch` | Yes | Pending | Missing root-owned watch lifetime/release coordinator |
+| `thread_cancel` | Yes | Pending | Missing authorized ordinary-thread current-run cancellation/draining host |
+| `publish_visual_reply` | Yes | Pending | Missing ordinary-thread artifact attachment/visual-reply publication host; an artifact file alone is insufficient |
 | `get_timeline` | Yes | Implemented | Kernel snapshot, transport time, query evaluation; paged strips |
 | `edit_layer_strips` | Yes | Implemented | Kernel timing/layer commands + atomic id-keyed operations |
 | `manage_project` | Yes | Implemented | Kernel shell library operations; active-project rename via CompCommand |
 | `save_project` | Yes | Implemented | Generation-bound shell SaveAs / Save; PMV4 writer and locks |
 | `export_video` | Yes | Adapter | ExportChild video worker; frozen options, immutable snapshot and verified output path |
 | `get_3d_scene` | Yes | Implemented | Kernel allProps/evaluation/compositionScene queries; frozen v1.2.0 result projection |
-| `edit_3d` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
-| `fork_builtin_extension` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
+| `edit_3d` | Yes | Pending | `pm-kernel::Scene3dCommand::plan` still returns NotImplemented; missing complete frozen scene command/validation adapter |
+| `fork_builtin_extension` | Yes | Adapter | Native `BuiltinSources`: explicit shipped root, frozen manifest validation, inert run staging and pristine merge base |
 | `get_project_state` | Yes | Implemented | Kernel snapshot, selection, query evaluation; paged digest |
 | `list_media` | Yes | Implemented | Kernel asset/folder/reference digest; optional MediaRegistry reports real runtime availability |
-| `replace_media` | Yes | Pending | Durable media import/version/Undo service |
-| `import_media` | Yes | Pending | Durable media import/version/Undo service |
+| `replace_media` | Yes | Pending | MediaCatalog/ImportQueue are primitives; missing verified byte replacement, retained runtime versions and native media Undo admission |
+| `import_media` | Yes | Pending | Missing durable original-byte storage/fingerprint/probe admission and coordinated kernel/media Undo; AddAsset alone is metadata |
 | `manage_media` | Yes | Implemented | Guarded kernel metadata edits and native Undo; never deletes stored/source bytes |
 | `select_layers` | Yes | Implemented | Kernel SelectionCall; ephemeral selection publication |
-| `inspect_creative_workspace` | Yes | Pending | Creative-app inventory and bounded source reader |
-| `set_panel_layout` | Yes | Pending | Workspace editing state and external workspace Undo/Redo callback host; settings alone are insufficient |
+| `inspect_creative_workspace` | Yes | Pending | Missing native After Effects preference/layout and script/CEP/plugin inventory reader; no equivalent in pm-services |
+| `set_panel_layout` | Yes | Pending | Kernel workspace facts exist; missing workspace edit service and external workspace Undo/Redo continuations |
 | `get_panel_layout` | Yes | Implemented | Kernel project/named workspace snapshot + winning panel registrations; tagged digest |
-| `inspect_creative_extension` | Yes | Pending | Creative-app inventory and bounded source reader |
-| `open_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `get_panel_state` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `interact_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `capture_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `computer_use_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `get_workspace_state` | Yes | Pending | Kernel identity/selection/effects exist; viewport, renderer errors, projects-screen state and extension health require shell/runtime |
+| `inspect_creative_extension` | Yes | Pending | Missing opaque creative-tool inventory and bounded no-symlink source/include reader |
+| `open_panel` | Yes | Pending | Missing registered macOS/remote-DOM shell panel-open/focus host |
+| `get_panel_state` | Yes | Pending | Missing fresh semantic panel/control snapshot and registration/document lifetime refs |
+| `interact_panel` | Yes | Pending | Missing live control refs, observed input dispatch and post-action semantic snapshot host |
+| `capture_panel` | Yes | Pending | Missing registered visible-panel target validation and real encoded pixels from macOS |
+| `computer_use_panel` | Yes | Pending | Missing observed panel pixel bounds, macOS input/capture and lifetime validation |
+| `get_workspace_state` | Yes | Pending | Kernel identity/selection exist; missing viewport, projects-screen state, renderer diagnostics and full extension health |
 | `render_frames` | Yes | Adapter | EngineHook snapshot capture; encoded images and revision/document fence; host absent by default |
 | `apply_commands` | Yes | Implemented | Frozen JSON adapter → typed kernel commands → guarded Transact |
 | `edit_video` | Yes | Implemented | All nine frozen operations; source bounds, static-timing guards, exact key rebasing, locks and rollback |
 | `rollback_changes` | Yes | Implemented | Document/revision guard + validated kernel Restore + journal publication |
-| `validate_effect` | Yes | Pending | Extension registration validator |
-| `stage_fork_rebase` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
+| `validate_effect` | Yes | Implemented | Pure Rust frozen `kernel/glsl.ts` registration validator port; does not register or compile shaders |
+| `stage_fork_rebase` | Yes | Pending | Fork copying works; missing installed-fork provenance/base inventory and three-way staged rebase/compile validation coordinator |
 | `probe_media` | Yes | Adapter | EngineHook original resolver and native probe; frozen Rust result adapter |
 | `sample_media_frames` | Yes | Adapter | EngineHook decoding/scan; kernel Legacy sourceTime samples; frozen time/quality/result adapter |
 | `media_contact_sheet` | Yes | Adapter | EngineHook labelled sheet assembler; frozen source/composition time and grid planner |
 | `media_waveform` | Yes | Adapter | EngineHook measured audio/image worker; frozen windows, silence/loudness and time mapping |
-| `transcribe_media` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
+| `transcribe_media` | Yes | Pending | No native speech model/session/job/cache service or original PCM staging binding; promedia Decoder is an injected trait |
 | `check_project` | Yes | Implemented | Kernel active/worldOpacity/sourceTime queries; optional media status and measured peaks |
-| `store_search` | Yes | Pending | Remote Store catalog/query service; local registry is not the catalog |
-| `store_extension` | Yes | Pending | Remote release/detail service; installed/version/source metadata lacks listing and releases |
-| `store_source` | Yes | Pending | Remote release tree/file service; kernel overlay inventory is not release-ID addressed |
-| `store_library` | Yes | Pending | Full extension manifests/health/trust, provenance, update checks and local-tree hashes; kernel inventory alone is insufficient |
-| `store_install` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_update` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_uninstall` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_publish_prepare` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_publish` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `generate_captions` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+| `store_search` | Yes | Adapter | Rust listing projection → `NativeStoreReads` → actual `pm-services::store::StoreTransport` GET `/v1/store/extensions` |
+| `store_extension` | Yes | Adapter | Rust detail/release-history projection → native Store transport GET `/v1/store/x/{handle}/{slug}` |
+| `store_source` | Yes | Adapter | Rust release-ID tree/file adapter → native Store transport GET release/tree and coordinate `/r/{version}/file/{path}` |
+| `store_library` | Yes | Pending | Missing full installed manifest/health/trust/provenance snapshot, local-tree hashing and update-check binding |
+| `store_install` | Yes | Pending | Store verification/install primitives exist; missing durable single-writer StoreKernel and permission/trust/runtime activation binding |
+| `store_update` | Yes | Pending | Missing durable StoreKernel, installed provenance/local-overlay checks and permission-aware verified activation binding |
+| `store_uninstall` | Yes | Pending | Archive-preserving store-host uninstall exists; missing durable StoreKernel and extension registry/runtime refresh binding |
+| `store_publish_prepare` | Yes | Pending | Missing publisher identity/provenance, local source-tree collection, permission/secret scanner and publish-plan coordinator |
+| `store_publish` | Yes | Pending | Missing authenticated publisher, prepared-plan revalidation and native publish confirmation/receipt host |
+| `generate_captions` | Yes | Pending | pm-captions is pure cue/text data; missing speech/model job host and kernel caption command admission (still NotImplemented) |
 | `export_captions` | Yes | Implemented | ExportChild caption method; default pure Rust SRT/WebVTT exporter |
 
 ## Wave 2 kernel/engine audit
 
 Wave 2 adds twelve bodies/adapters: `list_media`, `manage_media`, `edit_video`,
-`get_3d_scene`, `check_project`, `export_captions`, and the six `HOST_BACKED`
-tools above. Project/library/timeline reads, selection and existing edits continue
+`get_3d_scene`, `check_project`, `export_captions`, and the six original engine/export
+adapters in the table above. Project/library/timeline reads, selection and existing edits continue
 using their existing kernel authority. All 67 public names, descriptions and
 input schemas remain byte-identical to the tagged catalog.
 
@@ -156,8 +159,10 @@ introduced to bypass these gaps.
 projects-screen state and complete extension-health records. `set_panel_layout`
 needs workspace editing state and external Undo/Redo continuations. Panel and
 computer-use tools retain precise structured unavailable errors until their
-macOS hosts exist. Store/creative/agent/extension tools still need their respective
-services; generic registry inventory is not a substitute for those contracts.
+macOS hosts exist. Store writes, creative inventory, agents and extension activation still need
+their respective host coordinators. Store reads and inert built-in fork staging
+now have concrete adapters; generic registry inventory remains insufficient for
+the other contracts.
 
 Acceptance integration: **do not use `edit_video` as W033.unavailable**.
 `render_frames` has an adapter but remains unavailable without EngineHook;
@@ -165,6 +170,110 @@ Acceptance integration: **do not use `edit_video` as W033.unavailable**.
 stable pending choices are `import_media`, `replace_media`, `edit_3d`,
 `generate_captions`, `capture_panel`, `computer_use_panel` and the Store/agent
 families. This lane does not edit pm-acceptance.
+
+## Wave 3 backing audit and native bindings
+
+This wave adds **five tools: one portable body and four host adapters**. It does
+**not** complete every tool body. All 67 schemas remain frozen; 36 bodies remain
+pending with exact missing backing in the table above. Existing service crates
+provide primitives, not every end-to-end MCP guarantee:
+
+* `kernel/src/commands/captions.rs` and `scene3d.rs` still return
+  `CommandError::NotImplemented`. `pm-captions` supplies normalization, editing
+  and subtitle codecs, not a speech model/service or kernel command admission.
+* `services/src/media.rs::ImportQueue` requires a host `MediaHook::probe/admit`.
+  `promedia/src/media.rs::MediaCatalog` retains original/proxy relationships;
+  `promedia/src/codec.rs::{Decoder,Encoder}` are injected traits. These do not
+  yet copy/admit durable imported bytes and media Undo together.
+* `store-host/src/install.rs::StoreKernel` requires durable single-writer
+  `load/compare_exchange`; the implementation in that module is `MemoryKernel`.
+  Verification/archive/install primitives cannot substitute for the missing
+  kernel/permission/activation/provenance/publish coordinator.
+* `runtime-v8::{Realm,SvelteCompiler}` provide owner-worker execution and
+  compilation. Compat extraction supplies the realm facade, not complete native
+  panel hosts, API/source staging, scanner or atomic promotion/reload admission.
+* `engine-service/src/resources.rs::ResourceSnapshot::validate` explicitly
+  rejects nonempty extension/font resources. Headless rendering/export exists,
+  but that does not certify encoded MCP captures with arbitrary active extension
+  producers/project fonts. Existing six EngineHook/ExportChild adapters remain
+  explicit application integration requirements.
+* `pm-agents` implements provider protocols, runtime/approval and conversation
+  primitives. The frozen root-task graph, ordinary-thread coordinator, watches,
+  provider catalog and automatic delivery are not an MCP-hosted service yet.
+
+### Concrete host bindings within the MCP-owned path
+
+`apps/native/crates/mcp/backends` is package **pm-mcp-backends**, with an owned
+standalone workspace/lockfile. It depends on the actual `pm-services` and
+`pm-promedia` crates; it is not another kernel writer. Keeping its dependency
+integration here avoids modifying the integration lane's shared native
+Cargo.toml/Cargo.lock. App hosts must add this package to their dependencies and
+update that shared lockfile when integrating it. The standalone `powermove-mcp`
+binary does not discover an HTTP client, app resource root or loaded catalog.
+
+On the dedicated MCP worker:
+
+```rust,ignore
+pm_mcp_backends::bind_store(&mut host, store_origin, native_store_transport)?;
+host.extension_sources = Some(std::sync::Arc::new(
+    pm_mcp_backends::extensions::BuiltinSources::new(shipped_resources_root)?
+));
+// Share the actual catalog; retire/rebind it on project close/reopen.
+let registry = std::sync::Arc::new(pm_mcp_backends::NativeMediaRegistry::default());
+registry.bind(project_id, shared_native_media_catalog)?;
+host.media_registry = Some(registry);
+```
+
+`NativeStoreReads` validates origins using the actual native StoreClient,
+forwards bounded reads to its StoreTransport and strips diagnostic error chains.
+Rust maps catalog listings, full detail/release histories and release-ID-addressed
+source trees/files into exactly the tagged result fields. Source file reads
+resolve release coordinates first; local overlays are never used as release
+source. URL path segments/query values are encoded, traversal refused, redirects
+and streaming caps stay with the native transport, and responses are capped again
+at admission. Read-only calls do not refresh an agent's composition edit baseline.
+Both app and inspection sessions work under the frozen allowlists.
+
+`NativeMediaRegistry` reads real catalog availability and exact rational source
+duration for list/state/check/video planning. Registering metadata alone does not
+make an asset online. It does not invent measured peaks, loading/cloud states,
+decoders or a working original where only a proxy exists. Original-only export
+and media-source resolution still belong to their existing engine host adapters.
+
+`BuiltinSources` copies the explicitly supplied **immutable shipped source
+root** into the current run, checks the frozen v1–3 manifest contract, preserves
+unknown manifest fields, rewrites fork lineage/replaces and retains the pristine
+`.forked-from` tree. It does not activate or compile anything. A destination is
+reserved exclusively; the rewritten manifest is written last after source/base
+copies. Failed/partial staging is retained without a published manifest; the
+normal session archive preserves it on finish/disconnect. This deliberately
+replaces the tag's failure-time temporary-directory deletion (N4). Copies enforce
+the existing 400-file/8-MiB source budget and a bounded traversal depth. Shipped
+resources must remain immutable for the operation; staging must be worker-owned.
+
+`validate_effect` ports the frozen `kernel/glsl.ts` admission rules and ordered
+errors into Rust. The source-paired tests cover missing/duplicate params, flags,
+integer pass bounds and UTF-16 shader-length limits. These are authored ECMAScript contract semantics, not Chromium rendering
+quirks. End-anchor tests confirm both the tagged and native validators refuse
+trailing line terminators in identifiers. Validation has no registration, shader
+compilation or composition mutation side effect. Kernel/runtime registration can
+reuse this admission function when its host is integrated.
+
+### Wave 3 decisions
+
+| Decision | Picking rule |
+|---|---|
+| Keep five new bodies/adapters behind the existing frozen tool names and allowlists | N6 contract unchanged; N7 app and editor clients remain drivable. |
+| Use actual services transport/catalog bindings; leave absent hosts explicit | N1/N3 forbid success-shaped metadata or fake runtime availability; N8 keeps I/O off main. |
+| Project-bind Store reads and forks without refreshing edit observations | N3/N4 preserve revision/document fences and foreign work. |
+| Copy forks into inert run staging with exclusive reservation, manifest-last publication and retained partials | N4 archive, never delete; N6 retains source/lineage/result behavior without requiring JS activation. |
+| Preserve authored ECMAScript validation/string-length semantics in a native port | N6 and N3; no browser-specific rendering behavior is copied. |
+| Keep the new concrete bindings in an owned nested workspace until app integration | Ownership boundary and N8; no shared lockfile mutation or Node/Chromium runtime dependency. |
+| Keep the remaining 36 tools unavailable with exact missing backing | N1/N3/N4/N6: primitive presence does not prove durable admission, complete legacy behavior or actual pixels. |
+
+No visual/UX change or new visual placeholder is introduced. There are no
+`DESIGN-TODO(opus)` additions in this lane. Existing visual output remains
+provisional for Opus review.
 
 ## Implemented adapter limits
 
@@ -336,8 +445,9 @@ to block the UI thread or create another kernel writer.
 * Durable import/replace needs retained versions, verified fingerprints/storage,
   availability and native Undo; metadata AddAsset is insufficient. Source bytes
   and immutable objects must remain archived, never collected by MCP metadata edits.
-* The actual extension registration validator and transcription/caption job host
-  remain required; generic JSON registration is not a validator.
+* The native effect admission port is now available and source-paired; the
+  transcription/caption job host remains required. Generic JSON registration
+  is not a validator or a speech service.
 
 ### Shell, extensions and agent runtime
 
@@ -348,11 +458,48 @@ to block the UI thread or create another kernel writer.
 * Shared windowed/headless extension activation, deterministic virtual time,
   V8/compat runtimes, complete API pack, permissions, staging/compiler/scanning
   and atomic promotion/reload. User MCP and scripting need their real sandbox.
-* Pinned provider clients, approvals, child cancellation/draining, resume,
-  notifications, thread lifecycle and Store/creative inventory adapters. No
+* Bind pinned provider clients and approvals to root/child orchestration,
+  cancellation/draining, resume, notifications and thread lifecycle. Store writes
+  and creative inventory still require their application adapters. No
   provider login or OAuth state is read or changed by this crate.
 
-## Validation
+## Wave 3 validation
+
+**62 MCP tests pass** (5 unit, 24 existing conformance, 22 wave-2 and 11 wave-3).
+**273 kernel tests pass, 1 optional test ignored**. **10 native backend tests
+pass** (5 source/manifest/fork/archive tests and 5 actual service transport/catalog
+binding tests). Package formatting and strict all-target Clippy pass for pm-mcp
+and pm-mcp-backends. Both required Git tags must be fetched (`v1.2.0`, `v1.3.0`)
+for the existing kernel/MCP source-oracle tests; a first combined run stopped
+because this fresh checkout lacked v1.3.0, then the full run passed after fetching
+it. No kernel source change was required.
+
+`service-pairs.mjs` executes actual tagged effect-validator and Store gateway
+bodies. `fork-pairs.mjs` executes actual tagged manifest/fork bodies against
+isolated synthetic resources. Expected results never come from native output.
+Tests cover app/editor access, an unchanged foreign-edit baseline, explicit
+missing hosts, Store errors and byte caps, encoded source routes, manifest
+v1–3 admission, pristine bytes, no overwrite, inert publication and archival on
+both commit and cancel. All fixtures are synthetic; no live Store request,
+provider login, installed app/profile scan or user project was used.
+
+```sh
+# From apps/native
+cargo test --locked -p pm-mcp -p pm-kernel
+cargo fmt -p pm-mcp -- --check
+cargo clippy --locked -p pm-mcp --all-targets --no-deps -- -D warnings
+cargo test --locked --manifest-path crates/mcp/backends/Cargo.toml
+cargo fmt --manifest-path crates/mcp/backends/Cargo.toml -- --check
+cargo clippy --locked --manifest-path crates/mcp/backends/Cargo.toml --all-targets --no-deps -- -D warnings
+```
+
+macOS still needs application dependency/lockfile integration, native transport
+and shipped-resource injection, catalog retirement on close/reopen, worker-only
+invocation, bundle/symlink/permission behavior, and real Headless/media/export and
+remote-DOM surface verification listed below. Linux tests do not certify those
+integrations. No AppKit/Metal/WebKit code was introduced or exercised here.
+
+## Wave 2 validation (historical)
 
 Wave 2 verification: **51 MCP tests pass** (5 unit + 24 existing integration +
 22 new integration tests); **267 kernel tests pass, 1 optional test ignored**.

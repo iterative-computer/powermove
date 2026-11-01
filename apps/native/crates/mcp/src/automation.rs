@@ -100,6 +100,8 @@ pub struct Automation {
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
     pub export_child: Arc<dyn crate::services::ExportChild>,
+    pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
+    pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
 }
 impl Automation {
     /// `profile` must be an explicit, isolated native destination, never the
@@ -137,6 +139,8 @@ impl Automation {
             surfaces: None,
             media_registry: None,
             export_child: Arc::new(crate::services::NativeExportChild),
+            store_reads: None,
+            extension_sources: None,
         })
     }
     pub fn kernel(&self) -> &Kernel {
