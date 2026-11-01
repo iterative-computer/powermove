@@ -10,18 +10,9 @@ use std::{
 };
 
 pub fn fixture() -> PathBuf {
-    let p = Path::new(file!());
-    let absolute = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(p)
-    };
-    absolute
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("fixtures/electron")
+    // Independent of the directory cargo runs from (file!() is relative to
+    // whichever workspace root invoked rustc).
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/electron")
 }
 pub fn fixture_snapshot(temp: &Path) -> Snapshot {
     Snapshot::capture(
