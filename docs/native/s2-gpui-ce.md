@@ -146,3 +146,104 @@ finish native affine placement, transient menu behavior, text and A11Y; run the
 entire native matrix with a GUI and target displays; measure timeline/presentation
 p95 and paired margins; obtain the required orchestrator/Opus review. No subagents
 or review delegation were started by this implementation worker.
+
+
+## Unlocked rerun (2026-11-01)
+
+**Verdict: OPEN / NOT PASSED.** This run adds real-display evidence and fixes two
+spike bugs; it does not close the composition, IME, accessibility or headroom gates.
+The earlier locked-session results above are retained.
+
+### Conditions and reproduction
+
+macOS 27.2, Apple M5, one built-in 3024×1964 Retina XDR display, unlocked session.
+No second display was attached. All builds used Rust **1.96.1** and
+`~/Developer/pm-target`. The initial normal-workspace build of S2 and S5 passed.
+Another active lane then temporarily made workspace metadata unloadable. Subsequent
+builds used copies of the two manifests/lock in `/tmp`, absolute vendor paths and
+symlinks to these exact source directories; no shared manifest/lock was edited.
+The 4-GiB build guard stopped two attempts; only this verification's duplicate
+artifacts were removed before resuming above the limit. The final rebuild passed.
+Seven standalone contract tests passed on 1.96.1. This is not a full Cargo-test pass.
+Timing is a single development-build diagnostic on a shared machine, not a paired
+corpus gate.
+
+Optional demo controls added for reproduction:
+
+```sh
+S2_APPEARANCE=light S2_MENU=1 ~/Developer/pm-target/debug/pm-native-s2-spike
+S2_PACING=1 S2_MENU=1 ZED_MEASUREMENTS=1 ~/Developer/pm-target/debug/pm-native-s2-spike
+```
+
+`S2_PACING` paints 1,000 distinct retained textures plus a fresh 60-Hz producer
+source for 650 GPUI frames, then stops requesting frames. It logs the native
+viewer drawable's actual Metal `presentedTime`; zero timestamps are not counted
+as presentations. `ZED_MEASUREMENTS` is the existing upstream GPUI CPU frame
+instrumentation. Viewer-layer timestamps are **not** GPUI-layer GPU completion
+measurements. No vendor code was changed.
+
+### On-screen matrix
+
+| Check | Updated result / evidence |
+|---|---|
+| Native toolbar and dark glass | **PASS appearance smoke.** Real NSToolbar, native field, solid work surfaces, floating bar and child-menu glass visible. |
+| Light appearance | **PARTIAL.** Native toolbar, background and field use Aqua with the local override. GPUI/DOM tokens remain dark; the independently created menu still follows the system's dark appearance. No full light-theme pass. |
+| Reduce Transparency | **PASS startup fallback.** Effective workspace flag true; bar/menu become solid. Live reaction without restarting remains unverified. |
+| Increase Contrast | **PARTIAL.** Effective workspace flag true; solid menu border and native WebKit control outlines visibly strengthen. Dense GPUI contrast tokens remain unfinished. |
+| Compat slot and overlay hit | **PASS limited native probe after fix.** Original panel was blank because the web view's initial size was added to a zero-sized autoresizing parent. Initializing the wrapper to the child's frame fixes placement. Clicking the protruding WebKit overlay changed its button to `Clicked`. |
+| Cross-slot drag capture | **PASS limited native selection probe.** Dragged selection from the native field across the WebKit slot, then typed; replacement stayed in the original native field (`Native drag aCAPTURE`). No NSDraggingSession/export drag certification. |
+| Resize/reflow | **PARTIAL / budget UNVERIFIED.** A real edge drag changed the window from 1180×844 to 1032×772 points; WebKit panel and mask followed at the endpoint. No measured ≤1-frame DOM paint lag and no snapshot-stretch fallback. Docking remains untested. |
+| Clip / hit order | **PARTIAL.** Native field stays above viewer; visible WebKit overlay receives a click; child menu stays above GPUI. Arbitrary affine placement, GPUI occlusion over compat overlays under the new tile workload, and every priority/capture combination remain open. |
+| Child field menu / half bounce | **PARTIAL.** A real pooled 300×230 child window is visible above the parent. Runtime spring parameters: perceptual duration **0.320 s**, bounce **0.150**, calculated settling duration **0.471456 s**. Search field and four labels appear in AX. This is startup opening, not proof of control-triggered opening, keyboard selection, glider, velocity-continuous interruption or perceptual motion quality. |
+| OS IME in P-TEXT | **UNVERIFIED.** Native text entry works. Japanese Romaji and Simplified Pinyin input methods enabled successfully but `TISSelectInputSource` returned **-50** for both. U.S. selection succeeded; temporary methods were disabled. Manual composition/conversion/commit/cancel and Services remain required. |
+| Accessibility order | **FAIL.** External AXUIElement walk was trusted and completed. Main content exposes an empty AXGroup, toolbar and window chrome; native field, WebContent and transport are absent. The child menu exposes its search and labels separately. Interleaved slot children are not implemented. VoiceOver was not toggled. |
+| Display moves | **UNAVAILABLE.** One display attached; no mixed-scale/display-transition claim. |
+
+Controls on `NSGlassEffectView` now use its supported `contentView` instead of
+arbitrary subviews. The pre-26 path checks class availability and keeps ordinary
+AppKit contents. Menu interaction still needs a complete independent run.
+
+### Visible texture workload and presentation pacing
+
+650 requested GPUI frames completed in **5.815 s** with the field menu open.
+After 30 warmups, 620 upstream CPU frame samples had p50/p95/p99
+**6.316 / 6.884 / 7.703 ms**, maximum **13.797 ms**; **4/620** exceeded 8.333 ms.
+Within the bounded workload, 638 positive viewer presentation timestamps yielded
+606 strictly-positive intervals after warmup: p50/p95/p99
+**8.333250 / 8.333292 / 8.333375 ms**, maximum **33.333 ms**, **6** intervals
+above 8.5 ms. Zero/non-increasing timestamps were excluded, not promoted to frames.
+This demonstrates a 120-Hz presentation cadence for the native viewer during this
+workload, with missed intervals. **FAIL provisional 50%-interval headroom:**
+CPU p95 6.884 ms exceeds **4.167 ms** at 120 Hz. Full GPUI GPU/scanout timing,
+long-form scrolling, view caching and paired engine/corpus playback remain open.
+
+The original offscreen verifier was also rerun while the display was unlocked:
+all alpha, fence/lifetime, repeat-scene, clip and retirement checks passed.
+1,000 tiles (150 samples): encode p95 **0.462 ms**, submit+drain **2.905 ms**.
+60-Hz producer + tiles (120 frames): work p95 **14.601 ms**, **5** frames above
+16.667 ms. The offscreen mixed fixture still fails provisional half-interval
+headroom and does not replace the visible measurement.
+
+### Captures and restoration
+
+All screenshots remain outside Git:
+
+- `/tmp/pm-shots/s2v-original-dark.png` and `s2v-fixed-dark.png`: blank-panel reproduction and fix.
+- `/tmp/pm-shots/s2v-1000-tiles-onscreen.png`: actual displayed workload and glass child menu.
+- `/tmp/pm-shots/s2v-light.png`, `s2v-field-menu-light.png`: partial light appearance.
+- `/tmp/pm-shots/s2v-reduce-transparency.png`, `s2v-menu-reduce-transparency.png`: solid fallback.
+- `/tmp/pm-shots/s2v-increase-contrast.png`, `s2v-menu-increase-contrast.png`: stronger borders.
+- `/tmp/pm-shots/s2v-hit-after-events.png`, `s2v-resized.png`: overlay click and resized layout.
+
+System Settings was used after `defaults write` was denied. Both accessibility
+switches were observed off before testing and restored off afterwards. Original
+`defaults` keys were absent; macOS now stores explicit false values. Attempts to
+remove those keys through defaults/CFPreferences were denied or ineffective; the
+protected plist also rejected direct removal. **Effective settings are restored;
+exact original key absence is not restored.** Global appearance remains Dark;
+U.S. input is selected; VoiceOver and Reduce Motion were unchanged. Temporary
+input methods were disabled, fixture processes stopped and the GUI lock released.
+
+The gate remains open principally for foreign accessibility, real IME, measured
+resize lag/fallback, native ordering coverage, complete menu behavior and headroom.
+No framework kill is inferred from a synthetic development-build timing failure.

@@ -318,9 +318,15 @@ pub fn install(window: &gpui::Window) -> async_channel::Receiver<Action> {
     ns_window.setToolbar(Some(&toolbar));
     ns_window.setToolbarStyle(NSWindowToolbarStyle::Unified);
     ns_window.setTitlebarAppearsTransparent(true);
-    // The editor is dark-only until the light theme lane lands.
-    let dark = unsafe { objc2_app_kit::NSAppearanceNameDarkAqua };
-    ns_window.setAppearance(objc2_app_kit::NSAppearance::appearanceNamed(dark).as_deref());
+    // Spike-only native chrome override; GPUI work-surface tokens remain dark.
+    let appearance = unsafe {
+        if std::env::var("S2_APPEARANCE").as_deref() == Ok("light") {
+            objc2_app_kit::NSAppearanceNameAqua
+        } else {
+            objc2_app_kit::NSAppearanceNameDarkAqua
+        }
+    };
+    ns_window.setAppearance(objc2_app_kit::NSAppearance::appearanceNamed(appearance).as_deref());
 
     let (tx, rx) = async_channel::unbounded();
     SENDER.with(|s| *s.borrow_mut() = Some(tx));
@@ -377,7 +383,7 @@ pub fn place(id: &'static str, rect: Rect, radius: f64, layer: Layer, contents: 
             if let Contents::Buttons(buttons) = contents {
                 let row = button_row(mtm, &target, buttons);
                 row.setFrame(view.bounds());
-                view.addSubview(&row);
+                crate::native::material_contents(&view).addSubview(&row);
             }
             let order = if layer == Layer::Behind {
                 NSWindowOrderingMode::Below
