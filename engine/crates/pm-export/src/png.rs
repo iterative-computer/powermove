@@ -291,6 +291,16 @@ impl Sink for PngSink {
     }
 
     fn finish(self) -> Result<Delivered, Error> {
+        self.finish_with_cancel(&std::sync::atomic::AtomicBool::new(false))
+    }
+
+    fn finish_with_cancel(
+        self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Delivered, Error> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let mut problems = vec![];
         let alpha = self.spec.alpha != AlphaOutput::None;
         let depth = self.spec.codec.depth() as u8;
@@ -305,6 +315,9 @@ impl Sink for PngSink {
             ));
         }
         for index in 0..self.written {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
             let path = self.frame_path(index);
             bytes += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let keep = self.kept.iter().find(|(i, _)| *i == index);
@@ -373,6 +386,9 @@ impl Sink for PngSink {
             hardware_encoder: None,
             bytes,
         };
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let path = self.output.commit()?;
         Ok(Delivered { path, report })
     }

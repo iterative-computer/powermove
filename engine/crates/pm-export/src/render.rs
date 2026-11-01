@@ -527,56 +527,31 @@ impl Timeline {
     /// `max(1, round(duration × fps))` frames from `range.start`, as today's
     /// exporter counts them (`Math.round`, half up).
     pub fn new(start: Ticks, end: Ticks, rate: Rate) -> Result<Timeline, JobError> {
-        let span = i128::from(end.get()) - i128::from(start.get());
-        if span <= 0 {
-            return Err(JobError::Invalid("the export range is empty".into()));
-        }
-        let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
-        let unit = den * i128::from(TICKS_PER_SECOND);
-        let frames = ((2 * span * num + unit) / (2 * unit)).max(1);
-        let timeline = Timeline {
+        let schedule = crate::schedule::FrameSchedule::new(start.get(), end.get(), rate)
+            .map_err(|e| JobError::Invalid(e.to_string()))?;
+        Ok(Timeline {
             start,
             rate,
-            frames: u64::try_from(frames)
-                .map_err(|_| JobError::Invalid("too many frames".into()))?,
-        };
-        // Every frame's time and the end of the last one (its audio) must be
-        // representable ticks.
-        let end_tick = i128::from(start.get()) + timeline.offset(timeline.frames);
-        if i64::try_from(end_tick).map_or(true, |v| Ticks::new(v).is_err()) {
-            return Err(JobError::Invalid(
-                "the export range ends past the latest representable time".into(),
-            ));
+            frames: schedule.frames,
+        })
+    }
+
+    fn schedule(&self) -> crate::schedule::FrameSchedule {
+        crate::schedule::FrameSchedule {
+            start: self.start.get(),
+            rate: self.rate,
+            frames: self.frames,
         }
-        Ok(timeline)
     }
 
-    /// Ticks from `start` to frame `n`: `n / rate`, rounded half to even
-    /// onto the tick grid (exact for rates that divide the flick).
-    fn offset(&self, n: u64) -> i128 {
-        let (num, den) = (i128::from(self.rate.num()), i128::from(self.rate.den()));
-        let x = i128::from(n) * den * i128::from(TICKS_PER_SECOND);
-        let (q, r) = (x.div_euclid(num), x.rem_euclid(num));
-        let up = match (2 * r).cmp(&num) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Equal => q % 2 != 0,
-            std::cmp::Ordering::Less => false,
-        };
-        q + i128::from(up)
-    }
-
-    /// The composition time of export frame `n` (`0 ..= frames`; `new`
-    /// checked that these are representable): `start + n / rate`. Past
-    /// `frames` it saturates at the latest representable time.
+    /// Composition time of export frame n, relative to the exact authored in point.
     pub fn tick(&self, n: u64) -> Ticks {
-        Ticks::saturating_from_i128(i128::from(self.start.get()) + self.offset(n))
+        Ticks::new(self.schedule().tick(n)).expect("schedule clamps document ticks")
     }
 
     /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
     pub fn samples(&self, n: u64, sample_rate: u32) -> (i64, i64) {
-        let a = pm_audio::offline::sample_of_ticks(self.tick(n).get(), sample_rate);
-        let b = pm_audio::offline::sample_of_ticks(self.tick(n + 1).get(), sample_rate);
-        (a, b.max(a))
+        self.schedule().samples(n, sample_rate)
     }
 }
 

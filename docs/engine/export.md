@@ -671,3 +671,148 @@ The export-only sample-bit regression compares nested speed 1 and 1.2,
 including trims, fades and gain automation, while checking that playback
 at speed 1.2 still differs. Only an explicit legacy remap omission becomes
 silent; unrelated shape or source failures keep their existing behavior.
+
+## Native cloud export lane — 2026-11-01
+
+Branch: `feat/na-cloud-export`. This section records Linux software delivery;
+**the whole-app export parity gate remains open**. It does not supersede the
+historical measurements above or claim that macOS/renderer tests ran on Linux.
+Changes stay in `engine/crates/pm-export/**` and this document, plus the
+explicitly authorized native-workspace lockfile dependency edge.
+
+### Frozen reference and decisions
+
+The reference is `v1.2.0:apps/desktop/src/renderer/src/core/export-defaults.ts`,
+`legacy/core/exporter.ts`, and `apps/desktop/src/main/render-encoder.ts`.
+The tag offers H.264 MP4, ProRes **4444**, WebM, realtime WebM capture, PNG
+sequence/still, project-file saving, and web-animation export. It has no GIF,
+HEVC selector, other ProRes profile selector, output HDR selector, or output
+bit-depth selector. Additional profiles/depths/HDR below fulfill native pro
+requirements; they are not attributed to the shipped sheet. Web-animation
+export is excluded by the current owner decision. Project-file saving remains
+the project/session lane's responsibility, not an encoder format.
+
+| Decision | Rule and consequence |
+|---|---|
+| One conversion pipeline, interchangeable `Sink` implementations | N1/N3: software and VideoToolbox receive the engine's quantized planes; FFmpeg does not choose the RGB/YUV matrix. `SoftwareSink` implements the existing production `Sink` trait, not a simulated encoder. |
+| Native macOS encoders remain the default on macOS | N1/N8: no Node/Chromium path is introduced. `engine` is a default feature with macOS-only renderer/media dependencies; Linux builds the encoding core even with default features. `--no-default-features` also builds that core. |
+| Explicit HDR mastering intent | N3: `ColorTags::Rec2100Pq { white_nits }` and `Rec2100Hlg { white_nits, peak_nits }` convert linear Rec.709 → linear BT.2020 → ST 2084/HLG → BT.2020 nonconstant-luminance YUV before quantization. Standard working input is decoded first; alpha is unassociated before the nonlinear transform. HLG inverts the BT.2100 reference-display OOTF. Window/display headroom never changes file pixels. Eight-bit HDR is rejected. |
+| Unsupported HEVC alpha is an error | N3/N4: the available software encoder cannot encode Apple's HEVC alpha layers. Reject before creating work files, rather than flattening or substituting another codec. The VideoToolbox implementation remains available behind `Sink`. |
+| Preserve every replaced output | N4: `Overwrite::Replace` copies previous output bytes into an owner-only `.powermove-export-archive` beside the output before replacement. Replaced and stale same-sequence PNG frames are also retained there. Archive failure prevents replacement; unrelated files stay. Host-owned `InPlace` scratch files are not user archives. |
+| No check-then-rename overwrite race | N4: filesystems without hard links use atomic no-replace rename (`renameat2` on Linux, `renamex_np` on macOS); unavailable operations fail safely. |
+| Exact range sampling is shared | N3/N7: `schedule::FrameSchedule` takes authored in/out ticks and an exact rational export rate. The macOS job renderer delegates to it. Frame counts retain the authored positive half-up count rule; tick/sample conversion uses ties-to-even. Nonzero in points and adjacent audio intervals are preserved. |
+| Keep quantization independent of codec builds | N3: PCM16 uses deterministic index/channel TPDF, PCM24 rounds once, and float PCM preserves samples. A macOS-only test compares these portable bytes with the engine's native quantizer. |
+| Do not recreate browser artifacts in the new backend | N2/N3 and quirk policy: software WebM preserves authored alpha and normal encoder priming/padding metadata. It does not copy Chromium's alpha loss, untrimmed Opus tail, timestamp-zero VPX submission, or legacy EBML omissions. Historical macOS WebM consumers remain; no old implementation is pruned while they use it. |
+
+No panel, copy, visual token, layout, or interaction was designed or changed.
+There are no new `DESIGN-TODO(opus)` placeholders in this lane. All future visual
+exposure of these options still belongs to Opus and requires design review.
+
+### Software path and verification
+
+`export(spec)` selects `SoftwareSink` for MOV/MP4/WebM on Linux; PNG remains
+in-process. A macOS/headless host can explicitly select
+`software::SoftwareSink::with_tools` and pass it to `Pipeline::new` through the
+same `Sink` interface. `SoftwareTools` supplies explicit executable paths.
+The encoding core needs no Metal, AppKit, WebKit, GUI, or bundled-media build.
+
+Video uses stdin backpressure, never a whole-export frame buffer. Already
+converted Y416/V216 planes are repacked into planar YUV; 420v/x420 use NV12/P010.
+PCM is spooled in an owner-only, job-owned directory beside the destination.
+Media files are reserved with `create_new` and mode 0600; FFmpeg overwrites only
+those owned scratch files. Drop/cancel/spawn/probe failure closes and reaps the
+child, removes owned work, and leaves the prior destination intact. PNG now
+also checks cancellation during verification and immediately before commit.
+
+After encoding/muxing, `ffprobe` checks codec/profile/pixel format, dimensions,
+actual decoded frame count, rate, CICP/range, and audio coding/rate/channels.
+MOV/MP4's independent box parser also checks movie/media timescales, every
+sample duration, total duration, and timecode/reel. ProRes `nclc` may leave
+range unspecified: its video-range convention is accepted, while decoded
+pixel checks still enforce the numerical range. First/middle/last pictures
+are decoded back to engine input layouts and use the existing 4-CV ProRes /
+6-CV eight-bit / 24-CV ten-bit block tolerances. VPX alpha is decoded with
+libvpx, including an opaque first frame followed by translucent frames. Audio
+is decoded to disk and checked for sample loss and bounded final codec packet
+padding; exact presented sample length is checked when the container reports
+it. Only a verified output is committed.
+
+The host must supply an appropriate FFmpeg/ffprobe build with the requested
+software codecs. **The app's existing LGPL FFmpeg build does not include
+libx264/libx265/prores_ks; this lane does not change its licensing or bundle
+GPL encoders into the macOS app.** No dependency versions changed. `engine/Cargo.lock` remains unchanged; the
+native-workspace lock adds only pm-export's already-pinned `serde_json` production
+dependency edge. Both workspace checks use `--locked`. The native consumer was also checked with
+`cargo check --manifest-path apps/native/Cargo.toml --locked -p pm-export --lib`.
+
+### Option → status matrix
+
+“Linux verified” below means generated encoder/conversion fixtures, not complete
+renderer/project or interactive application parity. The tests use private,
+generated scratch media and vendor their v1.2.0 encoder argument reference in
+the owned test file. No captured personal media or external fixtures are needed.
+
+| Option | Linux software status | macOS / integration status |
+|---|---|---|
+| MP4 H.264 High; Draft/High/Max 4/16/40 Mbps | Verified; generated v1.2.0 encode/decode comparison at 16 Mbps | Existing VideoToolbox path; rerun paired real-project checks |
+| HEVC Main and Main10 | Verified, MP4; exact rational timescales and decoded pixels | Existing VideoToolbox; not run here |
+| ProRes 422 Proxy/LT/422/HQ | All verified, MOV, 10-bit coded output | Existing VideoToolbox; not run here |
+| ProRes 4444 and 4444 XQ | Both verified; coded 12-bit stream; installed `prores_ks` accepts only 10-bit input, so true 12-bit input precision remains a gap | Existing Y416/VideoToolbox path must prove 12-bit precision on Mac |
+| ProRes alpha: straight/premultiplied, opaque first frame | Verified for both 4444 profiles; alpha and sampled color checked | Existing alpha-description repair; rerun on Mac |
+| HEVC alpha | Explicitly unsupported; no silent flattening | Existing VideoToolbox implementation; platform proof required |
+| WebM VP9/VP8, opaque/straight alpha, Opus | Verified decoded pixels, alpha, audio family/rate/channels/length | Existing bundled libvpx/libopus implementation; broader shipped-reference comparison still open |
+| Realtime WebM (`rec`) | Encoder available as exact-frame WebM; no wall-clock recorder emulation | Host must retain/migrate the stored option to the native WebM request; UI/host adapter is outside ownership |
+| PNG still/sequence, 8/16-bit, opaque/straight alpha | Verified losslessly; numbering and stale-frame archival retained | Renderer and host sequence delivery need Mac verification |
+| Rec.709 QuickTime tags; SDR conversion | Verified numerical pixels and CICP 1-13-1 | Existing platform path; broadcast tag selection also remains supported |
+| HDR PQ / HLG, BT.2020, 10-bit HEVC | Verified CICP 9-16-9 / 9-18-9 and independently fixed neutral/highlight signal values | Direct `ExportSpec` API works; protocol/sheet/agent mapping and mastering metadata are outside this lane |
+| Output depth: 8/10/12/16 | H.264/HEVC/ProRes/PNG covered; software 4444 input-precision limit above applies | Project working-depth renderer and VideoToolbox gates remain Mac-only |
+| Audio off; PCM16/24/32f; AAC; Opus | Verified mono/stereo at 44.1/48 kHz for PCM/AAC and stereo 48 kHz Opus; sample length, PCM dither/rounding and decoded tone checked | Actual project mixing, all long-form/sample-rate combinations, AudioToolbox parity remain open |
+| Full/work range; nonzero in point; export rate differs from composition | Shared schedule verified at all 16 supported rates with contiguous 44.1/48/96 kHz audio intervals | Full/work selection and authored scene rendering remain host/renderer integration |
+| All 16 exact supported output frame rates | H.264 files verified for exact movie/media timescale, frame count/durations | Physical playback cadence not measured here |
+| Scaled/custom dimensions, motion blur, captions | Sink validates dimensions; renderer/host responsibilities retained | Rendering, burn-in, sidecars and caption controls need end-to-end Mac coverage |
+| MOV timecode / drop-frame / reel | Verified 29.97 DF `01:00:00;00`, reel A001 | Other timecode modes and host controls remain Mac coverage |
+| Cancel, drop, failed spawn/probe, replacement | Verified cleanup and preservation; archives and no-clobber race covered | APFS/exFAT and macOS no-replace fallback must be exercised |
+| GIF | No GIF export exists in the frozen sheet; not added | No shipped obligation found |
+| Web-animation export | Excluded by current owner decision | No code added |
+| Project-file export (`json`/PMV) | Outside encoder lane | Session/project owner retains it |
+
+### Validation and remaining work
+
+Linux, Rust 1.96.1: **48 unit + 14 integration tests pass (62 total)**. All
+external-codec scenarios ran here; zero capability skips. External tests check
+available encoders/decoders and print `SKIP software delivery: …` when a Mac or
+other developer build lacks them; missing codec support is not parity evidence.
+The existing platform test targets compile to zero tests on Linux and are not
+included in the passing count. The generated v1.2.0 H.264/ProRes comparison uses
+a decoded RGBA RMS limit of 3 eight-bit CV; this proves only those synthetic
+fixtures. PCM tolerances are 1e-12 float RMS, 1e-7 PCM24, and 4e-5 PCM16. AAC's
+short first-packet transient is separately bounded (whole-clip RMS 0.02,
+steady-state 0.003), not attributed to the mixer. No performance gate or full
+project/Electron equality is claimed.
+
+Reproduce from the repository (activate the installed toolchain first):
+
+```sh
+cd engine
+cargo test --locked -p pm-export -- --nocapture
+cargo test --locked -p pm-export --no-default-features -- --nocapture
+cargo clippy --locked -p pm-export --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-export -- --check
+```
+
+Required outside this lane: extend `pm-protocol`'s output-color/mastering model
+and the native export adapter so a job can carry explicit PQ/HLG mastering
+intent; the current `OutputColor` wire enum cannot express it. Mastering display
+primaries/white point, MaxCLL/MaxFALL, and truthful HDR source metadata must not
+be invented. Keep the app's software-codec distribution/licensing decision
+separate from this developer/test path. A software HEVC-alpha encoder and true
+12-bit ProRes 4444 input remain unresolved.
+
+Required on macOS: build the default engine feature, run the existing platform
+suites plus the new native-quantizer comparison; verify VideoToolbox PQ/HLG tags,
+highlights and alpha in real players; confirm AVAssetWriter and AudioToolbox
+outputs against v1.2.0 authored scenes and audio; exercise nonzero work ranges,
+custom sizes, working depths, motion blur/captions, queue/agent cancellation and
+long exports; verify archive recovery and atomic moves on APFS/exFAT; perform
+calibrated HDR/mastering and quiet paired performance gates. No claim here
+substitutes for those tests or for Opus's eventual design review.

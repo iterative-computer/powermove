@@ -376,13 +376,35 @@ fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
 }
 
 /// Converts one working frame to `format`. Rows are converted in parallel
-/// ([`crate::par`]); every sample depends only on its own inputs, so the result is
+/// (`crate::par`); every sample depends only on its own inputs, so the result is
 /// the same bytes on any number of threads.
 pub fn convert(
     frame: &WorkingFrame,
     format: InputFormat,
     params: &ConvertParams,
 ) -> Result<EncoderInput, Error> {
+    convert_tagged(frame, format, params, params.tags)
+}
+
+/// Applies the selected SDR/HDR output transform before quantization and chroma sampling.
+pub fn convert_tagged(
+    frame: &WorkingFrame,
+    format: InputFormat,
+    params: &ConvertParams,
+    tags: crate::settings::ColorTags,
+) -> Result<EncoderInput, Error> {
+    if tags.is_hdr() {
+        crate::hdr::validate(tags)?;
+        if !matches!(
+            format,
+            InputFormat::Y416 | InputFormat::V216 | InputFormat::X420
+        ) {
+            return Err(Error::InvalidSpec(
+                "HDR conversion needs a 10-bit or higher video input".into(),
+            ));
+        }
+    }
+    let params = &ConvertParams { tags, ..*params };
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
@@ -408,14 +430,18 @@ pub fn convert(
     // sub-blacks and footage's own out-of-gamut colors), so untouched
     // footage keeps its luma; only RGB 8-bit outputs take the CSS mapping.
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
-        let (c, a) = tagged_output_rgba(
-            pixel(frame, x, y),
-            params.working,
-            params.alpha,
-            params.tags,
-            false,
-        );
-        (rgb_to_ycbcr(c), a)
+        if tags.is_hdr() {
+            crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
+        } else {
+            let (c, a) = tagged_output_rgba(
+                pixel(frame, x, y),
+                params.working,
+                params.alpha,
+                tags,
+                false,
+            );
+            (rgb_to_ycbcr(c), a)
+        }
     };
     // Chroma of 4:2:0 sample (cx, cy): siting type 0, point decimation
     // horizontally (the even column), the declared filter vertically.

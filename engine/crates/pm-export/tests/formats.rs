@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Conformance of the formats written outside AVAssetWriter (plan section 17,
 //! "Formats at cutover"; section 25, codec and export conformance): WebM with
 //! VP9 and VP8 (with and without alpha) and Opus through FFmpeg, and PNG
