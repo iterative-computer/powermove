@@ -4847,6 +4847,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-recorder-raster"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "libm",
+ "pm-recorder",
+ "pm-text",
+ "png",
+]
+
+[[package]]
 name = "pm-remote-dom"
 version = "0.1.0"
 dependencies = [
