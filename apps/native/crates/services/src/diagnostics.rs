@@ -1,6 +1,7 @@
 //! Local records only. No crash uploader, profile discovery, or project/file contents.
+use crate::error::Result;
+use crate::service_ensure as ensure;
 use crate::storage::{ServiceStorage, component};
-use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ impl Diagnostics {
         text: &str,
     ) -> Result<()> {
         component(code)?;
-        ensure!(text.len() <= 64 * 1024, "log message too large");
+        ensure!(text.len() <= 64 * 1024, TooLarge; "log message too large");
         let text: String = redactor
             .redact(text)
             .chars()

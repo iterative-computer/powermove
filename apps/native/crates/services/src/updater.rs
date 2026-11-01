@@ -1,5 +1,6 @@
 //! TR-gated feed metadata only. No downloads, install, quit, signing or publish API.
-use anyhow::{Result, ensure};
+use crate::error::Result;
+use crate::service_ensure as ensure;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +63,7 @@ pub fn check(
             .notes
             .as_ref()
             .is_none_or(|notes| notes.len() <= 64 * 1024),
-        "feed notes too large"
+        TooLarge; "feed notes too large"
     );
     let offered = Version::parse(&metadata.version)?;
     let prerelease_allowed = current.pre.as_str().starts_with("beta.");

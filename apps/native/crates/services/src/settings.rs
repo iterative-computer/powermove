@@ -1,6 +1,7 @@
 //! App and extension preferences remain kernel-owned. Service-local durable
 //! metadata uses ServiceStorage; it is not a second app settings authority.
-use anyhow::{Result, ensure};
+use crate::error::Result;
+use crate::service_ensure as ensure;
 use serde_json::Value;
 
 pub trait SettingsHook {
@@ -19,7 +20,7 @@ impl<H: SettingsHook> SettingsService<H> {
         validate(key)?;
         ensure!(
             serde_json::to_vec(&value)?.len() <= crate::storage::MAX_SETTING_BYTES,
-            "setting exceeds 32 MiB"
+            TooLarge; "setting exceeds 32 MiB"
         );
         self.0.apply(key, Some(value))
     }

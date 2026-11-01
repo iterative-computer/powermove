@@ -1,6 +1,7 @@
 //! Inspectable import state machine and exact, content-addressed CPU artifact cache.
+use crate::error::{Context, Result};
+use crate::service_ensure as ensure;
 use crate::storage::{ServiceStorage, component, digest, generations, read_capped};
-use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -245,7 +246,7 @@ impl ArtifactCache {
         );
         ensure!(
             key.decoder_version.len() <= 128 && key.colour_pipeline.len() <= 128,
-            "artifact identity too large"
+            TooLarge; "artifact identity too large"
         );
         Ok(digest(&serde_json::to_vec(key)?))
     }
@@ -255,7 +256,7 @@ impl ArtifactCache {
         key: ArtifactKey,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        ensure!(bytes.len() <= self.max_bytes, "artifact too large");
+        ensure!(bytes.len() <= self.max_bytes, TooLarge; "artifact too large");
         let dir = storage.directory("artifacts", &self.key(&key)?)?;
         let record = Artifact {
             key,

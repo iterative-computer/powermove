@@ -1,5 +1,7 @@
 //! Immutable generations: a failed publication cannot destroy a previous value.
-use anyhow::{Context, Result, bail, ensure};
+use crate::error::{Context, Result};
+use crate::service_bail as bail;
+use crate::service_ensure as ensure;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -130,7 +132,7 @@ impl ServiceStorage {
         if let Some(value) = &value {
             ensure!(
                 serde_json::to_vec(value)?.len() <= MAX_SETTING_BYTES,
-                "setting exceeds 32 MiB"
+                TooLarge; "setting exceeds 32 MiB"
             );
         }
         // Refuse to cover up corrupt latest state. Recovery is explicit.
@@ -298,7 +300,7 @@ pub(crate) fn read_capped(path: &Path, max: usize) -> Result<Vec<u8>> {
         .take(max as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > max {
-        bail!("service payload too large")
+        bail!(TooLarge; "service payload too large")
     }
     if path
         .extension()

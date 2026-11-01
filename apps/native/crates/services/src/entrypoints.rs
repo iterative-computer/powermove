@@ -1,5 +1,6 @@
 //! LaunchServices hooks and cold-start deep-link routing, without AppKit on Linux.
-use anyhow::{Context, Result, ensure};
+use crate::error::{Context, Result};
+use crate::service_ensure as ensure;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -19,8 +20,13 @@ impl AuthLink {
         &self.token
     }
     pub fn parse(raw: &str) -> Result<Self> {
-        ensure!(raw.len() <= 16 * 1024, "deep link too long");
-        let url = Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid auth link"))?;
+        ensure!(raw.len() <= 16 * 1024, TooLarge; "deep link too long");
+        let url = Url::parse(raw).map_err(|_| {
+            crate::error::ServiceError::message(
+                crate::error::ServiceErrorCode::InvalidInput,
+                "invalid auth link",
+            )
+        })?;
         ensure!(
             url.scheme() == "powermove"
                 && url.host_str() == Some("auth")
@@ -95,7 +101,7 @@ impl EntryQueue {
                 && path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("pmv")),
-            "expected absolute .pmv file"
+            InvalidProject; "expected absolute .pmv file"
         );
         if !self.files.contains(&path) {
             self.files.push_back(path);

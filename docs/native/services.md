@@ -169,3 +169,18 @@ behavior; crash recovery and shutdown flush; signed TR/migration receipt, minimu
 OS routing and final Electron-compatible metadata. AppKit, WebKit, GPUI and signed
 updater behavior were not run or simulated as passed on Linux. No feed, tag,
 release, publication, or production updater was changed.
+
+## Design review follow-up
+
+The governing review is [na-cloud-services](design/reviews/na-cloud-services.md).
+This lane supplies data contracts only; shell rendering remains with its owner.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 1 — typed UI errors | Every fallible service and host hook uses `Result<T, ServiceError>`. `ServiceErrorCode` is stable, serializable data; Display/Debug/source remain developer diagnostics and must never be used as UI copy. I/O and HTTP failures have typed classifications, bounds use `TooLarge`, invalid PMV admission uses `InvalidProject`, and worker initialization/task failures retain codes. The UI owns localized sentence-case copy and project-name substitution. N1 useful failures, N3 explicit meaning, N7 inspectable codes, N8 nonblocking worker. |
+
+At this step **63 tests pass** (the original 58 plus five error regression tests),
+with strict crate Clippy and formatting checks. No user-facing error sentences
+were invented or renderer/theme files changed. Host adapters must now return the
+typed service result and select copy by code; `anyhow` conversion remains available
+for legacy host failures, preserving nested typed/I/O codes without text matching.

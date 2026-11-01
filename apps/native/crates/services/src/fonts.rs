@@ -1,5 +1,5 @@
 //! v1.2.0 font cache: cache only a nonempty enumeration at a stable registry version.
-use anyhow::Result;
+use crate::error::Result;
 
 pub trait FontHook {
     fn version(&mut self) -> Result<Option<u64>>;

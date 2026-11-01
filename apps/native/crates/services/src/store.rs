@@ -1,7 +1,8 @@
 //! Read-only Store transport + install/update metadata, never a publisher.
 //! Authentication belongs in the host transport; requests/results here carry no secrets.
+use crate::error::{Context, Result};
+use crate::service_ensure as ensure;
 use crate::{media::validate_hash, storage::component};
-use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use url::Url;
@@ -160,15 +161,28 @@ impl<T: StoreTransport> StoreClient<T> {
         let response = self
             .transport
             .send(Request { method, url, body }, MAX_JSON)?;
-        ensure!(response.body.len() <= MAX_JSON, "Store response too large");
-        ensure!(
-            response.status == 200,
-            "Store metadata request failed (HTTP {})",
-            response.status
-        );
+        ensure!(response.body.len() <= MAX_JSON, TooLarge; "Store response too large");
+        if response.status != 200 {
+            use crate::error::{ServiceError, ServiceErrorCode};
+            let code = match response.status {
+                401 | 403 => ServiceErrorCode::PermissionDenied,
+                404 | 410 => ServiceErrorCode::NotFound,
+                413 => ServiceErrorCode::TooLarge,
+                408 | 502..=504 => ServiceErrorCode::Offline,
+                _ => ServiceErrorCode::Unavailable,
+            };
+            return Err(ServiceError::message(
+                code,
+                format!("Store metadata request failed (HTTP {})", response.status),
+            ));
+        }
         // Never echo a server body in an error (it may contain account details).
-        serde_json::from_slice(&response.body)
-            .map_err(|_| anyhow::anyhow!("invalid Store metadata response"))
+        serde_json::from_slice(&response.body).map_err(|_| {
+            crate::error::ServiceError::message(
+                crate::error::ServiceErrorCode::InvalidData,
+                "invalid Store metadata response",
+            )
+        })
     }
     pub fn search(&mut self, search: Search) -> Result<SearchPage> {
         ensure!(
@@ -177,7 +191,7 @@ impl<T: StoreTransport> StoreClient<T> {
         );
         let mut query = Vec::new();
         if let Some(q) = search.query {
-            ensure!(q.len() <= 4096, "query too long");
+            ensure!(q.len() <= 4096, TooLarge; "query too long");
             query.push(("q", q));
         }
         if let Some(category) = search.category {
@@ -204,7 +218,7 @@ impl<T: StoreTransport> StoreClient<T> {
             query.push(("sort", sort));
         }
         if let Some(cursor) = search.cursor {
-            ensure!(cursor.len() <= 4096, "cursor too long");
+            ensure!(cursor.len() <= 4096, TooLarge; "cursor too long");
             query.push(("cursor", cursor));
         }
         if let Some(limit) = search.limit {
@@ -245,7 +259,7 @@ impl<T: StoreTransport> StoreClient<T> {
         Ok(page)
     }
     pub fn versions(&mut self, installed: &[InstalledRelease]) -> Result<Vec<VersionMetadata>> {
-        ensure!(installed.len() <= 200, "version batch exceeds 200");
+        ensure!(installed.len() <= 200, TooLarge; "version batch exceeds 200");
         let mut ids = std::collections::BTreeSet::new();
         for item in installed {
             uuid(&item.repo_id)?;

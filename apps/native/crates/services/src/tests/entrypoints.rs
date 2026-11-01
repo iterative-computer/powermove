@@ -1,5 +1,6 @@
 use crate::entrypoints;
-use anyhow::{Result, bail};
+use crate::error::Result;
+use crate::service_bail as bail;
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]

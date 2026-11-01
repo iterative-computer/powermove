@@ -1,5 +1,6 @@
 //! Kernel-owned library/recents/autosave: never open a second document writer.
-use anyhow::{Result, ensure};
+use crate::error::Result;
+use crate::service_ensure as ensure;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

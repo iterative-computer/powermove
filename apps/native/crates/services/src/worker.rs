@@ -1,8 +1,9 @@
 //! Dedicated Rust worker. Submit/poll never wait for I/O or JavaScript.
-use anyhow::{Result, anyhow};
+use crate::error::Result;
+use crate::error::{ServiceError, ServiceErrorCode};
 use std::{sync::mpsc, thread};
 
-type Task<T> = Box<dyn FnOnce(&mut T) + Send>;
+type Task<T> = Box<dyn FnOnce(&mut Result<T>) + Send>;
 pub struct ServiceWorker<T> {
     sender: mpsc::SyncSender<Task<T>>,
 }
@@ -18,11 +19,8 @@ impl<T: Send + 'static> ServiceWorker<T> {
             .name("pm-services".into())
             .spawn(move || {
                 let mut state = init();
-                // A failed init closes the channel, making queued receivers report failure.
-                if let Ok(state) = &mut state {
-                    while let Ok(task) = receiver.recv() {
-                        task(state);
-                    }
+                while let Ok(task) = receiver.recv() {
+                    task(&mut state);
                 }
             })?;
         Ok(Self { sender })
@@ -35,9 +33,18 @@ impl<T: Send + 'static> ServiceWorker<T> {
         let (sender, receiver) = mpsc::channel();
         self.sender
             .try_send(Box::new(move |state| {
-                let _ = sender.send(task(state));
+                let result = match state {
+                    Ok(state) => task(state),
+                    Err(error) => Err(ServiceError::message(error.code, error.to_string())),
+                };
+                let _ = sender.send(result);
             }))
-            .map_err(|_| anyhow!("service worker unavailable or queue full"))?;
+            .map_err(|_| {
+                ServiceError::message(
+                    ServiceErrorCode::Unavailable,
+                    "service worker unavailable or queue full",
+                )
+            })?;
         Ok(Pending { receiver })
     }
 }
@@ -47,9 +54,10 @@ impl<T> Pending<T> {
         match self.receiver.try_recv() {
             Ok(value) => value.map(Some),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err(anyhow!("service worker stopped before replying"))
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(ServiceError::message(
+                ServiceErrorCode::Unavailable,
+                "service worker stopped before replying",
+            )),
         }
     }
 }

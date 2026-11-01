@@ -1,5 +1,5 @@
+use crate::error::Result;
 use crate::store;
-use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
@@ -31,7 +31,7 @@ impl store::StoreTransport for TransportDouble {
         self.requests.push(request);
         self.responses
             .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("unexpected request"))
+            .ok_or_else(|| crate::ServiceError::from(anyhow::anyhow!("unexpected request")))
     }
 }
 fn installed() -> store::InstalledRelease {
@@ -344,4 +344,55 @@ fn nullable_store_fields_are_required_in_wire_metadata() {
             .install_plan(installed())
             .is_err()
     );
+}
+
+#[test]
+fn store_errors_have_typed_codes_without_server_body_copy() {
+    use crate::ServiceErrorCode as Code;
+    assert_eq!(
+        store::StoreClient::new("http://registry.invalid", TransportDouble::default())
+            .err()
+            .unwrap()
+            .code,
+        Code::InvalidInput
+    );
+    for (status, code) in [
+        (403, Code::PermissionDenied),
+        (404, Code::NotFound),
+        (413, Code::TooLarge),
+        (503, Code::Offline),
+        (500, Code::Unavailable),
+    ] {
+        let mut client = store::StoreClient::new(
+            "https://registry.invalid",
+            TransportDouble {
+                responses: VecDeque::from([store::Response {
+                    status,
+                    body: b"synthetic private response".to_vec(),
+                }]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = client.search(store::Search::default()).unwrap_err();
+        assert_eq!(error.code, code);
+        assert!(!error.to_string().contains("synthetic private response"));
+    }
+    for (body, code) in [
+        (vec![b'x'; 4 * 1024 * 1024 + 1], Code::TooLarge),
+        (b"invalid JSON".to_vec(), Code::InvalidData),
+    ] {
+        let mut client = store::StoreClient::new(
+            "https://registry.invalid",
+            TransportDouble {
+                responses: VecDeque::from([store::Response { status: 200, body }]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            client.search(store::Search::default()).unwrap_err().code,
+            code
+        );
+    }
 }

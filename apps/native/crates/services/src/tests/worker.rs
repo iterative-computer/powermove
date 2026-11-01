@@ -1,5 +1,6 @@
+use crate::error::Result;
+use crate::service_bail as bail;
 use crate::worker;
-use anyhow::{Result, bail};
 
 fn await_pending<T>(pending: &worker::Pending<T>) -> Result<T> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);

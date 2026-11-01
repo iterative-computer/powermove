@@ -1,6 +1,7 @@
 use super::test_storage;
+use crate::error::Result;
+use crate::service_bail as bail;
 use crate::{media, storage};
-use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -78,7 +79,11 @@ fn failed_probe_or_admission_is_retryable_without_false_success() {
     let mut host = MediaDouble::default();
     assert!(
         queue
-            .finish(ticket, Err(anyhow::anyhow!("probe failed")), &mut host)
+            .finish(
+                ticket,
+                Err(anyhow::anyhow!("probe failed").into()),
+                &mut host
+            )
             .is_err()
     );
     assert_eq!(queue.get("job").unwrap().state, media::ImportState::Failed);

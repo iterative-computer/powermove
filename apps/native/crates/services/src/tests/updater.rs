@@ -1,5 +1,6 @@
+use crate::error::Result;
+use crate::service_bail as bail;
 use crate::updater;
-use anyhow::{Result, bail};
 
 #[derive(Default)]
 struct FeedDouble {
