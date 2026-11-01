@@ -122,6 +122,7 @@ pub struct Catalog {
     pub assets: BTreeMap<String, Asset>,
     pub folders: BTreeMap<String, Folder>,
     pub compositions: BTreeMap<String, Composition>,
+    pub(crate) asset_order: Vec<String>,
     pub(crate) root: Arc<Value>,
     children: HashMap<Option<String>, Vec<String>>,
     pub(crate) composition_order: Vec<String>,
@@ -330,15 +331,33 @@ impl Catalog {
         let mut composition_order: Vec<_> = compositions.keys().cloned().collect();
         composition_order
             .sort_by(|a, b| compare(&compositions[a].name, &compositions[b].name).then(a.cmp(b)));
+        let asset_order = assets.keys().cloned().collect();
         Ok(Self {
             stamp,
             assets,
             folders,
             compositions,
+            asset_order,
             composition_order,
             root: Arc::new(root),
             children,
         })
+    }
+    /// Preserve an explicit imported enumeration supplied by the host. A
+    /// canonical object alone cannot recover JavaScript insertion order. The
+    /// hint must cover every asset exactly once; never guess chronology by id.
+    pub fn with_asset_order(mut self, ids: Vec<String>) -> Result<Self, Error> {
+        if ids.len() != self.assets.len()
+            || ids.iter().any(|id| !self.assets.contains_key(id))
+            || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+        {
+            return Err(Error::InvalidTarget);
+        }
+        self.asset_order = ids;
+        Ok(self)
+    }
+    pub fn asset_ids(&self) -> &[String] {
+        &self.asset_order
     }
     pub fn valid_folder(&self, id: Option<&str>) -> Option<String> {
         id.filter(|id| self.folders.contains_key(*id))
@@ -356,7 +375,25 @@ impl Catalog {
         out
     }
     pub fn within(&self, at: Option<&str>, ancestor: &str) -> bool {
-        self.path(at).iter().any(|f| f.id == ancestor)
+        // Navigation flattens damaged cycles, but drop validation must still
+        // inspect raw ancestry so it cannot admit a self/descendant move.
+        let mut at = self.valid_folder(at);
+        let mut seen = HashSet::new();
+        while let Some(id) = at {
+            if id == ancestor {
+                return true;
+            }
+            if !seen.insert(id.clone()) {
+                break;
+            }
+            at = self.valid_folder(
+                self.root
+                    .get("assetFolders")
+                    .and_then(|f| f.get(&id))
+                    .and_then(|f| text(f, "parent")),
+            );
+        }
+        false
     }
     pub fn contains(&self, id: &ItemId) -> bool {
         match id {
@@ -430,16 +467,20 @@ pub(crate) fn layers(root: &Value) -> impl Iterator<Item = &Value> {
         })
 }
 pub(crate) fn layer_asset(l: &Value) -> Option<&str> {
-    l.get("d").and_then(|d| text(d, "asset")).or_else(|| {
-        if text(l, "type") != Some("extension") {
-            return None;
-        }
-        let d = l.get("d")?.get("data")?;
-        d.get("object")
-            .and_then(|o| o.get("source"))
-            .and_then(|s| text(s, "assetId"))
-            .or_else(|| text(d, "assetId"))
-    })
+    l.get("d")
+        .and_then(|d| text(d, "asset"))
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if text(l, "type") != Some("extension") {
+                return None;
+            }
+            let d = l.get("d")?.get("data")?;
+            d.get("object")
+                .and_then(|o| o.get("source"))
+                .and_then(|s| text(s, "assetId"))
+                .filter(|s| !s.is_empty())
+                .or_else(|| text(d, "assetId"))
+        })
 }
 fn reference_counts(root: &Value) -> HashMap<String, usize> {
     let mut out = HashMap::new();

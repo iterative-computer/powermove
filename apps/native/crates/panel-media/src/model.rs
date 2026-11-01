@@ -315,8 +315,9 @@ impl MediaPanel {
             }
         }
         self.asset_order = c
-            .assets
-            .values()
+            .asset_order
+            .iter()
+            .map(|id| &c.assets[id])
             .filter(|a| {
                 if a.folder != self.folder {
                     return false;

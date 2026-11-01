@@ -1206,6 +1206,16 @@ fn corrupt_bin_cycles_and_orphans_remain_accessible() {
     assert_eq!(c.folders.len(), 3);
     assert!(c.folders.values().all(|f| f.parent.is_none()));
     assert!(c.assets["a"].folder.is_none());
+    assert!(c.within(Some("a"), "b"));
+    assert_eq!(
+        c.prepare(Edit::Move {
+            assets: vec![],
+            folders: vec!["a".into()],
+            target: Some("b".into())
+        })
+        .unwrap_err(),
+        Error::FolderCycle
+    );
 }
 #[test]
 fn bounded_virtual_pages_and_id_navigation_over_sixty_thousand_rows() {
@@ -1707,4 +1717,86 @@ fn nested_delete_button_targets_unselected_asset_and_reveal_button_selects_it() 
     assert_eq!(p.selected_assets(), ["b", "c"]);
     invoke(&mut p, &c, &r, MenuCommand::Reveal("a".into()));
     assert_eq!(p.selected_assets(), ["a"]);
+}
+
+#[test]
+fn explicit_import_order_drives_paging_keyboard_ranges_and_drag_payloads() {
+    let (c, _, r) = setup();
+    let c = c
+        .with_asset_order(["c", "b", "a", "d", "e"].map(str::to_owned).to_vec())
+        .unwrap();
+    let mut p = MediaPanel::default();
+    p.refresh(&c, &r);
+    pointer(&mut p, &c, &r, "c", Modifiers::default());
+    key(&mut p, &c, &r, "c", Key::Right, shift());
+    assert_eq!(p.selected_assets(), ["c", "b"]);
+    p.dispatch(
+        &c,
+        &r,
+        Input::DragStart {
+            id: asset("c"),
+            nested_control: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(p.drag.as_ref().unwrap().assets, ["c", "b"]);
+    let page = p.page(&c, &r, 4, 4).unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>(),
+        [asset("c"), asset("b"), asset("a"), asset("d")]
+    );
+}
+
+#[test]
+fn incomplete_or_duplicated_asset_order_hint_is_rejected() {
+    let c = catalog();
+    assert_eq!(
+        c.clone().with_asset_order(vec!["a".into()]).unwrap_err(),
+        Error::InvalidTarget
+    );
+    assert_eq!(
+        c.with_asset_order(["a", "b", "c", "d", "d"].map(str::to_owned).to_vec())
+            .unwrap_err(),
+        Error::InvalidTarget
+    );
+}
+
+#[test]
+fn empty_direct_asset_field_falls_through_to_extension_source() {
+    let mut root = parse(PROJECT).unwrap();
+    root.as_object_mut().unwrap().insert("layers",parse(r#"[{"id":"l","type":"extension","d":{"asset":"","data":{"object":{"source":{"assetId":""}},"assetId":"a"}}}]"#).unwrap());
+    let a = KernelActor::spawn(KernelConfig::default());
+    let h = a.handle();
+    h.open("P", OpenSource::Untitled(root))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let c = current(&h);
+    assert_eq!(c.assets["a"].references, 1);
+    let before = project(&h);
+    applied(
+        &h,
+        &c.prepare(Edit::DeleteAssets {
+            ids: vec!["a".into()],
+            confirmed: true,
+        })
+        .unwrap(),
+    );
+    assert!(
+        project(&h)
+            .get("comps")
+            .unwrap()
+            .get("C1")
+            .unwrap()
+            .get("layers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    history(&h, HistoryCall::Undo);
+    assert_eq!(project(&h), before);
 }
