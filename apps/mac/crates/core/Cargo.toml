@@ -1,0 +1,16 @@
+[package]
+name = "pm-mac-core"
+description = "Powermove for Mac: the single document authority (open/save .pmv, revisions, transactions, undo, selection, synchronous queries)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Pure Rust, no GPUI: panels, the MCP server and extensions share it, and it
+# is fully unit-testable without a window. Engine crates are linked by path
+# (docs/gpui/engine-boundary.md, section 2).
+
+[dependencies]
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-wasm = { path = "../../../../engine/crates/pm-wasm" }
+sha2 = "0.10"
