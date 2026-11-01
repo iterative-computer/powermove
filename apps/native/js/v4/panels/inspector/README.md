@@ -190,3 +190,25 @@ the merges: no failures or skipped tests. Inspector and parent typechecks,
 inspector formatting/browser build, strict inspector Clippy and rustfmt pass.
 The test probe's target path uses file-URL decoding, including spaces and URL
 delimiters; the runner retains no assumptions about macOS system temp links.
+
+## Frozen-contract verification (2026-11-01)
+
+Merged the frozen `origin/feat/native-engine` commit
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005`, which contains the v4 integration
+branch. The frozen `v4-api.md`, `ui-kit.md`, surface sources and JS API sources
+match this panel's previously merged contract; no panel code adaptation or
+lockfile update was necessary. This merge has no conflicts.
+
+Re-ran the same locked Rust gate: **215 passed** (110 inspector, 95 surface,
+10 design). Parent v4: **215 passed**, including **43 inspector tests and
+21 snapshots**. The frozen wire evaluation also passes **40/40**, with zero
+failures/pending cases; its 10 owner fixtures retain their explicit production
+integration blocks. Typechecks, strict inspector Clippy, rustfmt, inspector
+Prettier and browser bundle all pass.
+
+**API requests:** G1–G6 above remain requests for application integration and
+additive UI-kit/native-service capabilities. They do not change or reopen the
+frozen contract. No edits were made to `crates/surface` or `js/v4/src`.
+Decisions: preserve the frozen shape (N3 and orchestrator freeze authority),
+retain existing consumers (N4/N6 and prune rule), and keep all publication/edit
+routes asynchronous (N7/N8). D1/D2 and the macOS review gates remain unchanged.
