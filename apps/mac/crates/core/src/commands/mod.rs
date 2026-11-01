@@ -74,8 +74,10 @@ use pm_model::{Node, Op};
 
 use crate::error::CommandError;
 
+mod channels;
 mod cx;
 mod spine;
+mod track;
 #[allow(dead_code)] // helpers for the commands being ported
 mod values;
 

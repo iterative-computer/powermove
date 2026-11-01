@@ -18,3 +18,5 @@ sha2 = "0.10"
 # math, both already linked through pm-wasm.
 pm-edit = { path = "../../../../engine/crates/pm-edit" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
+# Expression validation (`expressionDiagnostic`).
+pm-expr = { path = "../../../../engine/crates/pm-expr" }
