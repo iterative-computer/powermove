@@ -103,8 +103,8 @@ fn picture(frame: u64, alpha: bool) -> Vec<f32> {
         })
         .collect()
 }
-fn write(s: ExportSpec) -> Delivered {
-    let mut job = if matches!(s.codec, Codec::Png { .. }) {
+fn portable_export(s: ExportSpec) -> Export {
+    if matches!(s.codec, Codec::Png { .. }) {
         pm_export::export(s.clone()).unwrap()
     } else {
         Pipeline::new(
@@ -112,7 +112,11 @@ fn write(s: ExportSpec) -> Delivered {
             OutputSink::Software(Box::new(software::SoftwareSink::new(&s).unwrap())),
         )
         .unwrap()
-    };
+    }
+}
+
+fn write(s: ExportSpec) -> Delivered {
+    let mut job = portable_export(s.clone());
     for i in 0..s.frames {
         let rgba = picture(i, s.alpha != AlphaOutput::None);
         job.push_frame(&WorkingFrame {
@@ -159,7 +163,7 @@ fn decode(path: &Path, pix: &str) -> Vec<u8> {
 }
 #[test]
 fn every_prores_profile_and_alpha_survives_an_opaque_first_frame() {
-    if !codecs_available(&["prores_ks"], &[]) {
+    if !codecs_available(&["prores_ks"], &["prores"]) {
         return;
     }
     for p in [
@@ -201,7 +205,7 @@ fn every_prores_profile_and_alpha_survives_an_opaque_first_frame() {
 }
 #[test]
 fn h264_quality_tiers_and_hevc_depths() {
-    if !codecs_available(&["libx264", "libx265"], &[]) {
+    if !codecs_available(&["libx264", "libx265"], &["h264", "hevc"]) {
         return;
     }
     for codec in [
@@ -233,7 +237,7 @@ fn h264_quality_tiers_and_hevc_depths() {
 }
 #[test]
 fn pq_and_hlg_are_encoded_and_tagged_as_bt2100() {
-    if !codecs_available(&["libx265"], &[]) {
+    if !codecs_available(&["libx265"], &["hevc"]) {
         return;
     }
     for tags in [
@@ -420,7 +424,7 @@ fn cancellation_drop_and_spawn_failure_preserve_destination_and_clean_work() {
     );
     std::fs::write(&s.destination, b"original").unwrap();
     s.overwrite = Overwrite::Replace;
-    let mut job = export(s.clone()).unwrap();
+    let mut job = portable_export(s.clone());
     for _ in 0..s.frames {
         job.push_frame(&WorkingFrame {
             width: 96,
@@ -434,7 +438,7 @@ fn cancellation_drop_and_spawn_failure_preserve_destination_and_clean_work() {
         Err(Error::Cancelled)
     ));
     assert_eq!(std::fs::read(&s.destination).unwrap(), b"original");
-    drop(export(s.clone()).unwrap());
+    drop(portable_export(s.clone()));
     let tools = software::SoftwareTools {
         ffmpeg: t.0.join("missing-ffmpeg"),
         ffprobe: "ffprobe".into(),
@@ -462,7 +466,7 @@ fn unsupported_hevc_alpha_and_eight_bit_hdr_fail_before_work() {
 }
 #[test]
 fn mov_timecode_is_carried_to_delivery() {
-    if !codecs_available(&["prores_ks"], &[]) {
+    if !codecs_available(&["prores_ks"], &["prores"]) {
         return;
     }
     let t = Temp::new();
@@ -478,7 +482,7 @@ fn mov_timecode_is_carried_to_delivery() {
 }
 #[test]
 fn shipped_v120_mp4_and_prores_decode_comparison() {
-    if !codecs_available(&["prores_ks", "libx264"], &[]) {
+    if !codecs_available(&["prores_ks", "libx264"], &["prores", "h264"]) {
         return;
     }
     for prores in [false, true] {
@@ -585,7 +589,7 @@ fn shipped_v120_mp4_and_prores_decode_comparison() {
 
 #[test]
 fn hdr_neutral_highlights_decode_to_standard_signal_values() {
-    if !codecs_available(&["libx265"], &[]) {
+    if !codecs_available(&["libx265"], &["hevc"]) {
         return;
     }
     for (tags, levels, signals) in [

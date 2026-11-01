@@ -677,7 +677,8 @@ silent; unrelated shape or source failures keep their existing behavior.
 Branch: `feat/na-cloud-export`. This section records Linux software delivery;
 **the whole-app export parity gate remains open**. It does not supersede the
 historical measurements above or claim that macOS/renderer tests ran on Linux.
-Only `engine/crates/pm-export/**` and this document changed in this lane.
+Changes stay in `engine/crates/pm-export/**` and this document, plus the
+explicitly authorized native-workspace lockfile dependency edge.
 
 ### Frozen reference and decisions
 
@@ -739,8 +740,10 @@ it. Only a verified output is committed.
 The host must supply an appropriate FFmpeg/ffprobe build with the requested
 software codecs. **The app's existing LGPL FFmpeg build does not include
 libx264/libx265/prores_ks; this lane does not change its licensing or bundle
-GPL encoders into the macOS app.** No new dependency versions or lockfile edits
-were needed; the existing `engine/Cargo.lock` passes `--locked`.
+GPL encoders into the macOS app.** No dependency versions changed. `engine/Cargo.lock` remains unchanged; the
+native-workspace lock adds only pm-export's already-pinned `serde_json` production
+dependency edge. Both workspace checks use `--locked`. The native consumer was also checked with
+`cargo check --manifest-path apps/native/Cargo.toml --locked -p pm-export --lib`.
 
 ### Option → status matrix
 

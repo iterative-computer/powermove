@@ -4630,6 +4630,7 @@ dependencies = [
  "pm-render",
  "pm-time",
  "png",
+ "serde_json",
  "thiserror 2.0.21",
  "wgpu",
 ]
