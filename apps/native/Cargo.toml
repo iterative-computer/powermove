@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spikes/s2"]
+members = ["spikes/*", "crates/*"]
 exclude = ["vendor/gpui-ce"]
 
 [profile.dev]
