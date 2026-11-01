@@ -249,6 +249,21 @@ impl OutputBinding {
                     )),
                     None,
                 );
+            // NSWindow.screen is not documented as KVO-compliant: a window
+            // dragged to another display (EDR headroom, display id) is only
+            // reliably reported by these window notifications.
+            for name in [
+                "NSWindowDidChangeScreenNotification",
+                "NSWindowDidChangeBackingPropertiesNotification",
+            ] {
+                objc2_foundation::NSNotificationCenter::defaultCenter()
+                    .addObserver_selector_name_object(
+                        &observer,
+                        sel!(screenChanged:),
+                        Some(&NSString::from_str(name)),
+                        Some(AsRef::<AnyObject>::as_ref(window)),
+                    );
+            }
         }
         Self { observer }
     }
