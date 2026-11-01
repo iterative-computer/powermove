@@ -47,6 +47,17 @@ jobs:
           rustup toolchain install 1.96.1 --profile minimal
           brew install llvm@21
           echo "LIBCLANG_PATH=$(brew --prefix llvm@21)/lib" >> "$GITHUB_ENV"
+      - name: Stabilize pinned-source timestamps for the GN cache
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import os, pathlib, subprocess
+          root = pathlib.Path('upstream-v8')
+          stamp = int(subprocess.check_output(['git', '-C', str(root), 'show', '-s', '--format=%ct', 'HEAD']))
+          files = subprocess.check_output(['git', '-C', str(root), 'ls-files', '--recurse-submodules', '-z']).split(b'\0')
+          for name in filter(None, files):
+              os.utime(root / os.fsdecode(name), (stamp, stamp), follow_symlinks=False)
+          PYCODE
       - uses: actions/cache@v4
         with:
           path: |

@@ -24,3 +24,7 @@ incremental = false
 
 [profile.release]
 debug = 0
+
+# Rust 1.96 strip=debuginfo misaligns LINKEDIT on macOS 27 (rust-lang/rust#157750).
+[profile.release.build-override]
+strip = false

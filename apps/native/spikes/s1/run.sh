@@ -13,6 +13,8 @@ codesign --display --entitlements :- "$bin"
 "$bin" --js "$PWD/jit.js"
 npm ci --ignore-scripts --no-audit --no-fund
 npm run bundle
-for fixture in preact react compiler; do
+for fixture in preact react; do
   "$bin" --js "$PWD/.generated/$fixture.js"
 done
+"$bin" --compiler "$PWD/.generated/compiler.js"
+"$bin" --compiler-snapshot "$PWD/.generated/compiler.js"

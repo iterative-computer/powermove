@@ -64,12 +64,109 @@ fn eval_text(i: &mut v8::Isolate, c: &v8::Global<v8::Context>, code: &str) -> Op
         eprintln!("JS: {}", e.to_rust_string_lossy(s));
     }
     s.perform_microtask_checkpoint();
+    if let Some(limit) = s.get_slot::<ExternalTaskLimit>().map(|p| p.0)
+        && s.get_heap_statistics().external_memory() > limit
+    {
+        s.terminate_execution();
+        return None;
+    }
     out
 }
 fn now_callback(_s: &mut v8::PinScope, _a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     rv.set_double(START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0);
 }
+#[derive(Clone)]
+struct HostIo {
+    address: std::net::SocketAddr,
+    path: std::path::PathBuf,
+}
+fn io_callback(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let kind = a.get(0).to_rust_string_lossy(s);
+    let host = s.get_slot::<HostIo>().cloned();
+    let result = (|| -> std::io::Result<bool> {
+        let Some(host) = host else { return Ok(false) };
+        match kind.as_str() {
+            "file" => {
+                std::fs::write(host.path, b"S1")?;
+                Ok(true)
+            }
+            "network" => {
+                let mut stream =
+                    std::net::TcpStream::connect_timeout(&host.address, Duration::from_secs(1))?;
+                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                stream.write_all(b"S1")?;
+                let mut ack = [0; 2];
+                stream.read_exact(&mut ack)?;
+                Ok(ack == *b"OK")
+            }
+            _ => Ok(false),
+        }
+    })();
+    rv.set_bool(result.unwrap_or(false));
+}
+fn effects() {
+    let root = std::env::temp_dir().join(format!(
+        "pm-s1-effects-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let path = root.join("synthetic-effect");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut data = [0; 2];
+                    return stream.read_exact(&mut data).is_ok()
+                        && data == *b"S1"
+                        && stream.write_all(b"OK").is_ok();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(_) => return false,
+            }
+        }
+        false
+    });
+    let blob = snapshot("extension");
+    let mut i = isolate(&blob, 64 * MIB);
+    i.set_slot(HostIo {
+        address,
+        path: path.clone(),
+    });
+    let c = context(&mut i);
+    eval_text(&mut i, &c, include_str!("../effects.js")).unwrap();
+    let result = eval_text(&mut i, &c, "effectResult").unwrap();
+    let mut result: Value = serde_json::from_str(&result).unwrap();
+    assert!(server.join().unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), b"S1");
+    result["irreversible_file_verified"] = json!(true);
+    result["loopback_network_verified"] = json!(true);
+    emit(result);
+    drop(c);
+    drop(i);
+}
+struct ExternalTaskLimit(usize);
 #[derive(Default)]
 struct ExternalQuota {
     used: usize,
@@ -102,8 +199,19 @@ fn external_quota(blob: &[u8]) {
     assert!(quota.allocate(&mut i, 2 * MIB).is_err());
     let measured = i.get_heap_statistics().external_memory();
     drop(backing); // The reservation is conservatively held until generation retirement.
+    i.set_slot(ExternalTaskLimit(2 * MIB));
+    let c = context(&mut i);
+    assert!(
+        eval_text(
+            &mut i,
+            &c,
+            "globalThis.overQuota=new Uint8Array(3*1024*1024); 1"
+        )
+        .is_none()
+    );
+    drop(c);
     emit(
-        json!({"probe":"external-quota","limit":2*MIB,"reserved":quota.used,"v8_external_bytes":measured,"over_limit_rejected_before_allocation":true,"scope":"host buffers; JS external usage sampled after tasks"}),
+        json!({"probe":"external-quota","limit":2*MIB,"reserved":quota.used,"v8_external_bytes":measured,"over_limit_rejected_before_allocation":true,"js_task_boundary_limit_terminated":true,"scope":"host buffers; JS external usage sampled after tasks"}),
     );
 }
 static CAGE_USED: AtomicUsize = AtomicUsize::new(0);
@@ -131,17 +239,29 @@ fn context(i: &mut v8::Isolate) -> v8::Global<v8::Context> {
         let f = v8::Function::new(cs, now_callback).unwrap();
         let k = v8::String::new(cs, "hostNow").unwrap();
         c.global(cs).set(cs, k.into(), f.into()).unwrap();
+        let f = v8::Function::new(cs, io_callback).unwrap();
+        let k = v8::String::new(cs, "hostExternalIO").unwrap();
+        c.global(cs).set(cs, k.into(), f.into()).unwrap();
     }
     v8::Global::new(s, c)
 }
 fn snapshot(kind: &str) -> Vec<u8> {
-    let mut i = v8::Isolate::snapshot_creator(None, None);
+    snapshot_bootstrap(kind, None)
+}
+fn snapshot_bootstrap(kind: &str, bootstrap: Option<&str>) -> Vec<u8> {
+    let mut i = v8::Isolate::snapshot_creator(
+        None,
+        Some(v8::CreateParams::default().heap_limits(0, 192 * MIB)),
+    );
     {
         v8::scope!(let s,&mut i);
         let c = v8::Context::new(s, Default::default());
         {
             let cs = &mut v8::ContextScope::new(s, c);
             eval(cs,&format!("globalThis.kind={kind:?}; globalThis.storage={{counter:7}}; globalThis.hot={{data:{{counter:0}}}}; globalThis.microtasks=0;")).unwrap();
+            if let Some(code) = bootstrap {
+                eval(cs, code).expect("snapshot bootstrap failed");
+            }
         }
         s.set_default_context(c);
     }
@@ -156,6 +276,7 @@ fn isolate(blob: &[u8], cap: usize) -> v8::OwnedIsolate {
             .heap_limits(0, cap),
     );
     i.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+    i.set_slot(ExternalTaskLimit(16 * MIB));
     i
 }
 fn snapshot_cache_buffers() -> Vec<u8> {
@@ -290,6 +411,54 @@ fn snapshot_cache_buffers() -> Vec<u8> {
     );
     drop(c);
     drop(i);
+    for consume in [false, true] {
+        let mut timings = Vec::new();
+        for _ in 0..30 {
+            let mut i = isolate(&chosen, 64 * MIB);
+            let c = context(&mut i);
+            {
+                v8::scope!(let hs,&mut i);
+                let ctx = v8::Local::new(hs, &c);
+                let scope = &mut v8::ContextScope::new(hs, ctx);
+                let text = v8::String::new(scope, code).unwrap();
+                let mut src = if consume {
+                    v8::script_compiler::Source::new_with_cached_data(
+                        text,
+                        None,
+                        v8::script_compiler::CachedData::new(&cache),
+                    )
+                } else {
+                    v8::script_compiler::Source::new(text, None)
+                };
+                let t = Instant::now();
+                let script = v8::script_compiler::compile_unbound_script(
+                    scope,
+                    &mut src,
+                    if consume {
+                        v8::script_compiler::CompileOptions::ConsumeCodeCache
+                    } else {
+                        v8::script_compiler::CompileOptions::EagerCompile
+                    },
+                    v8::script_compiler::NoCacheReason::NoReason,
+                )
+                .unwrap();
+                timings.push(elapsed(t));
+                assert_eq!(
+                    script
+                        .bind_to_current_context(scope)
+                        .run(scope)
+                        .unwrap()
+                        .int32_value(scope),
+                    Some(43)
+                );
+            }
+            drop(c);
+            drop(i);
+        }
+        emit(
+            json!({"probe":"code-cache-compile","consume":consume,"timings":stats(&timings),"source_bytes":code.len()}),
+        );
+    }
     chosen
 }
 fn watchdog(blob: Vec<u8>) {
@@ -450,6 +619,7 @@ fn reload(blob: &[u8]) {
     let cage_retained = CAGE_USED.load(Ordering::SeqCst);
     assert!(CageReservation::new(3 * 1024 * MIB).is_err());
     let export = generations[0].clone();
+    let active = generations.last().unwrap().clone();
     for g in &generations {
         assert_eq!(g.run("undo()"), (g.id % 251).to_string());
     }
@@ -464,22 +634,56 @@ fn reload(blob: &[u8]) {
     generations.clear();
     assert!(weak.upgrade().is_none());
     assert_eq!(export.run("undo()"), "0");
+    assert_eq!(CAGE_USED.load(Ordering::SeqCst), 128 * MIB);
     let pinned = footprint(std::process::id());
     let weak_export = Arc::downgrade(&export);
     drop(export);
     assert!(weak_export.upgrade().is_none());
+    assert_eq!(active.run("hot.data.counter"), "20");
+    assert_eq!(CAGE_USED.load(Ordering::SeqCst), 64 * MIB);
+    let active_only = footprint(std::process::id());
+    drop(active);
+    assert_eq!(CAGE_USED.load(Ordering::SeqCst), 0);
     let retired = footprint(std::process::id());
     emit(
-        json!({"probe":"reload-history","generations":20,"reload":stats(&timings),"retained_external_bytes":held_external,"physical_footprint":{"before":base,"retained":retained,"export_only":pinned,"all_retired":retired},"all_closures_callable":true,"export_pin_survived_history_retirement":true,"generations_disposed":20,"cage_retained_reserved":cage_retained,"cage_reserved_after_retirement":CAGE_USED.load(Ordering::SeqCst)}),
+        json!({"probe":"reload-history","generations":20,"reload":stats(&timings),"retained_external_bytes":held_external,"physical_footprint":{"before":base,"retained":retained,"active_and_export":pinned,"active_only":active_only,"all_retired":retired},"all_closures_callable":true,"export_pin_survived_history_retirement":true,"active_generation_survived_history_and_export_retirement":true,"generations_disposed":20,"cage_retained_reserved":cage_retained,"cage_reserved_after_retirement":CAGE_USED.load(Ordering::SeqCst)}),
     );
     // Live services need identity, held old implementations, stacked disposal,
     // failed-activation recovery. A fresh whole-cluster isolate loses ===.
     let g = Generation::new(blob, 0, 0);
-    let t = Instant::now();
-    let result = g.run(include_str!("../cluster.js"));
-    assert_eq!(result, "true");
+    let mut times = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        assert_eq!(g.run(include_str!("../cluster.js")), "true");
+        times.push(elapsed(t));
+    }
     emit(
-        json!({"probe":"cluster-reload","ms":elapsed(t),"staged_service_identity":true,"failed_activation_recovered":true,"decision":"staged module replacement within a sync cluster"}),
+        json!({"probe":"cluster-reload","timings":stats(&times),"staged_service_identity":true,"failed_activation_recovered":true,"decision":"staged module replacement within a sync cluster"}),
+    );
+}
+fn compiler_snapshot(path: &str) {
+    let code = std::fs::read_to_string(path).unwrap();
+    let t = Instant::now();
+    let blob = snapshot_bootstrap("compiler", Some(&code));
+    let build_ms = elapsed(t);
+    let mut restore = Vec::new();
+    let mut compile = Vec::new();
+    let mut last = Value::Null;
+    for _ in 0..30 {
+        let t = Instant::now();
+        let mut i = isolate(&blob, 192 * MIB);
+        let c = context(&mut i);
+        restore.push(elapsed(t));
+        let t = Instant::now();
+        let size:usize=eval_text(&mut i,&c,"svelteCompile('<button>snapshot</button>',{filename:'Snapshot.svelte',generate:'client'}).js.code.length").unwrap().parse().unwrap();
+        assert!(size > 0);
+        compile.push(elapsed(t));
+        last = heap(&mut i);
+        drop(c);
+        drop(i);
+    }
+    emit(
+        json!({"probe":"svelte-compiler-snapshot","version":"5.56.10","bytes":blob.len(),"build_ms":build_ms,"restore":stats(&restore),"compile_after_restore":stats(&compile),"heap":last,"bundle_sha256":format!("{:x}",Sha256::digest(code.as_bytes()))}),
     );
 }
 fn run_js_file(blob: &[u8], path: &str) {
@@ -621,9 +825,17 @@ fn child_test(mode: &str) -> Value {
     let output = process.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     if mode == "--fatal-oom" {
-        assert_eq!(output.status.signal(), Some(libc::SIGABRT));
         assert!(
-            stderr.contains("heap out of memory") || stderr.contains("JavaScript heap"),
+            matches!(
+                output.status.signal(),
+                Some(libc::SIGABRT) | Some(libc::SIGTRAP)
+            ),
+            "unexpected helper signal: {:?}; {stderr}",
+            output.status.signal()
+        );
+        assert!(
+            stderr.contains("Fatal JavaScript out of memory")
+                && stderr.contains("Reached heap limit"),
             "not a V8 OOM: {stderr}"
         );
     } else {
@@ -649,18 +861,14 @@ fn main() {
         ),
         "--quota" => quota(),
         "--helper" | "--fatal-oom" => helper(mode, args[2].parse().unwrap()),
-        "--effects" => {
-            let blob = snapshot("extension");
-            let mut i = isolate(&blob, 64 * MIB);
-            let c = context(&mut i);
-            eval_text(&mut i, &c, include_str!("../effects.js")).unwrap();
-            let result = eval_text(&mut i, &c, "effectResult").unwrap();
-            emit(serde_json::from_str(&result).unwrap());
-            drop(c);
-            drop(i);
-        }
-        "--js" => {
-            let blob = snapshot("extension");
+        "--effects" => effects(),
+        "--compiler-snapshot" => compiler_snapshot(&args[2]),
+        "--js" | "--compiler" => {
+            let blob = snapshot(if mode == "--compiler" {
+                "compiler"
+            } else {
+                "extension"
+            });
             run_js_file(&blob, &args[2]);
         }
         "--all" => {
@@ -671,7 +879,10 @@ fn main() {
             watchdog(blob.clone());
             parking(&blob);
             external_quota(&blob);
-            reload(&blob);
+            for wave in 0..5 {
+                emit(json!({"probe":"reload-wave","wave":wave}));
+                reload(&blob);
+            }
             let output = Command::new(std::env::current_exe().unwrap())
                 .arg("--quota")
                 .output()
@@ -709,4 +920,7 @@ fn main() {
         v8::V8::dispose();
     }
     v8::V8::dispose_platform();
+    if mode == "--all" {
+        emit(json!({"probe":"platform-disposed","footprint":footprint(std::process::id())}));
+    }
 }
