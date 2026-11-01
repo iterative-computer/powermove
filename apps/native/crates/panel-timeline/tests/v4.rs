@@ -339,3 +339,77 @@ fn sixty_thousand_real_model_rows_project_only_three_viewports() {
     assert_eq!(value["window"]["rows"][0]["index"], 29_991);
     assert_eq!(value["indexDigits"], 5);
 }
+
+#[test]
+fn property_navigation_uses_model_composition_times_and_does_not_wrap() {
+    let (_actor, mut c) = client();
+    let facts = PropertyFacts::default();
+    let context = v4::Context {
+        time: 0.5,
+        expected_document: c.model.index.doc_id,
+        expected_revision: c.model.index.revision,
+        millis: 0,
+        in_field: false,
+        keys_admitted: true,
+        property_facts: &facts,
+    };
+    let intent =
+        json!({"type":"adjacentKey","layer":"a:[]","path":"opacity","direction":"previous"});
+    assert_eq!(
+        block_on(v4::dispatch(&mut c, &intent, &context)).unwrap(),
+        [HostEffect::Seek(0.)]
+    );
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"adjacentKey","layer":"a:[]","path":"opacity","direction":"next"})
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+#[test]
+fn scale_link_is_undoable_through_the_actual_layer_command() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"scaleLink","layer":"a:[]"})).unwrap();
+    assert!(c.model.index.layer("a:[]").unwrap().scale_linked);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(!c.model.index.layer("a:[]").unwrap().scale_linked);
+}
+#[test]
+fn escape_cancels_an_active_native_preview_before_deselecting() {
+    let (_actor, mut c) = client();
+    let original = c.model.index.layer("a:[]").unwrap().from;
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: vec!["a:[]".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        time_delta: 1.,
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_ne!(c.model.index.layer("a:[]").unwrap().from, original);
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"Escape"}})).unwrap();
+    assert_eq!(c.model.index.layer("a:[]").unwrap().from, original);
+    assert!(c.active_drag().is_none());
+}
+#[test]
+fn window_refreshes_the_actual_kernel_publication_without_an_intervening_client_action() {
+    let (_actor, mut c) = client();
+    block_on(c.kernel.call(
+        "P",
+        pm_kernel::Request::new(
+            Caller::native(),
+            SelectionCall::Layers {
+                ids: vec!["b".into()],
+                add: false,
+            },
+        ),
+    ))
+    .unwrap()
+    .unwrap();
+    assert!(c.model.selection.layers().is_empty());
+    let result = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(result["window"]["rows"][1]["selected"], true);
+}
