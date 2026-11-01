@@ -10,7 +10,7 @@ Decisions follow the execution baseline v6: pro editor expectations first (N1); 
 
 **Plan/source discrepancies are explicit, not waived.** J/K/L shuttle is absent from the tag and exists on the later engine branch. Persistent linked A/V and ripple delete are also absent as editing workflows in the tag. They remain named cutover requirements, with new acceptance groups below. Ordinary trim, a method named slide that moves a strip, transform “Parent/Link Layers”, and an animation named spatial ripple are not evidence of pro slide, linked A/V or ripple editing. Source slip does exist through `edit_video`; no dedicated slip pointer tool ships.
 
-The shipped standalone web-animation export exists at the tag and was later deleted on main. It stays in W1 pending an explicit product disposition; a source deletion alone does not satisfy no-user-left-behind. Existing remote browser/serve workflows are inventoried, with the native plan’s explicit out-of-scope boundary recorded. This is an explicit scope decision, not an assertion that those features did not ship.
+The shipped standalone web-animation export exists at the tag and was later deleted on main. **Disposition (owner decision, 2026-10-29): removed from the product; not a cutover requirement.** The @powermove/player package stays for the website. It stays listed in W1 for traceability. Existing remote browser/serve workflows are inventoried, with the native plan’s explicit out-of-scope boundary recorded. This is an explicit scope decision, not an assertion that those features did not ship.
 
 ## How to execute these acceptance contracts
 
