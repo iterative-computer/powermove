@@ -2,6 +2,7 @@
 mod kernel;
 mod lifecycle;
 mod pixels;
+mod s5b;
 mod server;
 use block2::{DynBlock, RcBlock};
 use objc2::{
@@ -14,8 +15,9 @@ use objc2_app_kit::{
     NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSData, NSDate, NSDefaultRunLoopMode, NSError, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSTimer, NSURL, NSURLRequest, NSURLResponse,
+    NSData, NSDate, NSDefaultRunLoopMode, NSDictionary, NSError, NSHTTPURLResponse, NSObject,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL, NSURLRequest,
+    NSURLResponse,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigation, WKNavigationDelegate, WKUIDelegate, WKURLSchemeHandler,
@@ -99,7 +101,12 @@ define_class!(
                 unsafe {NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.3,false,&callback);}
                 return;
             }
-            scheme_reply(task,b"{\"ok\":true}");
+            let url = unsafe { task.request() }.URL().unwrap();
+            let path = url.path().map(|p|p.to_string()).unwrap_or_default();
+            if path.starts_with("/s5b/") {
+                let (mime, bytes) = self.ivars().s5b.request(&path);
+                scheme_reply_arc(task, bytes, mime, path.contains("/stream/"));
+            } else { scheme_reply(task,b"{\"ok\":true}"); }
         }
         #[unsafe(method(webView:stopURLSchemeTask:))]
         unsafe fn stop(&self, _web: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
@@ -108,19 +115,94 @@ define_class!(
     }
 );
 fn scheme_reply(task: &ProtocolObject<dyn WKURLSchemeTask>, bytes: &[u8]) {
+    scheme_reply_mime(task, bytes, "application/json");
+}
+fn scheme_reply_mime(task: &ProtocolObject<dyn WKURLSchemeTask>, bytes: &[u8], mime: &str) {
     let data = NSData::with_bytes(bytes);
+    scheme_reply_data(task, &[data], mime);
+}
+fn scheme_reply_arc(
+    task: &ProtocolObject<dyn WKURLSchemeTask>,
+    bytes: Arc<Vec<u8>>,
+    mime: &str,
+    stream: bool,
+) {
+    // Each NSData retains the immutable allocation through its deallocator block.
+    // This removes the UI-process NSData copy; WebKit IPC/decode may still copy.
+    let size = if stream {
+        64 * 1024
+    } else {
+        bytes.len().max(1)
+    };
+    let data: Vec<_> = bytes
+        .chunks(size)
+        .map(|chunk| {
+            let keep = bytes.clone();
+            let release = RcBlock::new(move |_: std::ptr::NonNull<std::ffi::c_void>, _: usize| {
+                std::hint::black_box(&keep);
+            });
+            unsafe {
+                NSData::initWithBytesNoCopy_length_deallocator(
+                    NSData::alloc(),
+                    std::ptr::NonNull::new(chunk.as_ptr().cast_mut().cast()).unwrap(),
+                    chunk.len(),
+                    Some(&release),
+                )
+            }
+        })
+        .collect();
+    scheme_reply_data(task, &data, mime);
+}
+fn scheme_reply_data(
+    task: &ProtocolObject<dyn WKURLSchemeTask>,
+    data: &[Retained<NSData>],
+    mime: &str,
+) {
+    let length: usize = data.iter().map(|d| d.len()).sum();
     let response = unsafe {
         NSURLResponse::initWithURL_MIMEType_expectedContentLength_textEncodingName(
             NSURLResponse::alloc(),
             &task.request().URL().unwrap(),
-            Some(&NSString::from_str("application/json")),
-            data.len() as isize,
+            Some(&NSString::from_str(mime)),
+            length as isize,
             Some(&NSString::from_str("utf-8")),
         )
     };
+    let image_response = if mime.starts_with("image/") {
+        let keys = [
+            NSString::from_str("Content-Type"),
+            NSString::from_str("Access-Control-Allow-Origin"),
+            NSString::from_str("Cross-Origin-Resource-Policy"),
+            NSString::from_str("Cache-Control"),
+        ];
+        let vals = [
+            NSString::from_str(mime),
+            NSString::from_str("*"),
+            NSString::from_str("cross-origin"),
+            NSString::from_str("no-store"),
+        ];
+        let headers = NSDictionary::from_slices(
+            &keys.iter().map(|x| &**x).collect::<Vec<_>>(),
+            &vals.iter().map(|x| &**x).collect::<Vec<_>>(),
+        );
+        Some(unsafe {
+            NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+                NSHTTPURLResponse::alloc(),
+                &task.request().URL().unwrap(),
+                200,
+                None,
+                Some(&headers),
+            )
+            .unwrap()
+        })
+    } else {
+        None
+    };
     unsafe {
-        task.didReceiveResponse(&response);
-        task.didReceiveData(&data);
+        task.didReceiveResponse(image_response.as_deref().map(|r| &**r).unwrap_or(&response));
+        for chunk in data {
+            task.didReceiveData(chunk);
+        }
         task.didFinish();
     }
 }
@@ -174,30 +256,39 @@ fn run() {
     window.setContentView(Some(&web));
     app.finishLaunching();
     // A visible accessory window alone is not a foreground comparator.
-    window.makeKeyAndOrderFront(None);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
-    // Activation is asynchronous. Do not start measuring a merely ordered-front
-    // window: establish the actual AppKit foreground baseline first.
-    let activation_started = Instant::now();
-    while (!app.isActive() || !window.isKeyWindow())
-        && activation_started.elapsed() < Duration::from_secs(2)
-    {
-        if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-            NSEventMask::Any,
-            Some(&NSDate::dateWithTimeIntervalSinceNow(0.01)),
-            unsafe { NSDefaultRunLoopMode },
-            true,
-        ) {
-            app.sendEvent(&event);
+    let headless = std::env::var("S5_HEADLESS").as_deref() == Ok("1");
+    if headless {
+        window.setFrameOrigin(NSPoint::new(-20000., -20000.));
+        window.setCanHide(false);
+        if std::env::var("S5_VISIBLE_HOST").as_deref() == Ok("1") {
+            window.orderFront(None);
         }
-        app.updateWindows();
-    }
-    if !app.isActive() || !window.isKeyWindow() {
-        state.record(json!({"test":"foreground_activation_failed","app_active":app.isActive(),"window_key":window.isKeyWindow()}));
-        lifecycle.finish(&state);
-        std::process::exit(2);
-    }
+    } else {
+        window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        // Activation is asynchronous. Do not start measuring a merely ordered-front
+        // window: establish the actual AppKit foreground baseline first.
+        let activation_started = Instant::now();
+        while (!app.isActive() || !window.isKeyWindow())
+            && activation_started.elapsed() < Duration::from_secs(2)
+        {
+            if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::Any,
+                Some(&NSDate::dateWithTimeIntervalSinceNow(0.01)),
+                unsafe { NSDefaultRunLoopMode },
+                true,
+            ) {
+                app.sendEvent(&event);
+            }
+            app.updateWindows();
+        }
+        if !app.isActive() || !window.isKeyWindow() {
+            state.record(json!({"test":"foreground_activation_failed","app_active":app.isActive(),"window_key":window.isKeyWindow()}));
+            lifecycle.finish(&state);
+            std::process::exit(2);
+        }
+    } // foreground-only guard; headless runs never activate the app
     let url = NSURL::URLWithString(&NSString::from_str(&format!(
         "http://127.0.0.1:{}/{}/",
         state.port, state.token
@@ -244,7 +335,7 @@ fn run() {
     let mut diagnosed = false;
     let started = Instant::now();
     println!("{}", json!({"test":"host_started"}));
-    state.record(json!({"test":"foreground_state","app_active":app.isActive(),"window_key":window.isKeyWindow(),"window_visible":window.isVisible(),"minimised":window.isMiniaturized()}));
+    state.record(json!({"test":"foreground_state","headless":headless,"app_active":app.isActive(),"window_key":window.isKeyWindow(),"window_visible":window.isVisible(),"minimised":window.isMiniaturized()}));
     while !state.done.load(Ordering::SeqCst)
         && started.elapsed()
             < Duration::from_secs(if case.starts_with("lifecycle-") {
@@ -255,6 +346,7 @@ fn run() {
     {
         lifecycle.tick(mtm, &app, &window, &web, &state);
         if !diagnosed
+            && !case.starts_with("s5b-")
             && !case.starts_with("kill-")
             && !case.starts_with("lifecycle-")
             && started.elapsed() > Duration::from_secs(3)

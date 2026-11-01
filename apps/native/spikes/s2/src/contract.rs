@@ -84,6 +84,7 @@ pub enum Target {
     Child(u64),
     Slot(u64),
     Gpui,
+    GpuiNode(&'static str),
     Compat,
     None,
 }
@@ -269,5 +270,29 @@ mod union_tests {
         assert!(clip.contains([50., 50.]));
         assert!(clip.contains([10., 190.]));
         assert!(!clip.contains([50., 150.]));
+    }
+}
+
+/// Shared with the fixture's CSS: right:12px; top:304px; width:320px; height:60px.
+pub fn compat_overlay(width: f64) -> Rect {
+    Rect::new(
+        width - 12. - crate::design::COMPAT_OVERLAY_WIDTH,
+        304.,
+        crate::design::COMPAT_OVERLAY_WIDTH,
+        crate::design::COMPAT_OVERLAY_HEIGHT,
+    )
+}
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+    #[test]
+    fn overlay_clip_includes_leading_label_at_wide_and_narrow_sizes() {
+        for width in [1180., 1032.] {
+            let r = compat_overlay(width);
+            assert_eq!(r.x, width - 332.);
+            assert!(r.contains([width - 331., 305.]));
+            assert!(r.contains([width - 13., 363.]));
+            assert!(!r.contains([width - 333., 305.]));
+        }
     }
 }

@@ -26,6 +26,8 @@ mod wgpu_renderer;
 use wgpu_renderer as renderer;
 
 pub mod composition;
+mod composition_accessibility;
+mod composition_accessibility_order;
 mod platform;
 mod window;
 mod window_appearance;

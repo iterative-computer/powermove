@@ -1,9 +1,16 @@
 //! Job-scoped activity candidates and explicit infinite-loop termination fixture.
 use crate::server::State;
-use objc2::{MainThreadMarker, MainThreadOnly, msg_send, rc::Retained, runtime::Bool, sel};
+use objc2::{
+    MainThreadMarker, MainThreadOnly, msg_send,
+    rc::Retained,
+    runtime::{Bool, ProtocolObject},
+    sel,
+};
 use objc2_app_kit::{NSApplication, NSBackingStoreType, NSWindow, NSWindowStyleMask};
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
-use objc2_web_kit::{WKPreferences, WKWebView, WKWebViewConfiguration};
+use objc2_foundation::{
+    NSActivityOptions, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
+};
+use objc2_web_kit::{WKInactiveSchedulingPolicy, WKPreferences, WKWebView, WKWebViewConfiguration};
 use serde_json::json;
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -17,6 +24,8 @@ pub struct Controller {
     offscreen: Option<Retained<NSWindow>>,
     preferences: Retained<WKPreferences>,
     old: Option<(bool, bool)>,
+    policy: Option<WKInactiveSchedulingPolicy>,
+    activity: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     kill_started: Option<Instant>,
     pid: i32,
     kill_sent: Option<Instant>,
@@ -25,7 +34,31 @@ impl Controller {
     pub fn new(case: String, config: &WKWebViewConfiguration, state: &State) -> Self {
         let preferences = unsafe { config.preferences() };
         let mut old = None;
-        if case == "lifecycle-spi" {
+        let modern = case.starts_with("lifecycle-s5b-") || case.starts_with("s5b-");
+        let combined = case.contains("combined") || case.starts_with("s5b-");
+        let mut policy = None;
+        let mut activity = None;
+        if modern && (case.ends_with("policy") || combined) {
+            if preferences.respondsToSelector(sel!(setInactiveSchedulingPolicy:)) {
+                unsafe {
+                    policy = Some(preferences.inactiveSchedulingPolicy());
+                    preferences.setInactiveSchedulingPolicy(WKInactiveSchedulingPolicy::None);
+                }
+                state.record(json!({"test":"inactive_policy_none","supported":true}));
+            } else {
+                state.record(json!({"test":"inactive_policy_none","supported":false}));
+            }
+        }
+        if modern && (case.ends_with("activity") || combined) {
+            activity = Some(
+                NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+                    NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical,
+                    &NSString::from_str("S5b bounded synthetic export"),
+                ),
+            );
+            state.record(json!({"test":"host_process_activity","scope":"UI process; not a WebContent assertion"}));
+        }
+        if case == "lifecycle-spi" || (modern && (case.ends_with("spi") || combined)) {
             let supported = preferences
                 .respondsToSelector(sel!(_setPageVisibilityBasedProcessSuppressionEnabled:))
                 && preferences.respondsToSelector(sel!(_setHiddenPageDOMTimerThrottlingEnabled:));
@@ -49,6 +82,8 @@ impl Controller {
             offscreen: None,
             preferences,
             old,
+            policy,
+            activity,
             kill_started: None,
             pid: 0,
             kill_sent: None,
@@ -56,7 +91,21 @@ impl Controller {
     }
     fn host(&mut self, mtm: MainThreadMarker, web: &WKWebView, visible: bool) {
         if self.offscreen.is_none() {
-            let r = NSRect::new(NSPoint::new(-20000., -20000.), NSSize::new(960., 640.));
+            let r = NSRect::new(
+                NSPoint::new(-20000., -20000.),
+                NSSize::new(
+                    if self.case.starts_with("lifecycle-s5b-") {
+                        1.
+                    } else {
+                        960.
+                    },
+                    if self.case.starts_with("lifecycle-s5b-") {
+                        1.
+                    } else {
+                        640.
+                    },
+                ),
+            );
             let w = unsafe {
                 NSWindow::initWithContentRect_styleMask_backing_defer(
                     NSWindow::alloc(mtm),
@@ -90,7 +139,7 @@ impl Controller {
         s: &Arc<State>,
     ) {
         if self.case.starts_with("lifecycle-") {
-            let visible = self.case == "lifecycle-offscreen";
+            let visible = self.case == "lifecycle-offscreen" || self.case.ends_with("offscreen");
             if self.stage == 0 && s.life_ready.swap(false, Ordering::SeqCst) {
                 window.miniaturize(None);
                 if visible {
@@ -125,11 +174,21 @@ impl Controller {
             if let Some(t) = self.kill_started {
                 if self.stage == 0 && t.elapsed() >= Duration::from_secs(2) {
                     self.stage = 1;
-                    let supported = web.respondsToSelector(if self.case == "kill-reset" {
-                        sel!(_killWebContentProcessAndResetState)
-                    } else {
-                        sel!(_killWebContentProcess)
-                    });
+                    let os = NSProcessInfo::processInfo().operatingSystemVersion();
+                    let supported = os.majorVersion >= 14
+                        && web.respondsToSelector(sel!(_webProcessIdentifier))
+                        && web.respondsToSelector(if self.case == "kill-reset" {
+                            sel!(_killWebContentProcessAndResetState)
+                        } else {
+                            sel!(_killWebContentProcess)
+                        });
+                    if self.case == "kill-reset" && !supported {
+                        s.record(json!({"test":"hang_stop_unavailable","code":"compat_hang_stop_unavailable","os_major":os.majorVersion}));
+                        s.failures.fetch_add(1, Ordering::SeqCst);
+                        s.done.store(true, Ordering::SeqCst);
+                        self.stage = 99;
+                        return;
+                    }
                     if self.case != "kill-fallback" && supported {
                         self.kill_sent = Some(Instant::now());
                         unsafe {
@@ -140,7 +199,7 @@ impl Controller {
                             }
                         }
                     }
-                    s.record(json!({"test":"kill_requested","spi_supported":supported,"used_spi":self.case!="kill-fallback"&&supported,"mode":self.case}));
+                    s.record(json!({"test":"kill_requested","os_major":os.majorVersion,"os_minor":os.minorVersion,"os_patch":os.patchVersion,"spi_supported":supported,"used_spi":self.case!="kill-fallback"&&supported,"mode":self.case}));
                 }
                 if self.stage == 1
                     && (s.terminated.load(Ordering::SeqCst) || process_gone(self.pid))
@@ -172,6 +231,18 @@ impl Controller {
         }
     }
     pub fn finish(&mut self, s: &State) {
+        if let Some(p) = self.policy.take() {
+            unsafe {
+                self.preferences.setInactiveSchedulingPolicy(p);
+            }
+            s.record(json!({"test":"inactive_policy_restored"}));
+        }
+        if let Some(a) = self.activity.take() {
+            unsafe {
+                NSProcessInfo::processInfo().endActivity(&a);
+            }
+            s.record(json!({"test":"host_activity_released"}));
+        }
         if let Some((a, b)) = self.old.take() {
             unsafe {
                 let _: () = msg_send![&*self.preferences,_setPageVisibilityBasedProcessSuppressionEnabled:a];

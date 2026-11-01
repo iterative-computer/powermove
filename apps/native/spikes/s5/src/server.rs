@@ -11,6 +11,7 @@ use std::{
 };
 
 pub struct State {
+    pub s5b: crate::s5b::Surfaces,
     pub token: String,
     pub port: u16,
     pub results: Mutex<Vec<Value>>,
@@ -45,6 +46,7 @@ pub fn start() -> Arc<State> {
         .read_exact(&mut random)
         .unwrap();
     let state = Arc::new(State {
+        s5b: crate::s5b::Surfaces::new(),
         token: random.iter().map(|b| format!("{b:02x}")).collect(),
         port: listener.local_addr().unwrap().port(),
         results: Mutex::new(vec![]),
@@ -158,11 +160,17 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
             )?;
             continue;
         }
+        if path.starts_with("s5b/") {
+            let (mime, bytes) = s.s5b.request(&format!("/{path}"));
+            respond(reader.get_mut(), 200, mime, &bytes)?;
+            continue;
+        }
         match path {
             "" => {
                 let page = include_str!("page.html")
                     .replace("__BASE__", &base)
                     .replace("__PIXELS_JS__", include_str!("pixels.js"))
+                    .replace("__S5B_JS__", include_str!("s5b.js"))
                     .replace("__LIFECYCLE_JS__", include_str!("lifecycle.js"))
                     .replace(
                         "__RESTARTED__",

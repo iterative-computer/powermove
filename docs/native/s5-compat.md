@@ -493,3 +493,342 @@ restoration details, including the explicit-false preference-key limitation, are
 recorded in the S2 rerun section. The owner's caffeinate assertion was left intact.
 No screenshot, private plan, capability URL or raw log was committed; no push,
 release or tag was performed.
+
+## S5b (2026-11-01)
+
+**Verdict: S5 remains OPEN. Evaluate the V8 trusted realm + remote-DOM fallback
+when S1 is available.** Engine-held IDs remove the bulk control-channel traffic,
+but they do not make newly rendered pixels synchronously available to a real
+WebKit canvas. This is a measured synthetic architecture spike, not a production
+renderer, compat-kernel extraction, corpus certification or permission to drop a
+v1–3 API.
+
+### Conditions and decision rules
+
+The screen remained locked. `S5_HEADLESS=1` bypasses activation entirely: a
+windowless `NSApplication` hosts the WebView in an offscreen, initially unordered
+window. AppKit reported inactive/not key and the page reported hidden/unfocused.
+No unlock, screen capture, input automation or foreground-session claim. This
+still requires a logged-in WindowServer session; it is not proof of no-GUI CI.
+macOS 27.2 (26B5086k), Apple M5; pinned Rust 1.96.1, unoptimized development
+build, one S5 host at a time, shared machine. The native 120-Hz requested timer
+continues the same ≥1-ms synthetic scrub work. Other lanes compile concurrently;
+these are diagnostic runs, not quiet-window, paired performance gates.
+
+- **N4/N6, §3.6:** preserve real canvas, synchronous returns, versioned sources,
+  pixel observations and JPEG data URLs. A warmed-up canvas or an async sibling
+  cannot substitute for an arbitrary synchronous capture of a new frame.
+- **N8, §3.5.2 and orchestrator decision 3:** scheme-handler control requests;
+  immutable native surfaces referenced by id/revision; same-stack continuations;
+  no hot-path evaluateJavaScript and no raw pixels, JSON pixel arrays or base64
+  images in continuation messages. The native UI never waits for page JS.
+- **Selection:** channel p95 ≤0.5 ms under scrub; paused 1080p pixels including
+  canvas fill ≤10 ms (or 70% of the frozen reference, if lower); EXT-RASTER-1
+  JS ≤1 ms/layer and complete compat path ≤4 ms/frame p95; lifecycle ≥95% of
+  actual foreground throughput after long minimise, hide and closed editors on
+  every supported OS. A locked initial phase cannot certify that last rule.
+- **D11/N4:** explicit Stop uses checked reset-state termination, then restores
+  authoritative state. Never silently kill a trusted extension. Synthetic test
+  Stop is explicitly requested here; product Stop/Wait and gesture sealing still
+  belong in production integration.
+
+### Pixel ownership, promotion and the synchronous boundary
+
+`src/s5b.rs` owns immutable synthetic 1920×1080 RGBA surfaces. Control replies
+contain only ids/revisions or dependency descriptors. Four recorder callbacks
+return commands and a versioned nested source id in one batch. The new path has
+no page→engine pixel upload; the old byte-transfer fixture remains solely for
+comparison. IDs are revision-pinned and resumes are single-use; stale, unknown
+and replayed requests are rejected by an executable Rust test. This bounded
+fixture has fixed known commands and pre-rendered outputs; it does not measure
+pm-render, general Canvas2D recording, memory reclamation or a full dependency
+graph.
+
+| Member | Chosen internal design | Observable boundary that still has to work |
+|---|---|---|
+| renderFrameTo / raster | Native surface id + content revision; batch recorder commands and nested source ids | Return the same real canvas/context objects. On pixel demand, materialize the correct version into its backing store. A new cold surface must work synchronously. |
+| snapshot | Keep the source/render native; encode from that surface where possible | Return the required JPEG data URL synchronously, including page canvas edits. Native JPEG serialization is future work; returning an id is not API parity. |
+| raster overrides | Inline page callback records commands referencing immutable source versions; engine consumes them directly | A callback using getImageData, toDataURL or real WebGL pixels needs promotion. Such calls cannot be silently deferred. |
+
+Promotion candidates use native ImageIO PNG/TIFF or uncompressed BMP resources,
+served by HTTP or `WKURLSchemeHandler`, then real `<img>.decode()` + drawImage
+or fetch→Blob→createImageBitmap→drawImage. The final scheme implementation wraps
+an immutable `Arc<Vec<u8>>` in NSData with a retaining deallocator: **no extra
+NSData copy in the UI process**, not a claim of zero-copy WebKit IPC or decode.
+A 64-KiB didReceiveData streaming variant is also measured. Custom-scheme image
+responses require CORS/CORP headers plus `crossOrigin=anonymous`; without them
+load succeeds but canvas readback throws SecurityError. Fixture-only grants do
+not decide production asset permissions.
+
+Both a compressible pattern and deterministic noisy opaque RGB are tested;
+full 8,294,400-byte `<img>` integrity checks run outside timing, with a 1-pixel readback
+inside each sample to force observable canvas work. ImageBitmap/WebGL use pixel
+smoke checks; no whole-frame WebGL oracle is claimed. Native encoding/preparation
+is reported separately and excluded from decode/fill timings: these are **lower
+bounds** on a new engine frame, not end-to-end budget passes. Each candidate has
+one warmup and 30 timed samples. Warm-fill rows reuse an already decoded image.
+
+Final isolated image batch: **all 14 cases completed**, all 14 full `<img>`
+byte checks passed. p95 milliseconds below (30 samples per cell):
+
+| Transport / resource | Pattern img decode+fill | Noise img decode+fill | Pattern ImageBitmap+fill | Noise ImageBitmap+fill | Pattern / noise warm fill |
+|---|---:|---:|---:|---:|---:|
+| scheme / BMP | 31.96 | 19.26 | 139.62 | 35.16 | 2.72 / 2.42 |
+| http / BMP | 30.44 | 24.30 | 132.96 | 174.90 | 2.46 / 1.86 |
+| stream / BMP | 40.40 | 23.16 | 142.80 | 41.50 | 3.58 / 2.14 |
+| scheme / PNG | 19.28 | 93.46 | 13.74 | 159.66 | 2.70 / 2.58 |
+| http / PNG | 39.44 | 70.24 | 43.42 | 212.84 | 3.34 / 3.74 |
+| scheme / TIFF | 21.30 | 21.08 | 112.34 | 137.78 | 3.20 / 1.78 |
+| http / TIFF | 151.96 | 21.22 | 180.08 | 132.32 | 4.08 / 2.72 |
+
+**No cold route meets ≤10 ms**, even with native preparation excluded. The
+lowest observed p95 is 13.74 ms for the compressible PNG through scheme→Blob→
+ImageBitmap; the lowest noisy-frame p95 is 19.26 ms for scheme BMP→img. These
+are different candidates, not one robust passing design. Streaming BMP is
+40.40/23.16 ms versus whole-resource 31.96/19.26 ms in this batch; it does not
+rescue the budget. Warm pixels can be filled cheaply, but are already decoded.
+A warm WebGL texture upload + fullscreen draw + gl.finish + drawImage into a
+real 2D canvas (with pixel verification) has p95 **16.00–195.32 ms** across the
+14 hosts, excluding image load/decode. It is not a cheaper promotion route here.
+This does not certify EXT-WGL-1's different production workload.
+
+Across the 16 final-batch host initializations (14 image cases plus continuation
+and profile), native preparation p50/p95 was: pattern BMP **45.28/95.89 ms**,
+PNG **24.77/41.40 ms**, TIFF **4.03/7.60 ms**; noise BMP **45.05/290.20 ms**,
+PNG **265.09/695.69 ms**, TIFF **3.43/5.63 ms**. These unoptimized, contended
+encoding/preparation numbers are separate from resource decode/fill and cannot
+be added as paired quantiles. TIFF avoids the PNG compression cost but still
+does not meet the decode/fill budget. Real engine render/readback is additional.
+
+**Choice by the ≤10-ms rule: no eligible WebKit cold-pixel route.** Keep IDs for
+engine consumers and the recorder path; async promotion may use image resources,
+but it cannot be declared a replacement for synchronous v1–3 pixel APIs.
+
+A fresh image tested on the same JS stack has `complete=false`, `naturalWidth=0`
+and draws no pixels (transparent alpha 0). `img.decode()` and createImageBitmap
+are Promise APIs: their successful asynchronous timings cannot prove synchronous
+renderFrameTo semantics. This agrees with the [HTML canvas image-source
+rules](https://html.spec.whatwg.org/dev/canvas.html). Preloading every possible
+future render/revision is not a solution for nested capture or a canvas changed
+by an arbitrary extension callback.
+
+**IOSurface/shared-memory bound:** the supported [scheme-task data
+API](https://developer.apple.com/documentation/webkit/wkurlschemetask/didreceive%28_%3A%29-8t5f8?language=objc)
+accepts NSData byte resources, not a CGImage/IOSurface handle. No supported API
+was found that imports an engine IOSurface or native mapped pointer into a page
+CanvasImageSource/ArrayBuffer. Sending an IOSurface id in a URL or labelling raw
+RGBA `image/x-…` does not add a WebKit decoder/importer. SharedArrayBuffer, even
+where cross-origin isolation permits it, does not expose a host mapping API.
+This is a bound on the interfaces investigated, not a proof about all possible
+future/private WebKit APIs. No fake zero-copy path or browser-engine patch is
+claimed. The initial custom BMP V4 resource was not decoded by WebKit; the final
+BMP candidate uses conventional opaque BGRA32. Alpha/HDR promotion remains open.
+
+### Continuation profile and redesign
+
+The first locked reproduction split the old nested-capture fixture into these
+stages (30 samples, ms p50 / p95). The individual p95s are not additive quantiles.
+Native resume includes unoptimized synthetic pattern generation and is not a
+pure channel hop.
+
+| Old stage | p50 / p95 ms |
+|---|---|
+| HTTP begin | 1.84 / 4.08 |
+| HTTP nested descriptor | 0.74 / 2.38 |
+| Nested download + JS text decode | 76.40 / 108.40 |
+| Nested putImageData | 0.86 / 3.92 |
+| Nested full getImageData | 3.48 / 6.54 |
+| Nested upload + native byte validation | 53.76 / 115.36 |
+| Small override upload | 1.64 / 3.20 |
+| Resume + native synthetic render | 50.38 / 76.62 |
+| Outer download + JS text decode | 76.62 / 103.12 |
+| Outer putImageData | 0.76 / 3.12 |
+
+The 287-ms unlocked result was not mostly event-loop continuation delay. This
+profile exposes two 8-MB text decodes, a redundant nested readback/upload and a
+Rust debug-build pattern generator. The redesigned control flow uses three
+scheme calls: begin returns a batch of four dependency descriptors; callbacks
+resolve the nested version by id and record commands inline; one resume submits
+the whole command batch and returns the outer id. No JSON/base64 serialization
+or asynchronous callback into the blocked page is needed. No claim that JSON
+alone accounted for hundreds of milliseconds.
+
+Final control/continuation batch under the combined job activity settings:
+
+| New path | n | p50 / p95 / p99 ms | Budget interpretation |
+|---|---:|---|---|
+| Scheme ID request | 2000 | 0.08 / **0.12** / 1.08 | PASS synthetic ≤0.5-ms channel latency |
+| Four recorder callbacks + nested ID + batch resume | 2000 | 0.24 / **0.48** / 1.32 | Control-only lower bound; not full EXT-RASTER-1 |
+| Same continuation + predecoded real canvas fill | 100 | 0.72 / **1.90** / 2.24 | Warm-case diagnostic ≤4 ms; no production raster gate claim |
+| Same continuation + new image decode + real canvas fill | 30 | 19.36 / **117.26** / 117.58 | FAIL ≤10 ms; asynchronous lower bound on the cold operation |
+| Full 1080p getImageData from materialized canvas | 30 | 2.36 / **5.00** / 5.06 | 5-ms readback; image load/render excluded |
+| Materialized canvas to JPEG data URL | 30 | 13.50 / **14.84** / 14.94 | FAIL provisional ≤10 ms before render/decode |
+
+Earlier diagnostic without the combined settings was 0.16-ms channel, 0.46-ms
+ID continuation, 3.20-ms warm fill and 32.66-ms cold fill at p95. The final cold
+117.26-ms tail must not be hidden behind that earlier 32.66-ms figure. Every
+new canvas result checks the override pixel and produces real canvas backing;
+JPEG output is a real JPEG data URL, not an id masquerading as API parity.
+The native-only pattern-generator instrumentation on the final reproduction was
+p50/p95 **48.89/66.33 ms** (30 samples after warmup), confirming that old resume
+work was not just a channel hop.
+
+**Decision:** retain same-stack, revision-pinned batched continuations with
+engine-held ids (N8, §3.5.2). The control path is viable; **full EXT-RASTER-1 is
+UNVERIFIED**, because the native result and command set are synthetic and
+pre-rendered. Any override demanding new real pixels reaches the failed cold
+boundary. No real-project JS≤1-ms/layer or renderer≤4-ms/frame pass is claimed.
+
+### Background activity
+
+Each candidate uses the same page-driven job: 1080p Canvas2D fill, 100 rectangles,
+one small readback and one scheme ID call per iteration, five seconds per phase.
+Additional one-second subtests separate JS compute, scheme-only, canvas-only and
+batched-ID continuations. There is a 60-second dwell after minimise/hide and a
+closed-editor phase hosted offscreen. Delayed checks confirmed minimised=true,
+app_hidden=true, then editor_visible=false. **All phases report hidden=true;
+“initial” below is locked/offscreen, never foreground.**
+
+| Mechanism | Initial / hidden / closed-editor jobs/s | Hidden / closed share of locked initial | Diagnostic |
+|---|---|---|---|
+| Default | 869.79 / no completion / — | — | Host deadline 160 s; no hidden-job completion |
+| Public inactiveSchedulingPolicy=None | 698.08 / 840.15 / 931.87 | 120.35% / 133.49% | Makes progress; candidate for a real foreground comparison |
+| UI-process beginActivity(UserInitiated \| LatencyCritical) alone | 760.68 / no completion / — | — | Host deadline 160 s; does not protect WebContent by itself |
+| Public policy + page suppression/timer SPI + UI activity | 795.62 / 545.72 / 772.50 | 68.59% / 97.09% | Hidden diagnostic below 95% |
+| Same combined settings + AppKit-visible 1×1 offscreen host, canHide=false | 676.71 / 608.72 / 720.44 | 89.95% / 106.46% | Hidden diagnostic below 95%; page still hidden |
+
+The public policy affects the actual WebContent scheduling preferences, whereas
+NSProcessInfo's assertion here belongs to the UI process. WebKit's
+[implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.mm)
+shows that None disables background RunningBoard throttling and retains a
+near-suspended assertion. The [public header](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.h)
+marks it macOS 14+, matching the deployment floor. This is a better diagnostic
+candidate than pretending an app activity token applies to another process.
+Both original policy and SPI preferences are restored and the activity token is
+ended when the job finishes. Deadline exits also release process-owned resources.
+
+Ratios alone hide substantial changes. In the combined run, JS subtest throughput
+was 38,052→18,890→21,976 iterations/s, scheme-only 7,211→3,974→4,957,
+canvas-only 2,306→1,475→1,743 and batched IDs 2,258→1,509→1,411.
+Policy-only mixed throughput increased while its JS subtest fell from 37,130 to
+23,542/22,914 iterations/s. Machine contention, workload mix and lifecycle all
+matter; this sample does not isolate an intrinsic WebKit suppression ratio.
+The 1×1 host does not supply a real visible page and cannot stand in for a
+foreground baseline.
+
+**Decision:** use public inactiveSchedulingPolicy=None as the first candidate for
+future job-scoped foreground/hidden validation; do not add a permanent offscreen
+visible window or silent-media trick as the production fix. The all-settings
+combination did not demonstrate a consistently better diagnostic result.
+The **≥95% foreground gate is UNVERIFIED**, and the earlier unlocked 28–41%
+failures are not overturned. Media/audio assertion tricks and V8 throughput are
+unmeasured. A short locked run cannot certify long unattended export on every
+supported OS. Pixel semantics independently require fallback evaluation.
+
+### Hang Stop and OS checks
+
+The exact `_killWebContentProcess` selector exists and returns, but again failed
+to terminate a real infinite loop during the 20-second observation window.
+The reset-state variant succeeded in three screen-independent runs:
+
+| Run | Stop→termination callback/observation | Stop→replacement ready |
+|---|---|---|
+| 1 | 1.048 ms | 126.969 ms |
+| 2 | 0.754 ms | 135.136 ms |
+| 3 | 0.788 ms | 178.206 ms |
+
+Every success confirmed a positive different replacement PID, the old PID gone,
+localStorage preserved and native snapshot revision 7 restored. These are new
+measurements, not a promise of the earlier 98.648-ms unlocked result. There is no
+separate numeric recovery budget in this spike. **PASS synthetic Stop/restart**;
+production reactivation, journal recovery and selective gesture sealing remain
+unverified.
+
+**Chosen Stop design (D11, N4/N8):** `_killWebContentProcessAndResetState`, with
+macOS major ≥14 and runtime selector checks for both it and `_webProcessIdentifier`.
+Unsupported Stop emits `compat_hang_stop_unavailable`; do not blindly call the
+SPI or pretend the failed named API is a working fallback. Check both actual
+termination and replacement readiness; a callback alone precedes process exit.
+This is a technical selection inside the spike, not a release approval. The
+[WebKit implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKWebView.mm)
+distinguishes terminate() from requestTermination(RequestedByClient) in these two
+selectors. That difference is a possible explanation, not a demonstrated root
+cause on the installed build. The private header does not supply a per-OS
+availability guarantee. macOS 14/15/26 and every future OS release require real
+loop/restart tests; selector presence and a numeric OS check cannot certify
+behavior. Automatic WebKit termination was not retested: its earlier 20-second
+failure remains the evidence. The product still prompts Stop/Wait for trusted
+extensions; these explicitly requested test kills do not change D11.
+
+### Budget verdict and fallback
+
+| Requirement | S5b result | Decision |
+|---|---|---|
+| Scheme page→app p95 ≤0.5 ms | 0.12 ms (2,000 ID calls); batched three-call continuation 0.48 ms | Synthetic latency PASS. Real kernel-actor, IME and VoiceOver gates remain open. |
+| 1080p paused sync pixels ≤10 ms including canvas fill | Best cold lower bounds 13.74 ms (pattern) / 19.26 ms (noise); cold continuation 117.26 ms; same-stack new image remains blank | FAIL; no eligible WebKit pixel-promotion design selected. |
+| EXT-RASTER-1 JS≤1 ms/layer, complete path≤4 ms/frame p95 | IDs 0.48 ms; warm canvas 1.90 ms; actual engine/corpus not linked | UNVERIFIED, not a whole-path pass. Cold promotion fails. |
+| ≥95% foreground throughput hidden/minimised/windowless | Policy-only progresses at 120%/133% of a locked initial phase; combined options have hidden ratios 69%/90% | UNVERIFIED without real foreground. Earlier unlocked failure remains unresolved. |
+| Explicit Stop/restart | Exact named SPI fails at 20 s; reset-state succeeds 3/3 at 127–178 ms | Select checked reset-state SPI; synthetic recovery PASS, OS matrix open. |
+
+**Fallback verdict: trigger evaluation of the complete trusted realm in V8 with
+remote DOM, pending S1; do not approve the WebKit-only architecture for P1.**
+N4 forbids changing sync returns, returning blank canvases, dropping pixel users
+or forcing an async API migration. N8 requires the native UI to remain independent
+of JS waits. There is no observed supported synchronous native-surface import
+into the WebKit realm. Engine-resident ids solve traffic for native consumers,
+not the web API's cold observable-pixel semantics. In V8, native code can fill
+sandbox-allocator-owned buffers on the isolate's worker thread (§3.5.1) without
+waiting on a WebKit decoder/event loop; recorder canvas and DOM bridging still
+have to preserve the existing API. This describes why the specified fallback
+is the next evaluation, **not proof that V8 already meets these budgets**.
+The trusted sync-service cluster must move together; silently splitting its
+callbacks between independent realms would break live-object semantics.
+
+Unverified: actual pm-render integration and surface/version reclamation; general
+recorder/promotion state and context identity; alpha, colour/HDR and canvas edits;
+real override and presenter corpus; frozen v1.2.0 renderFrameTo timings and the
+stricter 70% threshold; app→page production raster delivery; real IME/VoiceOver;
+quiet-window repetitions; true foreground and long unattended-export comparisons;
+macOS 14/15/26 and future releases; V8 sandbox, synchronous pixel API implementation,
+remote-DOM behavior and fallback throughput. None is waived by the synthetic pass.
+No foreground-session work was attempted or requested tonight.
+
+### Reproduction and checks
+
+```sh
+# Pinned workspace build; never edits the shared lockfile.
+apps/native/spikes/s5/check.sh build
+# If another lane's workspace/lock is incomplete, exact S5 sources via /tmp
+# manifest, offline cached dependencies, SAME ~/Developer/pm-target only:
+S5_ISOLATED=1 apps/native/spikes/s5/check.sh build
+S5_ISOLATED=1 apps/native/spikes/s5/check.sh test
+S5_HEADLESS=1 python3 apps/native/spikes/s5/run.py s5b-profile s5b-continuation
+# One isolated image candidate per host; repeat pattern/noise and bmp/png/tiff
+# with scheme/http; stream is the 64-KiB scheme-response BMP variant.
+S5_HEADLESS=1 python3 apps/native/spikes/s5/run.py s5b-images-scheme-noise-bmp s5b-images-stream-noise-bmp
+S5_HEADLESS=1 python3 apps/native/spikes/s5/run.py lifecycle-s5b-default lifecycle-s5b-policy lifecycle-s5b-activity lifecycle-s5b-combined lifecycle-s5b-combined-offscreen
+S5_HEADLESS=1 python3 apps/native/spikes/s5/run.py kill-spi kill-reset
+```
+
+Pinned isolated build and **all four Rust tests PASS**; JavaScript syntax checks
+PASS. Normal `--locked` build refused the shared lock update; it was not bypassed
+or modified. The isolated manifest uses the exact owned sources and cached
+versions, not a second Cargo target directory. Disk was checked before/during
+builds and remained above 4 GiB. No cargo clean. Final 14 image cases,
+continuation and profiled reproduction exited 0; both default/activity-only
+lifecycle cases correctly exited 2 at 160 seconds, the other three exited 0.
+Exact hang-kill exited 2 and all three reset recoveries exited 0.
+
+The initial monolithic image diagnostic stalled after scheme PNG/ImageBitmap
+and reached the 90-second host deadline; a prior image driver also hit its old
+35-second external bound. Initial BMP V4 decoding failed and headerless scheme
+images were tainted. These attempts are retained as failures/diagnostics outside
+Git, not mixed into the final isolated-candidate quantiles. Final image candidates
+use decode/fetch deadlines, explicit CORS, conventional BMP and the combined
+job-scoped activity settings; completion does not establish which individual
+change removed the earlier stall. A final noisy-image smoke run also checks the
+added per-sample noise-pixel assertion.
+
+Raw logs and sampling diagnostics remain outside Git. No private plan, screenshot,
+corpus, capability URL or operational dump is included. Only S5 sources and this
+report change; no production runtime switch, push, release or tag is performed.

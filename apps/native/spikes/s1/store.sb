@@ -1,0 +1,9 @@
+(version 1)
+(deny default)
+; No home, project, media, arbitrary file write, network, spawn or Mach-service grant.
+; Libraries may page in after startup. IPC uses a socket inherited before confinement.
+(allow file-read* (subpath "/System/Library") (subpath "/usr/lib")
+                  (subpath "/Library/Apple/System/Library") (literal "/dev/urandom"))
+(allow sysctl-read)
+(allow process-info* (target self))
+(allow dynamic-code-generation)
