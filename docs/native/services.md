@@ -196,3 +196,14 @@ Clippy passes. The integration owner must populate summaries on kernel save and
 resolve thumbnail IDs; shell uses the system relative formatter, never a cached
 English date. Native menu presentation, date localization and thumbnail drawing
 require macOS verification. No visual values or new copy were introduced.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 4 — update-sheet facts | `FeedMetadata` requires the feed's display `name` and `size_bytes`; no values are synthesized. `notes` are explicitly untrusted Markdown bounded to 64 KiB of UTF-8. Shell must disable executable HTML/remote resources, use pm-design's `reading` / `reading_leading`, and open links through its safe external-browser capability. Verbatim title/buttons are exported, with Install Update documented as accent. N1 standard update sheet, N3 preserve source metadata, N8 no rendering/JS on the services worker. |
+
+The six updater tests pass, including unchanged TR/macOS-13 routing, exact sheet
+metadata/Markdown round trip and the UTF-8 byte boundary returning `TooLarge`.
+Strict crate Clippy passes. Feed adapters must supply the new name/size fields;
+there is still no production feed parser/installer in this crate. The shell owner
+must render the specified sheet and verify browser links and pm-design styling on
+macOS. Metadata is never interpreted as executable markup by this lane.

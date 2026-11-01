@@ -4,6 +4,12 @@ use crate::service_ensure as ensure;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+/// Verbatim update-sheet copy from design review item 4; rendering belongs to shell.
+pub const UPDATE_SHEET_TITLE: &str = "A New Version of Powermove Is Available";
+pub const INSTALL_UPDATE_LABEL: &str = "Install Update";
+pub const REMIND_ME_LATER_LABEL: &str = "Remind Me Later";
+pub const SKIP_THIS_VERSION_LABEL: &str = "Skip This Version";
+
 pub const STARTUP_CHECK_MS: u64 = 30_000;
 pub const CHECK_INTERVAL_MS: u64 = 4 * 60 * 60 * 1000;
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,7 +40,16 @@ impl TransitionGate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedMetadata {
     pub version: String,
+    /// Release display name supplied by the feed (e.g. "Powermove 2.1").
+    pub name: String,
+    /// Download size supplied by the feed; never derived from the notes length.
+    pub size_bytes: u64,
     pub minimum_macos: u32,
+    /// Untrusted Markdown, at most 64 KiB of UTF-8. Never execute HTML/scripts or
+    /// load remote resources. Shell renders with pm_design::Tokens::typography.reading
+    /// and reading_leading in the standard update sheet. Activate links through
+    /// the host's safe external-browser opener, never by navigating an app panel.
+    /// Install Update is the accent action; the other buttons use the labels above.
     pub notes: Option<String>,
 }
 pub trait UpdateFeed {
