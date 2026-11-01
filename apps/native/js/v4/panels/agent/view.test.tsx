@@ -328,8 +328,11 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
 });
 test("the Agent panel bundles and mounts without Node, Chromium, document or window", async () => {
   const { runInNewContext } = await import("node:vm");
+  const { fileURLToPath } = await import("node:url");
   const build = await Bun.build({
-    entrypoints: [new URL("./nodefree-fixture.tsx", import.meta.url).pathname],
+    entrypoints: [
+      fileURLToPath(new URL("./nodefree-fixture.tsx", import.meta.url)),
+    ],
     target: "browser",
     format: "iife",
     minify: true,
