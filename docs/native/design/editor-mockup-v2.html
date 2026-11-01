@@ -1,0 +1,167 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Powermove Native · editor mockup v2</title>
+<style>
+:root{--win:#111;--panel:#1a1a1a;--panel2:#161616;--sunken:#0e0e0e;--field:#262626;--float:#2c2c2c;--hover:#232323;
+--line:rgba(255,255,255,.07);--t1:#F2F2F2;--t2:#B4B4B4;--t3:#949494;--t4:#7a7a7a;--acc:#FF6019;--accdim:rgba(255,96,25,.18);
+--clip:#3b4250;--clip2:#4a3b6b;--orb:#7a3a1f;--grain:#3a3a3a}
+*{box-sizing:border-box;margin:0;padding:0}html,body{background:transparent}
+body{font-family:-apple-system,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:var(--t1);font-size:12px}
+.fit{position:relative;width:100%;padding-top:62.5%}.stage{position:absolute;left:0;top:0;width:1440px;height:900px;transform-origin:0 0}
+.win{position:absolute;inset:0;border-radius:22px;background:var(--win);overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.09)}
+svg{display:block}.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.glass{background:rgba(60,60,64,.46);backdrop-filter:blur(22px) saturate(170%);-webkit-backdrop-filter:blur(22px) saturate(170%);border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.15),0 8px 24px rgba(0,0,0,.35)}
+.tb{position:absolute;left:0;right:0;top:0;height:52px;display:flex;align-items:center;gap:10px;padding:0 12px 0 18px}
+.lights{display:flex;gap:9px}.lights i{width:13px;height:13px;border-radius:50%}
+.cap{height:34px;border-radius:17px;display:flex;align-items:center;padding:0 3px;gap:1px;color:var(--t2)}
+.cap b{width:34px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center}.cap b.on{background:rgba(255,255,255,.16);color:#fff}
+.ttl{line-height:1.2;margin-left:4px}.ttl strong{font-size:13px;font-weight:600;display:block}.ttl span{font-size:11px;color:var(--t3)}
+.sp{flex:1}
+.pn{position:absolute;background:var(--panel);border-radius:12px;border:1px solid var(--line);overflow:hidden}
+.ph{height:36px;display:flex;align-items:center;gap:8px;padding:0 12px;font-size:12.5px;font-weight:600}
+.ph .r{margin-left:auto;display:flex;gap:10px;color:var(--t3)}
+.tabs{display:flex;gap:2px;background:var(--sunken);border-radius:8px;padding:2px;font-size:12px;font-weight:500;color:var(--t2)}
+.tabs span{padding:3px 10px;border-radius:6px}.tabs span.on{background:var(--float);color:var(--t1)}
+.thumb{width:124px}.thumb .im{height:74px;border-radius:7px;position:relative;overflow:hidden}
+.thumb .im em{position:absolute;left:6px;top:6px;font-style:normal;font-size:11px;background:rgba(0,0,0,.6);border-radius:4px;padding:1px 5px}
+.thumb .nm{margin-top:6px;font-size:12px;display:inline-block;padding:1px 5px;border-radius:4px;margin-left:-5px}.thumb .mt{font-size:11px;color:var(--t3)}
+.thumb.sel .im{box-shadow:0 0 0 3px #3a3a3a}.thumb.sel .nm{background:var(--acc);color:#fff}
+.sec{font-size:12px;font-weight:600;color:var(--t1);padding:12px 14px 6px}
+.pr{height:28px;display:flex;align-items:center;gap:8px;padding:0 10px 0 12px}
+.pr .d{width:8px;height:8px;transform:rotate(45deg);border:1.3px solid var(--t4);border-radius:1px;flex:none}.pr .d.k{background:var(--acc);border-color:var(--acc)}
+.pr .l{width:84px;color:var(--t2)}
+.f{height:22px;background:var(--field);border-radius:6px;display:flex;align-items:center;justify-content:flex-end;padding:0 8px;font-variant-numeric:tabular-nums;color:var(--t1);margin-left:auto}
+.cat{height:26px;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t2)}.cat.on{background:var(--hover);color:var(--t1)}
+.ef{height:26px;display:flex;align-items:center;padding:0 10px;color:var(--t1)}.efh{font-size:11px;color:var(--t3);padding:8px 10px 2px}
+.tr{position:absolute;left:0;right:0;height:26px;display:flex;align-items:center}
+.ln{width:232px;height:100%;display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12.5px;color:var(--t2);flex:none}
+.ln .n{width:16px;color:var(--t4);font-size:11px;font-variant-numeric:tabular-nums}
+.ln .b{width:18px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}
+.cl{position:absolute;height:20px;border-radius:5px;display:flex;align-items:center;padding:0 10px 0 18px;font-size:11.5px;color:#e8e8e8;white-space:nowrap;overflow:hidden}
+.kd{position:absolute;width:8px;height:8px;transform:rotate(45deg);border-radius:1px;background:#e9e9e9;top:9px}.kd.o{background:var(--acc)}
+</style></head><body>
+<div class="fit" id="fit"><div class="stage" id="stage"><div class="win">
+
+<!-- TOOLBAR -->
+<div class="tb">
+  <div class="lights"><i style="background:#FF5F57"></i><i style="background:#FEBC2E"></i><i style="background:#28C840"></i></div>
+  <div class="cap glass"><b><svg class="i" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2.5"/><path d="M6 3v10"/></svg></b></div>
+  <div class="ttl"><strong>Launch Film</strong><span>Edited</span></div>
+  <div class="sp"></div>
+  <div class="cap glass">
+    <b class="on"><svg class="i" viewBox="0 0 16 16"><path d="M4 2.5l8 5.5-3.6.9 2 3.8-1.6.8-2-3.8L4 12z" fill="currentColor" stroke="none"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><path d="M5 8V4.5a1 1 0 012 0V8M7 7V3.5a1 1 0 012 0V7.5M9 7.5V4.5a1 1 0 012 0v4.5c0 3-1.8 5-4.3 5-1.6 0-2.6-.8-3.4-2L2 9.6a1 1 0 011.6-1.2L5 9.5"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M5 7h4M7 5v4"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><path d="M4 1.5V12h10.5M1.5 4H12v10.5"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><rect x="2.5" y="5" width="7" height="7" rx="1.5"/><circle cx="10.5" cy="6.5" r="3.5"/></svg></b>
+    <b><svg class="i" viewBox="0 0 16 16"><path d="M8 2l3.5 9H4.5zM8 2v6M6 14h4"/></svg></b>
+    <b style="font-size:13px;font-weight:500">Aa</b>
+  </div>
+  <div class="sp"></div>
+  <div class="cap glass"><b><svg class="i" viewBox="0 0 16 16"><path d="M8 1.5l1.3 3.7 3.7 1.3-3.7 1.3L8 11.5 6.7 7.8 3 6.5l3.7-1.3zM12.5 10l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6z"/></svg></b></div>
+  <div class="cap" style="background:rgba(255,96,25,.85);border:1px solid rgba(255,255,255,.18);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 6px 18px rgba(255,96,25,.25);color:#fff;padding:0 14px 0 11px;gap:6px;font-size:13px;font-weight:600">
+    <svg class="i" viewBox="0 0 16 16"><path d="M8 10V2M5 4.5L8 1.5l3 3M4 7H3v7h10V7h-1"/></svg>Export</div>
+  <div class="cap glass"><b class="on"><svg class="i" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2.5"/><path d="M10 3v10"/></svg></b></div>
+</div>
+
+<!-- LEFT DOCK: Project | Effect Controls -->
+<div class="pn" style="left:6px;top:52px;width:300px;height:466px">
+  <div class="ph"><div class="tabs"><span class="on">Project</span><span>Effect Controls</span></div><div class="r"><svg class="i" style="width:14px" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></div></div>
+  <div style="display:flex;flex-wrap:wrap;gap:14px 12px;padding:8px 14px">
+    <div class="thumb sel"><div class="im" style="background:radial-gradient(60% 80% at 40% 50%,#9c4a22,#3c1a0e 70%,#1d0d07)"><em>0:12</em></div><span class="nm">Atmosphere_loop.mov</span><div class="mt">0:12 · 48 MB</div></div>
+    <div class="thumb"><div class="im" style="background:#ecebe8"><svg width="130" height="74" viewBox="0 0 130 74"><path d="M0 30 Q20 30 26 18 Q32 4 50 14 Q65 22 80 14 Q98 4 104 18 Q110 30 130 30 V74 H0Z" fill="#fff"/></svg></div><span class="nm">powermove-mark.svg</span><div class="mt">SVG · 141×116</div></div>
+    <div class="thumb"><div class="im" style="background:#20382c"><em>0:24</em><svg style="position:absolute;left:6px;bottom:8px" width="118" height="30" id="vo"></svg></div><span class="nm">VO_take03.wav</span><div class="mt">0:24 · 4.1 MB</div></div>
+    <div class="thumb"><div class="im" style="background:#2a2a2a radial-gradient(#666 0.6px,transparent 0.8px) 0 0/7px 7px"><em>0:08</em></div><span class="nm">Grain_35mm.mov</span><div class="mt">0:08 · 22 MB</div></div>
+  </div>
+</div>
+
+<!-- CENTER: VIEWER -->
+<div class="pn" style="left:312px;top:52px;width:816px;height:466px;background:var(--sunken)">
+  <div style="position:absolute;right:12px;top:8px;display:flex;gap:16px;font-size:12px;color:var(--t2)"><span>Auto ⌃⌄</span><span>Fit (54%) ⌃⌄</span></div>
+  <div style="position:absolute;left:28px;top:36px;width:760px;height:427px;overflow:hidden;background:radial-gradient(45% 60% at 30% 70%,rgba(160,70,30,.65),transparent 70%),radial-gradient(35% 55% at 72% 30%,rgba(140,60,25,.6),transparent 70%),radial-gradient(70% 70% at 50% 45%,#5a2a14,#24100a 75%,#140906)">
+    <div style="position:absolute;inset:0;background:radial-gradient(rgba(255,255,255,.07) .6px,transparent .9px) 0 0/5px 5px;opacity:.6"></div>
+    <div style="position:absolute;left:0;right:0;top:142px;text-align:center;font-size:10.5px;font-weight:600;letter-spacing:1.6px;color:#ff7a3c">DESIGN &nbsp;/&nbsp; MOTION &nbsp;/&nbsp; SYSTEM</div>
+    <div style="position:absolute;left:252px;top:144px;width:40px;height:40px;border-radius:20px;background:#ff6a2c;box-shadow:0 0 30px rgba(255,106,44,.5)"></div>
+    <div style="position:absolute;left:0;right:0;top:160px;text-align:center;font-size:72px;font-weight:700;letter-spacing:-2.5px;color:#f7f3ef">Make it move.</div>
+    <div style="position:absolute;left:150px;top:166px;width:460px;height:84px;border:1.2px solid var(--acc)">
+      <i style="position:absolute;left:-4px;top:-4px;width:7px;height:7px;background:var(--acc)"></i><i style="position:absolute;right:-4px;top:-4px;width:7px;height:7px;background:var(--acc)"></i>
+      <i style="position:absolute;left:-4px;bottom:-4px;width:7px;height:7px;background:var(--acc)"></i><i style="position:absolute;right:-4px;bottom:-4px;width:7px;height:7px;background:var(--acc)"></i>
+      <i style="position:absolute;left:50%;margin-left:-3px;top:-4px;width:7px;height:7px;background:var(--acc)"></i><i style="position:absolute;left:50%;margin-left:-3px;bottom:-4px;width:7px;height:7px;background:var(--acc)"></i>
+      <i style="position:absolute;top:50%;margin-top:-3px;left:-4px;width:7px;height:7px;background:var(--acc)"></i><i style="position:absolute;top:50%;margin-top:-3px;right:-4px;width:7px;height:7px;background:var(--acc)"></i>
+      <i style="position:absolute;left:50%;margin-left:-1px;top:-22px;width:1px;height:18px;background:var(--acc)"></i><i style="position:absolute;left:50%;margin-left:-4px;top:-27px;width:8px;height:8px;border-radius:4px;border:1.5px solid var(--acc);background:#1a1a1a"></i>
+    </div>
+  </div>
+</div>
+
+<!-- BOTTOM: TIMELINE (spans under Project + Viewer, as in the Electron app) -->
+<div class="pn" style="left:6px;top:524px;width:1122px;height:344px">
+  <div style="height:36px;display:flex;align-items:center;gap:12px;padding:0 12px;border-bottom:1px solid var(--line)">
+    <svg class="i" viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z" fill="currentColor"/></svg>
+    <span style="font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums">00:04:15</span>
+    <span style="color:var(--t3);font-size:11.5px">30 fps</span>
+    <span class="sp"></span>
+    <span style="color:var(--t3)"><svg class="i" viewBox="0 0 16 16"><path d="M2 13c3 0 4-10 7-10s3 6 5 6"/></svg></span>
+    <span style="color:var(--acc)"><svg class="i" viewBox="0 0 16 16"><path d="M4 2v6a4 4 0 008 0V2M4 2h2.5v6a1.5 1.5 0 003 0V2H12"/></svg></span>
+  </div>
+  <div style="position:absolute;left:232px;right:0;top:36px;height:24px;border-bottom:1px solid var(--line);border-left:1px solid var(--line)" id="ruler"></div>
+  <div style="position:absolute;left:0;right:0;top:60px;bottom:0">
+    <div style="position:absolute;left:232px;top:0;bottom:0;border-left:1px solid var(--line)"></div>
+    <div class="tr" style="top:4px"><div class="ln"><span class="n">01</span><span class="b" style="background:#2f3644;color:#9fb0d0">T</span>Kicker</div><div class="cl" style="left:calc(232px + 30px);width:500px;background:var(--clip);padding-left:62px">Kicker</div><i class="kd" style="left:calc(232px + 36px)"></i><i class="kd" style="left:calc(232px + 82px)"></i></div>
+    <div class="tr" style="top:32px;background:rgba(255,255,255,.04)"><div class="ln" style="color:var(--t1)"><span class="n">02</span><span class="b" style="background:#2f3644;color:#9fb0d0">T</span>Headline</div><div class="cl" style="left:calc(232px + 2px);width:604px;background:var(--clip);box-shadow:0 0 0 1.5px #d7dbe6;padding-left:44px">Headline</div><i class="kd o" style="left:calc(232px + 2px)"></i><i class="kd o" style="left:calc(232px + 36px)"></i><i class="kd o" style="left:calc(232px + 220px)"></i></div>
+    <div class="tr" style="top:58px;height:22px"><div class="ln" style="padding-left:50px;font-size:11.5px;color:var(--t3)">Scale</div><i class="kd o" style="left:calc(232px + 2px);top:7px"></i><i class="kd o" style="left:calc(232px + 26px);top:7px"></i><i class="kd o" style="left:calc(232px + 50px);top:7px"></i><svg style="position:absolute;left:calc(232px + 6px);top:2px" width="70" height="18"><path d="M0 14 C 12 14, 16 2, 26 4 S 40 12, 48 9 L 70 9" stroke="rgba(255,96,25,.6)" fill="none" stroke-width="1.3"/></svg></div>
+    <div class="tr" style="top:80px;height:22px"><div class="ln" style="padding-left:50px;font-size:11.5px;color:var(--t3)">Opacity</div><i class="kd o" style="left:calc(232px + 2px);top:7px"></i><i class="kd o" style="left:calc(232px + 26px);top:7px"></i></div>
+    <div class="tr" style="top:104px"><div class="ln"><span class="n">03</span><span class="b" style="background:#5a2a14;color:#ff9a66">S</span>Orb</div><div class="cl" style="left:calc(232px + 60px);width:546px;background:var(--orb)">Orb</div><i class="kd" style="left:calc(232px + 62px)"></i><i class="kd" style="left:calc(232px + 152px)"></i><i class="kd" style="left:calc(232px + 300px)"></i></div>
+    <div class="tr" style="top:132px"><div class="ln"><span class="n">04</span><span class="b" style="background:#333;color:#bbb">A</span>Grain</div><div class="cl" style="left:calc(232px + 2px);width:604px;background:var(--grain)">Grain</div></div>
+    <div class="tr" style="top:160px"><div class="ln"><span class="n">05</span><span class="b" style="background:#3a2e58;color:#b6a6ff">F</span>Atmosphere</div><div class="cl" style="left:calc(232px + 2px);width:604px;background:var(--clip2)">Atmosphere</div><i class="kd" style="left:calc(232px + 2px)"></i><i class="kd" style="left:calc(232px + 600px)"></i></div>
+    <div class="tr" style="top:188px;height:30px"><div class="ln"><span class="n">06</span><span class="b" style="background:#1f3a2c;color:#7fd6a5">♪</span>VO_take03</div><div class="cl" style="left:calc(232px + 92px);width:514px;height:24px;background:#24503a;padding:0"><svg width="514" height="24" id="wave"></svg></div></div>
+    <div style="position:absolute;left:calc(232px + 268px);top:-24px;bottom:0;width:1.5px;background:var(--acc)"><i style="position:absolute;left:-5px;top:2px;width:11px;height:11px;border-radius:6px;background:var(--acc)"></i></div>
+  </div>
+</div>
+
+<!-- RIGHT DOCK (full height): Properties over Effects & Presets -->
+<div class="pn" style="left:1134px;top:52px;width:300px;height:542px">
+  <div class="ph">Properties<div class="r"><svg class="i" style="width:14px" viewBox="0 0 16 16"><path d="M8 2L14 5 8 8 2 5zM2 8l6 3 6-3M2 11l6 3 6-3"/></svg><svg class="i" style="width:14px" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></div></div>
+  <div style="padding:2px 14px 6px;font-size:12.5px;font-weight:600">Headline <span style="font-weight:400;color:var(--t3)">· Text</span></div>
+  <div class="sec">Content</div>
+  <div class="pr" style="height:46px;align-items:flex-start;padding-top:4px"><span class="d" style="margin-top:7px"></span><span class="l" style="margin-top:3px">Text</span><div style="flex:1;height:40px;background:var(--field);border-radius:6px;padding:5px 8px">Make it move.</div></div>
+  <div class="pr"><span class="d"></span><span class="l">Font</span><span class="f" style="width:138px;justify-content:space-between">SF Pro Display<span style="color:var(--t3)">⌃⌄</span></span></div>
+  <div class="pr"><span class="d"></span><span class="l">Weight</span><span class="f" style="width:138px">650</span></div>
+  <div class="pr"><span class="d"></span><span class="l">Size</span><span class="f" style="width:138px">164 px</span></div>
+  <div class="pr"><span class="d"></span><span class="l">Tracking</span><span class="f" style="width:138px">−7 px</span></div>
+  <div class="pr"><span class="d"></span><span class="l">Leading</span><span class="f" style="width:138px">1</span></div>
+  <div class="pr"><span class="d"></span><span class="l">Align</span><span style="margin-left:auto;display:flex;width:138px;background:var(--field);border-radius:6px;padding:2px;gap:2px"><i style="flex:1;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center"><svg class="i" style="width:12px" viewBox="0 0 16 16"><path d="M2 4h12M2 8h8M2 12h11"/></svg></i><i style="flex:1;height:18px;border-radius:4px;background:#4a4a4a;display:flex;align-items:center;justify-content:center"><svg class="i" style="width:12px" viewBox="0 0 16 16"><path d="M2 4h12M4 8h8M3 12h10"/></svg></i><i style="flex:1;height:18px;display:flex;align-items:center;justify-content:center"><svg class="i" style="width:12px" viewBox="0 0 16 16"><path d="M2 4h12M6 8h8M3 12h11"/></svg></i></span></div>
+  <div class="pr"><span class="d"></span><span class="l">Color</span><span style="margin-left:auto;display:flex;align-items:center;gap:8px;width:138px"><i style="width:28px;height:18px;border-radius:9px;background:#F5F5F5"></i><span style="font-variant-numeric:tabular-nums">#F5F5F5</span></span></div>
+  <div class="sec">Transform</div>
+  <div class="pr"><span class="d"></span><span class="l">Position X</span><span class="f" style="width:138px">960 px</span></div>
+  <div class="pr"><span class="d k"></span><span class="l">Position Y</span><span class="f" style="width:138px">540 px</span></div>
+  <div class="pr"><span class="d k"></span><span class="l">Scale</span><span style="margin-left:auto;display:flex;gap:6px;align-items:center"><span class="f" style="width:58px">100 %</span><span class="f" style="width:58px">100 %</span><svg class="i" style="width:12px;color:var(--t3)" viewBox="0 0 16 16"><path d="M6.5 9.5l3-3M5 7.5L3.5 9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5L12.5 7A2.5 2.5 0 009 3.5L7.5 5"/></svg></span></div>
+  <div class="pr"><span class="d"></span><span class="l">Rotation</span><span class="f" style="width:138px">0°</span></div>
+  <div class="pr"><span class="d k"></span><span class="l">Opacity</span><span class="f" style="width:138px">100 %</span></div>
+</div>
+<div class="pn" style="left:1134px;top:600px;width:300px;height:268px">
+  <div class="ph">Effects &amp; Presets<div class="r"><svg class="i" style="width:14px" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></div></div>
+  <div style="display:flex;padding:0 6px">
+    <div style="width:118px">
+      <div class="cat on">All</div><div class="cat">Recent</div><div class="cat">Blur &amp; Sharpen</div><div class="cat">Stylize</div><div class="cat">Color</div><div class="cat">Distort</div><div class="cat">Generate</div><div class="cat">Text</div>
+    </div>
+    <div style="flex:1">
+      <div class="efh">Blur &amp; Sharpen</div><div class="ef">Gaussian Blur</div><div class="ef">Directional Blur</div><div class="ef">Motion Blur</div><div class="ef">Sharpen</div>
+      <div class="efh">Stylize</div><div class="ef">Glow</div><div class="ef">Film Grain</div>
+    </div>
+  </div>
+</div>
+
+<!-- STATUS BAR (sentence case, quiet) -->
+<div style="position:absolute;left:0;right:0;bottom:0;height:30px;display:flex;align-items:center;gap:14px;padding:0 16px;font-size:11.5px;color:var(--t3)">
+  <span>6 layers · 11 keyframes</span><span class="sp"></span>
+  <span style="display:flex;align-items:center;gap:6px"><i style="width:7px;height:7px;border-radius:4px;background:#34C77B"></i>Metal</span>
+  <span>Paused</span><span>4.2 ms</span><span>1920×1080 · 30 fps</span>
+</div>
+
+</div></div></div>
+<script>
+(function(){const r=document.getElementById('ruler');let h='';for(let s=0;s<=14;s++){const x=2+s*59;h+=`<div style="position:absolute;left:${x}px;bottom:0;height:7px;border-left:1px solid rgba(255,255,255,.25)"></div><div style="position:absolute;left:${x+4}px;top:3px;font-size:11px;color:#949494;font-variant-numeric:tabular-nums">0:${String(s).padStart(2,'0')}</div>`;for(let q=1;q<4;q++)h+=`<div style="position:absolute;left:${x+q*14.75}px;bottom:0;height:3px;border-left:1px solid rgba(255,255,255,.12)"></div>`}r.innerHTML=h})();
+(function(){function w(id,n,hgt,col){const s=document.getElementById(id);if(!s)return;let p='';for(let x=0;x<n;x+=3){const a=(Math.sin(x*.07)*.5+.5)*(Math.sin(x*.019)*.4+.6)*(hgt/2-1)*(.5+.5*Math.abs(Math.sin(x*1.3)));p+=`M${x} ${hgt/2-a}L${x} ${hgt/2+a}`}s.innerHTML=`<path d="${p}" stroke="${col}" stroke-width="1.6"/>`}w('wave',514,24,'rgba(140,230,180,.75)');w('vo',118,30,'rgba(140,230,180,.8)')})();
+(function(){const f=document.getElementById('fit'),s=document.getElementById('stage');function r(){s.style.transform=`scale(${f.clientWidth/1440})`}r();new ResizeObserver(r).observe(f)})();
+</script>
+</body></html>
