@@ -215,3 +215,44 @@ bun run build
 
 The five design TODOs, seven API gaps and macOS/Opus gates above remain open.
 Headless merge readiness is not full viewer parity or application cutover.
+
+## Frozen-contract follow-up — 2026-11-01
+
+Merged `origin/feat/native-engine` at frozen-contract commit
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005`. The merge is conflict-free. The frozen
+surface and JS API/UI-kit sources are identical to this lane's previously merged
+integration sources, so no viewer implementation, test snapshot, dependency or
+lockfile adaptation is needed. The lane continues to use the existing six-op
+surface protocol, HostClient subscription/command envelopes and supported kit
+components. The API freeze decision in p0-decisions.md takes precedence over
+older pre-freeze gate wording in the integration evidence.
+
+**Decision (N6; frozen-contract ownership):** preserve the frozen API shape;
+remaining features need additive APIs or application-owned integration. No
+`crates/surface` or `js/v4/src` file is edited by this follow-up. All remaining API
+gaps listed above are requests to their owners, not permission to change those
+paths or invent renderer behavior in panel metadata:
+
+- **API request A1:** register the viewer built-in, project-channel projection,
+  model command and native binding routes in the application's existing data
+  service, with generation/actor acknowledgement semantics already documented.
+- **API request A2:** add viewer-bar control variants and a richer native menu
+  descriptor (separators, action/check states, subtitle, key equivalents), symbol
+  slots, token arithmetic and native fixed-title measurement to the UI kit.
+- **API request A3:** add viewer image/frame/gizmo recipes that consume real
+  generation-owned engine leases and approved design tokens.
+- **API request A4:** add dark-scheme-over-image overlay, toolbar, banner and
+  source-transport/slider recipes with token-based lifecycle/motion handling.
+- **API request A5:** add custom layer rotor/LayoutItem/action and source-time
+  accessibility support plus application window-tree grafting.
+- **API request A6:** provide native classified gesture events and the application
+  tool/drop/text/IME routing needed to consume the existing model behaviors.
+
+The §1–9 coverage table, D1–D5 design questions and macOS/Opus gates are unchanged.
+
+Frozen-base verification reran the exact commands in the preceding Merge-ready
+verification section: **61 viewer-model + 95 surface Rust tests passed; 204 Bun
+tests passed, including 32 viewer tests and 23 snapshots; no failures or skipped
+tests**. Strict Clippy, rustfmt, both TypeScript checks, viewer Prettier and browser
+build pass. Headless API compatibility is verified; native rendering, application
+bindings and the existing macOS/Opus acceptance gates remain open.
