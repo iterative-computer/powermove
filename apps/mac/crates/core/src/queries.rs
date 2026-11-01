@@ -87,7 +87,9 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-/// Layer bounds in composition pixels (pm-eval `Bounds`).
+/// Layer bounds (pm-eval `Bounds`) in the layer's **own plane**, before its
+/// transform: map corners with [`QueryContext::world_matrix`] to get
+/// composition pixels (the old viewer did the same with `GL.bounds`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
     pub x0: f64,
@@ -96,7 +98,7 @@ pub struct Bounds {
     pub y1: f64,
     pub w: f64,
     pub h: f64,
-    /// Anchor point in composition pixels.
+    /// Anchor point, in the same plane.
     pub ax: f64,
     pub ay: f64,
 }
