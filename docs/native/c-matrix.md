@@ -35,11 +35,79 @@ The read-only local scan found **44 immediate extension directories with matchin
 - `corpus_usage_count`: distinct local installations with a recognized static reference. Only aggregate counts leave the scan.
 - `builtin_usage_count`: distinct built-in directories with a reference, out of **10** in the tag's built-in table.
 - `store_fixture_usage_count`: distinct manifest-bearing repository extension fixtures with a reference, out of **10**. This is a regression-fixture count, **not Store adoption**.
-- `store_usage_count`: **`NA` throughout**. Repository searches found Store client/server/UI code and synthetic fixtures, but no complete checked-in published catalog with extension source. No live catalog, account or private provenance database was queried. Store-wide usage cannot be inferred from fixture counts, permissions or the installed folder alone.
+- `store_usage_count`: distinct published extensions with a recognized static reference in their latest public release, out of **4** in the **2026-11-01** Store snapshot below. This population is independent of the local corpus and repository fixtures.
 
 A zero means no recognized reference in that scanned set. It does not prove absence: computed keys, callback indirection, imported helper wrappers, generated source and inferred `any` receivers can evade this scan. The count method does not execute extensions or include project-scoped folders, enabled-state metadata or downloaded bundles outside the specified installation folder. Canvas properties on a receiver whose type cannot be established remain a trace concern. The standard Canvas candidate rows deliberately cover more than the positive static-use subset.
 
 The browser document exposes an **open web platform**, not a source-defined global allowlist. The global rows include required members, used capabilities and conservative presence probes. `evidence_status` and `admission` distinguish known runtime code, standard candidates, feature-dependent constructors and denied accessors. Source alone cannot enumerate every browser prototype or prove availability of secure-context/worker-only members. A frozen runtime/view descriptor sweep must close that gap before choosing a DOM-free Store helper. Do not interpret all 226 candidates as guaranteed constructible globals.
+
+## Store snapshot (2026-11-01)
+
+The authorized read-only snapshot covered **4 published extensions**, **4 latest releases**, **11 release files** and **5 TypeScript source files**. The public catalog had **1 page**, **0 further pages** and **0 duplicate listings**. A second catalog read confirmed **0 changes** to the listing/release set during collection. No extension names, identifiers, publishers, source excerpts or per-extension provenance are retained here.
+
+### Acquisition and static-count method
+
+The desktop Store client and MCP `store_search`, `store_extension` and `store_source` gateway share the public Store read API. `store_library` describes local installations and is not a published-catalog denominator. The MCP gateway required an editor session, so collection used the desktop client's public HTTPS GET routes directly at `https://cloud.trypowermove.com`: `/v1/store/extensions?sort=name&limit=50`, then `/v1/store/releases/{releaseId}`, `/tree` and `/tar`. Requests used **no authentication, credentials, cookies or account state**. There was a **1-second minimum pause** between requests, **14 GET requests** in total and **0 rate-limit responses**; retries would honor `Retry-After`. No install, rating, publishing or other Store mutation was performed.
+
+All releases were downloaded under `/tmp/pm-store-snapshot`, outside Git. All **4 archive SHA-256 hashes**, **11 file sizes** and **11 Git blob SHA-1 hashes** matched the published release/tree metadata; all **4 file inventories** were complete. Archive paths were checked before extraction. The temporary snapshot was deleted after aggregate validation.
+
+A TypeScript syntax-tree scan of all **5 source files**, with **0 parse errors**, counted executable references against every existing canonical C-MATRIX row. Comments, type declarations/queries and type-only imports were excluded; GLSL strings were inspected as effect declarations rather than executed JavaScript or browser-global references. Runtime template interpolations remain source expressions. Inspection of all runtime call sites and imports cross-checked the result: **5 type-only imports** and **1 local value import**, whose target was included; **0 external runtime imports**. No extension code was executed and no build was run.
+
+The CSV schema is unchanged: its sole Store column is the number of distinct extensions using the member. The following table supplies the total source occurrence count for every nonzero row. **Every row omitted from this table has 0 Store extensions and 0 occurrences**, including all powermove helpers, PM members, services, Store globals, Canvas2D calls and supplemental commands. Namespace occurrences count the namespace expression within each member access; namespace and leaf counts overlap and must not be summed as independent operations. These are authored references, including registrations and checks, not runtime invocation counts.
+
+| C-MATRIX member | Store extensions | Total occurrences |
+| --- | ---: | ---: |
+| `api.effects` | 4 | 5 |
+| `api.effects.register` | 4 | 5 |
+| `api.events` | 1 | 1 |
+| `api.events.on` | 1 | 1 |
+| `api.log` | 1 | 1 |
+| `api.onDispose` | 1 | 1 |
+| `api.project` | 1 | 1 |
+| `api.project.get` | 1 | 1 |
+
+Thus **8 of 1,943 rows** have positive Store counts; the remaining **1,935 rows** have measured static zeros. The most-used callable member is `api.effects.register`: **4 extensions**, **5 occurrences**.
+
+### Versions and kinds
+
+| apiVersion | Extensions |
+| --- | ---: |
+| 1 | 1 |
+| 2 | 0 |
+| 3 | 3 |
+| Other | 0 |
+
+Kinds are distinct-extension counts from published manifest contributions, reconciled with catalog categories; kinds can overlap. Script means command/tool contributions or catalog category, not merely having a JavaScript entry module.
+
+| Kind | Extensions |
+| --- | ---: |
+| Effect | 4 |
+| Transition | 0 |
+| Panel | 0 |
+| Layer | 0 |
+| Theme | 0 |
+| Script/command/tool | 0 |
+
+### Compatibility risk classes
+
+Counts are distinct extensions and classes can overlap. DOM means browser-document/element construction or access; canvas means authored canvas/context creation or drawing; direct WebGL means an authored context/presenter call. Declarative GLSL effects are reported separately because they use the host shader pipeline and may need its WebGL fallback without creating an extension-owned context. Raster overrides mean replacement/registration of the raster provider, not ordinary effect registration. Synchronous pixel APIs include raster/capture/snapshot and canvas/WebGL readback/promotion; live services mean synchronous service get/register or legacy live-provider access. Direct project writes include assignments, updates and mutations through `PM.proj` or a retained alias.
+
+| Risk class | Extensions |
+| --- | ---: |
+| DOM | 0 |
+| Canvas / Canvas2D | 0 |
+| Direct WebGL context or presenter | 0 |
+| Declarative GLSL effects (host shader route) | 4 |
+| Raster overrides | 0 |
+| Synchronous pixel APIs | 0 |
+| Live services | 0 |
+| Direct `PM.proj` writes | 0 |
+
+### Coverage limits
+
+This is the complete anonymously browsable catalog at collection time, using **one latest public release per extension**. It excludes historical releases, private/unlisted/hidden/removed/tombstoned listings, yanked source unavailable to anonymous reads, unpublished work, installed-only or project-scoped extensions, and later publications. Collection is not a transactional server snapshot; the unchanged final catalog check bounds that limitation. The denominator counts extensions, not individual contributed effects or installations.
+
+Static counts do not prove execution frequency, permission admission, native shader compilation, rendering parity, runtime-global availability, service identity or compatibility conformance. Computed keys, generated/evaluated code, indirect aliases and remotely loaded dependencies can evade static analysis; none of the reviewed runtime imports required external source retrieval. GLSL identifiers and comments are not JavaScript global usage. No descriptor sweep, frozen-reference trace, runtime performance check or build was performed. Zero Store counts retain every compatibility requirement and fixture, including arbitrary trusted DOM, Canvas2D/pixel behavior and service/presenter coverage. This small effects-only catalog does not replace the broader local corpus or establish that every Store runtime can be DOM-free.
 
 ## Derived synchronous clusters
 
@@ -147,7 +215,7 @@ Source validation performed for this inventory: 43 compiler helper names reconci
 ## Open questions for Jude
 
 1. **Reconcile the reference build before traces freeze.** This tag's `RenderAPI`/`makeRender` have no `renderFrameToAsync`, `snapshotAsync` or `rasterAsync` siblings. `PM.Export.snapshotAsync` exists at `legacy/core/exporter.ts:1130`. The tag also binds J/K to visible event navigation and L to audio reveal, and no general direct-write admission barrier was found. If another shipped build is intended, pin it explicitly; until then this matrix uses the requested tag and treats the extra siblings/barrier/shuttle description as unverified. Trusted `api.apiVersion` is also hard-coded to 1 in `host.ts:530`, while sandbox reports `init.apiVersion`.
-2. **Supply an authorized Store source snapshot for Store-wide counts/global coverage.** Until available, retain `NA` and run conservative fixtures. Static zero counts and a DOM-free helper prototype cannot establish compatibility with every Store extension.
+2. **Store source snapshot: answered (2026-11-01).** Anonymous public reads covered all **4** current catalog extensions; Store counts and occurrence totals are recorded above. Runtime-global availability and compatibility traces remain open; static zero counts do not establish a DOM-free runtime.
 3. **Confirm classification of source/reference differences.** Native async-decline replay and short-transaction validation interact with the tag's literal-false/pre-cancel policy, partial workspace mutations, raw direct writes and Promise-returning mutation callbacks. Record which are authored contract and which are intentional fixes. Selective cancel/acknowledged-write preservation is already the native rule; do not silently relabel tag rollback as selective cancel.
 4. **Resolve facade completeness with S1/S5 evidence.** Can captions edit-request claims, contributed inspector sections, source preview, external-history closures and wider runtime service fields be represented without cross-isolate synchronous calls? Use E/compat closure until yes. Runtime globals needing full DOM take the per-extension WebView fallback; no affected extension is excluded.
 
