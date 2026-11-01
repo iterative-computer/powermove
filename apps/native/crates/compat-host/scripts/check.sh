@@ -5,20 +5,22 @@ source "$ROOT/engine/env.sh"
 export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 cd "$ROOT/apps/native"
 # Build and test only this lane; never clean the shared target or change caches.
+# GUARD_SECONDS bounds the owned child (default 8 minutes for builds/tests).
 run_guarded() {
-  python3 - "$@" <<'PY'
-import shutil, subprocess, sys, time
+  GUARD_SECONDS="${GUARD_SECONDS:-480}" python3 - "$@" <<'PY'
+import os, shutil, subprocess, sys, time
 minimum = 6 * 1024**3
+limit = int(os.environ['GUARD_SECONDS'])
 if shutil.disk_usage('/').free < minimum:
     raise SystemExit('compat_disk_below_6_gib: stopped before launch')
 p = subprocess.Popen(sys.argv[1:])
 start = time.monotonic()
 while p.poll() is None:
-    if shutil.disk_usage('/').free < minimum or time.monotonic() - start > 480:
+    if shutil.disk_usage('/').free < minimum or time.monotonic() - start > limit:
         p.terminate()
         try: p.wait(timeout=5)
         except subprocess.TimeoutExpired: p.kill(); p.wait()
-        raise SystemExit('compat_disk_or_8_minute_limit: owned child stopped')
+        raise SystemExit(f'compat_disk_or_{limit}_second_limit: owned child stopped')
     time.sleep(1)
 raise SystemExit(p.returncode)
 PY
@@ -47,7 +49,9 @@ case "${1:-test}" in
       true
     }
     trap release_gui EXIT INT TERM
-    run_guarded "$CARGO_TARGET_DIR/debug/examples/shell-smoke"
+    # The smoke bounds itself to 35 s and a watchdog thread to 45 s; this outer
+    # guard stops a process that is wedged beyond both.
+    GUARD_SECONDS=90 run_guarded "$CARGO_TARGET_DIR/debug/examples/shell-smoke"
     ;;
   *) echo 'Usage: check.sh [test|build|smoke]' >&2; exit 2 ;;
 esac

@@ -574,3 +574,113 @@ downward path. The legacy schedule in the same binary has no runaway
   stable but keeps the ~21 ms A/V bias and 27–39 late onsets per run.
 - Re-run the audio A/B and both shape runs after a lag-sampling fix, on a quiet
   machine (`fileproviderd` idle, no Electron instance).
+
+## P1 fix pass — 2026-11-01
+
+**Gate P1 remains NOT PASSED** (edit/scrub stay on the compositor floor;
+late onsets are not zero). This pass fixes the default schedule's present-lag
+runaway found by on-screen rerun 2 (`feat/na-onscreen2`, at `0863a9732`): at
+120 Hz the predicted lag climbed one refresh at a time to 333–375 ms and after
+~10 s submissions stopped reaching glass; at 60 Hz it crept 28 → 54 ms.
+
+### Root cause
+
+`73b91610c` requested `presentDrawable:atTime:` at `target + lag − ½ refresh`.
+`53f8f7027` then took the upper decile of `presentedTime − target`. The
+`atTime:` argument is when WindowServer may composite, not a glass time, and
+glass follows about one refresh later. So every sample contained the previous
+estimate plus that refresh, and the estimate fed back on itself: one refresh
+per window at 120 Hz. At 60 Hz the extra delay is under half a refresh, so only
+jitter pushed samples into the upper decile, hence the slower creep. Once the
+lag passed the drawable pool and the worker's 250 ms flight window, every
+drawable sat queued for a far-future present (worker → completion p95
+113 ms) and `presentedTime` was never observed. The median would also have run
+away; the decile only made it faster. A headless simulation of the old rule
+(below) reproduces both rates.
+
+### Fix (`engine-service/src/present.rs`)
+
+- **The request never depends on the estimate.** Playing frames request
+  `target − ½ refresh`, moved to a later refresh only if that is already due.
+  A frame still cannot be latched for a vsync before its target.
+- **Lag = `presentedTime − requested`** (traces add `requested`). It is a
+  sliding median of 31 samples. Each sample and the estimate are clamped to 4
+  refreshes, with a prior of 1.5 refreshes until 3 samples exist. Old samples
+  age out, so a burst of slow presents cannot ratchet it. The picture and
+  `audio_host` are chosen for `requested + lag`.
+- **Rejected variant (measured, round 2):** anchoring the request to the last
+  `presentedTime` phase (`LEAD` 12.5 ms before a real vsync). At 120 Hz it was
+  within noise (15 vs 17 late). At 60 Hz this ProMotion panel shows a frame a
+  near-constant ~12.5–13 ms after its request instead of on a fixed grid. The
+  glass phase then fed back into the next request, random-walked, and caused
+  10 late onsets (vs 0). The phase is not an independent input on this panel.
+- Legacy (`PM_ENGINE_PRESENT=legacy`) is unchanged, for same-build A/B.
+
+Headless tests (service lib, no GPU): a simulated WindowServer with a
+compositing delay, jitter, a grid phase offset and 3% missed vsyncs runs 60 s
+of 30 fps content at 120 and 60 Hz, with `presentedTime` arriving a refresh
+after glass. The estimate must settle within one refresh, stay ≤ 4 refreshes,
+not drift, lose no frame past 250 ms, and land ≥ 95% of frames exactly as
+predicted (≥ 50% and within 2 refreshes for a compositor that itself splits
+between slots). The same simulator running the old rule must exceed 250 ms at
+120 Hz and 50 ms at 60 Hz; it does. Also: a burst of slow samples does not
+ratchet and ages out, and the request is identical with any estimate.
+
+### On screen (120/60 Hz, release, default vs legacy in the same binary)
+
+Conditions: Apple M5 / 16 GiB, macOS 27.2, AC, built-in panel only, unlocked
+(caffeinate). One-minute load 3.8–7.6 from other lanes; existing apps were
+retained, so these are diagnostics, not gate-eligible. Each run held the GUI
+lock as `p1fix`, and the batch held `/tmp/pm-build.lock`. `display_restore_ok`
+was true for every run. Commands are those of "Latency pass → Reproduce"
+(`--lock-owner p1fix`, outputs under `/tmp/pm-p1fix/lat/`, not tracked). Final
+binary: round 3. Round 1 used the same request rule without the "already due"
+guard, which never triggers for 30 fps content.
+
+| Row | Rerun 2 default (`0863a9732`) | **Default, round 3** | Default, round 1 | Legacy, round 3 | Legacy, round 1 |
+|---|---|---|---|---|---|
+| Audio 120 Hz 20 s: onsets shown | 131 / ≈600 | **600 / 600** | 600 / 600 | 602 | 601 |
+| Audio: skipped / late onsets | 275 / 18 | **0 / 3** | 0 / 3 | 0 / 5 | 0 / 2 |
+| Audio: A/V mean signed / abs (ms) | 19.371 / 19.371 | **0.007 / 0.076** | 0.015 / 0.095 | 23.217 / 23.217 | 20.577 / 20.577 |
+| Audio: jitter p50 / p95 about mean (ms) | 11.053 / 13.944 | **0.042 / 0.078** | 0.055 / 0.092 | 0.221 / 0.258 | 0.028 / 0.064 |
+| Audio: worker → completion p95 (ms) | 113.343 | **2.763** | 2.666 | 2.529 | 2.483 |
+| Shape 120 Hz 60 s: onsets shown (of 1,800) | 132 | **1,800** | 1,800 | 1,801 | 1,801 |
+| Shape 120: skipped / late | 272 / 18 | **0 / 9** | 0 / 17 | 0 / 24 | 0 / 21 |
+| Shape 120: worker → completion p50 / p95 (ms) | 60.0 / 113.3 | 3.653 / 5.058 | 2.331 / 5.472 | 0.757 / 2.196 | 0.768 / 3.426 |
+| Shape 120: commit → display p50 / p95 (ms) | 174.0 / 249.1 | 21.063 / 21.657 | 21.982 / 22.437 | 24.576 / 24.694 | 24.597 / 24.695 |
+| Shape 60 Hz: onsets shown / skipped / late | 1,800 / 0 / 1 (lag creeping) | **1,800 / 0 / 4** | 1,800 / 0 / 0 | 1,801 / 0 / 4 | 1,801 / 0 / 2 |
+| Shape 60: worker → completion p95 (ms) | 4.340 | 3.476 | 3.812 | 4.875 | 4.857 |
+| Cached scrub p50 / p95, 120 Hz (ms) | 22.659 / 24.383 | 22.771 / 24.271 | 22.852 / 24.563 | 22.967 / 24.518 | 23.047 / 24.388 |
+| Edit → presentation p50 / p95, 120 Hz (ms) | 22.932 / 24.530 | 23.090 / 24.408 | 22.886 / 24.182 | 23.112 / 24.603 | 22.913 / 24.463 |
+
+Round 2 (rejected phase-anchored variant): audio 600 / 0 / 1 late, A/V
+−0.022 / 0.078, jitter p95 0.063 ms. Shape 120: 1 skipped, 15 late (legacy 1
+skipped, 49 late). Shape 60: 10 late (legacy 2).
+
+From the traces:
+- The estimate stays put. Audio: 1.47–1.50 refreshes for the whole run.
+  120 Hz shape: 1.15–1.23, drifting slowly with the link/glass phase. 60 Hz:
+  0.47–0.50, then 0.80–0.81 after the panel re-phased mid-run; only 4 frames
+  landed off-prediction.
+- 597/600 (audio) and 1,790/1,800 (shape) presents land exactly where predicted.
+- **Every remaining late onset is a WindowServer miss.** GPU completion and
+  commit were 13–16 ms before target at 120 Hz (28–30 ms at 60 Hz), and the
+  frame still appeared one refresh late. No present schedule removes these.
+  Legacy, which re-presents every vsync, has as many or more.
+- Worker → completion p95 at 120 Hz (5.1 ms) is above the 4.167 ms local
+  bound. As noted in the latency pass, every submission is now a full new
+  frame and there are 4× fewer submissions, so the GPU clocks down. Legacy's
+  per-present average is diluted by cache hits.
+
+Against the targets: **all onsets shown ✔, zero skipped ✔ (round 3), A/V mean
+≤ 1 ms ✔, jitter p95 ≤ 2 ms ✔, zero late ✘** (3 / 9 / 4 compositor misses).
+The default schedule beats legacy on every playback row except raw worker
+time, so it stays the default.
+
+Validation: service **30/30** with and without default features (12 lib
+incl. 5 new schedule tests, 18 integration), app **16/16**, compat-host
+**22/22** plus the offscreen probe (7/7). Clippy `--all-targets --no-deps -D
+warnings` passes for service, app and compat-host (all features); `fmt`
+passes. No kernel, engine, vendor, shell or Cargo.lock change. To keep ≥ 8 GiB
+free, 4 GiB of `pm-target/debug/deps` hash groups untouched for > 6 h were
+evicted.

@@ -765,7 +765,7 @@ impl MacDomHost {
             if let Some(p) = w.parentWindow() {
                 p.removeChildWindow(&w)
             }
-            w.close();
+            close_later(&w);
         }
     }
     fn check(&self, g: Generation, id: PanelId) -> Result<()> {
@@ -881,6 +881,22 @@ impl Drop for MacDomHost {
         }
         self.slot.removeFromSuperview();
         let _ = &self.bridge;
+    }
+}
+/// Closing a key child window makes its parent key synchronously, and the
+/// shell then renders inside that AppKit callback. A host method (called with
+/// the shell's borrow of the host held, e.g. `stop_and_recover`) must not
+/// re-enter the shell that way, so the close runs on the next run-loop turn in
+/// any common mode. The pending perform request retains the window.
+fn close_later(window: &NSWindow) {
+    let object: &NSObject = window;
+    unsafe {
+        object.performSelector_withObject_afterDelay_inModes(
+            sel!(close),
+            None,
+            0.,
+            &NSArray::from_slice(&[NSRunLoopCommonModes]),
+        );
     }
 }
 fn random_token() -> Result<String> {
