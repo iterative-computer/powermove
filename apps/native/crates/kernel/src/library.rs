@@ -10,8 +10,9 @@
 //! * `project.<id>`: `{v, proj}` envelope, a bare project, or a stringified
 //!   one (`R.unwrap`); a missing slot falls back to the legacy `autosave`
 //!   envelope when its project has that id.
-//! * `projectJournal.<id>`: `[{revision, patches}]` applied in order, skipping
-//!   entries whose revision is not newer than the slot's, with the legacy
+//! * `projectJournal.<id>`: `[{revision, sequence?, patches}]` applied in order.
+//!   v1.3 skips sequences covered by the envelope's `recoverySequence`; only
+//!   old records/envelopes fall back to document revisions, with the legacy
 //!   `applyPatches` semantics (silently skipping patches whose parent is
 //!   missing, splicing arrays on delete).
 //! * History: `projectHistory.<id>` when present, else the legacy combined
@@ -303,8 +304,16 @@ impl LibraryStore {
             return Err(LibraryError::InvalidKey(id.to_owned()));
         }
         let mut from_autosave = false;
+        let mut checkpoint_sequence = None;
         let mut project = match self.read(&format!("project.{id}"))? {
-            Some(raw) => unwrap_project(raw),
+            Some(raw) => {
+                let envelope = parse_project_envelope(raw);
+                checkpoint_sequence = envelope
+                    .as_ref()
+                    .and_then(|v| v.get("recoverySequence"))
+                    .cloned();
+                envelope.and_then(unwrap_project)
+            }
             None => {
                 let old = self.read("autosave")?.and_then(unwrap_project);
                 from_autosave = old
@@ -320,13 +329,21 @@ impl LibraryStore {
         let mut skipped = 0;
         if let Some(Value::Array(entries)) = self.read(&format!("projectJournal.{id}"))? {
             for entry in entries {
+                // v1.3 journals use a sequence independent of the edit revision:
+                // undo can rewind revisions. Preserve v1.2's fallback only when
+                // neither side carries the new sequence contract (N3/N4).
+                let sequence = entry.get("sequence").and_then(Value::as_f64);
+                let checkpoint = checkpoint_sequence
+                    .as_ref()
+                    .map(crate::commands::js_number)
+                    .filter(|v| !v.is_nan())
+                    .unwrap_or(0.0);
                 let revision = entry.get("revision").and_then(Value::as_f64);
                 let slot_revision = current.get("revision").and_then(Value::as_f64);
-                if let (Some(r), Some(s)) = (revision, slot_revision)
-                    && r.is_finite()
-                    && s.is_finite()
-                    && r <= s
-                {
+                let old_revision = checkpoint_sequence.is_none()
+                    && entry.get("sequence").is_none()
+                    && matches!((revision, slot_revision), (Some(r), Some(s)) if r.is_finite() && s.is_finite() && r <= s);
+                if sequence.is_some_and(|n| n.is_finite() && n <= checkpoint) || old_revision {
                     skipped += 1;
                     continue;
                 }
@@ -471,14 +488,16 @@ pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
 }
 
 /// `R.unwrap`: `{v, proj}`, a bare project, or a JSON string of either.
-fn unwrap_project(raw: Value) -> Option<Value> {
+fn parse_project_envelope(raw: Value) -> Option<Value> {
     let raw = match raw {
         Value::String(s) => parse(s.as_str()?).ok()?,
         other => other,
     };
-    if raw.is_null() {
-        return None;
-    }
+    (!raw.is_null()).then_some(raw)
+}
+
+fn unwrap_project(raw: Value) -> Option<Value> {
+    let raw = parse_project_envelope(raw)?;
     match raw.get("proj") {
         Some(p @ Value::Object(_)) => Some(p.clone()),
         _ => Some(raw),

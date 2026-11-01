@@ -731,8 +731,10 @@ fn actor_publishes_per_key_events_and_ui_facts_before_ack() {
         .unwrap()
         .unwrap();
     let events = h.subscribe();
-    let mut ui = UiState::default();
-    ui.tool = parse(r#"{"tool":"pen","toolShape":"rect"}"#).unwrap();
+    let ui = UiState {
+        tool: parse(r#"{"tool":"pen","toolShape":"rect"}"#).unwrap(),
+        ..Default::default()
+    };
     let ack = h
         .state_transaction(state(vec![
             setting("theme", Some(Value::from("dark"))),

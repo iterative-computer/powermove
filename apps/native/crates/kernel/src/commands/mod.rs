@@ -87,6 +87,8 @@ mod channels;
 mod cx;
 mod spine;
 mod track;
+// Shared legacy Number coercion for storage recovery sequence metadata.
+pub(crate) use track::js_number;
 mod values;
 
 pub mod captions;

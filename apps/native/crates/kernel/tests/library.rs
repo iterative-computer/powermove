@@ -284,3 +284,51 @@ fn smoke_real_store_copy_counts_only() {
          history rejected {rejected}, journal entries applied {journal_entries}, failures {failures}"
     );
 }
+
+#[test]
+fn recovery_sequences_keep_rewound_edits_in_plain_and_stringified_slots() {
+    for stringified in [false, true] {
+        for mode in 0..3 {
+            let dir = common::TempDir::new("sequence-reader");
+            std::fs::create_dir(dir.path("store")).unwrap();
+            let mut envelope = serde_json::json!({"v":"1.3.0","proj":{"id":"P","revision":100,"name":"base","layers":[]}});
+            let entries = match mode {
+                0 => {
+                    envelope["recoverySequence"] = 7.into();
+                    serde_json::json!([
+                        {"sequence":6,"revision":101,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                        {"sequence":8,"revision":1,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                    ])
+                }
+                1 => serde_json::json!([
+                    {"sequence":0,"revision":101,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                    {"sequence":1,"revision":1,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                ]),
+                _ => serde_json::json!([
+                    {"revision":99,"patches":[{"path":["name"],"exists":true,"value":"stale"}]},
+                    {"revision":101,"patches":[{"path":["name"],"exists":true,"value":"kept"}]}
+                ]),
+            };
+            let raw = if stringified {
+                serde_json::Value::String(envelope.to_string())
+            } else {
+                envelope
+            };
+            let bytes = raw.to_string().into_bytes();
+            std::fs::write(dir.path("store/project.P.json"), &bytes).unwrap();
+            std::fs::write(dir.path("store/projectJournal.P.json"), entries.to_string()).unwrap();
+            let loaded = LibraryStore::open(&dir.0).load("P").unwrap().unwrap();
+            assert_eq!(
+                loaded.project.get("name"),
+                Some(&Value::from("kept")),
+                "mode={mode}, stringified={stringified}"
+            );
+            assert_eq!((loaded.journal_applied, loaded.journal_skipped), (1, 1));
+            assert_eq!(
+                std::fs::read(dir.path("store/project.P.json")).unwrap(),
+                bytes,
+                "opening never rewrites input"
+            );
+        }
+    }
+}

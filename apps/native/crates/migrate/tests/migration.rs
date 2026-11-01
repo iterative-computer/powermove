@@ -387,3 +387,137 @@ fn transformed_payload_is_retained_without_becoming_an_original() {
     assert!(pass.closure[0].export_warning);
     assert!(pass.closure[0].original.is_none());
 }
+
+fn tree_bytes(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(
+        base: &Path,
+        p: &Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in fs::read_dir(p).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                walk(base, &entry.path(), out);
+            } else {
+                out.insert(
+                    entry.path().strip_prefix(base).unwrap().into(),
+                    fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+    }
+    let mut out = Default::default();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn interrupted_delta_archives_old_pass_objects_mappings_and_source_bytes() {
+    for stop in [
+        Checkpoint::ObjectPublished,
+        Checkpoint::RecordPublished,
+        Checkpoint::ClosurePublished,
+    ] {
+        let t = tempdir().unwrap();
+        let snapshot = fixture_snapshot(t.path());
+        let mut records = indexeddb::read(&snapshot).unwrap().records;
+        let source_before = tree_bytes(&t.path().join("snapshot"));
+        let root = t.path().join("store");
+        let input = ClosureInput {
+            inventoried: all_domains(),
+            references: vec![],
+        };
+        migration::migrate(&snapshot, &records, &input, &root, |_| Ok(())).unwrap();
+        let before = tree_bytes(&root);
+        let state: serde_json::Value =
+            serde_json::from_slice(&before[Path::new("migration.json")]).unwrap();
+        // A later record revision conflicts with the native key. Preserve both.
+        records[0].value["revision"] = "synthetic-delta-revision".into();
+        let mut interrupted = false;
+        assert!(
+            migration::migrate(&snapshot, &records, &input, &root, |point| {
+                if point == stop && !interrupted {
+                    interrupted = true;
+                    anyhow::bail!("synthetic delta interruption");
+                }
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(interrupted);
+        let pass = migration::migrate(&snapshot, &records, &input, &root, |_| Ok(())).unwrap();
+        assert!(!pass.cutover_ready);
+        assert_eq!(pass.mapping_conflicts.len(), 1);
+        let after = tree_bytes(&root);
+        for (path, bytes) in &before {
+            if path != Path::new("migration.json") {
+                assert_eq!(
+                    after.get(path),
+                    Some(bytes),
+                    "changed archived {}",
+                    path.display()
+                );
+            }
+        }
+        let current: serde_json::Value =
+            serde_json::from_slice(&after[Path::new("migration.json")]).unwrap();
+        assert_eq!(current["passes"].as_object().unwrap().len(), 2);
+        for (id, pass) in state["passes"].as_object().unwrap() {
+            assert_eq!(&current["passes"][id], pass);
+        }
+        assert_eq!(tree_bytes(&t.path().join("snapshot")), source_before);
+        migration::migrate(&snapshot, &records, &input, &root, |_| {
+            panic!("completed delta must be a no-op")
+        })
+        .unwrap();
+        assert_eq!(tree_bytes(&root), after);
+    }
+}
+
+#[test]
+fn proxy_metadata_boolean_or_version_prevents_original_promotion_even_on_fingerprint_match() {
+    let t = tempdir().unwrap();
+    let snapshot = fixture_snapshot(t.path());
+    let db = indexeddb::read(&snapshot).unwrap();
+    let record = db.records.iter().find(|r| r.key == "media:proxy").unwrap();
+    let fingerprint =
+        migration::sampled_fingerprint(&record.payload_path(&snapshot).unwrap().unwrap()).unwrap();
+    let references = [(true, 0), (false, 2), (true, 2)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (flag, version))| {
+            let mut r = reference(
+                &format!("synthetic-proxy-{i}"),
+                "media:proxy",
+                Availability::ProxyOnly,
+            );
+            r.playback_proxy = flag;
+            r.playback_proxy_version = version;
+            r.fingerprint = Some(fingerprint.clone());
+            r
+        })
+        .collect();
+    let pass = migration::migrate(
+        &snapshot,
+        &db.records,
+        &ClosureInput {
+            inventoried: all_domains(),
+            references,
+        },
+        &t.path().join("store"),
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(pass.cutover_ready);
+    for entry in pass.closure {
+        assert_eq!(entry.status, Status::ProxyOnly);
+        assert!(entry.original.is_none());
+        assert!(entry.stored.is_some());
+        assert!(entry.export_warning);
+    }
+    assert_eq!(
+        record.value.get("playbackProxy"),
+        None,
+        "the metadata belongs to project assets, not IDB"
+    );
+}
