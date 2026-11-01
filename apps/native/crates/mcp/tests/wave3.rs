@@ -75,6 +75,22 @@ fn validate_effect_matches_frozen_validator_including_error_order() {
     }
 }
 
+#[test]
+fn effect_identifiers_reject_trailing_line_terminators_like_the_tag() {
+    // N6/N3: validate complete identifiers, including the end anchor.
+    for (key, value) in [
+        ("id", json!("Effect\n")),
+        ("params", json!([{"k":"amount\n","def":1}])),
+    ] {
+        let mut d = definition();
+        d[key] = value;
+        let expected = oracle(json!({"tool":"validate_effect","arguments":{"definition":d}}));
+        let error = effect::validate(&d).unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        assert_eq!(error.message, expected["error"].as_str().unwrap());
+    }
+}
+
 struct Mock(Mutex<VecDeque<(store::Request, store::Response)>>);
 impl Mock {
     fn new(pairs: Vec<(store::Request, Value)>) -> Self {

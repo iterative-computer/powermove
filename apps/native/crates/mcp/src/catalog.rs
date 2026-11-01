@@ -121,7 +121,7 @@ fn validate_value(s: &Value, v: &Value, path: &str) -> Result<()> {
 }
 
 /// Tools with concrete bodies/adapters. HOST_BACKED tools need an injected
-/// engine/export worker; without it they still fail explicitly.
+/// native worker capabilities; without them they still fail explicitly.
 pub const IMPLEMENTED: &[&str] = &[
     "list_projects",
     "create_project",
