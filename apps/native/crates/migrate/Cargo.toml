@@ -1,0 +1,24 @@
+[package]
+name = "pm-native-migrate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+crc32c = "0.6"
+fs2 = "0.4"
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snap = "1"
+
+[dev-dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
+tempfile = "3"

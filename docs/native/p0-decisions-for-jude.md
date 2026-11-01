@@ -11,9 +11,9 @@ Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 | S1 V8 | Not started. The sandbox build needs far more disk than this Mac has (~10 GB free vs §9's 80 GB). Owner: a machine with space or CI. | — |
 | S2 GPUI-CE | **Open.** P-DEVICE, P-HEADLESS, P-TEXTURE pass GPU tests. IME, VoiceOver, resize, display moves, glass and 120 Hz are unverified (Mac locked). 1,000-texture fixture met deadlines but not 50% headroom. P-A11Y not started. | `s2-gpui-ce.md` |
 | S3 Viewer (EDR) | Not started; needs an unlocked GUI session and S2's on-screen checks. | — |
-| S4 GLSL | Running. | `s4-glsl.md` (pending) |
+| S4 GLSL | **Draw regression passes; gate open.** 661 cases / 1,605 variants by stage: 516 draw natively, 13 cases need the WebGL route, zero naga failures (so no SPIRV-Cross route), zero lost draws vs the previous writer; killable compiler processes. Open: production Metal compile still host-side, no historical WebGL captures, one self-unstable case. | `s4-glsl.md` |
 | S5 Compat | **Open, with failures** (below). | `s5-compat.md` |
-| S6 Migration readers | Running. | `s6-migration.md` (pending) |
+| S6 Migration readers | **Readers work; cutover proofs open.** Snapshot-only IndexedDB/LevelDB/V8/Blob and localStorage readers; resumable BLAKE3 media move at ~284 MiB/s, 5 MiB RSS. Real-profile proof on this Mac: 593 records (442 media, 151 posters) describing ~15.9 GB, read without Electron. Open: crashed-Chromium recovery, OS-denied blobs, rollback closure, signed Keychain/updater proofs, agent-client replay. Plan: two-DR Keychain ACL, TR-gated Squirrel, then Sparkle 2 with new EdDSA keys. | `s6-migration.md` |
 | Inventories | Done: W1, C-MATRIX, D-STATE, T1, OS base. | `w1-*.md`, `c-matrix.*`, `d-state.md`, `t1-themes.md`, `os-base.md` |
 
 ## S5 failures (measured with the Mac locked; some may be inflated by WebKit background throttling and need a rerun in an unlocked session)

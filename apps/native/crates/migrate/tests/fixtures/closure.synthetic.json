@@ -1,0 +1,55 @@
+{
+  "inventoried": [
+    "current",
+    "trash",
+    "take",
+    "undo",
+    "redo",
+    "agent"
+  ],
+  "references": [
+    {
+      "owner": "synthetic-current",
+      "ownerKind": "current",
+      "key": "media:synthetic",
+      "fingerprint": "v2:28:6c47bf2b0bff578655f0735b01f229ad0193786bb55a874c78919a3f9f44bae5",
+      "before": "original"
+    },
+    {
+      "owner": "synthetic-trash",
+      "ownerKind": "trash",
+      "key": "media:proxy",
+      "fingerprint": "v2:28:6c47bf2b0bff578655f0735b01f229ad0193786bb55a874c78919a3f9f44bae5",
+      "playbackProxy": true,
+      "playbackProxyVersion": 2,
+      "before": "proxy-only"
+    },
+    {
+      "owner": "synthetic-take",
+      "ownerKind": "take",
+      "key": "media:synthetic:poster",
+      "poster": true,
+      "before": "original"
+    },
+    {
+      "owner": "synthetic-undo",
+      "ownerKind": "undo",
+      "key": "old-bare-id",
+      "fingerprint": "v2:12:ca3f4c8149c2dc7b3f6ecc20c278a394720a035178ae55043a2a4f172aed32ba",
+      "before": "original"
+    },
+    {
+      "owner": "synthetic-redo",
+      "ownerKind": "redo",
+      "key": "missing-synthetic-media",
+      "before": "offline"
+    },
+    {
+      "owner": "synthetic-agent",
+      "ownerKind": "agent",
+      "key": "media:file",
+      "fingerprint": "v2:14:093676b571718a3ce743e9d808cf3dab419962843f405018b4508ecf340bb082",
+      "before": "original"
+    }
+  ]
+}
