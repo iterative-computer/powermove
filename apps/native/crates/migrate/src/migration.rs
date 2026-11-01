@@ -167,17 +167,36 @@ pub fn migrate(
     records: &[Record],
     closure: &ClosureInput,
     root: &Path,
+    hook: impl FnMut(Checkpoint) -> Result<()>,
+) -> Result<Pass> {
+    migrate_many(&[(snapshot, records)], closure, root, hook)
+}
+
+/// Coordinate all Chromium origins as one availability pass. Empty batches
+/// support profiles with source-linked/offline assets and no IndexedDB yet.
+/// Records with the same database/store/key across origins are refused rather
+/// than silently choosing one. Source roots are all checked before writing.
+pub fn migrate_many(
+    batches: &[(&Snapshot, &[Record])],
+    closure: &ClosureInput,
+    root: &Path,
     mut hook: impl FnMut(Checkpoint) -> Result<()>,
 ) -> Result<Pass> {
-    ensure!(
-        snapshot.complete(),
-        "sampled snapshots cannot authorize a media migration"
-    );
+    for (snapshot, _) in batches {
+        ensure!(
+            snapshot.complete(),
+            "sampled snapshots cannot authorize a media migration"
+        );
+        snapshot.ensure_destination(root)?;
+    }
+    let records: Vec<_> = batches
+        .iter()
+        .flat_map(|(_, records)| records.iter())
+        .collect();
     ensure!(
         records.iter().all(|r| r.payload_index < r.external.len()),
         "invalid media payload index"
     );
-    snapshot.ensure_destination(root)?;
     fs::create_dir_all(root)?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     check_space(root, 0)?;
@@ -197,7 +216,19 @@ pub fn migrate(
     for dir in ["objects", "keys", "tmp"] {
         fs::create_dir_all(root.join(dir))?;
     }
-    let snapshot_id = snapshot.identity()?;
+    // Keep existing single-origin checkpoints byte compatible.
+    let snapshot_id = if batches.len() == 1 {
+        batches[0].0.identity()?
+    } else {
+        blake3::hash(&serde_json::to_vec(
+            &batches
+                .iter()
+                .map(|(s, _)| s.identity())
+                .collect::<Result<Vec<_>>>()?,
+        )?)
+        .to_hex()
+        .to_string()
+    };
     let base_hash = blake3::hash(&serde_json::to_vec(&(records, closure))?)
         .to_hex()
         .to_string();
@@ -228,57 +259,59 @@ pub fn migrate(
     }
     save(&mut state, &id, &pass, &state_file)?;
     let mut seen = BTreeSet::new();
-    for record in records {
-        let rid = record_id(record);
-        ensure!(seen.insert(rid.clone()), "duplicate input record");
-        if let Some(done) = pass.records.get(&rid) {
-            if let Some(key) = &done.stored {
-                verify_key(root, key)?;
+    for (snapshot, records) in batches {
+        for record in *records {
+            let rid = record_id(record);
+            ensure!(seen.insert(rid.clone()), "duplicate input record");
+            if let Some(done) = pass.records.get(&rid) {
+                if let Some(key) = &done.stored {
+                    verify_key(root, key)?;
+                }
+                continue;
             }
-            continue;
-        }
-        let payload = record.payload();
-        let path = record.payload_path(snapshot)?;
-        let stored = if let Some(path) = path {
-            let key = import_file(
-                root,
-                &path,
-                payload.size,
-                ImportInfo {
-                    key: &record.key,
-                    mime: &payload.mime,
-                    revision: record.revision(),
-                    at: record.value.get("at").and_then(Value::as_f64),
-                    expected: None,
+            let payload = record.payload();
+            let path = record.payload_path(snapshot)?;
+            let stored = if let Some(path) = path {
+                let key = import_file(
+                    root,
+                    &path,
+                    payload.size,
+                    ImportInfo {
+                        key: &record.key,
+                        mime: &payload.mime,
+                        revision: record.revision(),
+                        at: record.value.get("at").and_then(Value::as_f64),
+                        expected: None,
+                    },
+                )?;
+                hook(Checkpoint::ObjectPublished)?;
+                Some(key)
+            } else if payload.size == 0 {
+                Some(import_empty(
+                    root,
+                    &record.key,
+                    &payload.mime,
+                    record.revision(),
+                )?)
+            } else {
+                None
+            };
+            // Checkpoint the manifest BEFORE publishing the public key. On conflict
+            // keep the existing key and both objects. Resolution belongs to cutover.
+            pass.records.insert(
+                rid,
+                Imported {
+                    source_record: record.clone(),
+                    stored: stored.clone(),
                 },
-            )?;
-            hook(Checkpoint::ObjectPublished)?;
-            Some(key)
-        } else if payload.size == 0 {
-            Some(import_empty(
-                root,
-                &record.key,
-                &payload.mime,
-                record.revision(),
-            )?)
-        } else {
-            None
-        };
-        // Checkpoint the manifest BEFORE publishing the public key. On conflict
-        // keep the existing key and both objects. Resolution belongs to cutover.
-        pass.records.insert(
-            rid,
-            Imported {
-                source_record: record.clone(),
-                stored: stored.clone(),
-            },
-        );
-        save(&mut state, &id, &pass, &state_file)?;
-        if let Some(key) = stored {
-            publish_key(root, &key, &mut pass.mapping_conflicts)?;
+            );
+            save(&mut state, &id, &pass, &state_file)?;
+            if let Some(key) = stored {
+                publish_key(root, &key, &mut pass.mapping_conflicts)?;
+            }
+            save(&mut state, &id, &pass, &state_file)?;
+            hook(Checkpoint::RecordPublished)?;
         }
-        save(&mut state, &id, &pass, &state_file)?;
-        hook(Checkpoint::RecordPublished)?;
     }
     // Resume a crash between the record checkpoint and its key publication.
     for r in pass.records.values() {

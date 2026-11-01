@@ -209,6 +209,12 @@ dependencies = [
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -3830,6 +3836,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-first-launch"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "cbc",
+ "crc32c",
+ "fs2",
+ "libc 0.2.186",
+ "pbkdf2",
+ "pm-kernel",
+ "pm-model",
+ "pm-native-migrate",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
@@ -5579,7 +5608,7 @@ version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "data-url",
  "fontdb",
  "harfrust 0.12.0",
@@ -6536,6 +6565,12 @@ dependencies = [
  "syn 3.0.9",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zerotrie"
