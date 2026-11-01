@@ -256,3 +256,15 @@ tests passed, including 32 viewer tests and 23 snapshots; no failures or skipped
 tests**. Strict Clippy, rustfmt, both TypeScript checks, viewer Prettier and browser
 build pass. Headless API compatibility is verified; native rendering, application
 bindings and the existing macOS/Opus acceptance gates remain open.
+
+The final merge-ready refresh also merges native-engine's distribution update at
+`6d1e3bf3faefe715f28277afd7bd17b6304bbddd`, a descendant of the frozen contract.
+That merge is conflict-free and imports its upstream packaging/workspace/lockfile
+changes without local edits. The viewer and frozen surface/API sources remain
+unchanged. All commands above are rerun against this newer merged base; the
+viewer production entry also builds directly with:
+
+```sh
+# apps/native/js/v4
+bun build panels/viewer/index.tsx --target browser --outdir <scratch-output>
+```
