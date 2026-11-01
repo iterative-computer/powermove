@@ -258,10 +258,11 @@ measurement. No push, tag, release or workflow dispatch.
 changed the engine service's playback schedule and the harness's A/V/drop
 definitions, and measured on screen. The session was locked 09:00–09:45; after
 unlock, two probe batches (120/60 Hz) and the 120 Hz app A/B ran under the
-`latency` GUI lock (each < 10 min, display mode restored). **The 60 Hz and
-audio app A/B did not run:** the harness's mandatory 8 GiB free-disk check
-failed (7.2 GiB; shared target directory), and a fresh release build would
-have crossed this lane's 6 GB stop rule. An earlier probe run made behind
+`latency` GUI lock (each < 10 min, display mode restored). The 60 Hz A/B ran
+next (same binary) under the on-screen lane's lock. **The audio A/B did not
+run:** the harness refused it twice, first for < 8 GiB free disk and then for
+active builds. The two follow-up fixes were not rebuilt for an on-screen run;
+a release rebuild needs ≥ 8 GiB free afterwards and a quiet machine. An earlier probe run made behind
 the lock screen is superseded by the on-screen repeat.
 
 Conditions: Apple M5 / 16 GiB, macOS 27.2 (26B5086k), AC power, built-in
@@ -351,6 +352,20 @@ The 36 dropped onsets break down as follows.
 - Worker p95 rose because every submission is now a new frame with a full
   render, and fewer submissions let the GPU clock down. Legacy's per-present
   average was diluted by 3 cache hits per frame.
+
+**60 Hz, same binary and protocol** (run by the on-screen lane under its GUI lock,
+load 10.7 → 7.0 legacy, 7.0 → 6.8 default):
+
+| Row (60 Hz) | Fix pass | Legacy schedule | New schedule | Verdict |
+|---|---|---|---|---|
+| Edit → presentation p50 / p95 (ms) | 23.588 / 32.110 | 23.364 / 24.579 | **23.497 / 24.624** | FAIL ≤ 17.667; at the floor |
+| Cached scrub p50 / p95 (ms) | 23.250 / 24.506 | 23.106 / 24.396 | **22.856 / 24.529** | FAIL ≤ 17.667; at the floor |
+| Presents in 60 s | 3,598 | 3,600 | **1,800** (+1,830 held) | — |
+| Dropped content frames | 3 raw gaps | **0** | 5 (all loop wraps after 47 s; bug fixed afterwards) | Re-run needed |
+| Worker → completion p95 (ms) | 1.725 | 2.964 | **3.209** | PASS 8.333 local bound |
+
+The audio A/B (legacy and new) was refused by the harness because other lanes
+had build processes running. **A/V remains unmeasured on screen.**
 
 Headless service (dev, offscreen) after the change: exactly **1,800** submissions
 per 60 s at 120 and 60 Hz, **5,290 / 1,796** held ticks, worker → completion p95
