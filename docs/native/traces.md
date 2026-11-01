@@ -135,4 +135,6 @@ The committed set contains **11 traces / 1,093 rows**. Each was produced twice i
 | `menu-equivalents` | Real menu undo/redo and trusted Cmd-Z, routing decision, renderer receipt and key-up | 141 |
 | `history-async` | Exact Promise return, commit before continuation, later raw write outside the committed entry | 22 |
 
+The version list in metadata names the compatibility scope; these scenarios use the shared trusted facade and do not separately activate extensions under each apiVersion.
+
 Remaining unverified: native/compat replay; native queue/watchdog/bypass semantics; physical AppKit menu selection and text defaults/IME; every C-MATRIX command, Store iframe forwarding, popout documents, hostile argument objects, arbitrary direct-write interception and barrier/race cases. Escape/Cmd-period observations describe the tag's immediate dispatch, not proof of the proposed native bypass queue. Reference choice remains provisional until the owner resolves Q1. Keep the frozen reference/overlay until its last comparison consumer and parity gate are retired.
