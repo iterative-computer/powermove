@@ -182,3 +182,36 @@ seek/playback/pointer capture, classified gestures/shortcuts/IME, retained GPU
 frames/EDR and geometry at 1×/2×, real VoiceOver traversal/rotor/actions, all
 accessibility appearances, lifecycle/selection fencing and no main-thread JS
 waits. Native screenshots, keyboard/AX evidence and Opus approval remain required.
+
+## Merge-ready verification — 2026-11-01
+
+Merged native-engine base `4204a153dbf8af916ef2b92d7ca01858e363516a` and
+v4 integration base `e5e209928817cb9434823ebf6ddf7d64f2213441`. The native merge's
+only conflict was the adjacent Cargo.lock panel package entries. Preserve every
+upstream panel package plus this crate's three development dependencies; no
+version upgrade or engine lock change was required. No new crate was added.
+Unowned changes arrived only through the requested upstream merges.
+
+Post-merge commands and results:
+
+```sh
+# apps/native
+cargo test --locked -p pm-panel-viewerchrome -p pm-surface
+# 61 viewer-model tests (53 existing + 8 adapter), 95 surface tests;
+# 156 passed, 0 failed, 0 ignored.
+cargo clippy --locked -p pm-panel-viewerchrome --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-panel-viewerchrome -- --check
+# Both pass.
+
+# apps/native/js/v4
+bun test
+# 204 passed, 0 failed, 0 skipped; includes 32 viewer tests and 23 snapshots.
+bun run typecheck
+bun x tsc --noEmit -p panels/viewer/tsconfig.json
+bun x prettier --check panels/viewer
+bun run build
+# All pass.
+```
+
+The five design TODOs, seven API gaps and macOS/Opus gates above remain open.
+Headless merge readiness is not full viewer parity or application cutover.
