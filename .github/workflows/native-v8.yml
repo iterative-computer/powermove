@@ -1,0 +1,92 @@
+name: Native V8 sandbox spike
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/na-s1-*']
+    paths: ['.github/workflows/native-v8.yml', 'apps/native/spikes/s1/**']
+permissions:
+  contents: read
+concurrency:
+  group: native-v8-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  sandbox-arm64:
+    if: startsWith(github.ref, 'refs/heads/feat/na-s1-')
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      V8_COMMIT: 2768994f664e8a6e3aba27503606c58339136e2a
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk (never runs on a developer Mac)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = arm64
+          df -h /
+          sudo rm -rf /Library/Developer/CoreSimulator/Volumes /Library/Developer/CoreSimulator/Images
+          sudo rm -rf "$HOME/Library/Developer/CoreSimulator/Caches" /Users/runner/Library/Android /usr/local/share/dotnet
+          python3 - <<'PY'
+          import shutil
+          assert shutil.disk_usage('/').free >= 20 * 1024**3, 'Need 20 GiB for V8'
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: denoland/rusty_v8
+          ref: 2768994f664e8a6e3aba27503606c58339136e2a
+          path: upstream-v8
+          submodules: recursive
+          fetch-depth: 1
+      - name: Pinned Rust and bindgen compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal
+          brew install llvm@21
+          echo "LIBCLANG_PATH=$(brew --prefix llvm@21)/lib" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            upstream-v8/target/release
+          key: native-v8-arm64-152.2.0-sandbox-rust1.96.1-gn-v1-${{ runner.os }}
+      - name: Build sandbox and pointer compression from source
+        working-directory: upstream-v8
+        env:
+          V8_FROM_SOURCE: '1'
+          PRINT_GN_ARGS: '1'
+          GN_ARGS: 'v8_enable_sandbox=true v8_enable_pointer_compression=true v8_enable_pointer_compression_shared_cage=true v8_enable_external_code_space=true symbol_level=0'
+        run: cargo +1.96.1 build --locked --release --lib --features v8_enable_sandbox -vv
+      - name: Package library, matching bindings and build provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v8-artifact
+          cp upstream-v8/target/release/gn_out/obj/librusty_v8.a v8-artifact/
+          cp upstream-v8/target/release/gn_out/src_binding.rs v8-artifact/
+          cp upstream-v8/target/release/gn_out/args.gn v8-artifact/
+          grep -Eq 'v8_enable_sandbox[[:space:]]*=[[:space:]]*true' v8-artifact/args.gn
+          grep -Eq 'v8_enable_pointer_compression[[:space:]]*=[[:space:]]*true' v8-artifact/args.gn
+          git -C upstream-v8 submodule status --recursive > v8-artifact/submodules.txt
+          printf 'rusty_v8=152.2.0\ncommit=%s\ntarget=aarch64-apple-darwin\nrust=1.96.1\nrun=%s/%s/actions/runs/%s\n' "$V8_COMMIT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > v8-artifact/build.txt
+          sw_vers >> v8-artifact/build.txt
+          xcodebuild -version >> v8-artifact/build.txt
+          (cd v8-artifact && shasum -a 256 librusty_v8.a src_binding.rs args.gn build.txt submodules.txt > SHA256SUMS)
+          df -h /
+      - name: Verify consumer links only the artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTY_V8_ARCHIVE="$GITHUB_WORKSPACE/v8-artifact/librusty_v8.a"
+          export RUSTY_V8_SRC_BINDING_PATH="$GITHUB_WORKSPACE/v8-artifact/src_binding.rs"
+          cargo +1.96.1 run --release --manifest-path apps/native/spikes/s1/isolated/Cargo.toml -- --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusty-v8-152.2.0-sandbox-aarch64-apple-darwin
+          path: v8-artifact/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
