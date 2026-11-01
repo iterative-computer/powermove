@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Powermove Native · panel states</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  Key states of every panel spec in docs/native/design/panels/. Colours and
+  metrics are pm-design tokens (tokens.md) plus the additions requested in
+  panels/README.md §6. Each card is drawn at 1:1 points. Icons approximate SF
+  Symbols. Use the switch at the top for Dark, Light or both.
+-->
+<style>
+.dark{--win:#111111;--panel:#1A1A1A;--panel2:#161616;--viewer:#0E0E0E;--field:#262626;--float:#2C2C2C;--hover:#232323;--sep:#303030;
+  --t1:#F2F2F2;--t2:#B4B4B4;--t3:#949494;--acc:#FF6019;--acctx:#FF8A55;--wash:#3C241A;--onacc:#fff;--self:#3A3A3A;--ok:#3FCF8E;--warn:#F59E0B;--bad:#F36357;
+  --lb-blue:#3B4250;--lb-violet:#4A3B6B;--lb-orange:#7A3A1F;--lb-green:#24503A;--lb-teal:#1F4B52;--lb-gray:#3A3A3A;--group:#2C2C2C;
+  --glass:rgba(58,58,62,.52);--glass-rim:rgba(255,255,255,.12);--glass-hi:rgba(255,255,255,.14);--shadow:0 18px 48px rgba(0,0,0,.6);--frame:rgba(255,255,255,.09);color-scheme:dark}
+.light{--win:#EEEEF1;--panel:#FDFDFE;--panel2:#F5F5F7;--viewer:#E4E4E4;--field:#F3F3F6;--float:#FFFFFF;--hover:#EBEBEF;--sep:#D4D4D8;
+  --t1:#1B1D23;--t2:#52545A;--t3:#62646A;--acc:#F0580A;--acctx:#B93800;--wash:#FBE9E1;--onacc:#fff;--self:#D5D5DA;--ok:#117A52;--warn:#A15C00;--bad:#C22A1F;
+  --lb-blue:#C9D4E8;--lb-violet:#D8CFF0;--lb-orange:#F7CFB6;--lb-green:#C5E3D1;--lb-teal:#C2E2E3;--lb-gray:#DCDCE0;--group:#F3F3F6;
+  --glass:rgba(255,255,255,.62);--glass-rim:rgba(20,22,28,.08);--glass-hi:rgba(20,22,28,.07);--shadow:0 18px 48px rgba(20,22,28,.22);--frame:rgba(20,22,28,.12);color-scheme:light}
+/* "over the image" always uses dark tokens (language §4) */
+.ovr{--t1:#F2F2F2;--t2:#B4B4B4;--t3:#949494;--float:#2C2C2C;--hover:#232323;--glass:rgba(40,40,44,.6);--glass-rim:rgba(255,255,255,.12);--glass-hi:rgba(255,255,255,.14)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#2a2a2c;font:12px/1.3 -apple-system,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:28px;color:#ddd}
+h1{font:600 20px/1.2 -apple-system,"SF Pro Display",system-ui;color:#f2f2f2;margin:0 0 4px}
+.lede{color:#aaa;max-width:980px;margin-bottom:14px;font-size:13px;line-height:1.45}
+.lede a{color:#ff8a55}
+.switch{display:inline-flex;background:#3a3a3c;border-radius:8px;padding:2px;gap:2px;margin-bottom:18px}
+.switch button{border:0;background:none;color:#ccc;font:500 12px -apple-system,system-ui;padding:4px 12px;border-radius:6px;cursor:pointer}
+.switch button.on{background:#5a5a5e;color:#fff}
+h2{font:600 15px -apple-system,system-ui;color:#eee;margin:34px 0 4px}
+h2 a{color:#ff8a55;font-weight:400;font-size:12px;margin-left:8px}
+.sub{color:#999;font-size:12px;margin-bottom:12px;max-width:980px;line-height:1.45}
+.row{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start}
+.cell{display:flex;flex-direction:column;gap:6px}
+.cap{color:#bbb;font-size:12px;max-width:640px;line-height:1.4}.cap b{color:#eee;font-weight:600}
+.ground{background:var(--win);padding:6px;border-radius:14px;color:var(--t1);position:relative}
+.num{font-variant-numeric:tabular-nums}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block;flex:none}
+svg.s13{width:13px;height:13px}svg.s11{width:11px;height:11px}svg.s22{width:26px;height:26px}
+.glass{background:var(--glass);backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);box-shadow:inset 0 0 0 .5px var(--glass-rim),inset 0 1px 0 var(--glass-hi),0 6px 18px rgba(0,0,0,.18)}
+.pn{position:relative;background:var(--panel);border-radius:12px;overflow:hidden}
+.ph{height:32px;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;font-size:13px;font-weight:600;flex:none}
+.ph .r{margin-left:auto;display:flex;gap:2px;color:var(--t2)}
+.ib{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--t2);flex:none}
+.ib.hov{background:var(--hover)}.ib.acc{color:var(--acc)}.ib.mut{color:var(--t3)}
+.seg{display:flex;background:var(--field);border-radius:6px;padding:2px;gap:2px;font-size:12px;font-weight:500;color:var(--t2)}
+.seg span{padding:2px 9px;border-radius:4px;white-space:nowrap;display:flex;align-items:center;gap:4px}.seg span.on{background:var(--float);color:var(--t1);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.seg.sm{font-size:11px}.seg.sm span{padding:2px 7px}
+.who{padding:0 12px;height:28px;display:flex;align-items:center;font-size:13px;font-weight:600;gap:4px;white-space:nowrap;overflow:hidden}.who span{font-weight:400;color:var(--t3)}
+.sec{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:12px 12px 6px}
+.sec .chev{margin-left:auto;color:var(--t3)}
+.pr{height:28px;display:flex;align-items:center;gap:0;padding:0 12px 0 4.5px;position:relative}
+.kdw{width:24px;height:24px;display:flex;align-items:center;justify-content:center;flex:none}
+.kd{width:9px;height:9px;transform:rotate(45deg);border:1.3px solid var(--t3);border-radius:1.5px;flex:none}
+.kd.on{background:var(--acc);border-color:var(--acc)}.kd.half{background:linear-gradient(135deg,var(--acc) 50%,transparent 50%);border-color:var(--acc)}
+.lab{flex:1;min-width:0;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:2px}
+.col{width:128px;flex:none;display:flex;gap:4px;align-items:center}
+.f{height:22px;flex:1;min-width:0;background:var(--field);border-radius:6px;display:flex;align-items:center;padding:0 6px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;color:var(--t1)}
+.f u{text-decoration:none;color:var(--t3);margin-left:auto;padding-left:4px}
+.f.hot{background:var(--hover)}.f.edit{box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 45%,transparent);font-weight:500}
+.f.mix{color:var(--t3)}.f.lock{color:var(--t3)}
+.f.pop{justify-content:space-between}.f.pop svg{color:var(--t3)}
+.linkg{position:absolute;right:0;width:12px;display:flex;justify-content:center;color:var(--t2)}
+.sw{width:22px;height:22px;border-radius:6px;flex:none;box-shadow:inset 0 0 0 1px var(--sep)}
+.seg2{flex:1;display:flex;background:var(--field);border-radius:6px;padding:2px;gap:2px;height:22px}
+.seg2 i{flex:1;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--t2);font-style:normal;font-size:11px}.seg2 i.on{background:var(--float);color:var(--t1);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.cb{width:14px;height:14px;border-radius:4px;flex:none;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px var(--t3)}
+.cb.on{background:var(--acc);box-shadow:none;color:#fff}
+.li{height:28px;display:flex;align-items:center;gap:6px;padding:0 12px;white-space:nowrap}
+.li.sel{background:var(--self);margin:0 3px;padding:0 9px;border-radius:6px}
+.li.hov{background:var(--hover);margin:0 3px;padding:0 9px;border-radius:6px}
+.li .tr{margin-left:auto;display:flex;gap:0;color:var(--t2)}
+.empty{position:absolute;left:0;right:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:6px;padding:0 24px}
+.empty .t{font-size:15px;font-weight:600;color:var(--t1)}.empty .d{font-size:13px;line-height:1.45;color:var(--t2)}.empty svg{color:var(--t3)}
+.btn{height:28px;padding:0 14px;border-radius:7px;display:inline-flex;align-items:center;font-size:13px;font-weight:500;background:var(--field);color:var(--t1);box-shadow:0 0 0 .5px var(--sep),0 1px 1px rgba(0,0,0,.08);white-space:nowrap}
+.btn.pri{background:var(--acc);color:var(--onacc);font-weight:600;box-shadow:none}
+.btn.dis{color:var(--t3)}
+.search{height:22px;border-radius:6px;background:var(--field);display:flex;align-items:center;gap:6px;padding:0 7px;color:var(--t3);flex:1}
+.pop{height:22px;display:flex;align-items:center;gap:4px;padding:0 6px 0 8px;border-radius:6px;font-size:12px;color:var(--t2);white-space:nowrap}
+.pop.hov{background:var(--hover)}
+.badge{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--t1);flex:none}
+.clip{position:absolute;top:4px;height:20px;border-radius:4px;display:flex;align-items:center;padding:0 8px;font-size:12px;white-space:nowrap;overflow:hidden;color:var(--t1)}
+.clip.sel{box-shadow:0 0 0 1.5px var(--t1)}
+.kf{position:absolute;width:9px;height:9px;transform:rotate(45deg);border-radius:1.5px;background:var(--t1);opacity:.9}
+.kf.sel{background:var(--acc);opacity:1;box-shadow:0 0 0 1px var(--panel)}
+.kf.sum{width:7px;height:7px;box-shadow:0 0 0 1px var(--panel)}
+.note{position:absolute;font:500 11px -apple-system,system-ui;color:#fff;background:#000c;border-radius:6px;padding:3px 7px;pointer-events:none;white-space:nowrap;z-index:9}
+.mb{background:rgba(0,0,0,.55);color:#fff}
+.card{background:var(--panel2);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 0 0 1px var(--sep)}
+.msg{font-size:13px;line-height:1.45}
+.you{align-self:flex-end;max-width:84%;background:var(--field);border-radius:12px;padding:8px 12px;font-size:13px;line-height:1.45}
+.steps{display:flex;align-items:center;gap:6px;color:var(--t3);font-size:12px}
+.composer{border-radius:6px;background:var(--field);padding:8px 12px 4px;font-size:13px;color:var(--t3);display:flex;flex-direction:column;gap:6px}
+.composer .bar{display:flex;align-items:center;gap:4px;height:24px;font-size:11px;color:var(--t2)}
+.grp{background:var(--group);border-radius:10px}
+.grp .gr{min-height:40px;padding:8px 12px;display:flex;align-items:center;gap:12px;border-top:1px solid var(--sep);margin-left:12px;padding-left:0}
+.grp .gr:first-child{border-top:0}
+.gr .gl{flex:1;min-width:0}.gr .gl b{font-weight:400;font-size:12px;display:block;color:var(--t1)}.gr .gl small{font-size:11px;color:var(--t3);line-height:1.35;display:block}
+.gr .gc{width:240px;flex:none;display:flex;justify-content:flex-end;align-items:center;gap:6px}
+.toggle{width:32px;height:18px;border-radius:9px;background:var(--sep);position:relative;flex:none}.toggle::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:7px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.toggle.on{background:var(--acc)}.toggle.on::after{left:16px}
+.ppop{height:22px;border-radius:6px;background:var(--float);box-shadow:0 0 0 .5px var(--sep),0 1px 1px rgba(0,0,0,.1);display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 8px;width:100%;font-size:12px;color:var(--t1)}
+.ppop svg{color:var(--t3)}
+.ring{width:18px;height:18px;border-radius:50%;background:conic-gradient(var(--acc) 0 30%,transparent 0);-webkit-mask:radial-gradient(circle,transparent 6.2px,#000 6.6px);mask:radial-gradient(circle,transparent 6.2px,#000 6.6px);position:absolute}
+</style></head><body>
+<h1>Powermove Native — panel states</h1>
+<p class="lede">The pictures for the build specs in <a href="panels/README.md">panels/</a>. Every card is one panel at its default size, drawn with pm-design tokens. They show the states a lane must build and a reviewer will compare against: empty, selected, hover, focus, editing, mixed, error, drop target, working. Where a spec and a picture disagree, the spec wins. Over-the-image chrome (badges, overlay capsule, gizmos) uses dark tokens in light mode too — <a href="language.md">language §4</a>.</p>
+<div class="switch"><button data-s="both" class="on">Dark and Light</button><button data-s="dark">Dark</button><button data-s="light">Light</button></div>
+<div id="out"></div>
+<script>
+const I={
+ plus:'<path d="M8 3v10M3 8h10"/>',search:'<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
+ chev:'<path d="M5 6.5l3-3 3 3M5 9.5l3 3 3-3"/>',down:'<path d="M4 6l4 4 4-4"/>',right:'<path d="M6 4l4 4-4 4"/>',left:'<path d="M10 4L6 8l4 4"/>',
+ play:'<path d="M5 3l8 5-8 5z" fill="currentColor" stroke="none"/>',graph:'<path d="M2 13c3 0 4-10 7-10s3 6 5 6"/>',
+ magnet:'<path d="M4 2v6a4 4 0 008 0V2M4 2h2.5v6a1.5 1.5 0 003 0V2H12"/>',eye:'<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
+ eyeoff:'<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><path d="M2.5 2.5l11 11"/>',
+ lock:'<rect x="3.5" y="7" width="9" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/>',
+ link:'<path d="M6.5 9.5l3-3M5 7.5L3.5 9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5L12.5 7A2.5 2.5 0 009 3.5L7.5 5"/>',
+ text:'<path d="M3 4V3h10v1M8 3v10M6 13h4"/>',film:'<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3"/>',
+ wave:'<path d="M2 8h1M4.5 5v6M7 3v10M9.5 5.5v5M12 7v2M14 8h0"/>',circle:'<circle cx="8" cy="8" r="5"/>',
+ sliders:'<path d="M3 4h10M3 8h10M3 12h10"/><circle cx="6" cy="4" r="1.3" fill="currentColor"/><circle cx="10" cy="8" r="1.3" fill="currentColor"/><circle cx="7" cy="12" r="1.3" fill="currentColor"/>',
+ wand:'<path d="M3 13l7-7M9 3v2M12 6h2M11.5 3.5l-1 1M4 5.5h0"/>',sparkles:'<path d="M7 1.8l1.2 3.5 3.5 1.2-3.5 1.2L7 11.2 5.8 7.7 2.3 6.5l3.5-1.2zM12.3 9.8l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z"/>',
+ x:'<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',reset:'<path d="M3.5 6.5A5 5 0 1 1 3 9"/><path d="M3.5 3v3.5H7"/>',
+ folder:'<path d="M2 4.5A1.5 1.5 0 013.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0114 6v5.5A1.5 1.5 0 0112.5 13h-9A1.5 1.5 0 012 11.5z"/>',
+ trash:'<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9"/>',warn:'<path d="M8 2l6.5 11.5h-13z"/><path d="M8 6.5v3M8 11.5v.1"/>',
+ cloud:'<path d="M4.5 12.5a3 3 0 01-.3-6 4 4 0 017.6-1 2.8 2.8 0 01.7 5.5"/><path d="M8 8v5M6 11l2 2 2-2"/>',
+ photo:'<rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.2"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/>',
+ pin:'<path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6z"/><path d="M8 8.5V14"/>',compose:'<path d="M10.5 2.5l3 3L7 12H4V9z"/><path d="M2 14h12"/>',
+ clip:'<path d="M10.5 5L6 9.5a1.5 1.5 0 002 2l5-5a3 3 0 00-4-4L4 7.5a4.5 4.5 0 006.5 6.5"/>',
+ send:'<circle cx="8" cy="8" r="6.5" fill="currentColor" stroke="none"/><path d="M8 11V5M5.5 7.5L8 5l2.5 2.5" stroke="#fff"/>',
+ stop:'<circle cx="8" cy="8" r="6.5" fill="currentColor" stroke="none"/><rect x="5.7" y="5.7" width="4.6" height="4.6" rx=".8" fill="var(--panel)" stroke="none"/>',
+ gear:'<circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>',
+ person:'<circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="6.5" r="2.2"/><path d="M4 12.5c1-1.8 2.4-2.6 4-2.6s3 .8 4 2.6"/>',
+ doc:'<path d="M4 1.5h5.5L12.5 4.5V14.5H4z"/><path d="M9.5 1.5v3h3"/>',mic:'<rect x="6" y="2" width="4" height="7.5" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V14.5"/>',
+ puzzle:'<path d="M3 5h3a1.5 1.5 0 113 0h3v3a1.5 1.5 0 110 3v3H3z"/>',viewfinder:'<path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/><circle cx="8" cy="8" r="2"/>',
+ alL:'<path d="M2.5 2v12M5 5h8M5 11h5"/>',alC:'<path d="M8 2v12M4 5h8M5.5 11h5"/>',alR:'<path d="M13.5 2v12M3 5h8M6 11h5"/>',
+ alT:'<path d="M2 2.5h12M5 5v8M11 5v5"/>',alM:'<path d="M2 8h12M5 4v8M11 5.5v5"/>',alB:'<path d="M2 13.5h12M5 3v8M11 6v5"/>',
+ dope:'<path d="M2 4h12M2 8h12M2 12h12"/>',both:'<path d="M2 4h12M2 7h12"/><path d="M2 13c3 0 4-4 6-4s3 2 6 2"/>',
+ brain:'<circle cx="8" cy="8" r="5.5"/><path d="M8 3v10M5 6h2M9 9h2"/>',
+};
+const ic=(n,c='',st='')=>`<svg class="i ${c}" viewBox="0 0 16 16" style="${st}">${I[n]}</svg>`;
+const kd=(k='')=>`<span class="kdw"><span class="kd ${k}"></span></span>`;
+const row=(label,value,k='',extra='',st='')=>`<div class="pr" style="${st}">${kd(k)}<span class="lab">${label}</span><div class="col">${value}</div>${extra}</div>`;
+const F=(v,u='',c='')=>`<div class="f ${c}">${v}${u?`<u>${u}</u>`:''}</div>`;
+const P=(v)=>`<div class="f pop">${v}${ic('chev','s11')}</div>`;
+const pnl=(w,h,inner,st='')=>`<div class="pn" style="width:${w}px;height:${h}px;${st}">${inner}</div>`;
+const note=(x,y,t)=>`<span class="note" style="left:${x}px;top:${y}px">${t}</span>`;
+const EMPTY=(sym,t,d,btn,top=32,bottom=0)=>`<div class="empty" style="top:${top}px;bottom:${bottom}px">${ic(sym,'s22')}<div class="t">${t}</div><div class="d">${d}</div>${btn?`<span class="btn" style="margin-top:6px">${btn}</span>`:''}</div>`;
+
+/* ---------- Timeline ---------- */
+function timeline(state){
+  const W=1000,H=300,L=232,sec=52,x0=L+10,t=(s)=>x0+s*sec;
+  let ruler='';for(let s=0;s<=14;s++){const x=t(s);ruler+=`<div style="position:absolute;left:${x}px;top:49px;height:7px;border-left:1px solid var(--t2);opacity:.7"></div><div class="num" style="position:absolute;left:${x+4}px;top:36px;font-size:11px;color:var(--t3)">0:${String(s).padStart(2,'0')}</div>`;for(let q=1;q<4;q++)ruler+=`<div style="position:absolute;left:${x+q*sec/4}px;top:53px;height:3px;border-left:1px solid var(--sep)"></div>`}
+  const work=`<div style="position:absolute;left:${t(1)}px;width:${t(9)-t(1)}px;top:32px;height:24px;background:var(--wash)"></div><div style="position:absolute;left:${t(1)-3}px;top:32px;width:6px;height:24px;background:var(--acc);border-radius:3px 0 0 3px"></div><div style="position:absolute;left:${t(9)-3}px;top:32px;width:6px;height:24px;background:var(--acc);border-radius:0 3px 3px 0"></div>`;
+  const rbar=`<div style="position:absolute;left:${t(0)}px;width:${3.5*sec}px;top:32px;height:3px;background:var(--ok);opacity:.7"></div><div style="position:absolute;left:${t(3.5)}px;width:${1.5*sec}px;top:32px;height:3px;background:var(--ok);box-shadow:inset 0 1px 0 var(--t1)"></div><div style="position:absolute;left:${t(5)}px;width:${sec}px;top:32px;height:3px;background:repeating-linear-gradient(45deg,var(--t3) 0 3px,transparent 3px 6px)"></div>`;
+  const marker=`<div style="position:absolute;left:${t(6)-4}px;top:38px;width:9px;height:11px;background:var(--t2);clip-path:polygon(0 0,100% 0,100% 65%,50% 100%,0 65%);border-radius:2px"></div><div style="position:absolute;left:${t(6)}px;top:56px;bottom:0;border-left:1px solid var(--sep)"></div>`;
+  const kinds={T:['text','var(--lb-blue)'],S:['circle','var(--lb-orange)'],M:['film','var(--lb-teal)'],F:['sliders','var(--lb-violet)'],A:['wave','var(--lb-green)']};
+  const rows=state==='empty'?[]:[
+   {n:'1',k:'T',name:'Kicker',from:.5,to:9,kf:[.6,1.4]},
+   {n:'2',k:'T',name:'Headline',from:0,to:10.4,sel:true,open:true,parent:true},
+   {sub:'Scale',val:'100, 100 %',link:true,kf:[0,.4,.8,3.8],selk:[.4,.8],has:true},{sub:'Opacity',val:'100 %',kf:[0,.4],has:true,hov:true},
+   {n:'3',k:'S',name:'Orb',from:1,to:10.4,kf:[1.05,2.6,5.2],hidden:true},
+   {n:'4',k:'M',name:'Atmosphere_loop',from:0,to:10.4,offline:true},
+   {n:'5',k:'F',name:'Grade',from:0,to:10.4,locked:true},
+   {n:'6',k:'A',name:'VO_take03',from:1.6,to:10.4,audio:true},
+  ];
+  let y=56,body='';
+  for(const r of rows){
+    if(r.sub){
+      body+=`<div style="position:absolute;left:0;right:0;top:${y}px;height:22px;${r.hov?'background:var(--hover)':''}">
+        <div style="position:absolute;left:0;width:${L}px;height:22px;display:flex;align-items:center;padding-left:12px;background:${r.hov?'var(--hover)':'var(--panel2)'}">
+          <span class="ib" style="width:24px;height:22px">${ic('left','s11')}</span><span class="kdw" style="height:22px"><span class="kd ${r.kf.includes(4.5)?'on':'half'}"></span></span><span class="ib" style="width:24px;height:22px">${ic('right','s11')}</span>
+          <span style="margin-left:6px;color:var(--t2);flex:1">${r.sub}</span>
+          <span class="f num" style="flex:none;height:20px;margin-right:${r.link?0:12}px">${r.val.replace(/ (%|px)$/,'<u>&nbsp;$1</u>')}</span>${r.link?`<span class="ib" style="height:22px;margin-right:0">${ic('link','s11')}</span>`:''}</div>
+        ${r.kf.map(k=>`<i class="kf ${(r.selk||[]).includes(k)?'sel':''}" style="left:${t(k)-4.5}px;top:6.5px"></i>`).join('')}</div>`;y+=22;continue;}
+    const [sym,col]=kinds[r.k];
+    const sw=[r.parent?`<span class="ib" style="color:var(--t2)">${ic('link','s11')}</span>`:'',r.locked?`<span class="ib">${ic('lock','s11')}</span>`:'',`<span class="ib" style="color:${r.hidden?'var(--t2)':'var(--t3)'}">${ic(r.hidden?'eyeoff':'eye','s11')}</span>`].join('');
+    body+=`<div style="position:absolute;left:0;right:0;top:${y}px;height:28px;${r.sel?'background:var(--self)':''}">
+      <div style="position:absolute;left:0;width:${L}px;height:28px;display:flex;align-items:center;gap:6px;padding:0 6px 0 12px;background:${r.sel?'var(--self)':'var(--panel2)'}">
+        <span class="num" style="width:7px;font-size:11px;color:var(--t3);text-align:right">${r.n}</span>
+        <span style="width:11px;color:var(--t2)">${r.open?ic('down','s11'):''}</span>
+        <span class="badge" style="background:${col}">${ic(sym,'s11')}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</span>${sw}</div>
+      <div class="clip ${r.sel?'sel':''}" style="left:${t(r.from)}px;width:${(r.to-r.from)*sec}px;background:${r.offline?'var(--lb-gray)':col}">${r.audio?`<svg width="${(r.to-r.from)*sec}" height="20" data-wave="${Math.round((r.to-r.from)*sec)},20"></svg>`:r.offline?`<span style="color:var(--bad);display:flex;gap:5px;align-items:center">${ic('warn','s11')}${r.name}</span>`:r.locked?`${r.name}<span style="margin-left:6px;color:var(--t3)">${ic('lock','s11')}</span>`:r.name}</div>
+      ${(r.kf||[]).map(k=>`<i class="kf sum" style="left:${t(k)-3.5}px;top:20.5px"></i>`).join('')}</div>`;
+    y+=28;
+  }
+  const px=t(4.5);
+  let extra='';
+  if(state==='empty') extra=`<div style="position:absolute;left:${L}px;right:0;top:56px;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-size:13px;color:var(--t2)">Drag media here or import from your computer.<span class="btn">Import…</span></div>`;
+  if(state==='drag') extra=`<div style="position:absolute;left:0;right:0;top:${56+28*1+22*2+28*3-1}px;height:2px;background:var(--acc)"><i style="position:absolute;left:8px;top:-2px;width:6px;height:6px;border-radius:3px;background:var(--acc)"></i></div><div style="position:absolute;left:${t(7)}px;top:32px;bottom:0;border-left:1px solid var(--acc)"></div>`
+    +note(t(7)+8,y-20,'media drop: insertion line + drop-time guide');
+  const tabs=`<span style="width:1px;height:17px;background:var(--sep);margin:0 2px"></span>
+     <span style="height:32px;display:flex;align-items:center;gap:4px;padding:0 10px;position:relative;color:var(--t1)"><span class="ib mut" style="width:16px;height:16px">${ic('x','s11')}</span>Launch Film<i style="position:absolute;left:8px;right:8px;bottom:0;height:2px;border-radius:1px;background:var(--acctx)"></i></span>
+     <span style="height:32px;display:flex;align-items:center;padding:0 10px 0 30px;color:var(--t2)">Endcard</span>`;
+  return `<div class="ground"><div class="pn" style="width:${W}px;height:${H}px">
+    <div class="ph" style="font-weight:400;gap:6px;padding-left:8px"><span class="ib" style="color:var(--t1)">${ic('play','s13')}</span><span class="num" style="font-size:13px;font-weight:500">00:00:04:15</span><span style="color:var(--t3);font-size:11px">30 fps</span>${tabs}
+     <span class="r" style="gap:6px;align-items:center"><div class="seg sm"><span class="on">Layers</span><span>Tracks</span></div><div class="seg sm"><span class="on">${ic('dope','s11')}</span><span>${ic('both','s11')}</span><span>${ic('graph','s11')}</span></div><span class="ib acc">${ic('magnet','s13')}</span></span></div>
+    <div style="position:absolute;left:0;top:32px;width:${L}px;bottom:0;background:var(--panel2)"></div>
+    ${state==='empty'?'':work}${rbar}${ruler}${state==='empty'?'':marker}
+    <div style="position:absolute;left:${L}px;right:0;top:56px;height:1px;background:var(--sep)"></div>
+    ${body}${extra}
+    <div style="position:absolute;left:${px-.75}px;top:40px;bottom:0;width:1.5px;background:var(--acc)"></div><div style="position:absolute;left:${px-5.5}px;top:36px;width:11px;height:16px;border-radius:3px 3px 6px 6px;background:var(--acc)"></div>
+  </div></div>`;
+}
+
+/* ---------- Properties ---------- */
+function properties(state){
+  if(state==='nosel') return `<div class="ground">${pnl(300,420,`<div class="ph">Properties<span class="r"><span class="ib">${ic('plus','s13')}</span></span></div>
+    <div class="sec">Composition</div>${row('Width',F('1920','px'))}${row('Height',F('1080','px'))}${row('Frame Rate',P('30 fps'))}${row('Duration',F('0:00:20','s'))}${row('Background','<span class="sw" style="background:#141414"></span>'+F('#141414'))}
+    <div style="padding:6px 12px;font-size:11px;color:var(--t3)">Select a layer to edit its properties.</div>`)}</div>`;
+  const multi=state==='multi';
+  return `<div class="ground" style="position:relative">${pnl(300,520,`<div class="ph">Properties<span class="r"><span class="ib">${ic('wand','s13')}</span><span class="ib">${ic('plus','s13')}</span></span></div>
+   <div class="who">${multi?'3 Layers <span>· Mixed</span>':'Headline <span>· Text</span>'}</div>
+   <div style="display:flex;gap:6px;padding:2px 12px 0;height:28px;align-items:center"><div class="seg" style="padding:2px"><span>${ic('alL','s11')}</span><span>${ic('alC','s11')}</span><span>${ic('alR','s11')}</span></div><div class="seg" style="padding:2px"><span>${ic('alT','s11')}</span><span>${ic('alM','s11')}</span><span>${ic('alB','s11')}</span></div></div>
+   ${multi?'':`<div class="sec">Content<span class="chev">${ic('down','s11')}</span></div>
+   ${row('Font',P('SF Pro Display'))}${row('Size',F('164','px','edit'),'on')}${row('Leading',F('1.0'))}
+   ${row('Align','<div class="seg2"><i>'+ic('alL','s11')+'</i><i class="on">'+ic('alC','s11')+'</i><i>'+ic('alR','s11')+'</i></div>')}
+   ${row('Color','<span class="sw" style="background:#F5F3EF"></span>'+F('#F5F3EF'))}`}
+   <div class="sec">Transform</div>
+   ${row('Position',F(multi?'—':'960','',multi?'mix':'hot')+F(multi?'—':'540','',multi?'mix':''),'half')}
+   <div class="pr">${kd('on')}<span class="lab">Scale</span><div class="col">${F('100','%')}<div class="f" style="flex:none;width:50px">100<u>%</u></div></div><span class="linkg" style="right:0;width:12px">${ic('link','s11')}</span></div>
+   ${row('Rotation',F('0','°'))}${row('Opacity',F(multi?'—':'100',multi?'':'%',multi?'mix':''),'on')}
+   ${multi?`<div class="sec">Layer</div>${row('Motion Blur','<span class="cb" style="background:var(--acc);box-shadow:none;color:#fff;font-size:11px;font-weight:700">–</span>')}${row('Blend Mode',P('Normal'))}`:''}
+   `)}${multi?note(150,236,'mixed: em dash, no unit')+note(150,346,'mixed checkbox'):note(140,148,'editing: system ring')+note(140,312,'hover: well lightens')+note(214,388,'link sits in the inset margin')}</div>`;
+}
+function colorPopover(){
+  return `<div class="ground" style="width:300px;height:340px;background:transparent;padding:0"><div class="glass" style="position:absolute;left:10px;top:20px;width:260px;height:300px;border-radius:14px;box-shadow:var(--shadow),inset 0 0 0 .5px var(--glass-rim)">
+   <div style="position:absolute;inset:8px;border-radius:9px;background:var(--float);padding:12px;display:flex;flex-direction:column;gap:10px">
+    <div class="seg" style="justify-content:stretch"><span class="on" style="flex:1;justify-content:center">Solid</span><span style="flex:1;justify-content:center">Linear</span><span style="flex:1;justify-content:center">Radial</span></div>
+    <div style="height:110px;border-radius:6px;background:linear-gradient(to top,#000,transparent),linear-gradient(to right,#fff,#FF6A1F);position:relative"><i style="position:absolute;left:12px;top:10px;width:12px;height:12px;border-radius:6px;box-shadow:0 0 0 2px #fff,0 0 0 3px rgba(0,0,0,.4)"></i></div>
+    <div style="height:12px;border-radius:6px;background:linear-gradient(to right,red,#ff0,lime,cyan,blue,#f0f,red);position:relative"><i style="position:absolute;left:12px;top:-2px;width:16px;height:16px;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4)"></i></div>
+    <div style="height:12px;border-radius:6px;background:linear-gradient(to right,transparent,#F5F3EF),repeating-conic-gradient(#999 0 25%,#ddd 0 50%) 0 0/8px 8px;position:relative"><i style="position:absolute;right:0;top:-2px;width:16px;height:16px;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4)"></i></div>
+    <div style="display:flex;gap:4px;align-items:center"><span class="sw" style="background:#F5F3EF"></span>${F('#F5F3EF')}<div class="f" style="flex:none;width:58px">100<u>%</u></div><span class="ib">${ic('viewfinder','s13')}</span></div>
+    <div style="display:flex;gap:6px">${['#F5F3EF','#FF6A1F','#141414','#3B6FFF','#3FCF8E','#F59E0B'].map(c=>`<i style="width:22px;height:22px;border-radius:11px;background:${c};box-shadow:inset 0 0 0 1px var(--sep)"></i>`).join('')}</div>
+   </div></div></div>`;
+}
+
+/* ---------- Effect Controls ---------- */
+function effectControls(state){
+  const head=`<div class="ph"><div class="seg"><span>Project</span><span class="on">Effect Controls</span></div><span class="r">${state==='nosel'?'':`<span class="ib">${ic('plus','s13')}</span>`}</span></div>`;
+  if(state==='nosel') return `<div class="ground">${pnl(300,300,head+EMPTY('wand','No Selection','Select a layer to see its effects.',''))}</div>`;
+  if(state==='none') return `<div class="ground">${pnl(300,300,head+`<div class="who">Headline <span>· Text</span></div>`+EMPTY('wand','No Effects','Drag an effect here from Effects &amp; Presets, or add one.','Add Effect…',60))}</div>`;
+  const eh=(name,open,on,sel,hov)=>`<div class="li ${sel?'sel':hov?'hov':''}" style="padding-left:${sel||hov?3:6}px"><span class="ib" style="width:24px">${ic(open?'down':'right','s11')}</span><span class="cb ${on?'on':''}">${on?'<svg viewBox="0 0 16 16" width="10" height="10" style="stroke:#fff;fill:none;stroke-width:2.2"><path d="M3.5 8.5l3 3 6-7"/></svg>':''}</span><b style="font-size:13px;font-weight:600;margin-left:4px;color:${on?'var(--t1)':'var(--t3)'}">${name}</b>${sel||hov?`<span class="tr"><span class="ib">${ic('reset','s11')}</span><span class="ib">${ic('x','s11')}</span></span>`:''}</div>`;
+  const prow=(l,v,k='')=>`<div class="pr" style="padding-left:20.5px">${kd(k)}<span class="lab">${l}</span><div class="col">${v}</div></div>`;
+  return `<div class="ground" style="position:relative">${pnl(300,420,head+`<div class="who">Headline <span>· Text</span></div>
+   ${eh('Glow',true,true,true)}${prow('Radius',F('24','px'),'half')}${prow('Intensity',F('0.65'),'on')}${prow('Color','<span class="sw" style="background:#FF7A3C"></span>'+F('#FF7A3C'))}
+   <div style="height:6px"></div>${eh('Film Grain',false,true,false,true)}
+   <div style="height:2px;background:var(--acc);margin:2px 12px;position:relative"><i style="position:absolute;left:-2px;top:-2px;width:6px;height:6px;border-radius:3px;background:var(--acc)"></i></div>
+   ${eh('Gaussian Blur',false,false)}
+   <div style="display:flex;justify-content:center;padding-top:12px"><span class="btn">Add Effect…</span></div>`)}
+   ${note(150,96,'selected: neutral fill')+note(150,196,'hover: Reset / Remove')+note(150,226,'drop insertion line')+note(150,252,'disabled: unchecked + muted')}</div>`;
+}
+
+/* ---------- Viewer chrome ---------- */
+function viewer(state){
+  const W=640,H=400,fw=520,fh=292,fx=60,fy=32+(H-32-fh)/2;
+  const img=`<div style="position:absolute;left:${fx}px;top:${fy}px;width:${fw}px;height:${fh}px;overflow:hidden;background:radial-gradient(45% 60% at 30% 70%,rgba(160,70,30,.65),transparent 70%),radial-gradient(70% 70% at 50% 45%,#5a2a14,#24100a 75%,#140906)">
+    <div style="position:absolute;left:0;right:0;top:118px;text-align:center;font:700 44px/1.1 -apple-system,'SF Pro Display',system-ui;letter-spacing:-1.5px;color:#f7f3ef">Make it move.</div>
+    ${state==='source'?'':`<div style="position:absolute;left:98px;top:110px;width:324px;height:60px;border:1px solid #FF6019;box-shadow:0 0 0 1px rgba(0,0,0,.4)">${[[-4,-4],[320,-4],[-4,56],[320,56],[158,-4],[158,56],[-4,26],[320,26]].map(([x,y])=>`<i style="position:absolute;left:${x}px;top:${y}px;width:7px;height:7px;background:#FF6019;box-shadow:0 0 0 1px #0E0E0E"></i>`).join('')}</div>`}</div>`;
+  let bar,over='';
+  if(state==='source') bar=`<span style="color:var(--t3)">Source:</span><span>VO_take03.wav</span><span style="color:var(--acctx);display:flex;align-items:center;gap:2px;margin-left:6px">${ic('left','s11')}Back to Composition</span><span style="flex:1"></span><span class="pop">Fit (54 %)${ic('chev','s11')}</span><span class="pop">Auto${ic('chev','s11')}</span>`;
+  else bar=`<span style="flex:1"></span><span class="pop ${state==='bar'?'hov':''}" style="width:96px;justify-content:space-between">Fit (54 %)${ic('chev','s11')}</span><span class="pop" style="width:112px;justify-content:space-between">Auto (Half)${ic('chev','s11')}</span>`;
+  if(state==='focus') over=`<div class="ovr glass" style="position:absolute;left:${W/2-110}px;bottom:12px;height:34px;border-radius:17px;display:flex;align-items:center;gap:2px;padding:0 6px;color:var(--t2)"><span class="pop" style="color:#F2F2F2">Fit (54 %)${ic('chev','s11')}</span><span class="pop" style="color:#F2F2F2">Auto (Half)${ic('chev','s11')}</span></div>
+    <div class="ovr glass" style="position:absolute;left:${W/2-150}px;bottom:56px;height:30px;border-radius:15px;display:flex;align-items:center;gap:8px;padding:0 14px;color:#F2F2F2;font-size:12px">${ic('sliders','s13')}Preview resolution lowered while playing</div>`;
+  if(state==='source') over=`<div class="ovr glass" style="position:absolute;left:${W/2-150}px;bottom:16px;width:300px;height:34px;border-radius:17px;display:flex;align-items:center;gap:8px;padding:0 12px;color:#F2F2F2"><span style="width:16px">${ic('play','s13')}</span><div style="flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.25);position:relative"><i style="position:absolute;left:0;width:38%;height:4px;border-radius:2px;background:#F2F2F2"></i><i style="position:absolute;left:38%;top:-5px;width:14px;height:14px;border-radius:7px;background:#fff;margin-left:-7px"></i></div></div>`;
+  return `<div class="ground" style="position:relative">${pnl(W,H,`${state==='focus'?'':`<div class="ph" style="font-weight:400;gap:6px;color:var(--t1);padding-right:8px">${bar}</div>`}
+    <div style="position:absolute;inset:${state==='focus'?0:32}px 0 0 0;background:var(--viewer)"></div>${img}${over}`,'background:var(--viewer)')}
+    ${state==='bar'?note(370,40,'zoom, then preview resolution — fixed widths'):''}${state==='focus'?note(20,20,'Focus: bar hidden, glass overlay (dark tokens in both schemes)'):''}</div>`;
+}
+
+/* ---------- Project ---------- */
+function project(state){
+  const head=`<div class="ph"><div class="seg"><span class="on">Project</span><span>Effect Controls</span></div><span class="r"><span class="ib">${ic('search','s13')}</span><span class="ib">${ic('plus','s13')}</span></span></div>`;
+  if(state==='empty') return `<div class="ground">${pnl(300,360,head+EMPTY('photo','No Media','Drag files here or import from your computer.','Import…'))}</div>`;
+  const th=(bg,name,meta,dur,o={})=>`<div style="width:132px;position:relative"><div style="height:74px;border-radius:6px;position:relative;overflow:hidden;background:${bg};${o.sel?'box-shadow:0 0 0 2px var(--acc)':''};${o.focus?'outline:2px solid var(--acctx);outline-offset:4px':''}">${o.extra||''}
+     ${dur?`<em class="num mb" style="position:absolute;left:5px;top:5px;font-style:normal;font-size:11px;border-radius:8px;padding:1px 6px">${dur}</em>`:''}
+     ${o.open?'<i style="position:absolute;right:6px;top:6px;width:6px;height:6px;border-radius:3px;background:var(--acc);box-shadow:0 0 0 1px rgba(0,0,0,.55)"></i>':''}
+     ${o.off?`<span class="mb" style="position:absolute;left:5px;bottom:5px;font-size:11px;border-radius:8px;padding:2px 7px;display:flex;gap:4px;align-items:center">${ic('warn','s11')}Media offline</span>`:''}
+     ${o.cloud?`<span class="mb" style="position:absolute;left:5px;bottom:5px;font-size:11px;border-radius:8px;padding:2px 7px;display:flex;gap:4px;align-items:center">${ic('cloud','s11')}In cloud</span>`:''}
+     ${o.hov?`<span style="position:absolute;right:5px;bottom:5px;display:flex;gap:4px">${['folder','plus','trash'].map(n=>`<i class="mb" style="width:24px;height:24px;border-radius:12px;display:flex;align-items:center;justify-content:center">${ic(n,'s11')}</i>`).join('')}</span>`:''}</div>
+     <div style="margin-top:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${o.sel?'background:var(--self);border-radius:5px;padding:0 4px;margin-left:-4px;margin-right:-4px':''}">${name}</div><div class="num" style="font-size:11px;color:${o.off?'var(--bad)':'var(--t3)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${meta}</div></div>`;
+  const grid=`<div style="display:flex;flex-wrap:wrap;gap:12px;padding:6px 12px">
+    ${th('var(--field)','Shots','4 items','',{extra:`<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--t2)">${ic('folder','s22')}</span>`})}
+    ${th('#141414','Launch Film','1920×1080 · 30 fps · 0:20','0:20',{open:true,extra:'<span style="position:absolute;inset:8px 18px;background:radial-gradient(60% 80% at 50% 50%,#7a3a1a,#1d0d07)"></span>'})}
+    ${th('radial-gradient(60% 80% at 40% 50%,#9c4a22,#3c1a0e 70%,#1d0d07)','Atmosphere_loop.mov','MOV · 1920×1080 · 0:12 · 48 MB','0:12',{sel:true,hov:state==='grid',focus:state==='grid'})}
+    ${th('#2a2a2a','Grain_35mm.mov','Missing · locate the file to relink it','',{off:true,extra:'<span style="position:absolute;inset:0;background:radial-gradient(#666 .6px,transparent .8px) 0 0/7px 7px;opacity:.5"></span>'})}
+    ${th('var(--lb-green)','VO_take03.wav','WAV · 0:24 · 4.1 MB','0:24',{sel:state==='multi',extra:'<svg style="position:absolute;left:6px;bottom:14px;color:var(--t1)" width="120" height="30" data-wave="120,30"></svg>'})}
+    ${th('linear-gradient(135deg,#2b3a55,#141a26)','Product_turntable.mov','Stored in iCloud · ~/Footage','',{cloud:true,sel:state==='multi'})}
+  </div>`;
+  const drop=state==='drop'?`<div style="position:absolute;inset:32px 0 0 0;background:var(--wash);display:flex;align-items:center;justify-content:center"><div style="background:var(--float);border-radius:12px;padding:14px 18px;display:flex;flex-direction:column;align-items:center;gap:4px;box-shadow:0 1px 3px rgba(0,0,0,.15)"><span style="color:var(--acc)">${ic('plus','s13')}</span><b style="font-size:13px">Add to Project Media</b><small style="font-size:11px;color:var(--t3)">Drops here don’t touch the timeline.</small></div></div>`:'';
+  const selbar=state==='multi'?`<div style="position:absolute;left:12px;right:12px;bottom:12px;height:28px;border-radius:6px;background:var(--float);display:flex;align-items:center;padding:0 4px 0 10px;box-shadow:0 0 0 .5px var(--sep),0 2px 6px rgba(0,0,0,.15)">3 selected<span class="ib" style="margin-left:auto;color:var(--bad)">${ic('trash','s13')}</span></div>`:'';
+  return `<div class="ground" style="position:relative">${pnl(300,380,head+grid+drop+selbar)}${state==='grid'?note(150,112,'selected ring + focus + hover actions')+note(150,176,'offline: badge + danger meta'):''}</div>`;
+}
+
+/* ---------- Effects & Presets ---------- */
+function effectsPresets(state){
+  const head=`<div class="ph">Effects &amp; Presets</div><div style="display:flex;gap:6px;padding:3px 12px;height:28px;align-items:center"><div class="search">${ic('search','s11')}<span style="color:${state==='none'?'var(--t1)':'var(--t3)'}">${state==='none'?'kaleido':'Search effects'}</span></div><span class="pop">All${ic('chev','s11')}</span></div>`;
+  if(state==='none') return `<div class="ground">${pnl(300,268,head+`<div class="empty" style="top:60px;bottom:0"><div class="d">No effects match “kaleido”</div></div>`)}</div>`;
+  const g=(n,open)=>`<div class="li" style="font-weight:600;padding-left:6px"><span class="ib" style="width:24px">${ic(open?'down':'right','s11')}</span>${n}</div>`;
+  const it=(n,o='')=>`<div class="li ${o}" style="padding-left:${o?24:30}px"><span style="color:var(--t3)">${ic(n.p?'sparkles':'wand','s11')}</span>${n.n}${o?`<span class="tr"><span class="ib">${ic('plus','s11')}</span></span>`:''}</div>`;
+  return `<div class="ground" style="position:relative">${pnl(300,268,head+g('Recent',true)+it({n:'Glow'})+g('Blur &amp; Sharpen',true)+it({n:'Gaussian Blur'},'hov')+it({n:'Directional Blur'},'sel')+it({n:'Motion Blur'})+g('Stylize',false))}${note(150,170,'selected: neutral; + on hover/selection')}</div>`;
+}
+
+/* ---------- Agent ---------- */
+function agent(state){
+  const head=(pop)=>`<div class="ph">Agent<span class="r" style="align-items:center"><span class="pop">Headline entrance${ic('chev','s11')}</span><span class="ib">${ic('compose','s13')}</span><span class="ib">${ic(pop?'pin':'x','s13')}</span></span></div>`;
+  const composer=(working)=>`<div class="composer" style="position:absolute;left:12px;right:12px;bottom:12px;${state==='pop'?'box-shadow:inset 0 0 0 1px var(--sep)':''}"><div style="min-height:38px">${working?'Add direction…':'Describe a change…'}</div><div class="bar"><span class="ib">${ic('clip','s13')}</span><span class="pop" style="font-size:11px">Composition only${ic('chev','s11')}</span><span class="pop" style="font-size:11px">GPT-6.1 · High${ic('chev','s11')}</span><span style="flex:1"></span><span style="color:${working?'var(--t1)':'var(--acc)'}">${ic(working?'stop':'send','',`width:20px;height:20px`)}</span></div></div>`;
+  if(state==='empty') return `<div class="ground">${pnl(360,520,head(false)+`<div class="empty" style="top:32px;bottom:120px"><div style="font:600 22px -apple-system,'SF Pro Display',system-ui;color:var(--t1)">Make Your Next Move</div><div class="d">Your ideas. Editable motion.</div><div style="display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:12px;color:var(--acctx)"><span>Add a soft overshoot to the headline</span><span>Cut to the beat of VO_take03</span></div></div>`+composer(false))}</div>`;
+  if(state==='offline') return `<div class="ground">${pnl(360,420,head(false)+`<div class="empty" style="top:32px;bottom:120px">${ic('warn','s22')}<div class="t">Connect Your Agent</div><div class="d">ChatGPT couldn’t be reached.</div><div style="display:flex;gap:8px;margin-top:6px"><span class="btn pri">Try Again</span><span class="btn">Connection Settings…</span></div></div>`+`<div class="composer" style="position:absolute;left:12px;right:12px;bottom:12px"><div style="min-height:38px">Connect an agent to start</div><div class="bar"><span style="flex:1"></span><span style="color:var(--t3)">${ic('send','',`width:20px;height:20px`)}</span></div></div>`)}</div>`;
+  const pop=state==='pop';
+  const inner=head(pop)+`<div style="position:absolute;left:12px;right:12px;top:40px;bottom:120px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
+    <div class="you">Make the headline land with a soft overshoot and add some film grain.</div>
+    <div class="steps">${ic('right','s11')}4 steps · 3.2 s</div>
+    <div class="msg">Done. <b style="font-weight:600">Headline</b> now scales from 92 % to 100 % with a spring over the first 0.8 s.</div>
+    <div class="card" style="${pop?'background:var(--panel)':''}"><div style="font-size:13px;font-weight:600">Apply the same entrance to Kicker?</div><div style="font-size:12px;color:var(--t2);line-height:1.4">It would start 0.2 s after the headline.</div><div style="display:flex;gap:6px;flex-wrap:wrap"><span class="btn pri">Apply to Kicker</span><span class="btn">Not Now</span><span style="margin-left:auto;font-size:13px;color:var(--t2);align-self:center">Skip</span></div></div>
+    <div class="steps"><span style="width:12px;height:12px;border-radius:6px;border:1.5px solid var(--t3);border-top-color:transparent"></span><span class="num">Working · 0:07</span></div>
+  </div>`+composer(true);
+  if(!pop) return `<div class="ground">${pnl(360,560,inner)}</div>`;
+  return `<div class="ground" style="width:400px;height:620px;position:relative">
+    <div class="glass" style="position:absolute;right:28px;top:4px;width:44px;height:34px;border-radius:17px;display:flex;align-items:center;justify-content:center;color:var(--acc)">${ic('sparkles')}<span class="ring" style="left:13px;top:8px"></span><i style="position:absolute;right:9px;top:6px;width:6px;height:6px;border-radius:3px;background:var(--acc)"></i></div>
+    <div class="glass" style="position:absolute;left:14px;top:48px;width:372px;height:560px;border-radius:16px;box-shadow:var(--shadow),inset 0 0 0 .5px var(--glass-rim)"><div style="position:absolute;inset:6px;border-radius:11px;background:var(--float);overflow:hidden">${inner}</div></div>
+    ${note(150,10,'toolbar item: working ring + attention dot')}</div>`;
+}
+
+/* ---------- Settings ---------- */
+function settings(){
+  const sb=(n,s,sel)=>`<div class="li ${sel?'sel':''}" style="height:28px">${ic(s,'s13','color:var(--acctx)')}${n}</div>`;
+  const gr=(l,d,c)=>`<div class="gr"><div class="gl"><b>${l}</b>${d?`<small>${d}</small>`:''}</div><div class="gc">${c}</div></div>`;
+  const pp=(v)=>`<span class="ppop" style="width:160px">${v}${ic('chev','s11')}</span>`;
+  return `<div class="ground" style="padding:0;border-radius:12px;overflow:hidden;width:760px;height:520px;display:flex;box-shadow:0 0 0 1px var(--frame)">
+   <div style="width:180px;background:var(--panel2);padding:40px 6px 0;display:flex;flex-direction:column;gap:2px;position:relative">
+     <div style="position:absolute;left:14px;top:14px;display:flex;gap:8px">${['#FF5F57','#FEBC2E','#28C840'].map(c=>`<i style="width:12px;height:12px;border-radius:6px;background:${c}"></i>`).join('')}</div>
+     <div class="search" style="flex:none;margin:0 6px 8px">${ic('search','s11')}Search</div>
+     ${sb('Project','doc')}${sb('General','gear',true)}${sb('Accounts','person')}${sb('Transcription','mic')}${sb('Extensions','puzzle')}</div>
+   <div style="flex:1;background:var(--panel);padding:20px;overflow:hidden">
+     <div style="text-align:center;font-size:13px;font-weight:600;margin:-10px 0 14px">General</div>
+     <div style="font-size:15px;font-weight:600">General</div><div style="font-size:13px;color:var(--t2);margin:6px 0 12px;line-height:1.45">How Powermove looks and works on this Mac.</div>
+     <div style="font-size:13px;font-weight:600;margin-bottom:6px">Appearance</div>
+     <div class="grp">${gr('Appearance','Follow your system setting, or pick a light or dark theme.',pp('Match System'))}${gr('Density','Spacing of panels, rows and controls.',pp('Normal'))}</div>
+     <div style="font-size:13px;font-weight:600;margin:16px 0 6px">Playback</div>
+     <div class="grp">${gr('Preview Memory Limit','Frames kept in memory so replays are instant.',pp('256 MB'))}</div>
+     <div style="font-size:13px;font-weight:600;margin:16px 0 6px">Media</div>
+     <div class="grp">${gr('Automatically Download Cloud Media','Download offloaded files when opening a project.','<span class="toggle"></span>')}${gr('Reopen Last Project on Launch','Open only the project you were last working on.','<span class="toggle on"></span>')}</div>
+   </div></div>`;
+}
+
+/* ---------- Export sheet ---------- */
+function exportSheet(state){
+  const gr=(l,d,c)=>`<div class="gr"><div class="gl"><b>${l}</b><small>${d}</small></div><div class="gc">${c}</div></div>`;
+  const pp=(v)=>`<span class="ppop">${v}${ic('chev','s11')}</span>`;
+  const cb=(on)=>`<span class="cb ${on?'on':''}">${on?'<svg viewBox="0 0 16 16" width="10" height="10" style="stroke:#fff;fill:none;stroke-width:2.2"><path d="M3.5 8.5l3 3 6-7"/></svg>':''}</span>`;
+  const frame=(w,h,inner)=>`<div class="ground" style="width:${w+80}px;height:${h+60}px;position:relative;background:color-mix(in srgb,var(--win) 70%,#000)">
+     <div class="glass" style="position:absolute;left:40px;top:30px;width:${w}px;height:${h}px;border-radius:22px;box-shadow:var(--shadow),inset 0 0 0 .5px var(--glass-rim)"><div style="position:absolute;inset:6px;border-radius:17px;background:var(--panel);overflow:hidden">${inner}</div></div></div>`;
+  if(state==='progress') return frame(600,330,`<div style="padding:20px"><div style="font-size:15px;font-weight:600">Exporting “Launch Film”</div>
+     <div style="margin:14px auto 0;width:300px;height:168px;border-radius:6px;background:var(--viewer);padding:10px"><div style="height:100%;background:radial-gradient(70% 70% at 50% 45%,#5a2a14,#24100a 75%,#140906);display:flex;align-items:center;justify-content:center;font:700 22px -apple-system,'SF Pro Display';color:#f7f3ef">Make it move.</div></div>
+     <div style="margin-top:14px;height:6px;border-radius:3px;background:var(--field)"><i style="display:block;width:40%;height:6px;border-radius:3px;background:var(--acc)"></i></div>
+     <div style="display:flex;margin-top:8px;font-size:12px"><span class="num">Frame 120 of 300 · 40 %</span><span style="margin-left:auto;color:var(--t2)">About 2 min left</span></div></div>
+     <div style="position:absolute;left:0;right:0;bottom:0;height:56px;border-top:1px solid var(--sep);display:flex;align-items:center;justify-content:flex-end;padding:0 20px"><span class="btn">Cancel</span></div>`);
+  return frame(600,560,`<div style="padding:20px 20px 0">
+     <div style="font-size:15px;font-weight:600">Export</div>
+     <div class="seg" style="margin-top:12px;font-size:13px"><span class="on" style="flex:1;justify-content:center;padding:3px">Video</span><span style="flex:1;justify-content:center">Images</span><span style="flex:1;justify-content:center">Project</span></div>
+     <div style="font-size:13px;color:var(--t2);margin:6px 0 12px">MP4, WebM or ProRes for delivery and editing.</div>
+     <div style="font-size:13px;font-weight:600;margin-bottom:6px">Output</div>
+     <div class="grp">${gr('Format','Container and codec of the exported file.',pp('MP4 · H.264'))}${gr('Resolution','Rendered size relative to the composition, or any pixel size.',pp('Full · 1920×1080'))}${gr('Frame Rate','Frames written per second of exported video.',pp('30 fps'))}${gr('Range','Export the work area or the whole composition.',pp('Work area'))}${gr('Quality','Video bitrate used for video exports.',pp('High · 16 Mbps'))}</div>
+     <div style="font-size:13px;font-weight:600;margin:14px 0 6px">Rendering</div>
+     <div class="grp">${gr('Motion Blur','Render motion blur for moving layers.',cb(false))}${gr('Include Audio','Mix composition audio into the video.',cb(true))}</div></div>
+     <div style="position:absolute;left:0;right:0;bottom:0;height:56px;border-top:1px solid var(--sep);display:flex;align-items:center;gap:8px;padding:0 20px;background:var(--panel)"><span class="num" style="color:var(--t2);font-size:12px">300 frames · 10 s · 1920×1080</span><span style="flex:1"></span><span class="btn">Cancel</span><span class="btn pri">Export Video</span></div>`);
+}
+
+/* ---------- page ---------- */
+const sections=[
+ ['Timeline','panels/timeline.md','Selected layer (neutral row, clip ring), revealed properties with ‹ ◆ › navigators and readouts, work area, render bar, marker, hidden/offline/locked layers.',[
+   ['default','<b>Default</b> — selection, revealed Scale/Opacity (hovered), offline and locked clips, hidden layer (eye.slash set).',()=>timeline('default')],
+   ['drag','<b>Drop</b> — media dragged in: insertion line between rows + drop-time guide.',()=>timeline('drag')],
+   ['empty','<b>Empty composition</b> — layer column and ruler stay; one sentence and Import….',()=>timeline('empty')]]],
+ ['Properties','panels/inspector.md','One 128 pt value column, values left-aligned, units muted; diamonds; link in the inset margin.',[
+   ['layer','<b>Layer selected</b> — Size editing (system ring), Position hovered.',()=>properties('layer')],
+   ['multi','<b>Multi-select</b> — 3 layers, mixed values as —, mixed checkbox.',()=>properties('multi')],
+   ['nosel','<b>No selection</b> — Composition section (not an empty state).',()=>properties('nosel')],
+   ['color','<b>Colour popover</b> — glass frame, solid floating content.',()=>colorPopover()]]],
+ ['Effect Controls','panels/effect-controls.md','Effect headers with disclosure, enable checkbox, hover Reset/Remove; params on the same panel-wide value column.',[
+   ['list','<b>Stack</b> — selected, hovered, drop insertion, disabled effect.',()=>effectControls('list')],
+   ['none','<b>Layer without effects</b>.',()=>effectControls('none')],
+   ['nosel','<b>No selection</b>.',()=>effectControls('nosel')]]],
+ ['Viewer chrome','panels/viewer-chrome.md','Zoom then preview resolution in the bar; nothing over the image when docked; dark-token overlays.',[
+   ['bar','<b>Docked</b> — Fit (54 %) hovered, Auto (Half) showing Auto’s choice.',()=>viewer('bar')],
+   ['focus','<b>Focus / full screen</b> — overlay capsule + banner, dark tokens in light mode.',()=>viewer('focus')],
+   ['source','<b>Source preview</b> — named source, Back to Composition, glass transport.',()=>viewer('source')]]],
+ ['Project','panels/media-browser.md','Grid with folder, open composition (dot), selected asset (ring + capsule, focus, hover actions), offline and cloud media.',[
+   ['grid','<b>Grid</b>.',()=>project('grid')],
+   ['multi','<b>Multi-select</b> — selection bar.',()=>project('multi')],
+   ['drop','<b>External drop</b>.',()=>project('drop')],
+   ['empty','<b>Empty project</b>.',()=>project('empty')]]],
+ ['Effects & Presets','panels/effects-presets.md','Always-visible search, scope pop-up, grouped outline.',[
+   ['browse','<b>Browse</b> — Recent group, hover, selection.',()=>effectsPresets('browse')],
+   ['none','<b>No results</b>.',()=>effectsPresets('none')]]],
+ ['Agent','panels/agent-panel.md','Popover by default (glass frame, solid content), pin to dock; question card with system buttons; working timer.',[
+   ['pop','<b>Popover, working</b> — toolbar ring + attention dot, question card, Stop.',()=>agent('pop')],
+   ['docked','<b>Docked</b> — same conversation on solid panel.',()=>agent('docked')],
+   ['empty','<b>New thread</b>.',()=>agent('empty')],
+   ['offline','<b>Connection unavailable</b>.',()=>agent('offline')]]],
+ ['Settings','panels/settings.md','Separate window: sidebar + one continuous detail page of grouped rows; switches only here.',[
+   ['general','<b>General</b>.',()=>settings()]]],
+ ['Export sheet','panels/export-sheet.md','System sheet (centred by macOS 26+), panel-material content, label by format.',[
+   ['video','<b>Video</b>.',()=>exportSheet('video')],
+   ['progress','<b>Progress</b> — after the destination is chosen.',()=>exportSheet('progress')]]],
+];
+function render(mode){
+  const schemes=mode==='both'?['dark','light']:[mode];
+  let h='';
+  for(const [title,link,sub,states] of sections){
+    h+=`<h2>${title}<a href="${link}">${link}</a></h2><div class="sub">${sub}</div>`;
+    for(const [,cap,fn] of states){
+      h+=`<div class="cap" style="margin:10px 0 6px">${cap}</div><div class="row">`;
+      for(const s of schemes) h+=`<div class="cell"><div class="${s}">${fn()}</div></div>`;
+      h+='</div>';
+    }
+  }
+  document.getElementById('out').innerHTML=h;
+  document.querySelectorAll('svg[data-wave]').forEach(svg=>{const [n,hh]=svg.dataset.wave.split(',').map(Number);let p='';for(let x=0;x<n;x+=3){const a=(Math.sin(x*.07)*.5+.5)*(Math.sin(x*.019)*.4+.6)*(hh/2-2)*(.5+.5*Math.abs(Math.sin(x*1.3)));p+=`M${x} ${hh/2-a}L${x} ${hh/2+a}`}svg.innerHTML=`<path d="${p}" stroke="currentColor" opacity=".75" stroke-width="1.6"/>`});
+}
+document.querySelectorAll('.switch button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.switch button').forEach(x=>x.classList.toggle('on',x===b));render(b.dataset.s)});
+render('both');
+</script>
+</body></html>
