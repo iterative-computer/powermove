@@ -44,7 +44,7 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 - **Store-wide counts:** pull published Store extension sources read-only through the Store tools; record usage counts only.
 - **S1:** runs on a cloud/CI macOS runner (this Mac lacks the disk).
 - **Design calls (language.md §17):** all five approved: left-aligned values, neutral timecode, neutral list selection, workspace switcher in Window ▸ Workspace (+ optional toolbar item), 32 pt panel headers.
-- **Edit/scrub latency endpoint (P1 §5 rows):** split into two checks. (1) Powermove's own share, input → frame ready for presentation (kernel + service + render, ending at GPU completion), p95 ≤ 9.333 ms at 120 Hz. (2) End to end, input → on screen (`presentedTime`), native must beat Electron measured the same way on the same Mac. Reason: macOS composition alone adds ~20–24 ms for any windowed `CAMetalLayer` (perf-gate-p1.md, "Latency pass"), and Electron's reference numbers stopped at GPU completion + rAF. Approved by Chike; Jude to confirm.
+- **Edit/scrub latency endpoint (P1 §5 rows):** split into two checks. (1) Powermove's own share, input → frame ready for presentation (kernel + service + render, ending at GPU completion), p95 ≤ 9.333 ms at 120 Hz. (2) End to end, input → on screen (`presentedTime`), native must beat Electron measured the same way on the same Mac. Reason: macOS composition alone adds ~20–24 ms for any windowed `CAMetalLayer` (perf-gate-p1.md, "Latency pass"), and Electron's reference numbers stopped at GPU completion + rAF. Approved by Chike.
 
 ## Plan adjustments (owner, Chike, 2026-11-01)
 
@@ -53,6 +53,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - **Timing machines.** The 120 Hz XDR reference machine is any Apple-silicon MacBook Pro with a 120 Hz XDR display. The build Mac (base M5, 16 GB) now fills that role; there's no requirement to run on one person's M4 Max. The second required machine is still "the cohort's most common base M-series at 60 Hz", because that's about users, not about who builds. Until one is available, 60 Hz rows run on the build Mac with the display set to 60 Hz and are labelled *stand-in (faster than typical)*.
 - **Capacity.** The rule was 6–8 local lanes on 128 GB. It is now at most 2 local lanes and one compile at a time (`flock /tmp/pm-build.lock`), with ≥ 8 GB disk kept free. CPU-side and JS work runs in cloud lanes.
 - **E-track (Rust engine finish).** The E-track becomes ordinary lanes run by the orchestrator. It starts from the open `feat/ne-*` branches (`ne-bigrender`, `ne-l4comp`, `ne-l5stills`, `ne-phase4a`, `ne-svg`). Their author keeps review rights, but Gate E no longer waits on one person.
+- **No single-person gates.** Nothing waits on Jude. His plan roles move: E-track → orchestrator lanes; the 2-round design review per surface → Opus design review plus the owner (Chike); release/`main`/TR approval → Chike. The latency endpoint decision stands on Chike's approval.
 - **Design and models.** Opus owns design (spec and review). Implementation goes to GPT-6.1 Sol by default, to conserve Claude usage.
 
 ## Questions from the inventories (original wording, kept for traceability)
