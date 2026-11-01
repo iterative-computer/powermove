@@ -207,8 +207,10 @@ apps/native/crates/compat-host/scripts/check.sh smoke
 
 This builds first, refuses a locked session, then acquires the shared GUI lock
 using `set -o noclobber; echo compathost > /tmp/pm-shots/gui.lock`, retrying every
-30 s while held. The owned test is bounded to 35 s (outer guard ≤8 min), removes
-its lock on exit and closes its own app. Do not interact with the fixture while
+30 s while held. The owned test is bounded to 35 s by its driver, 45 s by an
+independent watchdog thread (which writes `/tmp/pm-shots/compat-host-stall.txt`,
+a stack sample, before exiting 3) and 90 s by the outer guard. Any failure exits
+non-zero. It removes its lock on exit and closes its own app. Do not interact with the fixture while
 its synthetic keys/clicks run. Look for:
 
 1. A real GPUI window with a solid right-side “Remote DOM panel” inside its slot.
@@ -241,3 +243,58 @@ compatibility, P1, release or supported-OS approval is implied.
 Only readiness and foreground/key/responder acquisition are observed. The five
 visual checks above remain open. Rerun `check.sh smoke` on an unlocked Mac with
 ≥ 6 GiB free and no concurrent build.
+
+## Smoke fix and on-screen pass (2026-11-01, P1 fix lane)
+
+**PASS on screen:** `check.sh smoke` logged `SMOKE PASS typing overlay popout
+recovery activity` and exited 0 after ~10 s of fixture time. It ran on an
+unlocked Mac under the GUI lock with no concurrent build. Captures are in
+`/tmp/pm-p1fix/compat/run3/` (outside Git). The rerun-2 stall (`feat/na-onscreen2`)
+had four causes:
+
+1. **Blank panel slot (applier bug).** The page stylesheet makes each panel root
+   `position:fixed`, and `layout()` writes its left/top/width/height inline. The
+   fixture's `attr 0 style …` replaced the whole `style` attribute, which erased
+   that geometry. The root collapsed to page (0,0), behind the opaque GPUI
+   chrome, so the slot showed only WebKit's empty background. Any remote content
+   that styles its root would do the same. `applier.js` now re-applies the
+   host-owned geometry after every batch.
+2. **Driver timer stopped (stall with no timeout).** The 35 s check ran on an
+   `NSTimer` scheduled only in the default run-loop mode. The rerun-2 hang
+   screenshot shows AppKit's autocorrect bubble for the typed word. A correction
+   UI or event-tracking loop runs outside the default mode, so the driver (and
+   its deadline) stopped while GPUI kept rendering (~25% CPU). The timer now runs
+   in the common modes. The fixture input sets `spellcheck`/`autocorrect`/
+   `autocapitalize`/`autocomplete` off; the applier's attribute allowlist
+   gained these four harmless attributes.
+3. **Unenforced and misreported bounds.** A watchdog thread now enforces 45 s
+   independently of the main thread, writes a stack sample to
+   `/tmp/pm-shots/compat-host-stall.txt` and exits 3. The outer guard for the
+   smoke is 90 s (`GUARD_SECONDS`; 8 minutes still for builds/tests). Failures
+   used to exit **0**, because GPUI's quit terminates the process before `main`
+   could return a status. They now exit 2 directly, with a `failure` capture.
+4. **Recovery re-entrancy abort.** `stop_and_recover()` closed the popout window
+   synchronously. AppKit made the parent key and GPUI rendered inside that
+   callback, and the paint closure re-borrowed the host that the caller still
+   held: a `RefCell` panic in a non-unwinding callback. Host methods now close
+   popout windows on the next run-loop turn (`close_later`), so no host call
+   re-enters the shell.
+
+The smoke fixture also leaves GPUI's chrome transparent over reported overlay
+holes, so the protruding overlay is visible as well as clickable.
+
+| Check (on screen, 2026-11-01 ~11:53) | Result |
+|---|---|
+| Panel in its slot | **PASS**: "Remote DOM panel", "Compat name" field, popout button |
+| Real typing | **PASS**: `powermove` typed, `Value: powermove` shown (`typed=powermove`) |
+| Overlay click through the native hole | **PASS**: `click node=6`, button reads `Overlay clicked` |
+| Trusted popout | **PASS**: separate "Compat popout" child window with its own input (`popout_count=1`) |
+| Hung page → recovery | **PASS**: real infinite loop, generation 1 sealed, generation 2 ready and restored panel, shell kept rendering |
+| Bound: driver stuck (`PM_COMPAT_SMOKE_FAULT=stuck`) | **PASS**: `SMOKE timeout stage=1`, exit 2 at 35 s |
+| Bound: main thread blocked (`PM_COMPAT_SMOKE_FAULT=stall`) | **PASS**: `SMOKE watchdog_timeout`, exit 3 at 45 s, stack sample shows the blocked main thread |
+| Offscreen probe / unit tests | **PASS** 7/7 / 22/22 |
+
+Still unverified: IME, spoken VoiceOver, appearance variants, resize lag,
+supported-OS matrix and budgets. The synchronous `pmCompatHost.call` XHR
+remains the RPC contract. A page blocking on it while AppKit waits on WebKit
+was considered as a hang cause, but it was not observed.

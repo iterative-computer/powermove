@@ -22,7 +22,7 @@
   const tags = new Set(['section','div','span','p','h1','h2','h3','input','textarea','button','output','label','select','option','canvas','img','ul','li']);
   function attr(n, name, value) {
     if (name==='data-pm-panel' || name==='data-pm-node') throw Error('reserved host attribute');
-    if (!/^(aria-[\w-]+|data-[\w-]+|class|style|id|title|type|placeholder|role|tabindex|disabled|width|height|value|src)$/.test(name)) throw Error('unsupported attribute');
+    if (!/^(aria-[\w-]+|data-[\w-]+|class|style|id|title|type|placeholder|role|tabindex|disabled|width|height|value|src|spellcheck|autocomplete|autocorrect|autocapitalize)$/.test(name)) throw Error('unsupported attribute');
     if (value === null) n.removeAttribute(name); else n.setAttribute(name, String(value));
   }
   function batch(p, ops) {
@@ -41,13 +41,18 @@
         n.remove();
       } else throw Error('unsupported mutation');
     }
+    // A remote `style` on the root must not erase the host-owned geometry.
+    place(p);
+  }
+  function place(p) {
+    if (!p.slot) return;
+    const b = p.slot.bounds;
+    Object.assign(p.root.style,{left:b.x+'px',top:b.y+'px',width:b.w+'px',height:b.h+'px'});
   }
   function layout(p, slot) {
     p.slot = slot; p.root.hidden = !slot;
     for (const q of [...panels.values()].sort((a,b)=>(a.slot?.reading_order??1e9)-(b.slot?.reading_order??1e9) || Number(a.root.dataset.pmPanel)-Number(b.root.dataset.pmPanel))) document.body.append(q.root);
-    if (!slot) return;
-    const b = slot.bounds;
-    Object.assign(p.root.style,{left:b.x+'px',top:b.y+'px',width:b.w+'px',height:b.h+'px'});
+    place(p);
     // Composition clips the shared page; do not clip this root: fixed overlays
     // must escape its panel rectangle. The compositor owns native occlusion.
   }
