@@ -1,4 +1,6 @@
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRoot, type Commit } from "../src";
 import { tasks } from "./tasks";
 import { exercise } from "./scenarios";
@@ -82,7 +84,15 @@ if (import.meta.main) {
     const factory: typeof createRoot = candidate
       ? (
           await import(
-            new URL(candidate, pathToFileURL(`${process.cwd()}/`)).href
+            // Resolve filesystem names before URL encoding, and collapse aliases
+            // such as macOS /tmp -> /private/tmp to one module identity.
+            pathToFileURL(
+              realpathSync(
+                candidate.startsWith("file:")
+                  ? fileURLToPath(candidate)
+                  : resolve(candidate),
+              ),
+            ).href
           )
         ).createRoot
       : createRoot;
