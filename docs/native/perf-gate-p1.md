@@ -693,3 +693,73 @@ p95 ≤ 9.333 ms, and input → on screen faster than Electron when both are mea
 `presentedTime` on the same machine. The ~20–24 ms macOS composition floor measured in the
 "Latency pass" counts against neither app. The harness must report both numbers per row.
 
+## Cloud gate tooling — 2026-11-01
+
+**Code and Linux fixtures only; no Mac runs. Gate P1 remains NOT PASSED.**
+`tools/perf-gate/run-gate.sh p1` now schedules thirty independent native/Electron
+pairs for each of the ten existing rows, alternates AB/BA order, retains all
+attempts, and writes a Markdown report table plus raw JSON outside Git. The
+configured Electron bundle/executable receives its own temporary profile; each
+side receives an independent writable copy of the same hashed public workload.
+The former diagnostic entry points remain for their existing consumers.
+
+Quiet checks cover normalized 1/5/15-minute load, NSProcessInfo thermal state,
+GUI-app inventory, active builds, AC, session lock, free disk and unchanged
+display/OS conditions before, during and after both sides. An already-running
+copy of the configured app is foreign; only the measured executable in the
+runner's owned process group is exempt. Invalid-condition pairs are retained
+and replaced within a bounded attempt limit. Far Tukey outliers are flagged,
+retained in every quantile and never used as a reason for replacement. Missing
+reference observations cannot form a pair with another run's native result.
+
+The approved endpoint split is enforced: edit/cached own-share p95 ≤9.333 ms,
+and native on-screen p50/p95 strictly faster than paired Electron
+`presentedTime`. Native GPU completion remains reportable when physical
+presentation is missing; Electron GPU fence/rAF remains explicitly nonphysical.
+No composition-floor estimate is subtracted. Reported side distributions remain
+visible independently of the smaller paired intersection used for comparisons.
+
+Decisions and selecting rules:
+
+- **N1/N2, owner endpoint decision:** all clauses, ≥30 pairs per row, full
+  60-second playback windows, nearest-rank tails, and both latency numbers;
+  no timing-based trimming or promotion of incomplete diagnostics to a pass.
+- **N2/N3:** use a conservative load ceiling of 0.5 per logical CPU at all
+  three horizons, nominal thermal only, fixed conditions and whole-pair rejection.
+  No additional public outlier prescription exists; the far 3-IQR rule only
+  annotates observations. The explicit 9.333 ms own-share limit is retained
+  conservatively at 60 Hz as well as 120 Hz.
+- **N3:** validate actual random-seek media with ffprobe before timing, requiring
+  ≥3840×2160 inter-frame video and a measured keyframe interval ≥1 second;
+  use identical seeded frame targets. No still/shape or intra-only substitute.
+- **N4/N6:** retain raw evidence and private profiles/copies, never change the
+  source document or an installed profile, and keep the unmodified frozen
+  reference. No app or user data is deleted by the new runner.
+- **N7/N8:** one inspectable CLI and bounded JSON adapters; Node is used only
+  by external Electron-reference tooling, with no new native-app dependency.
+- **Prune rule:** keep `run.sh`, `driver.py` and `native.py`; their diagnostic
+  consumers remain. No product visual/interaction changes or design decisions.
+
+See `tools/perf-gate/README.md` for manifest preparation, command usage, the
+versioned adapter contract, retained evidence, and Linux replay. The recording
+is synthetic protocol data, not a new measurement of either app. Replay always
+exits 2 and explicitly cannot certify a gate. Python 3.9+ paths canonicalize the
+system temporary root for macOS's root-owned `/tmp` link.
+
+Linux verification: **61 tests collected, 58 pass, 3 existing Darwin-only tests
+skip**. Node syntax and shell syntax checks pass. No Rust crate or dependency
+changed, so no Cargo lockfile update or Rust compilation is required by this
+tooling change.
+
+The bundled adapter automates the existing app seams. It still cannot certify
+first interactive launch, matching physical Electron/open endpoints, verified
+Electron cache hits, random-seek preview, complete playback/frame-work census,
+GPU/energy attribution, paired device A/V, shell/main-thread repaint, extension
+wakeups, or deduplicated memory. These require the Mac instrumentation adapters
+described in the owned README; unavailable counters remain missing. Before any
+Mac timing, compile/check the Swift condition probe, verify foreground app/process
+group accounting and reference launches, pin/match display and quality, then
+exercise the real endpoint adapters on both required rigs. A 60 Hz build-Mac
+stand-in stays labelled and cannot satisfy the base-machine gate. No crate,
+engine, vendor, spike, or native-app source changed in this lane.
+
