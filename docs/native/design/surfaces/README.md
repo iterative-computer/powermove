@@ -34,7 +34,7 @@ Used for confirmations and errors only (language §9).
 | Icon | The app icon (system default). `alertStyle = .critical` (caution badge) only where a spec says *critical*: irreversible deletion and standing authority. Never a custom image. |
 | Message | `messageText`, sentence case. A question ends with `?`, a statement with `.`. Names of documents and items in curly quotes. |
 | Informative text | `informativeText`, at most two sentences, says what happens next or how to fix it. Omit rather than restate the message. |
-| Buttons | Added in the order listed in each spec: first = default (rightmost, accent, Return). `Cancel` responds to Esc. `Don’t Save` gets ⌘D (system convention). A destructive button sets `hasDestructiveAction = true` (system red text) and is **never** the default. Labels are Title Case verbs; `OK` only as the single button of a pure acknowledgement. |
+| Buttons | Added in the order listed in each spec: first = default (rightmost, accent, Return). Where `Cancel` is the default (destructive or replacing alerts) it is listed — and added — first; the action sits to its left. `Cancel` responds to Esc. `Don’t Save` gets ⌘D (system convention). A destructive button sets `hasDestructiveAction = true` (system red text) and is **never** the default. Labels are Title Case verbs; `OK` only as the single button of a pure acknowledgement. |
 | Extras | `showsSuppressionButton` or an accessory view only where a spec lists one. |
 | Stacking | One alert per window at a time; further ones queue in arrival order. |
 | VoiceOver | System alert semantics; nothing added. |
@@ -51,7 +51,7 @@ Language §9 *Sheets and alerts*, plus:
 | Footer | Trailing: `Cancel`, then the accent default named for the action. A tertiary action (e.g. `Individual Images`) sits at the **leading** edge. |
 | Validation | Live. An invalid field shows the panels/README *Error* state on the line under the field and the default button is disabled; no alert on submit. |
 | Keyboard | First field focused with contents selected; Return = default; Esc = Cancel; Tab order = reading order. |
-| Stale target | If the object the sheet edits disappears (project closed, composition deleted elsewhere), the sheet closes itself and the window shows a banner (§3) `{Object} was changed, so the dialog closed.` — never an apply that errors. |
+| Stale target | If the object the sheet edits disappears (project closed, composition deleted elsewhere), the sheet closes itself and the window shows a banner (§3) `{Object} was changed, so the dialog closed.` — never an apply that errors. `{Object}` is the owner whose change closed it, with the article: `The project`, `The composition`, `The layer`, `The media` (import/relink/sequence sheets), `The preset`. Keyframe dialogs use `The layer`. |
 
 ## 3. Banner and notice
 
@@ -66,6 +66,11 @@ Two non-modal surfaces, nothing else (no toasts):
 2. **Inline notice** in windows without a viewer (Project Library, Settings):
    a row at the top of the content, `c.panel_secondary` fill,
    `m.control_radius`, symbol + `t.body` text + one borderless action.
+
+Symbol (both surfaces), `m.symbol_inline`, unless the owning spec names one:
+info `info.circle` `c.secondary` · warning `exclamationmark.triangle.fill`
+`c.warning` · error `xmark.octagon.fill` `c.danger` (over the image: the
+dark-scheme values). Use the kit `Banner` (`placement: viewer | inline`).
 
 Both post an `NSAccessibility` announcement (`.medium`; `.high` for errors).
 

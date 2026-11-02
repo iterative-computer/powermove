@@ -16,7 +16,7 @@ of the renderer crash) — alert, sheet on that window:
 |---|---|
 | Message | `Powermove needs to reload this window.` |
 | Informative | `The editor ran out of memory.` *or* `The editor stopped unexpectedly.` + ` Reload restores the latest local recovery. The most recent edits may be missing.` |
-| Buttons | `Reload` (default) · `Close Window` |
+| Buttons | `Reload` (default) · `Close Window`. No Esc action. |
 
 **Next launch after an unexpected quit**, per affected project, in the order
 the windows are restored:
@@ -59,6 +59,7 @@ content becomes the shared `EmptyState` (panels/README §3) with symbol
 | `Starting` > 0.5 s | — (Loading state) | `Starting {extension}…` | — |
 | `Starting` + `ReadyTimeout` | `{Panel} Didn’t Start` | `{Extension} took too long to start.` | `Try Again` |
 | `WaitingToRestart` after `Crash` | `{Panel} Stopped` | `It will restart in a moment.` | `Restart Now` |
+| `WaitingToRestart` with no recorded `Failure` | as after `Crash` | | |
 | `WaitingToRestart` after `Hang` | `{Panel} Stopped Responding` | `Powermove stopped it and will restart it in a moment.` | `Restart Now` |
 | `Disabled` (restart policy exhausted) | `{Panel} Is Turned Off` | `{Extension} stopped working several times.` | `Turn On` |
 | `Stopping`, `Sealing` | — (Loading state) | `Stopping {extension}…` | — |
