@@ -4,12 +4,12 @@ import math
 ROWS = {
     "cold_launch": "p95 <400 ms AND native/Electron ≤0.50",
     "open": "native/Electron ≤0.50; main-thread stall ≤1 frame",
-    "scrub_cached": "p95 ≤refresh interval+1 ms AND ratio ≤0.60",
+    "scrub_cached": "own-share p95 ≤9.333 ms; presentedTime native < Electron",
     "scrub_random_seek": "preview ≤refresh interval+2 ms; full ≤150 ms; ratio ≤0.60 (4K long-GOP)",
     "playback": "60 s at 60 fps; zero drops; frame-work p95 ≤half frame interval",
     "playback_cost": "CPU ratio ≤0.60; GPU-time ratio ≤0.80; energy ratio ≤0.70",
     "av": "matched device timestamps: mean absolute offset ≤1 ms; p95 jitter ≤2 ms",
-    "edit_repaint": "p95 ≤refresh interval+1 ms; ratio ≤0.60; main-thread work ≤4 ms/frame",
+    "edit_repaint": "own-share p95 ≤9.333 ms; presentedTime native < Electron; main-thread work ≤4 ms/frame",
     "idle": "CPU <1% AND ratio ≤0.50; ≤2 wakeups/s per idle extension",
     "memory_small": "family footprint ≤Electron −150 MB; shared CPU/GPU allocations counted once",
 }
@@ -46,7 +46,7 @@ def check(row, native, electron, *, hz=60, runs=30, conditions=True, endpoints=T
         if len(a) < runs or (paired and len(b) < runs):
             missing.append(metric + ": fewer than required valid runs")
             return None
-        if any(not math.isfinite(v) or v < 0 for v in a + b):
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in a + b):
             missing.append(metric + ': invalid measurement')
             return None
         return a, b
@@ -75,8 +75,14 @@ def check(row, native, electron, *, hz=60, runs=30, conditions=True, endpoints=T
         relative("latency_ms", .5)
         absolute("main_max_ms", interval, every=True)
     elif row in {"scrub_cached", "edit_repaint"}:
-        absolute("latency_ms", interval + 1)
-        relative("latency_ms", .6)
+        # Owner decision, perf-gate-p1.md "Budget endpoint decision". No
+        # subtraction of a guessed compositor floor, and rAF is not scanout.
+        absolute("own_share_ms", 9.333)
+        pair = values("on_screen_ms", True)
+        if pair:
+            for q in (.5, .95):
+                if percentile(pair[0], q) >= percentile(pair[1], q):
+                    failures.append(f"on_screen_ms p{int(q*100)} must beat Electron")
         if row == "edit_repaint":
             absolute("main_max_ms", 4, every=True)
     elif row == "scrub_random_seek":

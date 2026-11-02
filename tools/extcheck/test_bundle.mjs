@@ -48,8 +48,13 @@ try {
         manifest: JSON.parse(
           await readFile(path.join(out, "manifest.json"), "utf8"),
         ),
+        initial: JSON.parse(
+          await readFile(path.join(out, "initial.json"), "utf8"),
+        ),
         expressions: [
           "__extcheck.realm.kernel.commands.get('synthetic').run()",
+          "typeof PowermoveCompat.runtimeModules.svelte.mount",
+          "Array.isArray(PM.proj.markers)",
           "__extcheck.dispose()",
         ],
       }),
@@ -57,7 +62,7 @@ try {
   );
   assert.equal(result.logic, "runtime-v8");
   assert.equal(result.activation.ok, true);
-  assert.deepEqual(result.results, [17, true]);
+  assert.deepEqual(result.results, [17, "function", true, true]);
   assert.deepEqual(result.diagnostics.missing, []);
   assert.equal(result.gates.webkit_panels, false);
   console.log(

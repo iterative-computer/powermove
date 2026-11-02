@@ -157,6 +157,62 @@ fn identity_stable_and_profile_scoped() {
     assert_eq!(a.kernel_storage_key(), "ext.sample-ext");
     assert_eq!(a.webkit_uuid().unwrap().len(), 36);
 }
+
+#[test]
+fn platform_session_requires_persisted_decisions_and_rechecks_revocation() {
+    use pm_store_host::adapter::StoreSession;
+    let (mut kernel, _dir, _artifacts) = installed(&[Permission::ProjectWrite]);
+    assert!(matches!(
+        StoreSession::admit(&kernel, &id("sample-ext")),
+        Err(Error::Denied)
+    ));
+    grant(&mut kernel, Permission::ProjectWrite);
+    let session = StoreSession::admit(&kernel, &id("sample-ext")).unwrap();
+    let mut policy = MethodPolicy::default();
+    policy
+        .register("edit.apply".into(), [Permission::ProjectWrite].into())
+        .unwrap();
+    session.authorize(&kernel, &policy, "edit.apply").unwrap();
+    assert_eq!(
+        session.authorize(&kernel, &policy, "unknown"),
+        Err(Error::Denied)
+    );
+    let mut next = state(&kernel);
+    let revision = next.revision;
+    next.revision += 1;
+    next.permissions
+        .get_mut(&Permission::ProjectWrite)
+        .unwrap()
+        .decision = Decision::Deny;
+    kernel
+        .compare_exchange(&id("sample-ext"), Some(revision), &next)
+        .unwrap();
+    assert_eq!(
+        session.authorize(&kernel, &policy, "edit.apply"),
+        Err(Error::Stale)
+    );
+    let denied = StoreSession::admit(&kernel, &id("sample-ext")).unwrap();
+    assert!(!denied.grants.contains(&Permission::ProjectWrite));
+    assert_eq!(
+        denied.authorize(&kernel, &policy, "edit.apply"),
+        Err(Error::Denied)
+    );
+}
+
+#[test]
+fn platform_session_never_routes_full_access_into_isolated_store() {
+    use pm_store_host::adapter::StoreSession;
+    let (mut kernel, _dir, _artifacts) = installed(&[Permission::FullAccess]);
+    assert!(matches!(
+        StoreSession::admit(&kernel, &id("sample-ext")),
+        Err(Error::Invalid("full access requires trusted realm"))
+    ));
+    grant(&mut kernel, Permission::FullAccess);
+    assert!(matches!(
+        StoreSession::admit(&kernel, &id("sample-ext")),
+        Err(Error::Invalid("full access requires trusted realm"))
+    ));
+}
 #[test]
 fn identity_rejects_unsafe_ids_including_deserialization() {
     for s in [

@@ -23,6 +23,61 @@ use std::{
     sync::Arc,
 };
 
+fn native_profile(profile: Option<PathBuf>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    // N4: the native library is durable and isolated from Electron and test lanes.
+    profile.or_else(|| {
+        home.filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join("Library/Application Support/Powermove Native"))
+    })
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::native_profile;
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_is_durable_and_separate_from_electron() {
+        let home = std::env::temp_dir().join("synthetic-home");
+        let profile = native_profile(None, Some(home.clone().into_os_string())).unwrap();
+        assert_eq!(
+            profile,
+            home.join("Library/Application Support/Powermove Native")
+        );
+        assert_ne!(profile, home.join("Library/Application Support/Powermove"));
+        assert_ne!(
+            profile,
+            std::env::temp_dir().join("powermove-native-integration")
+        );
+    }
+
+    #[test]
+    fn profile_override_takes_precedence() {
+        let profile = std::env::temp_dir().join("synthetic-profile-override");
+        assert_eq!(
+            native_profile(Some(profile.clone()), Some("synthetic-home".into())),
+            Some(profile)
+        );
+    }
+
+    #[test]
+    fn override_does_not_require_home() {
+        let profile = std::env::temp_dir().join("synthetic-profile-without-home");
+        assert_eq!(native_profile(Some(profile.clone()), None), Some(profile));
+    }
+
+    #[test]
+    fn missing_home_never_falls_back_to_shared_temp() {
+        assert_eq!(native_profile(None, None), None);
+        assert_eq!(native_profile(None, Some("".into())), None);
+        // Keep the override's existing absolute-path validation at the caller.
+        assert_eq!(
+            native_profile(Some(PathBuf::from("relative")), None),
+            Some(PathBuf::from("relative"))
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "--engine-job") {
@@ -39,16 +94,16 @@ fn main() -> Result<()> {
     }
     let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
     let mut launch = None;
-    let mut profile = std::env::var_os("PM_NATIVE_PROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("powermove-native-integration"));
+    let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--powermove-mcp" {
             // Same app executable and newline-delimited stdio contract.
         } else if args[i] == "--profile" {
             i += 1;
-            profile = PathBuf::from(args.get(i).context("--profile needs a directory")?);
+            profile = Some(PathBuf::from(
+                args.get(i).context("--profile needs a directory")?,
+            ));
         } else if args[i].to_string_lossy().starts_with('-') {
             anyhow::bail!("Unknown argument: {}", args[i].to_string_lossy());
         } else {
@@ -57,6 +112,8 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
+    let profile = native_profile(profile, std::env::var_os("HOME"))
+        .context("HOME is required when no native profile override is provided")?;
     anyhow::ensure!(
         profile.is_absolute(),
         "Use an absolute isolated native profile"
