@@ -177,8 +177,8 @@ mod tests {
         );
         assert_eq!(prepared.alert.alertStyle(), NSAlertStyle::Informational);
         let buttons = prepared.alert.buttons();
-        assert_eq!(buttons.objectAtIndex(0).title().to_string(), "Delete");
-        assert!(buttons.objectAtIndex(0).hasDestructiveAction());
-        assert_eq!(buttons.objectAtIndex(1).keyEquivalent().to_string(), "\r");
+        assert_eq!(buttons.objectAtIndex(1).title().to_string(), "Delete");
+        assert!(buttons.objectAtIndex(1).hasDestructiveAction());
+        assert_eq!(buttons.objectAtIndex(0).keyEquivalent().to_string(), "\r");
     }
 }

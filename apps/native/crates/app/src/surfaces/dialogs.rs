@@ -308,9 +308,14 @@ impl CompositionDraft {
             if settings { "Apply" } else { "Create" },
         );
         if settings && extending_layers > 0 {
-            s.warning = Some(format!(
-                "{extending_layers} layers extend past the new duration. They’re kept but won’t play past the end."
-            ));
+            s.warning = Some(if extending_layers == 1 {
+                "1 layer extends past the new duration. It’s kept but won’t play past the end."
+                    .into()
+            } else {
+                format!(
+                    "{extending_layers} layers extend past the new duration. They’re kept but won’t play past the end."
+                )
+            });
         }
         s.valid();
         s
@@ -450,6 +455,9 @@ pub fn delete_composition(id: DialogId, owner: WindowId, name: &str, users: usiz
         format!("Delete “{name}”?"),
         Some(if users == 0 {
             "You can undo this.".into()
+        } else if users == 1 {
+            "It’s used in 1 other composition. Those layers are removed too. You can undo this."
+                .into()
         } else {
             format!(
                 "It’s used in {users} other compositions. Those layers are removed too. You can undo this."
@@ -470,13 +478,15 @@ fn alert(
     let mut s = Surface::sheet(id, owner, &title, vec![], action);
     s.piece = NativePiece::Alert;
     s.line = line;
+    // NSAlert order: the first button added is rightmost and the default, so
+    // Cancel (default, Esc) goes first and the action sits to its left.
     s.buttons = vec![
+        Button::cancel(true),
         Button {
             default: false,
             destructive,
             ..Button::action(action)
         },
-        Button::cancel(true),
     ];
     s
 }
@@ -614,7 +624,11 @@ impl VelocityDraft {
                 fields: vec!["out.speed", "out.influence"],
             },
         ];
-        s.line = Some(format!("{count} keyframes"));
+        s.line = Some(if count == 1 {
+            "1 keyframe".into()
+        } else {
+            format!("{count} keyframes")
+        });
         if !self.valid() {
             s.fields[0].error = Some(VELOCITY_ERROR);
         }
@@ -864,6 +878,8 @@ pub fn replace_preset(id: DialogId, owner: WindowId, export: DialogId, name: &st
 pub fn rename_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str) -> Surface {
     let mut s = alert(id, owner, "Rename Preset".into(), None, "Rename", false);
     s.parent_sheet = Some(export);
+    // Rename is the default here: it goes first (rightmost), Cancel after it.
+    s.buttons.reverse();
     s.buttons[0].default = true;
     s.buttons[1].default = false;
     s.fields.push(Field::new(

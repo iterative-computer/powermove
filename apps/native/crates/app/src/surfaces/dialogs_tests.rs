@@ -199,14 +199,17 @@ fn delete_composition_copy_counts_and_safe_default() {
             s.line,
             Some(if n == 0 {
                 "You can undo this.".into()
+            } else if n == 1 {
+                "It’s used in 1 other composition. Those layers are removed too. You can undo this."
+                    .into()
             } else {
                 format!(
                     "It’s used in {n} other compositions. Those layers are removed too. You can undo this."
                 )
             })
         );
-        assert!(s.buttons[0].destructive);
-        assert!(!s.buttons[0].default);
+        assert!(s.buttons[1].destructive);
+        assert!(!s.buttons[1].default);
         assert_eq!(s.keyboard(Key::Return), KeyEffect::Cancel);
     }
 }
@@ -407,8 +410,8 @@ fn preset_exact_alerts_menu_parent_and_accessory() {
     );
     let s = delete_preset(id(), owner(), export.clone(), "Film");
     assert_eq!(s.title, "Delete the preset “Film”?");
-    assert!(s.buttons[0].destructive);
-    assert!(s.buttons[1].default);
+    assert!(s.buttons[1].destructive);
+    assert!(s.buttons[0].default);
     let s = rename_preset(id(), owner(), export, "Film");
     assert_eq!(s.title, "Rename Preset");
     assert_eq!(s.fields[0].values, vec!["Film"]);
