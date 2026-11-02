@@ -7,7 +7,14 @@ use pm_panel_inspector::{
     v4::{EffectsPanel, ParameterPresentation, Presentation},
 };
 use std::io::{self, BufRead};
+/// Kernel waits are illegal on the macOS main thread (crates/kernel actor.rs),
+/// so the wire loop runs on a worker thread.
 fn main() {
+    std::thread::spawn(run)
+        .join()
+        .expect("effect controls model wire");
+}
+fn run() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let handle = actor.handle();
     let project = parse(r##"{"id":"P","compId":"C","name":"Synthetic","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{},"d":{"w":100,"h":100},"fx":[{"id":"f1","type":"glow","on":true,"open":true,"p":{"radius":{"v":24,"kf":[],"expr":null},"intensity":{"v":0.65,"kf":[],"expr":null},"color":{"v":"#FF7A3C","kf":[],"expr":null}}},{"id":"f2","type":"glow","on":false,"open":false,"p":{"radius":{"v":12,"kf":[],"expr":null},"intensity":{"v":0.5,"kf":[],"expr":null},"color":{"v":"#FFFFFF","kf":[],"expr":null}}},{"id":"f3","type":"missing","on":true,"open":true,"p":{"unknown":{"v":1,"opaque":"preserve"}}}]},{"id":"b","type":"text","name":"Destination","from":0,"dur":10,"on":true,"p":{},"d":{},"fx":[]},{"id":"locked","type":"shape","name":"Locked","from":0,"dur":10,"on":true,"lock":true,"p":{},"d":{},"fx":[]},{"id":"audio","type":"audio","name":"Audio","from":0,"dur":10,"on":true,"p":{},"d":{},"fx":[]}]}"##).unwrap();
