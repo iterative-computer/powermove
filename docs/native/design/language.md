@@ -3,7 +3,9 @@
 Status: **governing spec** for every visual lane of the native rewrite.
 Owner: design lead. Values live in `pm-design` (see [tokens.md](tokens.md));
 the gate is [review-checklist.md](review-checklist.md); the reference picture is
-[editor-mockup-v3.html](editor-mockup-v3.html).
+[editor-mockup-v3.html](editor-mockup-v3.html). Per-panel build specs live in
+[panels/](panels/README.md) (pictures: [panels-mockup.html](panels-mockup.html));
+where a panel spec is more specific than this page, the panel spec wins.
 
 Powermove Native is the **same Powermove**, refined so that it is at home on
 the Mac. It is not a redesign. Where the two disagree:
@@ -61,7 +63,7 @@ running Electron app.
 
 ```
 ┌ traffic lights · Sidebar · Title/Edited ·· [ tool capsule ] ·· Agent · Tasks · Export · Inspector ┐  52 pt unified toolbar (glass)
-│┌ Project | Effect Controls ┐┌ viewer bar   (Fit ⌄) (Auto ⌄) ┐┌ Properties ──────────┐│
+│┌ Project | Effect Controls ┐┌ viewer bar (Fit (54 %) ⌄)(Auto ⌄)┐┌ Properties ────────┐│
 ││                            ││                               ││                       ││  panels: solid, 12 pt radius,
 │└────────────────────────────┘│                               ││                       ││  6 pt gaps and window edge
 │┌ Timeline ─────────────────────────────────────────────────┐│├ Effects & Presets ───┤│
@@ -168,6 +170,21 @@ item's marks (ring, diamond, thumbnail outline) carry the accent.
 **Semantic**: `danger` (offline media, errors, destructive buttons),
 `warning` (missing-but-recoverable, proxy-only), `success` (rendered, online).
 Never use them decoratively, and never alone: pair with an SF Symbol and words.
+
+**Over the image.** Anything drawn *on top of* footage or artwork — viewer
+gizmo keylines and labels, the Focus/full-screen overlay capsule, viewer
+banners, the source-preview transport, badges and hover buttons on Project
+thumbnails — uses the **dark-scheme** tokens in both appearances (plus
+`media_badge` for badge fills). Media is dark on average, and light chrome on
+a black frame reads as a hole; this is how QuickTime and Photos treat
+controls over content. The panel chrome around the image (viewer bar,
+surround) follows the app appearance.
+
+**Light viewer surround** is pure neutral (`viewer` `#E4E4E4`, R = G = B),
+so footage reads true in light mode too; the composition frame keeps its
+1 px `separator` outline when its background is transparent or close to the
+surround. (Changed 2026-11-01 from the cool `#E6E6EA`; see
+[panels/README.md §6](panels/README.md#6-token-additions-and-changes-requested).)
 
 **Labels** (clips and layers): eight muted fills (`labels.*`) — blue, violet,
 orange, red, yellow, green, teal, gray — tuned so `text` on them is ≥ 7:1 and
@@ -343,8 +360,14 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 
 - Sheets for any task that needs several fields: Save Layout, New
   Composition, Composition Settings, Export, Pre-compose, Replace Media.
-  Window-modal, **attached below the toolbar** (system placement; not centred
-  in the window). Width `sheet_width` (480) unless content needs more.
+  Window-modal system sheets (`NSWindow.beginSheet`). **Placement belongs to
+  the system:** on macOS 26 and later (including macOS 27) the system
+  presents a sheet as a floating glass card **centred in the window**; on
+  earlier systems it slides down below the toolbar. Powermove never
+  positions, offsets or re-parents a sheet, and never fakes one with a
+  centred child window. A save/open panel started from a sheet is a sheet on
+  that sheet. Width `sheet_width` (480) unless content needs more
+  (`sheet_width_wide` for Export).
 - Layout: `heading` title (Title Case), one `reading` sentence of
   explanation if needed, fields in inspector grammar (label left, shared value
   column), footer buttons trailing: Cancel, then the accent default button
@@ -389,12 +412,14 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 - Surround `colors.viewer`; the composition frame is drawn at its real
   bounds with a 1 px `separator` outline when the comp background is
   transparent (checkerboard) or matches the surround.
-- No panel title. The viewer bar (`header` 32) holds, trailing: zoom pop-up
-  (`Fit (54 %) ⌄`), quality/resolution pop-up (`Auto ⌄`), guides/safe-area
-  toggle. Electron put them bottom-left as pills; native puts them in the bar
-  so they never cover the image. In Focus or full-screen viewer modes the
-  same controls become a glass `ViewerOverlay` capsule that fades in on
-  pointer movement.
+- No panel title. The viewer bar (`header` 32) holds, trailing: the zoom
+  pop-up (`Fit (54 %) ⌄`), then the preview-resolution pop-up (`Auto ⌄`, or
+  `Auto (Half) ⌄` when Auto has lowered it). Both titles have fixed widths so
+  they never jump. Electron put them bottom-left as pills; native puts them
+  in the bar so they never cover the image. There is no guides/safe-area
+  toggle (v1.2.0 has none). In Focus or full-screen viewer modes the same two
+  controls become a glass `ViewerOverlay` capsule (dark scheme) that fades in
+  on pointer movement. Full spec: [panels/viewer-chrome.md](panels/viewer-chrome.md).
 - Gizmos: bounding box 1 pt `accent`, handles 7 pt squares `accent` with
   1 pt `viewer` keyline; anchor point circle; rotation handle above. Gizmos
   scale with the display, not with zoom.
@@ -408,8 +433,10 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 
 - Header (`header` 32): play button, **timecode** (`timecode` 13 medium,
   tabular, `text`; Electron's orange timecode becomes neutral — orange is the
-  playhead's), fps in `muted`, then trailing tools (graph editor, snapping,
-  track/layer mode segmented control).
+  playhead's), fps in `muted`, composition tabs, then trailing: Layers/Tracks
+  mode, the Dope Sheet / Dope Sheet and Graph / Graph Editor view control,
+  graph options and the snap toggle. Full spec:
+  [panels/timeline.md](panels/timeline.md).
 - Layer column `layer_column` (232) on `panel_secondary`: index (tabular,
   `muted`), kind symbol in a label-colour badge, name (`body`), trailing
   visibility/lock/solo glyphs at `symbol_inline` shown on hover or when set.
@@ -419,7 +446,9 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
   inside in `body` (`text`), trimmed with an ellipsis. Selection is a 1.5 pt
   `text`-coloured ring plus brighter fill — **never a solid accent fill**
   (that is how a selected clip would hide its keyframes).
-- Property sub-rows `property_row` 22, indented 50 pt, label `secondary`.
+- Property sub-rows `property_row` 22: keyframe navigator (‹ ◆ ›, three
+  `hit` squares from the inset), label `secondary` after it, and the value
+  readout trailing in the layer column when it fits.
 - Keyframes: 9 pt diamonds; unselected `text` at 90 %, selected `accent`
   with a 1 pt `panel` keyline; easing shown by shape (diamond linear, circle
   ease, hourglass hold) as in Electron.
@@ -434,8 +463,11 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 
 ## 12. Agent panel
 
-- A solid panel (`Surface::AgentPanel`), default `agent_width` 360, docked on
-  the right like the Electron agent rail; toggled by the toolbar Agent button.
+- Opens from the toolbar Agent button as a **popover** (glass frame, solid
+  `floating` content), as Electron's launcher does; **Pin** docks it as a
+  solid panel (`Surface::AgentPanel`, default `agent_width` 360) in the right
+  dock, and closing the docked panel returns it to the popover. Full spec:
+  [panels/agent-panel.md](panels/agent-panel.md).
 - Messages in `reading` 13; the user's messages right-aligned on
   `floating` with `control_radius`; agent replies are plain text on the panel
   (no bubble), markdown rendered with the language's type scale, code in SF
@@ -475,7 +507,9 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
   Presets`, `Anchor Point`.
 - **Sentence case** for everything descriptive: section headings that
   describe (`Type settings`), explanations, placeholder text, tooltips' second
-  line, empty states, status bar facts, errors, notifications.
+  line, empty-state explanations, status bar facts, errors, notifications.
+  Empty-state **titles** are Title Case (`No Media`), like the system's
+  content-unavailable view.
 - Ellipsis `…` (U+2026, not three dots) when a command needs more input before
   it acts. Use `▸` only in prose paths (`Window ▸ Layouts`) and `→` never.
 - Never all caps, never internal names (`fxbrowser`, `TEMPORARY · PHASE 1`,
@@ -502,7 +536,7 @@ Behaviour is Electron's `legacy/ui/controls.ts`, unchanged:
 | Orange timecode | Neutral timecode; orange reserved for the playhead | One accent, used as a mark |
 | Uppercase status (`SAVED`) | `Saved` | Copy style |
 | Zoom/quality pills over the bottom-left of the viewer | Pop-up buttons in the viewer bar; glass overlay only in Focus | Never cover the image; system pop-up |
-| Dialogs centred, panel material, custom buttons | System sheets below the toolbar, panel-material content, system buttons, orange default | HIG sheets; same material rule as Electron |
+| Dialogs centred, panel material, custom buttons | System sheets (system-placed: centred on macOS 26+), panel-material content, system buttons, orange default | HIG sheets; same material rule as Electron |
 | Electron-drawn menus imitating macOS | Real `NSMenu` | Exact system behaviour, accessibility |
 | Blue system focus ring possible beside orange accent | AccentColor = Powermove orange | One accent |
 | Letter badges for tracks (`V1`, `A1`) and `fx` badges | SF Symbol kind badges in label colours (track names stay) | System iconography |
@@ -551,3 +585,15 @@ These are made in this document; reverse any of them here and in pm-design.
 4. Workspace switcher leaves the toolbar for Window ▸ Workspace plus an
    optional toolbar item. Chosen: menu + optional item.
 5. Panel header 32 pt (Electron latest) rather than 36 pt (mockup v2).
+
+**Design-lead resolutions (2026-11-01).** Three open design items, decided
+within the rules above (reverse here if the owner disagrees):
+
+- *Sheet placement on macOS 27*: the system centres sheets; we use system
+  sheets and never place them (§9 *Sheets and alerts*).
+- *Light-mode palette over the black viewer*: chrome follows the
+  appearance; everything drawn over the image uses dark-scheme tokens; the
+  light surround becomes neutral `#E4E4E4` (§4 *Over the image*).
+- *Quality pop-up placement*: viewer bar, trailing, right after zoom, titled
+  `Auto (Half)` when Auto lowers it (§10, [panels/viewer-chrome.md](panels/viewer-chrome.md)).
+

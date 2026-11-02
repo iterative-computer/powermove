@@ -66,6 +66,10 @@ list into the lane's PR or `docs/native/design/reviews/<lane>.md`.
 - [ ] Empty states are centred in their panel, `heading`/`reading` sizes,
       with one clear action; no developer placeholders (`TEMPORARY`, panel ids,
       `fxbrowser`).
+- [ ] The panel matches its spec in [panels/](panels/README.md): anatomy,
+      every listed state, copy strings verbatim, focus order, VoiceOver labels.
+- [ ] Anything drawn over footage (gizmos, overlay capsules, banners, media
+      badges) uses dark-scheme tokens in light mode too.
 
 ## 4. Typography and numbers
 
@@ -83,7 +87,8 @@ list into the lane's PR or `docs/native/design/reviews/<lane>.md`.
 - [ ] Document title is single-line-centred when there is no subtitle.
 - [ ] App name in the menu bar is **Powermove** (bundle name), never the
       launching process's name.
-- [ ] Sheets attach below the toolbar (system sheet), not centred dialogs.
+- [ ] Sheets are system sheets (`beginSheet`), placed by the system (centred in
+      the window on macOS 26+); never a custom-positioned panel or child window.
 - [ ] Menus and context menus are real `NSMenu`s; state shown with checkmarks;
       every command also reachable from the main menu.
 - [ ] Settings via ⌘, only; no Settings gear in the toolbar.

@@ -44,6 +44,8 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 - **Store-wide counts:** pull published Store extension sources read-only through the Store tools; record usage counts only.
 - **S1:** runs on a cloud/CI macOS runner (this Mac lacks the disk).
 - **Design calls (language.md §17):** all five approved: left-aligned values, neutral timecode, neutral list selection, workspace switcher in Window ▸ Workspace (+ optional toolbar item), 32 pt panel headers.
+- **Panel product calls:** timeline layer list 266 pt default; agent opens as a popover and can be pinned; "Effects & Presets" renamed Effects until presets exist; web-animation export removed (see design/panels/README.md).
+- **v4 API frozen (orchestrator, 2026-11-01):** after the integration lane, the headless eval passes 40/40, including all 10 owner-panel specs. The v4 contract on feat/native-engine is frozen for built-in panel work. Changes from now on are additive or need a recorded break. Production integration (real kernel binding, macOS UI acceptance of the owner panels) continues in parallel and does not reopen the API shape.
 - **Edit/scrub latency endpoint (P1 §5 rows):** split into two checks. (1) Powermove's own share, input → frame ready for presentation (kernel + service + render, ending at GPU completion), p95 ≤ 9.333 ms at 120 Hz. (2) End to end, input → on screen (`presentedTime`), native must beat Electron measured the same way on the same Mac. Reason: macOS composition alone adds ~20–24 ms for any windowed `CAMetalLayer` (perf-gate-p1.md, "Latency pass"), and Electron's reference numbers stopped at GPU completion + rAF. Approved by Chike.
 
 ## Plan adjustments (owner, Chike, 2026-11-01)

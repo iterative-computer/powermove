@@ -32,7 +32,7 @@ fn cli() -> Result<u8, String> {
             "--format" => {
                 format = args
                     .next()
-                    .ok_or("--format requires json, markdown, e2e-csv or catalog")?
+                    .ok_or("--format requires json, markdown, e2e-csv, blockers-csv or catalog")?
             }
             "--strict" => strict = true,
             "--runtime-runner" => {
@@ -70,14 +70,14 @@ fn cli() -> Result<u8, String> {
             }
             "--help" => {
                 println!(
-                    "pm-acceptance [--workflow W033] [--case A517] [--strict] [--runtime-runner /path/to/pm-acceptance-runtime] [--compat-bundle /path/to/probes.js] [--format json|markdown|e2e-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
+                    "pm-acceptance [--workflow W033] [--case A517] [--strict] [--runtime-runner /path/to/pm-acceptance-runtime] [--compat-bundle /path/to/probes.js] [--format json|markdown|e2e-csv|blockers-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
                 );
                 return Ok(0);
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
-    if !["json", "markdown", "e2e-csv", "catalog"].contains(&format.as_str()) {
+    if !["json", "markdown", "e2e-csv", "blockers-csv", "catalog"].contains(&format.as_str()) {
         return Err("unknown report format".into());
     }
     let catalog = Catalog::embedded()?;
@@ -106,6 +106,7 @@ fn cli() -> Result<u8, String> {
     match format.as_str() {
         "markdown" => print!("{}", report.markdown()),
         "e2e-csv" => print!("{}", report.e2e_csv()),
+        "blockers-csv" => print!("{}", report.blockers_csv()),
         _ => println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?

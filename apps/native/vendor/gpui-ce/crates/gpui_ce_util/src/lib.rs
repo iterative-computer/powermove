@@ -164,14 +164,35 @@ pub fn measure<R>(label: &str, f: impl FnOnce() -> R) -> R {
     });
 
     if *zed_measurements {
+        #[cfg(target_os = "macos")]
+        let cpu_start = (label == "frame duration").then(thread_cpu_time).flatten();
         let start = Instant::now();
         let result = f();
         let elapsed = start.elapsed();
+        #[cfg(target_os = "macos")]
+        if let Some(cpu_start) = cpu_start {
+            if let Some(end) = thread_cpu_time() {
+                eprintln!("PM_GPUI_MAIN_CPU_MS {:.6}", (end - cpu_start) * 1000.);
+            }
+        }
         eprintln!("{}: {:?}", label, elapsed);
         result
     } else {
         f()
     }
+}
+
+// CLOCK_THREAD_CPUTIME_ID measures only this main thread's running CPU time;
+// the existing frame-duration metric also includes scheduling and GPU waits.
+#[cfg(target_os = "macos")]
+fn thread_cpu_time() -> Option<f64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one initialized timespec and retains nothing.
+    (unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0)
+        .then_some(time.tv_sec as f64 + time.tv_nsec as f64 * 1e-9)
 }
 
 #[macro_export]

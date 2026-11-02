@@ -10,7 +10,7 @@
   },
   "scripts": {
     "test": "bun test tests",
-    "build": "bun build src/index.ts --target=browser --format=iife --global-name=PowermoveCompat --outfile=dist/compat-realm.js",
+    "build": "bun build src/browser.ts --target=browser --format=iife --outfile=dist/compat-realm.js",
     "typecheck": "tsc --noEmit",
     "replay": "bun scripts/replay.ts",
     "corpus": "bun scripts/corpus.ts",

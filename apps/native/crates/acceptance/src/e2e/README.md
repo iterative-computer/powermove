@@ -1,0 +1,120 @@
+# Frozen Playwright → native headless acceptance
+
+Wave 5 e2e lane, frozen reference `v1.2.0` /
+`07ed5fa17ee640659cb075f9cad1af2095011d60`. No old app or test was deleted.
+
+The requested `git grep -l 'test(' v1.2.0 -- apps/desktop/e2e` returns **290
+files**: **289 spec files / 614 test declarations** and one non-test fixture,
+`fixtures/typewriter-effect/cursor.ts` (a regular-expression `.test(` match).
+**80 declarations are parameterized**; these are declaration counts, not
+expanded Playwright test-instance counts. The ledger retains the enclosing
+loops, named parameter-table source, conditional skips and file-level guards.
+None are executed or silently dropped during extraction.
+
+`frozen.json` records every file hash and declaration's file/line, title,
+registration and declaration hash. `backings.json` names the missing native
+controllers/services/oracles for the existing W1 workflow mappings.
+`traceability.json` links executable native checks to exact declarations and
+states the assertion subset each check covers. Existing CSV rows link each
+declaration to this ledger. The acceptance lane's 396-row file inventory,
+acceptance IDs, supporting IDs, blocker IDs and file verdicts remain unchanged.
+The standalone manifest follows `acceptance/runtime` and requires no changes
+to the acceptance lane's `lib.rs`, manifest, workspace lock or runner.
+
+## Results on Linux
+
+**30 executable checks: 29 pass / 1 measured failure**, linked to **28 source
+declarations in 26 spec files**. Of the **614 declarations**, **3 complete
+headless equivalents pass / 1 fails / 610 remain blocked**. Passing domain
+subsets and recording trait doubles never certify a UI/pixel declaration.
+The three complete headless equivalents are the frozen revision recovery,
+strip/library operations and selection-after-Undo/Redo scenarios. Their direct
+PM/agent-tool assertions have native actor/MCP equivalents; this does not
+certify their enclosing app workflow or macOS launch/input/transport.
+
+`cargo test` has **36 passing tests**: the strict passing checks, one explicit
+known-defect guard, and six ledger/report tests. This test-harness count is
+not a claim that 36 product contracts passed. The report always executes the
+unchanged strict failed check and returns a failure exit code.
+
+### Measured failure requiring a change outside this lane
+
+`agent-keyframe-easing.spec.ts:5`, `set_property` variant: keys at 0/2/3 s with
+values 10/110/−40 and `ease: 'glide'` must retain the complete curve. At 1 s,
+native evaluation gives **90.42094586353606**, expected
+**104.94929544957891**. `replace_keyframes` passes the same oracle.
+The expected curve is independently inverted in f64 from the frozen Glide
+handles `[0.16, 0.84, 0.24, 1]`, rather than read back from native output.
+The owning kernel/MCP lane needs to preserve all incoming/outgoing easing
+handles when sequential `set_property` keyframe commands build a track.
+`checks::tests::known_failure_easing_set_batch` requires this precise failure
+class to remain explicit; a fix must remove that guard and promote the strict
+check to a normal passing test. Do not change the expected authored curve.
+
+## Run
+
+Every shell starts with the lane environment:
+
+```sh
+source /workspace/.tools/activate.sh; cd /workspace/powermove
+cd apps/native
+cargo test --locked -p pm-acceptance
+cd ../..
+cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+cargo fmt --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml -- --check
+cargo clippy --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --all-targets --no-deps -- -D warnings
+cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --bin pm-e2e-triage > work/e2e/report.json
+```
+
+The JSON runner exits **1 for any measured failure**, **2 for unresolved
+declarations**, **0 only for a passing requested scope**, and **64 for invalid
+arguments/ledger**. The current full report exits **1**, deliberately.
+Checks run on a worker, including on macOS; no actor wait runs on main.
+An individual native check is inspectable/drivable by its registered ID:
+
+```sh
+cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --bin pm-e2e-triage -- --check easing_set_batch
+```
+
+Filtered results cannot certify unexecuted parameter variants. In particular,
+running only `easing_replace_batch` passes that check but leaves its declaration
+blocked because `easing_set_batch` was not executed.
+
+Validate or regenerate provenance with development-only TypeScript 5.9.3 and
+Python's standard library. Node/TypeScript is never a native runtime dependency:
+
+```sh
+npm install --prefix work/e2e --no-audit --no-fund --ignore-scripts typescript@5.9.3
+NODE_PATH=work/e2e/node_modules node apps/native/crates/acceptance/src/e2e/extract.cjs
+python3 apps/native/crates/acceptance/src/e2e/annotate.py
+# Only after reviewing an intentional ledger change:
+NODE_PATH=work/e2e/node_modules node apps/native/crates/acceptance/src/e2e/extract.cjs --write
+python3 apps/native/crates/acceptance/src/e2e/annotate.py --write
+```
+
+## Decisions and selecting rules
+
+| Decision | Rule |
+| --- | --- |
+| Use immutable tagged syntax, preserve every declaration/parameter/guard, and account for the regex-only fixture | N3 frozen intent; N4 no missing old tests; N6 retain v1–3 coverage |
+| Execute native actor/MCP contracts by ID, with disposable synthetic profiles and real portable files | N7 headless/inspectable; N4 no user data touched |
+| Treat three data/behavior-only scenarios as complete headless equivalents; keep UI/pixel subsets and trait doubles explicitly supporting | N3 correctness and evidence scope; N1 real professional behavior, not fabricated screenshots |
+| Keep the failed full-curve oracle and publish its failing result; do not modify production paths owned by other lanes | N3 authored intent exact; ownership; quirk policy |
+| Preserve fractional authored rates rather than old rounding | N1 professional rates; N3 exact timing; quirk policy |
+| Use a standalone child manifest and annotate existing CSV rows only | Lane ownership; preserve parallel acceptance work and its existing consumers |
+| Run checks on a worker; V8 logic/PM/sync services, native recorder pixels and remote-DOM WebKit panels remain the architecture | N8 no main-thread waits/Node/Chromium; N4/N6 unchanged extension contract |
+| Retain removed standalone-web-export declarations as owner-scoped evidence, without reinstating the removed feature | Recorded owner decision; N4/prune: retain remaining player/portable-export consumers |
+
+## Still to verify
+
+The report's missing-capability entries are the backlog, tied to exact frozen
+declarations. On macOS, connect actual GPUI/AppKit semantic surfaces and input,
+V8 extension/service activation and WebKit remote DOM, original/proxy media
+storage and decoders, Metal pixels/GPU recovery, audio devices, native export
+children and installed MCP reconnection. Run frozen pixel/standards oracles and
+paired physical timing/performance checks. Linux double results are not Metal,
+WebKit, AppKit, audio, scanout, performance, or v1–3 corpus compatibility passes.
+
+No visual/UX output or product copy was added. There are no new
+`DESIGN-TODO(opus)` placeholders; all future visual work still requires the
+existing Opus specifications and review.

@@ -127,7 +127,10 @@ impl Controls {
         let current = self
             .drafts
             .get(&id)
-            .and_then(|d| numeric_draft(&d.text, 0.))
+            .and_then(|d| {
+                let current = node.props.get("value").and_then(Value::as_f64)?;
+                numeric_draft(&d.text, current)
+            })
             .or_else(|| node.props.get("value").and_then(Value::as_f64))
             .ok_or("numeric value required")?;
         let min = node
@@ -261,8 +264,12 @@ pub fn numeric_draft(raw: &str, current: f64) -> Option<f64> {
     if parser.at != parser.bytes.len() || !result.is_finite() {
         return None;
     }
-    let rounded = (result * 10_000.).round() / 10_000.;
-    rounded.is_finite().then_some(rounded)
+    let scaled = result * 10_000.;
+    Some(if scaled.is_finite() {
+        scaled.round() / 10_000.
+    } else {
+        result
+    })
 }
 struct Parser<'a> {
     bytes: &'a [u8],

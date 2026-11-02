@@ -7,6 +7,36 @@ import { JSDOM } from 'jsdom';
 import type { Batch } from '../src/protocol';
 
 describe('remote DOM mirror and real-document applier', () => {
+  test('innerHTML applies browser DOMString coercion before parsing', () => {
+    const h = harness();
+    const reference = new JSDOM();
+    try {
+      for (const tag of ['div', 'template', 'svg']) {
+        const remote =
+          tag === 'svg'
+            ? h.shim.document.createElementNS('http://www.w3.org/2000/svg', tag)
+            : h.shim.document.createElement(tag);
+        const real =
+          tag === 'svg'
+            ? reference.window.document.createElementNS('http://www.w3.org/2000/svg', tag)
+            : reference.window.document.createElement(tag);
+        for (const value of [42, false, undefined, null, { toString: () => '<b>Synthetic</b>' }]) {
+          remote.innerHTML = value;
+          (real as any).innerHTML = value;
+          expect(remote.innerHTML).toBe(real.innerHTML);
+        }
+        expect(() => {
+          remote.innerHTML = Symbol('synthetic');
+        }).toThrow(TypeError);
+        expect(() => {
+          (real as any).innerHTML = Symbol('synthetic');
+        }).toThrow();
+      }
+    } finally {
+      h.close();
+      reference.window.close();
+    }
+  });
   test('HTML templates, SVG namespaces, selectors and exact text/attribute/style writes', async () => {
     const h = harness(),
       d = h.shim.document;
@@ -329,6 +359,25 @@ test('real selectionchange refreshes the stable realm Selection before the handl
   expect(selected).toBe('Editable');
   expect(d.getSelection().anchorNode).toBe(p.firstChild);
   h.close();
+});
+test('Range.selectNodeContents preserves comment data offsets', async () => {
+  const h = harness(),
+    d = h.shim.document;
+  try {
+    const comment = d.createComment('Synthetic 🦀');
+    d.body.append(comment);
+    await h.settle();
+    const reference = h.page.window.document.createRange();
+    reference.selectNodeContents(h.applier.node(h.shim.id(comment)) as Comment);
+    const range = d.createRange();
+    range.selectNodeContents(comment);
+    expect(range.startOffset).toBe(reference.startOffset);
+    expect(range.endOffset).toBe(reference.endOffset);
+    expect(range.toString()).toBe(reference.toString());
+    expect(h.errors).toEqual([]);
+  } finally {
+    h.close();
+  }
 });
 test('FormData collects successful text/checkbox/select controls without including disabled or unchecked fields', async () => {
   const h = harness(),

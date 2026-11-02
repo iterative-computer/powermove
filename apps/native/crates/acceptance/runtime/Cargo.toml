@@ -15,6 +15,12 @@ macos-sandbox = ["pm-runtime-v8/macos-sandbox"]
 
 [dependencies]
 pm-runtime-v8 = { path = "../../runtime-v8" }
+pm-services = { path = "../../services" }
+pm-promedia = { path = "../../promedia" }
+pm-remote-dom = { path = "../../remote-dom" }
+pm-surface = { path = "../../surface" }
+pm-store-host = { path = "../../store-host" }
+pm-recorder-raster = { path = "../../recorder-raster" }
 serde_json = "=1.0.150"
 
 [profile.dev]

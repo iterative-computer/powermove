@@ -1,0 +1,422 @@
+//! Thin v4 control adapter. Rust retains selection, timing, history and UI state.
+//! Platform hit testing, native fields and rendering are explicit host work.
+use crate::{
+    ClientError, GraphDisplay, HostEffect, KeyInput, LayerSwitch, ModelError, Modifiers, Plan,
+    PropertyFacts, RowId, TimelineClient, TimelineMode, resolve_key,
+};
+use serde_json::{Value, json};
+
+#[derive(Debug)]
+pub enum Error {
+    InvalidIntent(&'static str),
+    MissingHost(&'static str),
+    Model(ModelError),
+    Client(ClientError),
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for Error {}
+impl From<ModelError> for Error {
+    fn from(value: ModelError) -> Self {
+        Self::Model(value)
+    }
+}
+impl From<ClientError> for Error {
+    fn from(value: ClientError) -> Self {
+        Self::Client(value)
+    }
+}
+
+/// Native transport time and monotonic reveal time, supplied by the application.
+/// Shell must arbitrate extension shortcuts and text ownership before admitting
+/// key events. Coordinates never become authored times in this adapter.
+pub struct Context<'a> {
+    pub time: f64,
+    pub expected_document: u64,
+    pub expected_revision: u64,
+    pub millis: u64,
+    pub in_field: bool,
+    pub keys_admitted: bool,
+    pub property_facts: &'a PropertyFacts,
+}
+
+/// Collision-free stable IDs, even when imported layer IDs contain punctuation.
+pub fn row_id(row: &RowId) -> String {
+    match row {
+        RowId::Layer(id) => json!(["layer", id]).to_string(),
+        RowId::Property { layer_id, channel } => json!(["property", layer_id, channel]).to_string(),
+    }
+}
+pub fn parse_row(id: &str) -> Result<RowId, Error> {
+    let parts: Vec<String> =
+        serde_json::from_str(id).map_err(|_| Error::InvalidIntent("row id"))?;
+    match parts.as_slice() {
+        [kind, id] if kind == "layer" && !id.is_empty() => Ok(RowId::Layer(id.clone())),
+        [kind, layer_id, channel]
+            if kind == "property" && !layer_id.is_empty() && !channel.is_empty() =>
+        {
+            Ok(RowId::Property {
+                layer_id: layer_id.clone(),
+                channel: channel.clone(),
+            })
+        }
+        _ => Err(Error::InvalidIntent("row id")),
+    }
+}
+fn string<'a>(v: &'a Value, key: &'static str) -> Result<&'a str, Error> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .ok_or(Error::InvalidIntent(key))
+}
+fn boolean(v: &Value, key: &'static str) -> Result<bool, Error> {
+    v.get(key)
+        .and_then(Value::as_bool)
+        .ok_or(Error::InvalidIntent(key))
+}
+fn modifiers(v: &Value) -> Result<Modifiers, Error> {
+    let flag = |key| match v.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(Error::InvalidIntent("modifiers")),
+    };
+    Ok(Modifiers {
+        shift: flag("shiftKey")?,
+        alt: flag("altKey")?,
+        meta: flag("metaKey")?,
+        control: flag("ctrlKey")?,
+    })
+}
+fn layer_row(intent: &Value) -> Result<String, Error> {
+    match parse_row(string(intent, "id")?)? {
+        RowId::Layer(id) => Ok(id),
+        _ => Err(Error::InvalidIntent("layer row")),
+    }
+}
+fn key_name(key: &str) -> String {
+    match key {
+        " " => "space".into(),
+        "ArrowLeft" => "left".into(),
+        "ArrowRight" => "right".into(),
+        "ArrowUp" => "up".into(),
+        "ArrowDown" => "down".into(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// Native control actions, invoked only on the worker. Returned HostEffects
+/// require real host execution/acknowledgement before resolving the JS act call.
+/// Missing host work is an error, never a success-shaped placeholder.
+pub async fn dispatch(
+    client: &mut TimelineClient,
+    intent: &Value,
+    context: &Context<'_>,
+) -> Result<Vec<HostEffect>, Error> {
+    if !context.time.is_finite() {
+        return Err(Error::InvalidIntent("time"));
+    }
+    client.sync()?;
+    if client.model.index.doc_id != context.expected_document
+        || client.model.index.revision != context.expected_revision
+    {
+        return Err(Error::InvalidIntent("stale native surface"));
+    }
+    let action = string(intent, "type")?;
+    let mut persist = false;
+    let plan = match action {
+        "play" => client.model.command(
+            "play",
+            context.time,
+            None,
+            false,
+            context.millis,
+            context.property_facts,
+        )?,
+        "mode" => {
+            client.model.mode = match string(intent, "mode")? {
+                "Layers" => TimelineMode::Layers,
+                "Tracks" => TimelineMode::Tracks,
+                _ => return Err(Error::InvalidIntent("mode")),
+            };
+            persist = true;
+            Plan::default()
+        }
+        "view" => {
+            client.model.graph_display = match string(intent, "view")? {
+                "DopeSheet" => GraphDisplay::DopeSheet,
+                "Combined" => GraphDisplay::Combined,
+                "Graph" => GraphDisplay::Graph,
+                _ => return Err(Error::InvalidIntent("view")),
+            };
+            persist = true;
+            Plan::default()
+        }
+        "snap" => {
+            client.model.track_snap_disabled = !client.model.track_snap_disabled;
+            persist = true;
+            Plan::default()
+        }
+        "selectRow" => {
+            let row = parse_row(string(intent, "id")?)?;
+            if client.model.row_position(&row).is_none() {
+                return Err(ModelError::HiddenRow.into());
+            }
+            let m = modifiers(
+                intent
+                    .get("modifiers")
+                    .ok_or(Error::InvalidIntent("modifiers"))?,
+            )?;
+            let id = match row {
+                RowId::Layer(id) => id,
+                // Property/curve focus requires the native field/key hit, not a guessed layer click.
+                _ => return Err(Error::MissingHost("property selection/hit")),
+            };
+            let calls = if client.model.mode == TimelineMode::Tracks {
+                client.model.select_track_layer(&id, m)?.0
+            } else {
+                client.model.select_layer(&id, m)?
+            };
+            Plan {
+                calls,
+                ..Plan::default()
+            }
+        }
+        "disclosure" => {
+            let id = layer_row(intent)?;
+            let open = boolean(intent, "open")?;
+            let layer = client
+                .model
+                .index
+                .layer(&id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            let current = client.model.reveal.layers.get(&id);
+            let closed = if layer.kind == "group" {
+                current
+                    .map(|d| d.group_collapsed)
+                    .unwrap_or(layer.group_collapsed)
+            } else {
+                current.map(|d| d.collapsed).unwrap_or(layer.collapsed)
+            };
+            if open == closed {
+                client.model.toggle_disclosure(&id)?;
+            }
+            persist = true;
+            Plan::default()
+        }
+        "switch" => {
+            let id = layer_row(intent)?;
+            match string(intent, "name")? {
+                "visibility" => client.model.switch(&id, LayerSwitch::Visible)?,
+                "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
+                "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
+                "mute" => client.model.mute(&id, context.time)?,
+                "parent" => return Err(Error::MissingHost("native parent menu")),
+                _ => return Err(Error::InvalidIntent("switch")),
+            }
+        }
+        "keyToggle" => {
+            let layer = string(intent, "layer")?;
+            let path = string(intent, "path")?;
+            let paths = client
+                .model
+                .track_channels(layer, path)
+                .iter()
+                .map(|c| c.path.clone())
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return Err(ModelError::UnknownId(path.into()).into());
+            }
+            let targets = client.model.property_targets(layer, &paths)?;
+            if targets.is_empty() {
+                return Err(ModelError::Locked(layer.into()).into());
+            }
+            client.model.property_diamond(&targets, context.time)?
+        }
+        "adjacentKey" => {
+            let layer = string(intent, "layer")?;
+            let path = string(intent, "path")?;
+            if client.model.track_channels(layer, path).is_empty() {
+                return Err(ModelError::UnknownId(path.into()).into());
+            }
+            let direction = match string(intent, "direction")? {
+                "previous" => -1,
+                "next" => 1,
+                _ => return Err(Error::InvalidIntent("direction")),
+            };
+            Plan {
+                effects: client
+                    .model
+                    .adjacent_key(direction, context.time, Some((layer, path)))
+                    .map(HostEffect::Seek)
+                    .into_iter()
+                    .collect(),
+                ..Plan::default()
+            }
+        }
+        "scaleLink" => {
+            let id = string(intent, "layer")?;
+            let layer = client
+                .model
+                .index
+                .layer(id)
+                .ok_or_else(|| ModelError::UnknownId(id.into()))?;
+            client.model.scale_link(id, !layer.scale_linked)
+        }
+        "keyDown" => {
+            if !context.keys_admitted {
+                return Err(Error::MissingHost("shell shortcut arbitration"));
+            }
+            let event = intent.get("event").ok_or(Error::InvalidIntent("event"))?;
+            let key = key_name(string(event, "key")?);
+            let m = modifiers(event)?;
+            let repeat = match event.get("repeat") {
+                None => false,
+                Some(Value::Bool(v)) => *v,
+                _ => return Err(Error::InvalidIntent("repeat")),
+            };
+            if key == "escape" && client.active_drag().is_some() {
+                client.finish_drag(false).await?;
+                return Ok(Vec::new());
+            }
+            let shortcut = resolve_key(&KeyInput {
+                key: &key,
+                modifiers: m,
+                repeat,
+                in_field: context.in_field,
+            })
+            .ok_or(Error::MissingHost(
+                "local focus/field or unclaimed key routing",
+            ))?;
+            // View/reveal commands are UI state; authored edits stay in the kernel.
+            persist =
+                shortcut.command.starts_with("timeline.reveal") || shortcut.command == "graph";
+            client.model.command(
+                shortcut.command,
+                context.time,
+                shortcut.frames,
+                shortcut.shift_reveal,
+                context.millis,
+                context.property_facts,
+            )?
+        }
+        "import" => Plan {
+            effects: vec![client.model.import_drop(context.time, None, false)?],
+            ..Plan::default()
+        },
+        "graphOptions" => return Err(Error::MissingHost("native graph menu")),
+        "open" | "tab" => return Err(Error::MissingHost("composition/project services")),
+        "timeEdit" | "rename" => return Err(Error::MissingHost("native field bindings")),
+        "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel" | "doubleClick" | "wheel"
+        | "keyUp" | "dragEnter" | "dragOver" | "dragLeave" | "drop" => {
+            return Err(Error::MissingHost(
+                "native timeline geometry/gesture adapter",
+            ));
+        }
+        _ => return Err(Error::InvalidIntent("action")),
+    };
+    let effects = client.dispatch(plan).await?;
+    if persist && let Err(error) = client.publish_view().await {
+        if let Some(published) = client.kernel.published(&client.project) {
+            client.model.restore_ui(&published.ui_state);
+        }
+        return Err(error.into());
+    }
+    Ok(effects)
+}
+
+/// Model-owned window facts for a native presentation/kit adapter. This does not
+/// invent property labels, units, timecode formatting, media readiness or copy.
+/// A native presenter supplies those via its schema/evaluation/media services.
+/// Ordinal windows use exactly one viewport of overscan on each side.
+pub fn window(client: &mut TimelineClient, first: usize, visible: usize) -> Result<Value, Error> {
+    if visible == 0 {
+        return Err(Error::InvalidIntent("visible rows"));
+    }
+    client.sync()?;
+    if client.model.mode == TimelineMode::Tracks {
+        return Err(Error::MissingHost("track lane presentation"));
+    }
+    let model = &client.model;
+    let window = model.window(first, visible, visible);
+    let selected = model
+        .selection
+        .layers()
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let rows = window
+        .rows
+        .iter()
+        .map(|row| {
+            let mut value = json!({ "id": row_id(&row.id), "depth": row.depth });
+            match &row.id {
+                RowId::Layer(id) => {
+                    let layer = model
+                        .index
+                        .layer(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    let disclosure = model.reveal.layers.get(id);
+                    value["kind"] = json!("layer");
+                    value["layer"] = json!(id);
+                    value["index"] = if layer.group.is_some() {
+                        Value::Null
+                    } else {
+                        json!(model.index.layer_ordinal(id).map(|n| n + 1))
+                    };
+                    value["label"] = json!(layer.name.to_string_lossy());
+                    value["selected"] = json!(selected.contains(id));
+                    value["locked"] = json!(layer.effectively_locked);
+                    value["visible"] = json!(layer.visible);
+                    value["solo"] = json!(layer.solo);
+                    value["expanded"] = json!(!if layer.kind == "group" {
+                        disclosure
+                            .map(|d| d.group_collapsed)
+                            .unwrap_or(layer.group_collapsed)
+                    } else {
+                        disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed)
+                    });
+                    // Keep authored timing exact. Never convert these to frames on read.
+                    value["from"] = json!(layer.from);
+                    value["duration"] = json!(layer.duration);
+                }
+                RowId::Property { layer_id, channel } => {
+                    value["kind"] = json!("property");
+                    value["layer"] = json!(layer_id);
+                    value["path"] = json!(channel);
+                    value["locked"] = json!(
+                        model
+                            .index
+                            .layer(layer_id)
+                            .ok_or_else(|| ModelError::UnknownId(layer_id.clone()))?
+                            .effectively_locked
+                    );
+                    value["selected"] = json!(false);
+                    if channel == "scale" {
+                        value["scaleLinked"] =
+                            json!(model.index.layer(layer_id).unwrap().scale_linked);
+                    }
+                    value["channels"] = json!(
+                        model
+                            .track_channels(layer_id, channel)
+                            .iter()
+                            .map(|c| c.path.as_str())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(json!({
+        "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
+        "hasComposition": model.index.comp_id.is_some(),
+        "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
+        "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
+        "snapping": !model.track_snap_disabled,
+        "window": { "first": window.first, "total": window.total, "rows": rows },
+        "indexDigits": model.index.layers.len().max(1).to_string().len(),
+        "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
+            else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
+    }))
+}

@@ -1,9 +1,12 @@
 // Development evaluation host: Refresh must be installed before creating any root.
 import "powermove-v4/refresh";
 import { Evaluation } from "./harness";
+import { exerciseOwner } from "./scenarios";
+import { createRoot } from "powermove-v4";
 import { tasks } from "./tasks";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { OwnerHost, exerciseHostData } from "./host-fixture";
 
 /** Consultation log: task-specific public reference sections/types used, including cached reads.
  * Counts are this coding-agent attempt, not human usability statistics or independent sessions.
@@ -91,6 +94,7 @@ export async function runExtension(id: string, wire?: string) {
   const task = tasks.find((task) => task.id === id);
   if (!task) throw Error(`Unknown task ${id}`);
   if (task.status === "pending-owner") return { id, status: "pending-owner" };
+  if (task.group === "owner") return runOwner(id, wire);
   const path = new URL(`../examples/tasks/${id}.tsx`, import.meta.url);
   const source = await readFile(path, "utf8");
   const lines = source
@@ -120,5 +124,56 @@ export async function runExtension(id: string, wire?: string) {
     return { ...metrics(), status: "fail", error: String(error) };
   } finally {
     await e.dispose();
+  }
+}
+
+/** Headless owner acceptance exercises real public data routing plus authored
+ * behavior fixtures. Production media/permission/rendering gates remain explicit;
+ * this score is not full native panel acceptance.
+ */
+export async function runOwner(
+  id: string,
+  wire?: string,
+  factory = createRoot,
+) {
+  const task = tasks.find((task) => task.id === id && task.group === "owner");
+  if (!task?.behavior) throw Error(`Unknown owner specification ${id}`);
+  const e = new Evaluation(wire, factory);
+  const host = new OwnerHost();
+  const metrics = () => ({
+    id,
+    scope:
+      "headless owner behavior + native data service; production integration required",
+    wire: !!wire,
+    commits: e.commits.length,
+    ops: e.commits.reduce((count, commit) => count + commit.ops.length, 0),
+  });
+  try {
+    await exerciseHostData(host);
+    await exerciseOwner(Number(id.slice(-2)), e, host);
+    e.compareNative();
+    return {
+      ...metrics(),
+      status: "pass",
+      fixtureStatus: "pass",
+      serviceStatus: "pass",
+      productionReady: false,
+      fullAcceptance: "blocked-on-production-integration",
+      integrationGates: task.behavior.apiGaps,
+    };
+  } catch (error) {
+    return {
+      ...metrics(),
+      status: "fail",
+      fixtureStatus: "fail",
+      failureKind: "fixture",
+      error: String(error),
+    };
+  } finally {
+    try {
+      await host.retire();
+    } finally {
+      await e.dispose();
+    }
   }
 }

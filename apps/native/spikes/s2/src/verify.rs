@@ -82,7 +82,7 @@ pub fn run() -> Result<()> {
     objc2::rc::autoreleasepool(|_| run_inner())
 }
 fn run_inner() -> Result<()> {
-    std::fs::create_dir_all("/tmp/pm-shots")?;
+    std::fs::create_dir_all("/tmp/pm-p120")?;
     let device =
         metal::Device::system_default().ok_or_else(|| anyhow::anyhow!("Metal unavailable"))?;
     let mut renderer = MetalRenderer::new_headless_with_device(
@@ -110,7 +110,7 @@ fn run_inner() -> Result<()> {
     let source = NativeTexture::new(texture, event, 1, lease()).map_err(anyhow::Error::msg)?;
     let s = scene(source.clone(), 1);
     let image = renderer.render_scene_to_image(&s, size(DevicePixels(64), DevicePixels(64)))?;
-    image.save("/tmp/pm-shots/ptext-texture-bgra.png")?;
+    image.save("/tmp/pm-p120/ptext-texture-bgra.png")?;
     ensure!(
         image.get_pixel(32, 32).0 == [128, 0, 0, 255],
         "premultiplied BGRA blend: {:?}",
@@ -132,7 +132,7 @@ fn run_inner() -> Result<()> {
         &scene(half_source, 1),
         size(DevicePixels(64), DevicePixels(64)),
     )?;
-    half_image.save("/tmp/pm-shots/ptext-texture-rgba16f.png")?;
+    half_image.save("/tmp/pm-p120/ptext-texture-rgba16f.png")?;
     ensure!(
         half_image.get_pixel(32, 32).0 == [128, 0, 0, 255],
         "RGBA16F blend"
@@ -239,7 +239,30 @@ fn run_inner() -> Result<()> {
     tiles.finish();
     renderer
         .render_scene_to_image(&tiles, size(DevicePixels(640), DevicePixels(400)))?
-        .save("/tmp/pm-shots/ptext-1000-tiles-offscreen.png")?;
+        .save("/tmp/pm-p120/ptext-1000-tiles-offscreen.png")?;
+    // Grouping non-overlapping tiles changes stacking work, never their pixels.
+    // Replay the group too: the visible cached entity uses that exact path.
+    let mut grouped = Scene::default();
+    grouped.push_layer(rect(0., 0., 640., 400.));
+    for surface in &tiles.surfaces {
+        grouped.insert_primitive(surface.clone());
+    }
+    grouped.pop_layer();
+    grouped.finish();
+    let mut replay = Scene::default();
+    replay.replay(0..grouped.len(), &grouped);
+    replay.finish();
+    let reference =
+        renderer.render_scene_to_image(&tiles, size(DevicePixels(640), DevicePixels(400)))?;
+    for candidate in [&grouped, &replay] {
+        ensure!(
+            renderer
+                .render_scene_to_image(candidate, size(DevicePixels(640), DevicePixels(400)))?
+                == reference,
+            "P-120 grouped/cached tiles changed pixels"
+        );
+    }
+    println!("PASS P-120 grouped and replayed 1,000 tiles: pixel-identical");
     let mut encode = Vec::new();
     let mut complete = Vec::new();
     for i in 0..180 {

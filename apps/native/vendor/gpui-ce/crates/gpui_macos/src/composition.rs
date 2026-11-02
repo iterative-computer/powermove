@@ -1,17 +1,11 @@
 //! Powermove P-LAYER/P-HIT: main-thread slot hooks at the Metal presentation boundary.
 //! See vendor POWERMOVE.md. The host owns and retains its AppKit slot views.
 //!
-//! P-120: GPUI presents its drawable inside the composition `CATransaction`
-//! (`presentsWithTransaction`, which waits on the main thread until the command
-//! buffer is scheduled) only when it must: native slot geometry moved, AppKit is
-//! painting synchronously, or frames are continuous. Isolated frames (hover,
-//! caret, a single edit) present asynchronously from the command buffer.
-//!
-//! Why continuous frames stay transactional (measured on screen, 120 Hz): an
-//! asynchronous present stays on glass ~3 refreshes, so with CAMetalLayer's three
-//! drawables back-to-back async frames starve the pool and the main thread blocks
-//! in `nextDrawable` instead (p95 0.04 → 4.2–9.1 ms), costing more than the
-//! ~0.4 ms `waitUntilScheduled` it saved. See docs/native/s2-gpui-ce.md.
+//! P-120: native geometry changes and AppKit synchronous paints remain atomic
+//! with GPUI in a CATransaction. Compositor-paced frames can present without
+//! waiting on main: CAMetalDisplayLink supplies a drawable for the current update.
+//! The legacy CVDisplayLink fallback still couples continuous frames, because its
+//! unpaced async nextDrawable path exhausted the three-drawable pool on screen.
 use objc2::{MainThreadMarker, class, msg_send, rc::Retained};
 use objc2_app_kit::NSView;
 use objc2_foundation::NSPoint;
@@ -95,8 +89,9 @@ fn untracked(present: Rc<dyn Fn()>) -> Rc<dyn Fn() -> SlotChange> {
     })
 }
 /// Like [`register`], but `present` reports whether slot geometry moved. Frames
-/// that return [`SlotChange::Unchanged`] present GPUI's drawable without waiting
-/// on the main thread. The first frame after registration is always transactional.
+/// that return [`SlotChange::Unchanged`] can present without waiting when paced
+/// by Core Animation. The legacy continuous-frame fallback remains transactional.
+/// The first frame after registration is always transactional.
 pub fn register_tracked(
     view: &NSView,
     present: Rc<dyn Fn() -> SlotChange>,
@@ -203,19 +198,31 @@ pub(crate) fn present(view: usize) -> Option<Transaction> {
     Some(transaction)
 }
 /// A frame drawn within this long after the previous one is "continuous".
-/// Two 60 Hz refreshes: async presents can then never hold all three drawables.
+/// The legacy CVDisplayLink fallback couples frames within this interval.
 pub const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_micros(33_334);
 /// P-120 policy for one GPUI frame. `forced` is set by AppKit-driven synchronous
 /// paints (live resize `displayLayer:`, tab activation) that must match the window;
 /// `continuous` when the previous frame was drawn within [`CONTINUOUS_FRAME`].
+/// `compositor_paced` permits continuous updates without a scheduling wait.
 /// Windows without composition hosts keep upstream behaviour (async unless forced).
 pub(crate) fn presents_with_transaction(
     forced: bool,
     frame: Option<&Transaction>,
     continuous: bool,
+    compositor_paced: bool,
 ) -> bool {
-    forced || frame.is_some_and(|t| t.moved() || continuous)
+    forced || frame.is_some_and(|t| t.moved() || (continuous && !compositor_paced))
 }
+/// Admit a display-linked update only while its CPU budget fits before the
+/// presentation-submission deadline. Rejected updates leave GPUI demand queued.
+pub(crate) fn has_frame_budget(now: f64, deadline: f64, budget: f64) -> bool {
+    now.is_finite()
+        && deadline.is_finite()
+        && budget.is_finite()
+        && budget > 0.
+        && now + budget < deadline
+}
+
 pub(crate) struct Transaction {
     change: SlotChange,
 }
@@ -290,9 +297,24 @@ pub mod probe {
             forced,
             transaction.as_ref(),
             continuous,
+            false,
         ))
     }
+    /// Compositor-paced frames can use async even during continuous animation.
+    pub fn paced_frame(key: usize, forced: bool) -> Option<bool> {
+        let transaction = present(key);
+        transaction.as_ref()?;
+        Some(presents_with_transaction(
+            forced,
+            transaction.as_ref(),
+            true,
+            true,
+        ))
+    }
+    pub fn has_frame_budget(now: f64, deadline: f64, budget: f64) -> bool {
+        super::has_frame_budget(now, deadline, budget)
+    }
     pub fn unregistered_frame(forced: bool) -> bool {
-        presents_with_transaction(forced, None, true)
+        presents_with_transaction(forced, None, true, false)
     }
 }

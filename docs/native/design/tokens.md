@@ -132,7 +132,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.inset` | Content inset inside a panel | 12 | 12 | 12 | 12 |
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
-| `metrics.layer_column` | Timeline layer list column width | 232 | 232 | 232 | 232 |
+| `metrics.layer_column` | Timeline layer list column width | 266 | 266 | 266 | 266 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |
 | `metrics.min_center` | Smallest viewer extent | 180 | 180 | 180 | 180 |

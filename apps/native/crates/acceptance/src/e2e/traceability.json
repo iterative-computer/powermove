@@ -1,0 +1,281 @@
+[
+  {
+    "check": "easing_replace_batch",
+    "sources": [
+      "apps/desktop/e2e/agent-keyframe-easing.spec.ts#L5"
+    ],
+    "coverage": "replace_keyframes variant: all three Glide keys, independent f64 midpoint samples and complete run rollback.",
+    "kind": "headless-contract",
+    "scope": "complete-headless"
+  },
+  {
+    "check": "easing_set_batch",
+    "sources": [
+      "apps/desktop/e2e/agent-keyframe-easing.spec.ts#L5"
+    ],
+    "coverage": "set_property variant: same strict complete-curve oracle; measured native failure remains visible in report.",
+    "kind": "headless-contract",
+    "scope": "complete-headless"
+  },
+  {
+    "check": "revision_recovery",
+    "sources": [
+      "apps/desktop/e2e/agent-revision-recovery.spec.ts#L3"
+    ],
+    "coverage": "Stale batch rejects without mutation, refresh admits all 90 layers/150 keys; undo preserves the foreign user edit and prior agent layers.",
+    "kind": "headless-contract",
+    "scope": "complete-headless"
+  },
+  {
+    "check": "selection_preserves_redo",
+    "sources": [
+      "apps/desktop/e2e/agent-undo-redo.spec.ts#L3"
+    ],
+    "coverage": "Actor Undo, transient layer selection, Redo retains agent text and selection; no host input is simulated.",
+    "kind": "headless-contract",
+    "scope": "complete-headless"
+  },
+  {
+    "check": "strip_move_and_library",
+    "sources": [
+      "apps/desktop/e2e/agent-project-timeline.spec.ts#L3"
+    ],
+    "coverage": "Exact two-strip [5,6] move and Undo; rename/duplicate/create/list independent project IDs and width 640.",
+    "kind": "headless-contract",
+    "scope": "complete-headless"
+  },
+  {
+    "check": "speed_double",
+    "sources": [
+      "apps/desktop/e2e/video-speed-duration.spec.ts#L3"
+    ],
+    "coverage": "2x speed preserves trim/from/source interval and halves duration, rebase keys and save/reopen; timeline pixel width/control gestures remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "speed_half",
+    "sources": [
+      "apps/desktop/e2e/video-speed-duration.spec.ts#L3"
+    ],
+    "coverage": "0.5x speed preserves source interval and doubles duration/key times; strip width/control drag remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "speed_undo_redo",
+    "sources": [
+      "apps/desktop/e2e/video-speed-duration.spec.ts#L3"
+    ],
+    "coverage": "Persisted native Undo/Redo restores complete pre/post speed-edit layers; UI Escape scrubbing remains blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "video_split_continuity",
+    "sources": [
+      "apps/desktop/e2e/agent-video-editing.spec.ts#L4",
+      "apps/desktop/e2e/video-frame-integrity.spec.ts#L214"
+    ],
+    "coverage": "Split retains source trim and evaluates opacity continuously across the cut, then rollback restores layers; no decoded video/pixels are produced.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "video_slip_bounds",
+    "sources": [
+      "apps/desktop/e2e/agent-video-editing.spec.ts#L4"
+    ],
+    "coverage": "Source-only slip leaves strip/animation untouched; out-of-handles request is atomic; agent review/decoded frames remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "video_trim_bounds",
+    "sources": [
+      "apps/desktop/e2e/agent-video-editing.spec.ts#L4"
+    ],
+    "coverage": "Trim changes source/strip bounds and preserves composition-time opacity; invalid source interval applies nothing.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "keyframe_drag_values",
+    "sources": [
+      "apps/desktop/e2e/timeline-keyframe-drag.spec.ts#L4"
+    ],
+    "coverage": "Native key movement retains IDs, values and all non-time fields, then Undo restores original keys; timeline pointer/row integration remains blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "markers_persist",
+    "sources": [
+      "apps/desktop/e2e/timeline-markers.spec.ts#L5"
+    ],
+    "coverage": "Marker IDs/times/names and native Undo/Redo survive portable save/reopen; ruler menus/pins/themes require the host.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "live_drag_commit",
+    "sources": [
+      "apps/desktop/e2e/timeline-track-live-drag.spec.ts#L40"
+    ],
+    "coverage": "Actor publishes each provisional timing step before commit and groups replace steps into one Undo/Redo; preview pixels/input remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "live_drag_cancel",
+    "sources": [
+      "apps/desktop/e2e/timeline-track-live-drag.spec.ts#L83"
+    ],
+    "coverage": "Actor publishes provisional timing then cancel restores original document; real decoder seek/pointer capture require macOS.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "authored_fractional_rates",
+    "sources": [
+      "apps/desktop/e2e/project-settings.spec.ts#L3",
+      "apps/desktop/e2e/ae-audit-implementation.spec.ts#L95"
+    ],
+    "coverage": "Exact 23.976/29.97/59.94/30000:1001 rates, size/duration and portable save; no output cadence/codec/panel pass.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "portable_opaque_data",
+    "sources": [
+      "apps/desktop/e2e/persistence.spec.ts#L26",
+      "apps/desktop/e2e/project-save.spec.ts#L69"
+    ],
+    "coverage": "Portable file round trip retains opaque extension data, Unicode, embedded NUL and exact authored f64 values; host chooser/relaunch remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "portable_redo_tail",
+    "sources": [
+      "apps/desktop/e2e/memory-history-persistence.spec.ts#L5",
+      "apps/desktop/e2e/project-save-large-history.spec.ts#L6"
+    ],
+    "coverage": "Portable save/reopen retains pending Redo and complete layers; this small synthetic case does not prove large-history memory-pressure behavior.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "library_trash_retains_work",
+    "sources": [
+      "apps/desktop/e2e/project-save.spec.ts#L102"
+    ],
+    "coverage": "Closed library slot moves to recoverable trash and restores retained layers; Projects screen/file-state controls remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "media_folder_undo",
+    "sources": [
+      "apps/desktop/e2e/agent-media-management.spec.ts#L57"
+    ],
+    "coverage": "Existing media metadata folder/move/rename/native Undo/delete-folder retains unknown fields; import bytes/replace_media remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "media_delete_lock",
+    "sources": [
+      "apps/desktop/e2e/agent-media-management.spec.ts#L57",
+      "apps/desktop/e2e/media-bulk-selection.spec.ts#L20"
+    ],
+    "coverage": "Referenced/locked deletion refuses atomically; explicit removal supports native Undo and never deletes the referenced synthetic source file.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "caption_srt",
+    "sources": [
+      "apps/desktop/e2e/captions.spec.ts#L52",
+      "apps/desktop/e2e/media-intelligence.spec.ts#L464"
+    ],
+    "coverage": "Exact composition-offset SRT text with pure native exporter; import/style/word timing/burn-in remain blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "caption_vtt",
+    "sources": [
+      "apps/desktop/e2e/captions.spec.ts#L52",
+      "apps/desktop/e2e/media-intelligence.spec.ts#L464"
+    ],
+    "coverage": "Exact composition-offset WebVTT, language header and escaping; no burn-in/codec/transcription pass.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "capture_preserves_document",
+    "sources": [
+      "apps/desktop/e2e/agent-canvas-capture.spec.ts#L3",
+      "apps/desktop/e2e/agent-playhead.spec.ts#L6"
+    ],
+    "coverage": "EngineHook request times/revision/width and document preservation; double emits no pixels and does not exercise provider send or presentation.",
+    "kind": "trait-double",
+    "scope": "supporting"
+  },
+  {
+    "check": "capture_rejects_stale",
+    "sources": [
+      "apps/desktop/e2e/agent-canvas-capture.spec.ts#L3"
+    ],
+    "coverage": "Stale revision is rejected before invoking EngineHook, retains the newer document.",
+    "kind": "trait-double",
+    "scope": "supporting"
+  },
+  {
+    "check": "capture_failure_preserves_edits",
+    "sources": [
+      "apps/desktop/e2e/agent-context-review.spec.ts#L114"
+    ],
+    "coverage": "Injected EngineHook failure retains applied layers and saved file; review-error UI/agent coordinator remain blocked.",
+    "kind": "trait-double",
+    "scope": "supporting"
+  },
+  {
+    "check": "surface_stable_ids",
+    "sources": [
+      "apps/desktop/e2e/agent-panel-tools.spec.ts#L3",
+      "apps/desktop/e2e/agent-computer-use.spec.ts#L8"
+    ],
+    "coverage": "SurfaceHook forwards the explicit stable panel/element IDs and one action; recording double is not native input/canvas.",
+    "kind": "trait-double",
+    "scope": "supporting"
+  },
+  {
+    "check": "surface_unknown_ids",
+    "sources": [
+      "apps/desktop/e2e/agent-panel-tools.spec.ts#L3"
+    ],
+    "coverage": "Unknown element ID refuses without action or project mutation; no semantic panel tree is fabricated.",
+    "kind": "trait-double",
+    "scope": "supporting"
+  },
+  {
+    "check": "mcp_tool_contract",
+    "sources": [
+      "apps/desktop/e2e/agent-tool-runtime.spec.ts#L7"
+    ],
+    "coverage": "All 67 frozen names/descriptions/schemas exposed by native McpSession; installed executable/host connection remains blocked.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  },
+  {
+    "check": "pending_tools_are_explicit",
+    "sources": [
+      "apps/desktop/e2e/agent-tool-runtime.spec.ts#L7"
+    ],
+    "coverage": "Every currently pending MCP tool reports not_available_in_this_build with exact production backing and leaves document intact; unavailable tools never masquerade as success.",
+    "kind": "headless-contract",
+    "scope": "supporting"
+  }
+]
