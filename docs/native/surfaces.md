@@ -473,3 +473,44 @@ visibility and overwrite behavior, save/import races, tab transfer/snap-back,
 popout restoration/focus, system AX announcements/labels/keyboard, and native
 v4 material/placement rendering in every appearance/accessibility setting.
 All visual output remains provisional until Opus review.
+
+### Documents lane merge validation — 2026-11-01
+
+Merged `origin/feat/native-engine` at
+`edc3c6e07164f6ac2bd71f1ef2405ff8d11520c3` with no conflicts. The remote's
+narrow fetch mapping initially left its tracking ref stale; an explicit refspec
+fetch corrected it, and the final fetch/merge verified FETCH_HEAD and the
+tracking ref both equal this commit. Only owned files differ from this base;
+only the seven named design-coverage cells changed, each by appending text.
+The production lockfiles match the merged base (including its upstream changes).
+
+Post-merge results using the commands above:
+
+- Documents: **53 Rust tests passed** (50 controller/kernel/lifetime tests and
+  three real service-contract tests); zero failed/ignored. Linux Clippy
+  `--locked --all-targets -- -D warnings` and owned-source rustfmt pass.
+- v4 documents: **7 tests passed**, 60 assertions, including real Rust six-op,
+  kit-diagnostic and accessibility/focus projection; TypeScript and Prettier pass.
+- Kernel: `cd apps/native && cargo test --locked -p pm-kernel`:
+  **273 passed, 1 existing ignored** (`smoke_real_store_copy_counts_only`,
+  which requires a real-store copy and is intentionally not run on user data).
+  Frozen v1.2.0/v1.3.0 reader-oracle tests pass after fetching their existing tags.
+- macOS-target `cargo check --locked` and Clippy `--locked -- -D warnings`
+  pass for the actual document modules/adapter on `x86_64-apple-darwin`.
+  No AppKit/GPUI/Metal runtime or macOS visual test is claimed.
+- `git diff --check`, append-safe coverage/ownership checks and staged gitleaks
+  scans pass before commits. No new crate or production dependency was added.
+
+One pre-existing whole-app formatting issue remains **outside owned paths**:
+`cargo fmt --manifest-path apps/native/Cargo.toml -p pm-native-app -- --check`
+reports the packed `for_session(&p.snapshot, &p.media, p.path.as_deref(), …)`
+arguments at `apps/native/crates/app/src/smoke.rs:90`. That file is byte-identical
+to the merged engine base; its owner should expand those arguments with rustfmt.
+The portable lane driver checks every owned Rust source without changing it.
+
+The clean-release regression verifies byte-identical external file contents
+through the release itself and exact authored document/replayable history
+through final kernel compaction. Existing `PrepareQuit` may append an identical
+PMV4 record for a deferred journal; this lane does not claim physical-file
+identity across that existing compaction operation. Watcher/reload integration
+and the two Opus placeholders listed above remain open.
