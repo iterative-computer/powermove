@@ -28,6 +28,9 @@ class LocalPause(RuntimeError):
 
 class DiskFloor(RuntimeError):
     pass
+
+class ShaderCompilerUnavailable(RuntimeError):
+    pass
 STAGES = ('open', 'render', 'play', 'scrub', 'audio', 'edit', 'save', 'mp4', 'prores')
 
 def space():
@@ -110,10 +113,33 @@ def tree(src, dst):
         raise RuntimeError('source_changed')
     return len(before)
 
-def call(binary, args, log, timeout=180):
+def freeze_tools(binary, compiler, root):
+    binary=Path(binary).expanduser()
+    if compiler is None:
+        directory=binary.parent
+        if directory.name in ('examples','deps'):
+            directory=directory.parent
+        compiler=directory/'pm-glsl-compiler'
+    compiler=Path(compiler).expanduser()
+    if not compiler.is_file() or compiler.is_symlink() or not os.access(compiler,os.X_OK):
+        raise ShaderCompilerUnavailable('shader_compiler_unavailable')
+    identities={'worker_sha256':digest(binary),'compiler_sha256':digest(compiler)}
+    outputs=[]
+    for source,folder,key in [(binary,'workers','worker_sha256'),(compiler,'compilers','compiler_sha256')]:
+        directory=root/folder
+        directory.mkdir(exist_ok=True,mode=0o700)
+        target=directory/identities[key]
+        if not target.exists():
+            clone(source,target)
+            target.chmod(0o700)
+        outputs.append(target)
+    return *outputs,identities
+
+def call(binary, args, log, timeout=180, compiler=None):
     space()
     with log.open('wb') as f:
-        child = subprocess.Popen([str(binary), *map(str, args)], stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+        env=None if compiler is None else {**os.environ,'POWERMOVE_GLSL_COMPILER':str(compiler)}
+        child = subprocess.Popen([str(binary), *map(str, args)], stdout=f, stderr=subprocess.STDOUT, start_new_session=True,env=env)
         deadline=time.monotonic()+timeout
         try:
             while True:
@@ -162,6 +188,9 @@ def archive_logs(batch, destination):
     destination.mkdir(parents=True, mode=0o700)
     for log in batch.glob('*.private.log'):
         shutil.copyfile(log, destination / log.name)
+    descriptor=batch/'asset-request.private.json'
+    if descriptor.exists():
+        shutil.copyfile(descriptor,destination/descriptor.name)
 
 def interrupted_result(public, batch, used, capture_errors):
     try:
@@ -232,16 +261,10 @@ def run(args):
             (ROOT / '.owner.json').write_text(json.dumps(owner))
         summary['snapshot_run_id']=owner['run_id']
         summary['runner_sha256']=digest(Path(__file__))
-        summary['worker_sha256']=digest(args.binary)
         # Keep this run independent of shared-target rebuilds or cache cleanup.
-        workers=ROOT/'workers'
-        workers.mkdir(exist_ok=True,mode=0o700)
-        frozen=workers/summary['worker_sha256']
-        if not frozen.exists():
-            clone(args.binary,frozen)
-            frozen.chmod(0o700)
-        args.binary=frozen
-        summary['mixed_provenance']=bool(previous and (previous.get('runner_sha256') != summary['runner_sha256'] or previous.get('worker_sha256') != summary['worker_sha256'] or previous.get('snapshot_run_id') != summary['snapshot_run_id'] or previous.get('mixed_provenance')))
+        args.binary,args.compiler,identities=freeze_tools(args.binary,getattr(args,'compiler',None),ROOT)
+        summary.update(identities)
+        summary['mixed_provenance']=bool(previous and (previous.get('runner_sha256') != summary['runner_sha256'] or previous.get('worker_sha256') != summary['worker_sha256'] or previous.get('compiler_sha256') != summary['compiler_sha256'] or previous.get('snapshot_run_id') != summary['snapshot_run_id'] or previous.get('mixed_provenance')))
         if not (ROOT / 'profile/store').exists():
             tree(profile / 'store', ROOT / 'profile/store')
         records = []
@@ -262,7 +285,7 @@ def run(args):
             target = ROOT / f'indexeddb-{i}'
             blobs = db.with_name(db.name.removesuffix('.leveldb') + '.blob')
             if not target.exists():
-                code = call(args.binary, ['snapshot', db, blobs, target], ROOT / f'snapshot-{i}.private.log', timeout=120)
+                code = call(args.binary, ['snapshot', db, blobs, target], ROOT / f'snapshot-{i}.private.log', timeout=120,compiler=args.compiler)
                 if code:
                     summary['setup_failures'].append({'stage': 'snapshot', 'id': hashlib.sha256(db.name.encode()).hexdigest()[:16], 'class': 'reader_failed'})
                     continue
@@ -270,7 +293,7 @@ def run(args):
         summary['snapshot'] = {'host_records': host_count, 'indexeddb_records': len(records) - host_count,
                                'store_files': len(list((ROOT / 'profile/store').glob('*')))}
         if not ((ROOT/'inventory.json').exists() and owner.get('inventory_worker_sha256') == summary['worker_sha256']):
-            if call(args.binary, ['inventory', ROOT], ROOT / 'inventory.private.log', timeout=180):
+            if call(args.binary, ['inventory', ROOT], ROOT / 'inventory.private.log', timeout=180,compiler=args.compiler):
                 raise RuntimeError('library_inventory_failed')
             owner['inventory_worker_sha256']=summary['worker_sha256']
             (ROOT/'.owner.json').write_text(json.dumps(owner))
@@ -367,7 +390,7 @@ def run(args):
                             raise LocalPause('local_pause')
                         raise BatchLimit('copy_failed')
                 else:
-                    code = call(args.binary, ['blob', record['snapshot'], record['database'], record['number'], dest], batch / 'blob.private.log', timeout=60)
+                    code = call(args.binary, ['blob', record['snapshot'], record['database'], record['number'], dest], batch / 'blob.private.log', timeout=60,compiler=args.compiler)
                     if code:
                         text = (batch / 'blob.private.log').read_text(errors='replace')
                         if 'disk_floor' in text:
@@ -382,7 +405,7 @@ def run(args):
                 if 'file_source' in row:
                     try:
                         row['file'] = capture(row['file_source'])
-                        code = call(args.binary, ['file-info', row['file'], batch / 'info.private.json'], batch / 'info.private.log', timeout=60)
+                        code = call(args.binary, ['file-info', row['file'], batch / 'info.private.json'], batch / 'info.private.log', timeout=60,compiler=args.compiler)
                         if code:
                             raise BatchLimit('project_file_reader_failed')
                         info = json.loads((batch / 'info.private.json').read_text())
@@ -430,7 +453,7 @@ def run(args):
                 # Detached file associations cannot cause writes to original PMVs.
                 (ROOT / 'media.json').write_text(json.dumps({'records': selected, 'linked': linked}))
                 (batch / 'spec.private.json').write_text(json.dumps(row))
-                code = call(args.binary, ['project', ROOT, batch / 'spec.private.json', batch], batch / 'worker.private.log', timeout=args.timeout)
+                code = call(args.binary, ['project', ROOT, batch / 'spec.private.json', batch], batch / 'worker.private.log', timeout=args.timeout,compiler=args.compiler)
                 state = json.loads((batch / 'result.json').read_text()) if (batch / 'result.json').exists() else {}
                 if state.get('extension') == 'p2':
                     summary['p2'].append(row['id'])
@@ -486,7 +509,7 @@ def run(args):
     except Exception as error:
         if isinstance(error,(LocalPause,DiskFloor)):
             args.retain_for_debug=True
-        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'disk_floor' if isinstance(error,DiskFloor) or shutil.disk_usage('/tmp').free < FLOOR else 'runner_setup_failed'})
+        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'shader_compiler_unavailable' if isinstance(error,ShaderCompilerUnavailable) else 'disk_floor' if isinstance(error,DiskFloor) or shutil.disk_usage('/tmp').free < FLOOR else 'runner_setup_failed'})
         report()
         raise
     finally:
@@ -502,6 +525,7 @@ def main():
         return
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--binary', type=Path, default=Path.home() / 'Developer/pm-target/debug/examples/pm-corpus')
+    p.add_argument('--compiler',type=Path,help='GLSL compiler helper; defaults to pm-glsl-compiler next to the build output.')
     p.add_argument('--profile', type=Path, default=Path.home() / 'Library/Application Support/Powermove')
     p.add_argument('--projects', type=Path, action='append')
     p.add_argument('--extra-files', type=Path, help='Private JSON list of additional PMV source paths, for indexed discovery or targeted rechecks.')

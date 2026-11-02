@@ -1,5 +1,7 @@
 # Native corpus P1 runner
 
+**WIP handoff:** compiler bundling and private asset diagnostics are unfinished integration work. See [current status and exact folder-run commands](../../docs/native/handoff/corpus-p1.md). The changed effect/rotation synthetic expectations are not yet end-to-end validated.
+
 Run on the owner's Mac, never in CI with real data. Sources are read-only.
 
 ```sh
@@ -8,6 +10,9 @@ export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 cd apps/native
 flock /tmp/pm-build.lock cargo build -p pm-native-app --example pm-corpus --offline
 cd ../..
+cd engine
+flock /tmp/pm-build.lock cargo build --locked -p pm-glsl --bin pm-glsl-compiler
+cd ..
 python3 tools/corpus/run.py
 ```
 
@@ -105,6 +110,10 @@ Runner/worker checksums and the snapshot run ID record provenance. Resuming
 results across changed tools or another snapshot marks mixed provenance and
 cannot certify a complete gate. The worker executable is frozen in the private
 run directory so shared-target rebuilds or cleanup cannot change a running audit.
+The GLSL compiler helper is frozen too and explicitly supplied to workers and
+their export children. Its checksum participates in provenance. `--compiler`
+selects a helper explicitly; missing helpers fail setup before any project is
+copied, rather than masquerading as unsupported GLSL effects.
 Retained inventories are reused only with the same frozen worker, avoiding
 repeated parsing of large project documents during a resource-limited resume.
 The discovered file list and its search limitations are retained for the same

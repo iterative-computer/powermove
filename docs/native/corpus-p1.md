@@ -1,5 +1,7 @@
 # Native corpus P1
 
+> WIP follow-up: the historical GLSL diagnosis is being corrected after finding a missing compiler helper in the frozen runner bundle. See [the handoff](handoff/corpus-p1.md) for current status, validated migration fixes and unfinished work.
+
 **Gate P1 remains OPEN. All discovered entries are accounted for; verification is incomplete.**
 
 Status: 2026-11-01; native base `ff42d751fbf6`.

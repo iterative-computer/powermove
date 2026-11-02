@@ -19,6 +19,37 @@ class CorpusSafety(unittest.TestCase):
         capacity.start()
         self.addCleanup(capacity.stop)
 
+    def test_frozen_worker_and_export_child_use_frozen_compiler(self):
+        import sys
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory)
+            worker,helper=base/'worker',base/'pm-glsl-compiler'
+            helper.write_text('#!/usr/bin/env python3\nprint("synthetic compiler")\n')
+            # Mimic a worker's export child inheriting the compiler environment.
+            child='import os,subprocess;subprocess.run([os.environ["POWERMOVE_GLSL_COMPILER"]],check=True)'
+            worker.write_text('#!/usr/bin/env python3\nimport subprocess,sys\nsubprocess.run([sys.executable,"-c",'+repr(child)+'],check=True)\n')
+            worker.chmod(0o700)
+            helper.chmod(0o700)
+            frozen_root=base/'frozen'
+            frozen_root.mkdir()
+            frozen,compiler,identities=corpus.freeze_tools(worker,helper,frozen_root)
+            worker.unlink()
+            helper.unlink()
+            log=base/'private.log'
+            self.assertEqual(corpus.call(frozen,[],log,timeout=5,compiler=compiler),0)
+            self.assertEqual(log.read_text().strip(),'synthetic compiler')
+            self.assertEqual(corpus.digest(compiler),identities['compiler_sha256'])
+
+    def test_missing_compiler_is_a_setup_error_before_any_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory)
+            worker=base/'worker'
+            worker.write_bytes(b'synthetic executable')
+            root=base/'frozen'
+            with self.assertRaises(corpus.ShaderCompilerUnavailable):
+                corpus.freeze_tools(worker,None,root)
+            self.assertFalse(root.exists())
+
     def test_clone_is_independent_and_rejects_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

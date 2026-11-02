@@ -2,18 +2,21 @@
 """Run the complete pipeline on a disposable, generated project (no owner data)."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--binary', type=Path, default=Path.home() / 'Developer/pm-target/debug/examples/pm-corpus')
+p.add_argument('--compiler',type=Path,help='Explicit compiler for a relocated/frozen worker.')
 p.add_argument('--worker-only', action='store_true', help='Use an independent fixture root while a real driver is active.')
 p.add_argument('--legacy', action='store_true')
 p.add_argument('--text', action='store_true')
 p.add_argument('--rotated', action='store_true', help='Reproduce the rotated-video capability refusal with generated media.')
 p.add_argument('--offline', action='store_true', help='Reproduce the missing-original refusal without any real media.')
 p.add_argument('--effect', choices=('glow','shadow'), help='Reproduce a native effect requiring the unavailable GLSL fallback.')
+p.add_argument('--expect-refusal',action='store_true',help='Demonstrate a pre-fix capability refusal explicitly.')
 args = p.parse_args()
 if args.effect:
     args.text = True
@@ -63,9 +66,10 @@ with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
         work=root/'batch'
         work.mkdir()
         (work/'spec.json').write_text(json.dumps({'id':'0000000000000001','library':'synthetic'}))
-        subprocess.run([str(args.binary),'project',str(root),str(work/'spec.json'),str(work)],check=True)
+        env=None if args.compiler is None else {**os.environ,'POWERMOVE_GLSL_COMPILER':str(args.compiler)}
+        subprocess.run([str(args.binary),'project',str(root),str(work/'spec.json'),str(work)],check=True,env=env)
         result=json.loads((work/'result.json').read_text())
-        if args.rotated or args.offline or args.effect:
+        if args.offline or args.expect_refusal:
             expected='GLSL fallback runner' if args.effect else 'rotated video' if args.rotated else 'offline_originals'
             logs=[work/(stage+'.private.log') for stage in ('render','mp4','prores')]
             if not any(log.exists() and expected in log.read_text() for log in logs):
@@ -73,10 +77,13 @@ with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
             print('Expected synthetic refusal reproduced; no owner media used.')
             raise SystemExit(0)
         if not all(result.get(stage)=='pass' for stage in ('open','render','play','scrub','audio','edit','save','mp4','prores')):
-            raise SystemExit('Synthetic worker regression failed: '+str(result))
+            details='\n'.join(p.read_text() for p in work.glob('*.private.log'))
+            raise SystemExit('Synthetic worker regression failed: '+str(result)+'\n'+details)
     else:
         report = Path('/tmp/pm-corpus-synthetic-summary.json')
-        subprocess.run(['python3', str(Path(__file__).with_name('run.py')), '--binary', str(args.binary), '--profile', directory, '--projects', directory, '--report', str(report)], check=True)
+        command=['python3', str(Path(__file__).with_name('run.py')), '--binary', str(args.binary), '--profile', directory, '--projects', directory, '--report', str(report)]
+        if args.compiler:command+=['--compiler',str(args.compiler)]
+        subprocess.run(command, check=True)
         result = json.loads(report.read_text())
         if not all(stage['pass'] == 1 for stage in result['totals'].values()):
             raise SystemExit('Synthetic end-to-end regression failed; see count-only report')

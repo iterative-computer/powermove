@@ -475,6 +475,47 @@ fn project(
         actor.shutdown();
         return Ok(());
     }
+    // Private selected metadata for resolving catalog failures; not an audit
+    // result. Omit names, embedded data and arbitrary asset fields.
+    let mut descriptors = raw["assets"].clone();
+    if let Some(assets) = descriptors.as_object_mut() {
+        for asset in assets.values_mut() {
+            if let Some(fields) = asset.as_object_mut() {
+                fields.retain(|key, _| {
+                    [
+                        "id",
+                        "kind",
+                        "storageKey",
+                        "fingerprint",
+                        "revision",
+                        "sourcePath",
+                        "path",
+                        "link",
+                        "playbackProxy",
+                        "playbackProxyVersion",
+                        "contentHash",
+                        "sourceHash",
+                        "blake3",
+                    ]
+                    .contains(&key.as_str())
+                });
+                if let Some(link) = fields.get_mut("link").and_then(Value::as_object_mut) {
+                    link.retain(|key, _| key == "path");
+                }
+            }
+        }
+    }
+    if !descriptors.is_object() {
+        descriptors = json!(null);
+    }
+    let used = project_assets(&raw)
+        .as_object()
+        .map(|a| a.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    write(
+        &work.join("asset-request.private.json"),
+        &json!({"assets":descriptors,"used":used}),
+    )?;
     result(work, "running", "render")?;
     let comp = p
         .snapshot
