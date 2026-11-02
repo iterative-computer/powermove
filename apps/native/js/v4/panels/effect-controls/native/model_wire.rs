@@ -4,7 +4,7 @@ use pm_kernel::{Caller, KernelActor, KernelConfig, OpenSource, Reply, Request, S
 use pm_model::json::{parse, to_canonical_string};
 use pm_panel_inspector::{
     EffectClipboard, EffectDefinition, Inspector, ParamDefinition,
-    v4::{EffectsPanel, ParameterPresentation, Presentation},
+    v4_effects::{EffectsPanel, ParameterPresentation, Presentation},
 };
 use std::io::{self, BufRead};
 /// Kernel waits are illegal on the macOS main thread (crates/kernel actor.rs),
@@ -185,7 +185,7 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::SyncSender};
 struct Inflight {
     request: HostRequest,
     reply: SyncSender<HostAck>,
-    plan: pm_panel_inspector::v4::Plan,
+    plan: pm_panel_inspector::v4_effects::Plan,
     pending: pm_kernel::Pending<Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
 }
 struct Backend {

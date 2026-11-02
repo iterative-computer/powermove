@@ -18,7 +18,7 @@ made to the surface crate or v4 runtime/UI sources.
 
 ## Production worker integration
 
-The thin `pm_panel_inspector::v4::EffectsPanel` adapter is compiled into the real
+The thin `pm_panel_inspector::v4_effects::EffectsPanel` adapter is compiled into the real
 model crate. It owns only presentation metadata, a structural row index and the
 visible range. The app retains the existing `Inspector` and shared app-owned
 `EffectClipboard` across remounts. The adapter never owns a writable document,

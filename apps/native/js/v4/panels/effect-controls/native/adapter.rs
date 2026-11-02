@@ -5,7 +5,7 @@ use pm_kernel::{
 use pm_model::{Map, Value, json::parse};
 use pm_panel_inspector::{
     EffectClipboard, EffectDefinition, Inspector, ParamDefinition,
-    v4::{EffectsPanel, Presentation},
+    v4_effects::{EffectsPanel, Presentation},
 };
 struct Fixture {
     actor: Option<KernelActor>,
