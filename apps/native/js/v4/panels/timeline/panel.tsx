@@ -22,6 +22,9 @@ const reading = {
   fontSize: t("typography.reading"),
 };
 const line = { display: "flex", flexDirection: "row", alignItems: "center" };
+/** Leading cluster + trailing cluster: replaces the flexible-spacer placeholder
+ * (design review 2026-11-01; the validator accepts space-between). */
+const split = { ...line, justifyContent: "space-between" };
 const text = { color: t("colors.text"), fontSize: t("typography.body") };
 const modifiers = (e: SurfaceEvent): Modifiers => ({
   shiftKey: !!e.shiftKey,
@@ -99,111 +102,116 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
     <div
       id="timeline:header"
       style={{
-        ...line,
+        ...split,
         height: t("metrics.header"),
         paddingLeft: t("metrics.inset"),
-        gap: t("metrics.gap"),
+        paddingRight: t("metrics.inset"),
       }}
     >
-      <Icon
-        id="timeline:play"
-        label={f.playing ? "Pause" : "Play"}
-        title="Play / Pause (Space)"
-        symbol={f.playing ? "pause.fill" : "play.fill"}
-        disabled={!f.hasComposition}
-        primary
-        send={send}
-        intent={{ type: "play" }}
-      />
-      {f.hasComposition && (
-        <>
-          {f.timeEditor ? (
-            <UI.TextField
-              id="timeline:time"
-              label="Current time"
-              value={f.timeEditor.value}
-              binding={f.timeEditor.binding}
-              {...input(send, { kind: "currentTime" })}
+      <div style={{ ...line, gap: t("metrics.gap") }}>
+        <Icon
+          id="timeline:play"
+          label={f.playing ? "Pause" : "Play"}
+          title="Play / Pause (Space)"
+          symbol={f.playing ? "pause.fill" : "play.fill"}
+          disabled={!f.hasComposition}
+          primary
+          send={send}
+          intent={{ type: "play" }}
+        />
+        {f.hasComposition && (
+          <>
+            {f.timeEditor ? (
+              <UI.TextField
+                id="timeline:time"
+                label="Current time"
+                value={f.timeEditor.value}
+                binding={f.timeEditor.binding}
+                {...input(send, { kind: "currentTime" })}
+                style={{
+                  color: t("colors.text"),
+                  fontSize: t("typography.timecode"),
+                  fontWeight: t("typography.medium_weight"),
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              />
+            ) : (
+              <UI.ToolbarItem
+                id="timeline:time"
+                label="Current time"
+                value={f.spokenTime}
+                onClick={action(send, { type: "timeEdit" })}
+                metadata={{ designTodo: "T2", fixedWidthSample: "00:00:00:00" }}
+                style={{
+                  color: t("colors.text"),
+                  fontSize: t("typography.timecode"),
+                  fontWeight: t("typography.medium_weight"),
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {f.timecode}
+              </UI.ToolbarItem>
+            )}
+            <text
               style={{
-                color: t("colors.text"),
-                fontSize: t("typography.timecode"),
-                fontWeight: t("typography.medium_weight"),
-                fontVariantNumeric: "tabular-nums",
-              }}
-            />
-          ) : (
-            <UI.ToolbarItem
-              id="timeline:time"
-              label="Current time"
-              value={f.spokenTime}
-              onClick={action(send, { type: "timeEdit" })}
-              metadata={{ designTodo: "T2", fixedWidthSample: "00:00:00:00" }}
-              style={{
-                color: t("colors.text"),
-                fontSize: t("typography.timecode"),
-                fontWeight: t("typography.medium_weight"),
-                fontVariantNumeric: "tabular-nums",
+                color: t("colors.muted"),
+                fontSize: t("typography.minimum"),
               }}
             >
-              {f.timecode}
-            </UI.ToolbarItem>
-          )}
-          <text
-            style={{
-              color: t("colors.muted"),
-              fontSize: t("typography.minimum"),
-            }}
-          >
-            {f.frameRate}
-          </text>
-          {f.tabs.length > 0 && (
-            <div
-              id="timeline:tabs"
-              label="Open compositions"
-              role="tablist"
-              metadata={{ designTodo: "T3" }}
-              style={line}
-            >
-              {f.tabs.map((tab) => (
-                <div key={tab.id} style={line}>
-                  {/* DESIGN-TODO(opus) T6: specify the close-tab VoiceOver action label. */}
-                  {f.tabs.length > 1 && tab.showClose && (
-                    <Icon
-                      id={`timeline:tab-close:${tab.id}`}
+              {f.frameRate}
+            </text>
+            {f.tabs.length > 0 && (
+              <div
+                id="timeline:tabs"
+                label="Open compositions"
+                role="tablist"
+                metadata={{ designTodo: "T3" }}
+                style={line}
+              >
+                {f.tabs.map((tab) => (
+                  <div key={tab.id} style={line}>
+                    {f.tabs.length > 1 && tab.showClose && (
+                      <Icon
+                        id={`timeline:tab-close:${tab.id}`}
+                        label={`Close ${tab.name}`}
+                        title={`Close ${tab.name} (⌘W)`}
+                        symbol="xmark"
+                        tabIndex={-1}
+                        send={send}
+                        intent={{ type: "tab", id: tab.id, close: true }}
+                      />
+                    )}
+                    <UI.ToolbarItem
+                      id={`timeline:tab:${tab.id}`}
                       label={tab.name}
-                      symbol="xmark"
-                      tabIndex={-1}
-                      send={send}
-                      intent={{ type: "tab", id: tab.id, close: true }}
-                    />
-                  )}
-                  <UI.ToolbarItem
-                    id={`timeline:tab:${tab.id}`}
-                    label={tab.name}
-                    title={tab.name}
-                    role="tab"
-                    tabIndex={tab.active ? 0 : -1}
-                    aria-selected={tab.active}
-                    onClick={action(send, {
-                      type: "tab",
-                      id: tab.id,
-                      close: false,
-                    })}
-                    {...input(send, { kind: "tab", id: tab.id })}
-                    style={{
-                      color: t(tab.active ? "colors.text" : "colors.secondary"),
-                      fontSize: t("typography.body"),
-                    }}
-                  >
-                    {tab.name}
-                  </UI.ToolbarItem>
-                </div>
-              ))}
-            </div>
-          )}
-          <div
-            metadata={{ designTodo: "T4", requiredLayout: "flexible-spacer" }}
-          />
+                      title={tab.name}
+                      role="tab"
+                      tabIndex={tab.active ? 0 : -1}
+                      aria-selected={tab.active}
+                      onClick={action(send, {
+                        type: "tab",
+                        id: tab.id,
+                        close: false,
+                      })}
+                      {...input(send, { kind: "tab", id: tab.id })}
+                      style={{
+                        color: t(
+                          tab.active ? "colors.text" : "colors.secondary",
+                        ),
+                        fontSize: t("typography.body"),
+                      }}
+                    >
+                      {tab.name}
+                    </UI.ToolbarItem>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {f.hasComposition && (
+        <div style={{ ...line, gap: t("metrics.gap") }}>
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
@@ -262,7 +270,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             send={send}
             intent={{ type: "snap" }}
           />
-        </>
+        </div>
       )}
     </div>
   );
@@ -271,173 +279,190 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
   const show = row.hovered || row.focused;
   return (
     <>
-      {row.index !== null && (
-        <text
-          style={{
-            color: t("colors.muted"),
-            fontSize: t("typography.minimum"),
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {String(row.index).padStart(2, "0")}
-        </text>
-      )}
-      {row.canOpen && (
-        <Icon
-          id={`timeline:disclosure:${row.id}`}
-          label={row.label}
-          symbol="chevron.right"
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-        />
-      )}
-      {row.nameEditor ? (
-        <UI.TextField
-          label={row.label}
-          value={row.nameEditor.value}
-          binding={row.nameEditor.binding}
-          tabIndex={-1}
-          {...input(send, { kind: "row", id: row.id })}
-        />
-      ) : (
-        <text
-          title={row.label}
-          style={text}
-          onDoubleClick={action(send, { type: "rename", id: row.id })}
-        >
-          {row.label}
-        </text>
-      )}
-      <div metadata={{ designTodo: "T4", requiredLayout: "flexible-spacer" }} />
-      {row.transformable && (row.parent.set || show) && (
-        <Icon
-          id={`timeline:parent:${row.id}`}
-          label={`Parent: ${row.parent.name} · Drag to a layer`}
-          symbol="link"
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "switch", id: row.id, name: "parent" }}
-        />
-      )}
-      {(row.solo || show) && (
-        <Icon
-          id={`timeline:solo:${row.id}`}
-          label="Toggle Solo"
-          symbol={row.solo ? "s.circle.fill" : "s.circle"}
-          active={row.solo}
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "switch", id: row.id, name: "solo" }}
-        />
-      )}
-      {(row.locked || show) && (
-        <Icon
-          id={`timeline:lock:${row.id}`}
-          label="Toggle Lock"
-          symbol={row.locked ? "lock" : "lock.open"}
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "switch", id: row.id, name: "lock" }}
-        />
-      )}
-      {(!row.visible || show) && (
-        <Icon
-          id={`timeline:visibility:${row.id}`}
-          label="Toggle Visibility"
-          symbol={row.visible ? "eye" : "eye.slash"}
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "switch", id: row.id, name: "visibility" }}
-        />
-      )}
+      <div style={{ ...line, gap: t("metrics.gap") }}>
+        {row.index !== null && (
+          <text
+            style={{
+              color: t("colors.muted"),
+              fontSize: t("typography.minimum"),
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {String(row.index).padStart(2, "0")}
+          </text>
+        )}
+        {row.canOpen && (
+          <Icon
+            id={`timeline:disclosure:${row.id}`}
+            label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+            symbol="chevron.right"
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+          />
+        )}
+        {row.nameEditor ? (
+          <UI.TextField
+            label={row.label}
+            value={row.nameEditor.value}
+            binding={row.nameEditor.binding}
+            tabIndex={-1}
+            {...input(send, { kind: "row", id: row.id })}
+          />
+        ) : (
+          <text
+            title={row.label}
+            style={text}
+            onDoubleClick={action(send, { type: "rename", id: row.id })}
+          >
+            {row.label}
+          </text>
+        )}
+      </div>
+      <div style={line}>
+        {row.transformable && (row.parent.set || show) && (
+          <Icon
+            id={`timeline:parent:${row.id}`}
+            label={`Parent: ${row.parent.name} · Drag to a layer`}
+            symbol="link"
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "switch", id: row.id, name: "parent" }}
+          />
+        )}
+        {(row.solo || show) && (
+          <Icon
+            id={`timeline:solo:${row.id}`}
+            label="Toggle Solo"
+            symbol={row.solo ? "s.circle.fill" : "s.circle"}
+            active={row.solo}
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "switch", id: row.id, name: "solo" }}
+          />
+        )}
+        {(row.locked || show) && (
+          <Icon
+            id={`timeline:lock:${row.id}`}
+            label="Toggle Lock"
+            symbol={row.locked ? "lock" : "lock.open"}
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "switch", id: row.id, name: "lock" }}
+          />
+        )}
+        {(!row.visible || show) && (
+          <Icon
+            id={`timeline:visibility:${row.id}`}
+            label="Toggle Visibility"
+            symbol={row.visible ? "eye" : "eye.slash"}
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "switch", id: row.id, name: "visibility" }}
+          />
+        )}
+      </div>
     </>
   );
 }
 function Property({ row, send }: { row: PropertyRow; send: Send }) {
   return (
     <>
-      {row.animated && (
+      <div style={line}>
+        {row.animated && (
+          <Icon
+            id={`timeline:previous:${row.id}`}
+            label="Previous Keyframe (⇧J)"
+            symbol="chevron.left"
+            disabled={!row.previous}
+            tabIndex={-1}
+            send={send}
+            intent={{
+              type: "adjacentKey",
+              layer: row.layer,
+              path: row.path,
+              direction: "previous",
+            }}
+          />
+        )}
         <Icon
-          id={`timeline:previous:${row.id}`}
-          label="Previous Keyframe (⇧J)"
-          symbol="chevron.left"
-          disabled={!row.previous}
-          tabIndex={-1}
-          send={send}
-          intent={{
-            type: "adjacentKey",
-            layer: row.layer,
-            path: row.path,
-            direction: "previous",
-          }}
-        />
-      )}
-      <Icon
-        id={`timeline:diamond:${row.id}`}
-        label={row.keyAtPlayhead ? "Remove Keyframe" : "Add Keyframe"}
-        symbol="diamond"
-        active={row.animated}
-        disabled={row.locked}
-        tabIndex={-1}
-        send={send}
-        intent={{ type: "keyToggle", layer: row.layer, path: row.path }}
-      />
-      {row.animated && (
-        <Icon
-          id={`timeline:next:${row.id}`}
-          label="Next Keyframe (⇧K)"
-          symbol="chevron.right"
-          disabled={!row.next}
-          tabIndex={-1}
-          send={send}
-          intent={{
-            type: "adjacentKey",
-            layer: row.layer,
-            path: row.path,
-            direction: "next",
-          }}
-        />
-      )}
-      <text
-        title={row.path}
-        style={{ color: t("colors.secondary"), fontSize: t("typography.body") }}
-      >
-        {row.label}
-      </text>
-      <div metadata={{ designTodo: "T4", requiredLayout: "flexible-spacer" }} />
-      {row.numeric && row.scaleLinked === undefined ? (
-        <UI.NumberField
-          id={`timeline:value:${row.id}`}
-          label={row.label}
-          {...row.numeric}
+          id={`timeline:diamond:${row.id}`}
+          label={row.keyAtPlayhead ? "Remove Keyframe" : "Add Keyframe"}
+          symbol={
+            row.keyAtPlayhead
+              ? "diamond.fill"
+              : row.animated
+                ? "diamond.lefthalf.filled"
+                : "diamond"
+          }
+          active={row.animated}
           disabled={row.locked}
           tabIndex={-1}
+          send={send}
+          intent={{ type: "keyToggle", layer: row.layer, path: row.path }}
         />
-      ) : (
+        {row.animated && (
+          <Icon
+            id={`timeline:next:${row.id}`}
+            label="Next Keyframe (⇧K)"
+            symbol="chevron.right"
+            disabled={!row.next}
+            tabIndex={-1}
+            send={send}
+            intent={{
+              type: "adjacentKey",
+              layer: row.layer,
+              path: row.path,
+              direction: "next",
+            }}
+          />
+        )}
         <text
-          label={row.accessibilityLabel}
-          metadata={{ designTodo: "T5" }}
+          title={row.path}
           style={{
-            color: t(row.locked ? "colors.muted" : "colors.text"),
+            color: t("colors.secondary"),
             fontSize: t("typography.body"),
-            fontVariantNumeric: "tabular-nums",
           }}
         >
-          {row.readout}
+          {row.label}
         </text>
-      )}
-      {row.scaleLinked !== undefined && (
-        <Icon
-          id={`timeline:scale-link:${row.id}`}
-          label={row.scaleLinked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
-          symbol={row.scaleLinked ? "link" : "link.slash"}
-          disabled={row.locked}
-          tabIndex={-1}
-          send={send}
-          intent={{ type: "scaleLink", layer: row.layer }}
-        />
-      )}
+      </div>
+      <div style={line}>
+        {row.numeric && row.scaleLinked === undefined ? (
+          <UI.NumberField
+            id={`timeline:value:${row.id}`}
+            label={row.label}
+            {...row.numeric}
+            disabled={row.locked}
+            tabIndex={-1}
+          />
+        ) : (
+          <text
+            label={row.accessibilityLabel}
+            metadata={{ designTodo: "T5" }}
+            style={{
+              color: t(row.locked ? "colors.muted" : "colors.text"),
+              fontSize: t("typography.body"),
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {row.readout}
+          </text>
+        )}
+        {row.scaleLinked !== undefined && (
+          <Icon
+            id={`timeline:scale-link:${row.id}`}
+            label={
+              row.scaleLinked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"
+            }
+            symbol={row.scaleLinked ? "link" : "link.slash"}
+            disabled={row.locked}
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "scaleLink", layer: row.layer }}
+          />
+        )}
+      </div>
     </>
   );
 }
@@ -471,7 +496,7 @@ const TimelineRow = memo(
         }}
         // Child controls stop click bubbling; the outline remains the sole row Tab stop.
         style={{
-          ...line,
+          ...split,
           height: t(
             row.kind === "property"
               ? "metrics.property_row"
@@ -498,37 +523,36 @@ const TimelineRow = memo(
         ) : (
           <>
             <text style={text}>{row.label}</text>
-            <div
-              metadata={{ designTodo: "T4", requiredLayout: "flexible-spacer" }}
-            />
-            <Icon
-              id={`timeline:track-enable:${row.id}`}
-              label={row.accessibilityLabel}
-              symbol={
-                row.audio
-                  ? row.enabled
-                    ? "speaker.wave.2"
-                    : "speaker.slash"
-                  : row.enabled
-                    ? "eye"
-                    : "eye.slash"
-              }
-              tabIndex={-1}
-              send={send}
-              intent={{
-                type: "switch",
-                id: row.id,
-                name: row.audio ? "mute" : "visibility",
-              }}
-            />
-            <Icon
-              id={`timeline:track-lock:${row.id}`}
-              label="Toggle Lock"
-              symbol={row.locked ? "lock" : "lock.open"}
-              tabIndex={-1}
-              send={send}
-              intent={{ type: "switch", id: row.id, name: "lock" }}
-            />
+            <div style={line}>
+              <Icon
+                id={`timeline:track-enable:${row.id}`}
+                label={row.accessibilityLabel}
+                symbol={
+                  row.audio
+                    ? row.enabled
+                      ? "speaker.wave.2"
+                      : "speaker.slash"
+                    : row.enabled
+                      ? "eye"
+                      : "eye.slash"
+                }
+                tabIndex={-1}
+                send={send}
+                intent={{
+                  type: "switch",
+                  id: row.id,
+                  name: row.audio ? "mute" : "visibility",
+                }}
+              />
+              <Icon
+                id={`timeline:track-lock:${row.id}`}
+                label="Toggle Lock"
+                symbol={row.locked ? "lock" : "lock.open"}
+                tabIndex={-1}
+                send={send}
+                intent={{ type: "switch", id: row.id, name: "lock" }}
+              />
+            </div>
           </>
         )}
       </UI.TreeItem>
@@ -601,7 +625,7 @@ export function TimelinePanel({
           <div
             id="timeline:splitter"
             role="separator"
-            label="Timeline"
+            label="Layer column"
             tabIndex={0}
             metadata={{ designTodo: "T4", widthToken: "metrics.layer_column" }}
             style={{ minWidth: t("metrics.hit"), minHeight: t("metrics.hit") }}
