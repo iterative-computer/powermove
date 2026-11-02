@@ -57,7 +57,7 @@ Left to right; leading inset `m.inset`, items separated by `m.gap`.
 | Play/Pause button | borderless icon button, `play.fill` / `pause.fill` at `m.symbol_panel`, `c.text` (not secondary: it is the primary control here). Tooltip `Play / Pause (Space)`. |
 | Current time | `t.timecode` (13, `t.medium_weight`, tabular), `c.text`, format `HH:MM:SS:FF` at the composition rate. **Neutral** (language §17.2). Fixed width = width of `00:00:00:00` in that font, so it never reflows. Click → becomes a text field (see §5 *Go to time*). |
 | Frame rate | `t.minimum`, `c.muted`, `30 fps` / `29.97 fps` (integer rates without decimals, others to 2 decimals). |
-| Separator | 1 × `t.timecode` line-height vertical hairline, `m.border` `c.separator`, `m.gap` either side. Shown only when tabs follow. |
+| Separator | `m.symbol_panel`-tall vertical hairline, `m.border` `c.separator`, `m.gap` either side. Shown only when tabs follow. |
 | Composition tabs | One tab per open composition (v1.2.0 `comp-tabs.ts`). Tab: label `t.body`, `c.secondary`; active tab `c.text` with a 2 pt `c.accent_text` underline inset `m.inset − m.inner_radius` from each tab edge, bottom-aligned to the header. Height `m.header`. Max tab width `m.toolbar_title_width + m.hit + m.inset` (196 pt); longer names truncate with `…` and a tooltip. Close glyph `xmark` at `m.symbol_inline` at the **leading** edge of the tab (Mac convention), hit `m.hit`, shown on hover, on the active tab and on keyboard focus; hidden (and not focusable) when only one composition is open. Tabs scroll horizontally (no scrollbar; overflow fades with a 16 pt `c.panel` gradient edge — the only gradient allowed in the timeline). |
 | Spacer | flexible |
 | Mode control | GPUI segmented control (README §2 tab group recipe), labels `Layers` · `Tracks`, `t.minimum` `t.medium_weight`. Tooltips `Use layer timeline (After Effects)` / `Use track timeline (Premiere)`. |
@@ -267,7 +267,7 @@ Return seeks, Esc restores.
 | Panel | group | `Timeline` |
 | Play | button | `Play` / `Pause` |
 | Current time | text field | label `Current time`, value spoken as `0 hours 0 minutes 4 seconds 15 frames` |
-| Tabs | tab group `Open compositions`; tabs | composition name; selected |
+| Tabs | tab group `Open compositions`; tabs | composition name; selected; close button `Close {composition}` |
 | Mode, View | radio group | `Timeline mode` (`Layers`, `Tracks`); `Timeline view` (`Dope Sheet`, `Dope Sheet and Graph`, `Graph Editor`) |
 | Snap | toggle button | `Snapping`, on/off |
 | Track area | outline `Layers` (`AXRowCount` = all rows) | layer row: `Headline, text layer, 0:00 to 0:10` + `selected`, `locked`, `hidden`, `soloed`; property row: `Scale, 100 by 100 percent, animated, keyframe at playhead` |
@@ -305,6 +305,7 @@ Tooltips and menu items are listed in §2/§4. Additional:
 | Undo names | `Move Layers`, `Trim Layer`, `Split Layer`, `Move Keyframes`, `Add Keyframe`, `Clear Keyframes`, `Rename Layer`, `Toggle Visibility`, `Toggle Lock`, `Toggle Solo`, `Set Parent`, `Add Marker`, `Remove Marker`, `Set Work Area`, `Reset Work Area`, `Stagger Layers`, `Link Scale Axes` |
 | Empty composition | `Drag media here or import from your computer.` · button `Import…` |
 | Graph empty | `Select an animated property to see its curve.` |
+| Tab close tooltip | `Close {composition} (⌘W)` |
 | Parent tooltip | `Parent: {name} · Drag to a layer` (`None` when unparented; `Missing Layer` when broken) |
 | Status bar (selection) | `{n} layers selected` · `{n} keyframes selected` |
 

@@ -73,7 +73,8 @@ W018–W023 (A259, A412–A432, A454–A469, B019, B144).
 | **Focus** | the grid is one Tab stop; the focused card gets the focus ring around the thumbnail (outside the selection ring when both) and shows its hover actions. The hover-action buttons are not Tab stops; their commands are reachable from the keyboard (§5), the context menu and VoiceOver actions. |
 | **Selected / multi-select** | §2; ⌘-click toggles, ⇧-click ranges in grid order, marquee from empty space with autoscroll (A415, A456). |
 | **Disabled** | Add to Timeline disabled for a comp that can't nest (`nestable = false`); Delete Composition disabled when it is the last. Disabled hover buttons draw at `c.muted` glyph on `c.media_badge`. |
-| **Error** | offline/changed/unavailable per §2; import failures appear in Background Tasks (with `Retry`), and the failed file never becomes a card. A delete stopped by a project switch announces `Deletion stopped because you switched projects`. |
+| **Unknown readiness** | (not yet checked) poster if any, else kind glyph on `c.field`; no status capsule; meta shows known parts only (never `Ready to use`); hover actions `Delete Media` only; not draggable; after 2 s still unknown → presented as Loading. |
+| **Error** | panel transport lost: last view stays, card actions and Add disabled, one Error line at the top of the content (`c.warning` triangle, `t.body` `c.warning`) `Project media isn’t updating right now.`, announced once, cleared when publications resume. Offline/changed/unavailable per §2; import failures appear in Background Tasks (with `Retry`), and the failed file never becomes a card. A delete stopped by a project switch announces `Deletion stopped because you switched projects`. |
 | **Drag source** | dragging cards to the timeline/viewer: system drag image = the thumbnail(s) stacked with a count badge (`c.accent` capsule, `t.minimum` `c.selected_text`); originals at 50 %. Offline/loading cards are not draggable. |
 | **Drop** | external files → whole panel (overlay); onto a folder → into that folder; ⌥ while dropping a folder keeps individual files (not an image sequence, A418). Internal drag onto a folder/crumb moves the batch (one undo `Move to Folder`); a folder onto its descendant is rejected (no highlight, "not allowed" cursor). |
 | **Rename** | folder name becomes an AppKit field in place, text selected; Return commits, Esc cancels, blank ignored. |
@@ -152,6 +153,7 @@ selected`, `Added {name} to the timeline`, `Showed {name} in Finder`,
 | Drop overlay | `Add to Project Media` · `Drops here don’t touch the timeline.` |
 | Selection bar | `{n} selected` · `Delete Selected Media…` |
 | Folder default name | `Untitled Folder` |
+| Errors | `Project media isn’t updating right now.` |
 | Undo names | `Delete Media`, `New Folder`, `Rename Folder`, `Delete Folder`, `Move to Folder`, `Replace Media` |
 
 v1.2.0 sentence-case menu items (`Add to timeline`, `Delete media…`,

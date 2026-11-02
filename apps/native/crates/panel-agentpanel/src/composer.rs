@@ -148,6 +148,17 @@ impl Draft {
         draft.history = vec![draft.state.clone()];
         Ok(draft)
     }
+    /// Text-only worker projection; does not clone encoded attachment bodies.
+    pub fn text(&self) -> String {
+        self.state
+            .units
+            .iter()
+            .filter_map(|unit| match unit {
+                Unit::Char(c) => Some(*c),
+                Unit::File(_) => None,
+            })
+            .collect()
+    }
     pub fn legacy(&self) -> (String, Vec<Value>) {
         let mut text = String::new();
         let mut offset = 0;
