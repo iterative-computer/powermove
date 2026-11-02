@@ -198,9 +198,9 @@ impl Alert {
                 format!("Delete the workspace “{name}”?"),
                 "Your panels stay as they are. You can undo this.".into(),
                 AlertStyle::Warning,
-                // Keep S012's listed order; shared grammar forbids a destructive
-                // default. The adapter explicitly sets Cancel as default.
-                vec![delete(), cancel()],
+                // NSAlert order: first added = rightmost default, so Cancel
+                // goes first and the destructive Delete sits to its left.
+                vec![cancel(), delete()],
             ),
             Prompt::TrashLocal { name, .. } => (
                 format!("Move “{name}” to the Trash?"),
@@ -212,7 +212,7 @@ impl Alert {
                 format!("Delete “{name}” immediately?"),
                 "The project is archived in Powermove’s storage and can’t be opened from the Library again.".into(),
                 AlertStyle::Critical,
-                vec![delete(), cancel()],
+                vec![cancel(), delete()],
             ),
         };
         AlertView {

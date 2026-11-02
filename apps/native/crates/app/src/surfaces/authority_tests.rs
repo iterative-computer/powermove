@@ -394,10 +394,10 @@ fn workspace_exact_copy_button_order_cancel_default_and_archive_command() {
     );
     assert_eq!(
         v.buttons.iter().map(|b| b.label).collect::<Vec<_>>(),
-        ["Delete", "Cancel"]
+        ["Cancel", "Delete"]
     );
-    assert!(v.buttons[0].destructive && !v.buttons[0].default);
-    assert!(v.buttons[1].default && v.buttons[1].escape);
+    assert!(v.buttons[1].destructive && !v.buttons[1].default);
+    assert!(v.buttons[0].default && v.buttons[0].escape);
     let (mut a, mut s, mut h) = (Authority::default(), Services::default(), Host::default());
     let id = enqueue(&mut a, &mut s, &mut h, "w", workspace());
     a.answer(&target("w"), id, Action::Delete, &mut s, &mut h)
@@ -438,7 +438,7 @@ fn local_project_trash_and_permanent_archive_exact_copy() {
                 "The project is archived in Powermove’s storage and can’t be opened from the Library again."
             );
             assert_eq!(v.style, AlertStyle::Critical);
-            assert!(v.buttons[1].default);
+            assert!(v.buttons[0].default && v.buttons[1].destructive);
         } else {
             assert_eq!(v.message, "Move “Panel” to the Trash?");
             assert_eq!(
