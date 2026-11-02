@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["./**/*.ts", "./**/*.tsx"],
+  "exclude": [],
+  "compilerOptions": {
+    "paths": {
+      "powermove-v4/jsx-runtime": ["../../src/jsx-runtime.ts"],
+      "powermove-v4/jsx-dev-runtime": ["../../src/jsx-dev-runtime.ts"],
+      "powermove/ui": ["../../src/components/index.ts"]
+    }
+  }
+}

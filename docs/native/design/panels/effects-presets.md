@@ -1,6 +1,6 @@
-# Effects & Presets
+# Effects
 
-Panel id `fxbrowser`, title **Effects & Presets**, bottom of the right dock
+Panel id `fxbrowser`, title **Effects** (owner decision 3 renamed "Effects & Presets" until a presets library exists), bottom of the right dock
 under Properties (default height `pm_design::workspace::DEFAULT_EFFECTS`).
 Shared rules: [README.md](README.md).
 
@@ -28,7 +28,7 @@ groups, with identical row behaviour. Until then the panel shows effects.
 ## 2. Anatomy
 
 ```
-┌ Effects & Presets ───────────────────────────────┐  header (no buttons)
+┌ Effects ─────────────────────────────────────────┐  header (no buttons)
 │ [⌕ Search effects              ] [All ⌄]         │  search row m.row
 │ ⌄ Recent                                          │  group row (only under All, when recents exist)
 │     ✦ Glow                                  [+]  │  item row m.row, + on hover
@@ -62,7 +62,7 @@ groups, with identical row behaviour. Until then the panel shows effects.
 | **Focus** | list is one Tab stop; focus ring on the focused row. |
 | **Selected** | neutral fill; selection is browsing-only (does not apply). |
 | **Disabled** | Add disabled without a target layer (above). Rows remain draggable. |
-| **Error** | an item whose definition failed to load: label `c.muted`, trailing `exclamationmark.triangle.fill` `c.warning`, tooltip `This effect couldn’t load.`; not draggable or addable. |
+| **Error** | apply rejected: Error line under the search row (`c.warning` triangle, `t.body` `c.warning`) `Couldn’t add {label}. Try again.`, also announced; focus stays; clears on the next apply/query/scope change. Search failed: previous results stay, same line `Couldn’t search effects. Try again.`. Settings persistence failure: no UI (diagnostic only). An item whose definition failed to load: label `c.muted`, trailing `exclamationmark.triangle.fill` `c.warning`, tooltip `This effect couldn’t load.`; not draggable or addable. |
 | **Drag source** | dragging an item: system drag image = a capsule (`c.floating`, `m.control_radius`) with symbol + label; payload `{kind: 'effect', id, label}`; valid targets highlight per their specs (timeline row, viewer layer, Effect Controls insertion line, Properties panel). |
 | **Drop** | N/A (panel accepts no drops). |
 | **Multi-select** | N/A (single selection, v1.2.0). |
@@ -95,7 +95,7 @@ inserts it.
 |---|---|---|
 | Search | search field | `Search effects`; results count announced on change (`12 effects`) |
 | Scope | pop-up button | `Category, All` |
-| List | outline `Effects` (`AXRowCount`) | group: `Blur & Sharpen, 3 effects, expanded`; item: `Gaussian Blur, effect, Blur & Sharpen`; actions `Add to selected layer` |
+| List | outline `Effects` (`AXRowCount`) | group: `Blur & Sharpen, 3 effects, expanded`; item: `Gaussian Blur, effect, Blur & Sharpen` / preset `{label}, preset, {group}`; actions `Add to selected layer` |
 | Add | button | `Add Gaussian Blur` |
 
 ## 7. Appearance

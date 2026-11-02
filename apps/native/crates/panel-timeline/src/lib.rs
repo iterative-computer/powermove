@@ -11,6 +11,7 @@ mod session;
 pub mod snap;
 mod snapshot;
 pub mod tracks;
+pub mod v4;
 
 pub use behaviour::*;
 pub use client::{ClientError, TimelineClient};

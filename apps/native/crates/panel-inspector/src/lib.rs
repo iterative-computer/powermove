@@ -11,6 +11,8 @@ mod edit;
 mod effects;
 pub mod input;
 mod relations;
+pub mod v4_effects;
+pub mod v4_properties;
 mod view;
 
 pub use edit::{Binding, EditSession, PropertyAction, ServiceIntent};
