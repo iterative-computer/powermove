@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createRoot,
@@ -45,6 +46,10 @@ export function binaries() {
   const workspace = fileURLToPath(
     new URL("../../../../../Cargo.toml", import.meta.url),
   );
+  const target = resolve(
+    process.env.CARGO_TARGET_DIR ??
+      fileURLToPath(new URL("../../../../../target", import.meta.url)),
+  );
   if (!built) {
     for (const args of [
       [
@@ -53,6 +58,8 @@ export function binaries() {
         "--locked",
         "--manifest-path",
         workspace,
+        "--target-dir",
+        target,
         "-p",
         "pm-panel-viewerchrome",
         "--examples",
@@ -64,22 +71,15 @@ export function binaries() {
     built = true;
   }
   return {
-    ui: fileURLToPath(
-      new URL(
-        "../../../../../target/debug/examples/v4_panel_wire",
-        import.meta.url,
-      ),
-    ),
-    model: fileURLToPath(
-      new URL("../../../../../target/debug/examples/v4_wire", import.meta.url),
-    ),
+    ui: join(target, "debug/examples/v4_panel_wire"),
+    model: join(target, "debug/examples/v4_wire"),
   };
 }
 export function replay(commits: Commit[]) {
   const result = Bun.spawnSync([binaries().ui], {
     stdin: Buffer.from(commits.map((c) => JSON.stringify(c)).join("\n") + "\n"),
   });
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
   return result.stdout
     .toString()
     .trim()

@@ -1,10 +1,14 @@
-import { test, expect } from "bun:test";
+import { beforeAll, test, expect } from "bun:test";
 import { HostClient, type HostRequest } from "../../../src";
 import { ViewerService } from "../service";
 import { ViewerPanel } from "../panel";
 import { mountViewer } from "../index";
 import { snapshot, type ViewerSnapshot } from "../contract";
-import { ack, fixture, modelWorker, recorder } from "./helpers";
+import { ack, binaries, fixture, modelWorker, recorder } from "./helpers";
+
+beforeAll(() => {
+  binaries();
+}, 120_000);
 const identity = { realm: "viewer-test", generation: 1, project: "p" };
 
 test("UI -> v4 host data -> Rust model -> actual kernel ack -> publication", async () => {

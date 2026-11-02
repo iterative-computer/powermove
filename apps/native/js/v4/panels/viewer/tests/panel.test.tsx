@@ -1,8 +1,13 @@
-import { test, expect } from "bun:test";
+import { beforeAll, test, expect } from "bun:test";
 import { ViewerPanel, type ViewerActions } from "../panel";
 import { snapshot, zoomTitle, resolutionTitle, percent } from "../contract";
 import type { ViewerSnapshot } from "../contract";
-import { fixture, recorder, replay } from "./helpers";
+import { binaries, fixture, recorder, replay } from "./helpers";
+
+// A cold Rust build is setup work, not part of a five-second UI assertion.
+beforeAll(() => {
+  binaries();
+}, 120_000);
 
 const actions: ViewerActions = { drive() {}, open() {} };
 const cases: [string, (s: ViewerSnapshot) => void][] = [

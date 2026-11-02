@@ -1,4 +1,4 @@
-//! Linux test-only worker: real model/actor acknowledgements, synthetic project.
+//! Headless test-only worker: real model/actor acknowledgements, synthetic project.
 //! Not an application KernelData adapter; no media/renderer is fabricated.
 use pm_kernel::{Caller, KernelActor, KernelConfig, OpenSource};
 use pm_model::{
@@ -8,6 +8,12 @@ use pm_model::{
 use pm_panel_viewerchrome::{v4::Session, *};
 use std::io::{self, BufRead, Write};
 fn main() {
+    // Blocking kernel waits are forbidden on the macOS process main thread.
+    // Keep the complete request/publication loop on the same worker thread.
+    std::thread::spawn(run).join().expect("model wire worker");
+}
+
+fn run() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let fixture = r##"{"id":"p","name":"Launch Film","compId":"c","compName":"Launch Film","w":1920,"h":1080,"fps":24,"dur":10,"work":[1,9],"bg":"#000000","layers":[],"assets":{},"comps":{}}"##;
     actor
