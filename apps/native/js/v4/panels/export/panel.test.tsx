@@ -322,7 +322,7 @@ test("accessibility exposes dialog, exact control labels, units and actual progr
   ).toMatchObject({ role: "Dialog", label: "Export" });
   expect(
     row.ax.find((n: any) => n.id === named(f.root, "export.width").id),
-  ).toMatchObject({ role: "NumberInput", label: "Size", value: "1920 pixels" });
+  ).toMatchObject({ role: "NumberInput", label: "Width", value: "1920 pixels" });
   expect(
     row.ax.find((n: any) => n.id === named(f.root, "export.audio").id),
   ).toMatchObject({ role: "CheckBox", label: "Include Audio" });

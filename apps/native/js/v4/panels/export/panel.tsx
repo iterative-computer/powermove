@@ -20,6 +20,20 @@ const text = {
   color: token("colors.text"),
   fontSize: token("typography.body"),
 };
+/** Leading content and trailing controls on one line (design review 2026-11-01). */
+const line = {
+  display: "flex",
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+} as const;
+const cluster = {
+  display: "flex",
+  flexDirection: "row",
+  alignItems: "center",
+  gap: token("metrics.gap"),
+} as const;
+const stack = { display: "flex", flexDirection: "column" } as const;
 const detail = {
   color: token("colors.muted"),
   fontSize: token("typography.minimum"),
@@ -48,9 +62,13 @@ function FormRow(props: {
         },
       }}
     >
-      <text style={text}>{label}</text>
-      <text style={detail}>{props.help ?? help}</text>
-      {props.children}
+      <div style={line}>
+        <div style={stack}>
+          <text style={text}>{label}</text>
+          <text style={detail}>{props.help ?? help}</text>
+        </div>
+        <div style={cluster}>{props.children}</div>
+      </div>
     </div>
   );
 }
@@ -245,25 +263,28 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   },
                 }}
               />
-              <text style={{ ...text, fontVariantNumeric: "tabular-nums" }}>
-                {progress(s.run).leading}
-              </text>
-              {progress(s.run).eta ? (
-                <text
-                  style={{
-                    color: token("colors.secondary"),
-                    fontSize: token("typography.body"),
-                  }}
-                >
-                  {progress(s.run).eta}
+              <div style={line}>
+                <text style={{ ...text, fontVariantNumeric: "tabular-nums" }}>
+                  {progress(s.run).leading}
                 </text>
-              ) : null}
+                {progress(s.run).eta ? (
+                  <text
+                    style={{
+                      color: token("colors.secondary"),
+                      fontSize: token("typography.body"),
+                    }}
+                  >
+                    {progress(s.run).eta}
+                  </text>
+                ) : null}
+              </div>
             </>
           )}
           <div
             role="group"
             label="Export"
             metadata={{ export: { recipe: "sheet-footer" } }}
+            style={{ ...cluster, justifyContent: "end" }}
           >
             {s.run.phase === "failed" ? (
               <>
@@ -329,6 +350,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     style={{
                       ...detail,
                       background: token("colors.panel_secondary"),
+                      borderRadius: token("metrics.capsule_radius"),
+                      paddingLeft: token("metrics.gap"),
+                      paddingRight: token("metrics.gap"),
                     }}
                   >
                     {label}
@@ -364,7 +388,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                         {i ? <text style={text}>×</text> : null}
                         <UI.NumberField
                           id={`export.${axis}`}
-                          label="Size"
+                          label={axis === "width" ? "Width" : "Height"}
                           title={rows.size[1]}
                           value={model.size[axis]}
                           binding={s.bindings[axis]}
@@ -474,33 +498,38 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 height: ["metrics.control", "metrics.inset", "metrics.inset"],
               },
             }}
+            style={line}
           >
-            <text
-              id="export.summary"
-              label={p.summary}
-              metadata={{ export: { announce: "polite" } }}
-              style={{
-                color: token("colors.secondary"),
-                fontSize: token("typography.body"),
-                fontVariantNumeric: "tabular-nums",
-              }}
-            >
-              {p.summary}
-            </text>
-            {p.note ? <text style={detail}>{p.note}</text> : null}
-            <Action
-              id="export.cancel"
-              label="Cancel"
-              disabled={busy}
-              onClick={() => watch(model.cancel())}
-            />
-            <Action
-              id="export.start"
-              label={model.actionLabel}
-              primary
-              disabled={!model.canExport}
-              onClick={() => watch(model.start())}
-            />
+            <div style={stack}>
+              <text
+                id="export.summary"
+                label={p.summary}
+                metadata={{ export: { announce: "polite" } }}
+                style={{
+                  color: token("colors.secondary"),
+                  fontSize: token("typography.body"),
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {p.summary}
+              </text>
+              {p.note ? <text style={detail}>{p.note}</text> : null}
+            </div>
+            <div style={cluster}>
+              <Action
+                id="export.cancel"
+                label="Cancel"
+                disabled={busy}
+                onClick={() => watch(model.cancel())}
+              />
+              <Action
+                id="export.start"
+                label={model.actionLabel}
+                primary
+                disabled={!model.canExport}
+                onClick={() => watch(model.start())}
+              />
+            </div>
           </div>
         </>
       )}
