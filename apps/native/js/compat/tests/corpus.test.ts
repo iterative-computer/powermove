@@ -251,6 +251,9 @@ test("frozen host graph regenerates exactly from v1.2.0 plus recorded adaptation
     "binding",
     "pm-facades",
     "icons",
+    "store-api",
+    "ease-runtime",
+    "sandbox-rpc",
   ]) {
     const expected = await frozen(name),
       actual = await Bun.file(
