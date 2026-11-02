@@ -623,8 +623,6 @@ impl<P: LibraryPort> LibraryController<P> {
                             self.rename = None;
                         }
                         if let Some(id) = self.pending_duplicate.take() {
-                            // The duplicate may be outside the current filter. Do
-                            // not silently change the user's search/section.
                             if self.rows.iter().any(|r| r.id == id) {
                                 self.selected = Some(id.clone());
                                 if let Ok(row) = self.row(&id) {
@@ -636,7 +634,19 @@ impl<P: LibraryPort> LibraryController<P> {
                                 }
                                 self.effects.push_back(HostEffect::Rename { id });
                             } else {
-                                self.effects.push_back(HostEffect::IntegrationGap("DESIGN-TODO(opus): reveal/select a duplicate outside the current filter without guessing a filter change."));
+                                // Opus answer: clear a non-matching search before selecting.
+                                // Keep the pending ID through the worker's next load.
+                                if self.snapshot.rows.iter().any(|r| {
+                                    r.id == id
+                                        && !r
+                                            .name
+                                            .to_lowercase()
+                                            .contains(&self.query.text.trim().to_lowercase())
+                                }) {
+                                    self.query.text.clear();
+                                    self.pending_duplicate = Some(id);
+                                    let _ = self.refresh();
+                                }
                             }
                         }
                         for row in self.snapshot.rows.iter().filter(|r| r.open) {
