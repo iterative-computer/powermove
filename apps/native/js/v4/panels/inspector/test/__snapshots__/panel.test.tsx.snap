@@ -406,6 +406,7 @@ exports[`spec §3: composition six-op tree, native validator and AX snapshot 1`]
 {"op":"setProps","id":49,"patch":{"disabled":false}}
 {"op":"setProps","id":49,"patch":{"binding":"bg"}}
 {"op":"setProps","id":49,"patch":{"style":{"color":{"token":"colors.text"},"fontSize":{"token":"typography.body"},"minWidth":{"token":"metrics.hit"},"minHeight":{"token":"metrics.hit"},"height":{"token":"metrics.field"},"borderRadius":{"token":"metrics.control_radius"}}}}
+{"op":"setProps","id":49,"patch":{"metadata":{"pmKit":{"minimal":false}}}}
 {"op":"setProps","id":49,"patch":{"aria-haspopup":"dialog"}}
 {"op":"setProps","id":49,"patch":{"control":"color"}}
 {"op":"setProps","id":49,"patch":{"labelledBy":"generated-label"}}
@@ -475,7 +476,7 @@ tree
 {"children":[47],"id":46,"input":null,"listeners":{},"parent":45,"props":{"data-pm-slot":"label","id":"generated-label","label":"Background","style":{"color":{"token":"colors.secondary"},"fontSize":{"token":"typography.label"},"overflow":"hidden","textOverflow":"ellipsis","whiteSpace":"nowrap"},"title":"Background"},"text":"","type":"text"}
 {"children":[],"id":47,"input":null,"listeners":{},"parent":46,"props":{},"text":"Background","type":"text"}
 {"children":[49],"id":48,"input":null,"listeners":{},"parent":45,"props":{"data-pm-slot":"value","style":{"maxWidth":{"token":"metrics.value_column"},"minWidth":{"token":"metrics.value_column"},"width":{"token":"metrics.value_column"}}},"text":"","type":"div"}
-{"children":[],"id":49,"input":null,"listeners":{},"parent":48,"props":{"aria-haspopup":"dialog","binding":"bg","control":"color","data-pm-component":"colour-well","disabled":false,"id":"value:bg","label":"Background","labelledBy":"generated-label","style":{"borderRadius":{"token":"metrics.control_radius"},"color":{"token":"colors.text"},"fontSize":{"token":"typography.body"},"height":{"token":"metrics.field"},"minHeight":{"token":"metrics.hit"},"minWidth":{"token":"metrics.hit"}},"value":"#F5F3EF"},"text":"","type":"button"}
+{"children":[],"id":49,"input":null,"listeners":{},"parent":48,"props":{"aria-haspopup":"dialog","binding":"bg","control":"color","data-pm-component":"colour-well","disabled":false,"id":"value:bg","label":"Background","labelledBy":"generated-label","metadata":{"pmKit":{"minimal":false}},"style":{"borderRadius":{"token":"metrics.control_radius"},"color":{"token":"colors.text"},"fontSize":{"token":"typography.body"},"height":{"token":"metrics.field"},"minHeight":{"token":"metrics.hit"},"minWidth":{"token":"metrics.hit"}},"value":"#F5F3EF"},"text":"","type":"button"}
 {"children":[51],"id":50,"input":null,"listeners":{},"parent":7,"props":{"style":{"color":{"token":"colors.muted"},"fontSize":{"token":"typography.minimum"},"paddingLeft":{"token":"metrics.inset"},"paddingRight":{"token":"metrics.inset"},"paddingTop":{"token":"metrics.gap"}}},"text":"","type":"text"}
 {"children":[],"id":51,"input":null,"listeners":{},"parent":50,"props":{},"text":"Select a layer to edit its properties.","type":"text"}
 accessibility

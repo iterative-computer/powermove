@@ -319,6 +319,25 @@ exports[`wire snapshot: selected video 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -483,6 +502,28 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -647,6 +688,44 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -827,6 +906,20 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -983,6 +1076,24 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -1636,6 +1747,24 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -1834,6 +1963,16 @@ exports[`wire snapshot: selected video 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -2647,6 +2786,25 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                   "mp4": "H.264 MP4 export is unavailable on this Mac",
                                 },
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": true,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -2811,6 +2969,28 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -2975,6 +3155,44 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -3155,6 +3373,20 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -3311,6 +3543,24 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -3964,6 +4214,24 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -4162,6 +4430,16 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -4973,6 +5251,25 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -5137,6 +5434,28 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -5301,6 +5620,44 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -5481,6 +5838,20 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area · not set",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area · not set",
@@ -5637,6 +6008,24 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -6290,6 +6679,24 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -6488,6 +6895,16 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -7299,6 +7716,25 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -7463,6 +7899,28 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -7627,6 +8085,44 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -7807,6 +8303,20 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -8595,6 +9105,24 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -8793,6 +9321,16 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -9604,6 +10142,20 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "PNG sequence",
+                                    "v": "png",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "Still frame (PNG)",
+                                    "v": "still",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -9763,6 +10315,28 @@ exports[`wire snapshot: PNG sequence 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -9927,6 +10501,44 @@ exports[`wire snapshot: PNG sequence 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -10107,6 +10719,20 @@ exports[`wire snapshot: PNG sequence 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -10794,6 +11420,16 @@ exports[`wire snapshot: PNG sequence 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -11605,6 +12241,20 @@ exports[`wire snapshot: still 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "PNG sequence",
+                                    "v": "png",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "Still frame (PNG)",
+                                    "v": "still",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -11764,6 +12414,28 @@ exports[`wire snapshot: still 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -12459,6 +13131,16 @@ exports[`wire snapshot: still 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -13840,6 +14522,25 @@ exports[`wire snapshot: no captions 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -14004,6 +14705,28 @@ exports[`wire snapshot: no captions 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -14168,6 +14891,44 @@ exports[`wire snapshot: no captions 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -14348,6 +15109,20 @@ exports[`wire snapshot: no captions 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -14504,6 +15279,24 @@ exports[`wire snapshot: no captions 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -15018,6 +15811,16 @@ exports[`wire snapshot: no captions 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -15829,6 +16632,25 @@ exports[`wire snapshot: multiple captions 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -15993,6 +16815,28 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -16157,6 +17001,44 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -16337,6 +17219,20 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -16493,6 +17389,24 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -17146,6 +18060,24 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -17344,6 +18276,16 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -18155,6 +19097,25 @@ exports[`wire snapshot: custom size 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -18319,6 +19280,28 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -18743,6 +19726,44 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -18923,6 +19944,20 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -19079,6 +20114,24 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -19732,6 +20785,24 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -19930,6 +21001,16 @@ exports[`wire snapshot: custom size 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -20741,6 +21822,25 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -20905,6 +22005,28 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -21351,6 +22473,44 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -21531,6 +22691,20 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -21687,6 +22861,24 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -22340,6 +23532,24 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -22538,6 +23748,16 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -23352,6 +24572,25 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -23516,6 +24755,28 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -23680,6 +24941,44 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -23860,6 +25159,20 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -24016,6 +25329,24 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -24669,6 +26000,24 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -24867,6 +26216,16 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "disabled": true,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",
@@ -26719,6 +28078,25 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               "export": {
                                 "optionSubtitles": {},
                               },
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "disabled": false,
+                                    "label": "QuickTime · ProRes 4444",
+                                    "v": "prores",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "MP4 · H.264",
+                                    "v": "mp4",
+                                  },
+                                  {
+                                    "disabled": false,
+                                    "label": "WebM · VP9",
+                                    "v": "webm",
+                                  },
+                                ],
+                              },
                             },
                             "options": [
                               {
@@ -26883,6 +28261,28 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.scale",
                             "label": "Resolution",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Half · 960×540",
+                                    "v": 0.5,
+                                  },
+                                  {
+                                    "label": "Full · 1920×1080",
+                                    "v": 1,
+                                  },
+                                  {
+                                    "label": "2× · 3840×2160",
+                                    "v": 2,
+                                  },
+                                  {
+                                    "label": "Custom size…",
+                                    "v": "custom",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Half · 960×540",
@@ -27047,6 +28447,44 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.fps",
                             "label": "Frame Rate",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "23.976 fps",
+                                    "v": 23.976023976023978,
+                                  },
+                                  {
+                                    "label": "24 fps",
+                                    "v": 24,
+                                  },
+                                  {
+                                    "label": "25 fps",
+                                    "v": 25,
+                                  },
+                                  {
+                                    "label": "29.97 fps",
+                                    "v": 29.97002997002997,
+                                  },
+                                  {
+                                    "label": "30 fps",
+                                    "v": 30,
+                                  },
+                                  {
+                                    "label": "50 fps",
+                                    "v": 50,
+                                  },
+                                  {
+                                    "label": "59.94 fps",
+                                    "v": 59.94005994005994,
+                                  },
+                                  {
+                                    "label": "60 fps",
+                                    "v": 60,
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "23.976 fps",
@@ -27227,6 +28665,20 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.range",
                             "label": "Range",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Work area",
+                                    "v": "work",
+                                  },
+                                  {
+                                    "label": "Full composition",
+                                    "v": "all",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Work area",
@@ -27383,6 +28835,24 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.quality",
                             "label": "Quality",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Draft · 4 Mbps",
+                                    "v": "draft",
+                                  },
+                                  {
+                                    "label": "High · 16 Mbps",
+                                    "v": "high",
+                                  },
+                                  {
+                                    "label": "Max · 40 Mbps",
+                                    "v": "max",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Draft · 4 Mbps",
@@ -28036,6 +29506,24 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.captionsSidecar",
                             "label": "Caption File",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "None",
+                                    "v": "none",
+                                  },
+                                  {
+                                    "label": "SubRip (.srt)",
+                                    "v": "srt",
+                                  },
+                                  {
+                                    "label": "WebVTT (.vtt)",
+                                    "v": "vtt",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "None",
@@ -28234,6 +29722,16 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "disabled": false,
                             "id": "export.preset",
                             "label": "Saved Preset",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "Choose Preset",
+                                    "v": "",
+                                  },
+                                ],
+                              },
+                            },
                             "options": [
                               {
                                 "label": "Choose Preset",

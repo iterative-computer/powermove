@@ -1,4 +1,4 @@
-use super::{Component, Layout};
+use super::{Component, DesignTokenTable, Layout};
 use crate::{Diagnostic, Id, Node, Surface};
 use pm_design::Tokens;
 use serde_json::Value;
@@ -62,7 +62,20 @@ pub fn interactive(node: &Node) -> bool {
 /// Diagnostic policy for v4 panels; does not change the v1–3 wire contract or
 /// silently reject/normalize authored data. Run after accepted atomic commits.
 pub fn validate_panel(surface: &Surface, tokens: &Tokens, layout: &Layout) -> Vec<Diagnostic> {
-    let table = serde_json::to_value(tokens).expect("finite design tokens");
+    validate_panel_with_table(
+        surface,
+        tokens,
+        &DesignTokenTable::from_design(tokens),
+        layout,
+    )
+}
+pub fn validate_panel_with_table(
+    surface: &Surface,
+    tokens: &Tokens,
+    table: &DesignTokenTable,
+    layout: &Layout,
+) -> Vec<Diagnostic> {
+    let table = table.value();
     let mut out = vec![];
     for node in surface.nodes().values().filter(|n| n.id != 0) {
         let mut flag = |prop: &str, code: &str| {
@@ -76,13 +89,39 @@ pub fn validate_panel(surface: &Surface, tokens: &Tokens, layout: &Layout) -> Ve
         if node.props.contains_key("data-pm-component") && component.is_none() {
             flag("data-pm-component", "unknownComponent");
         }
+        if component == Some(Component::Switch) && !super::additions::settings_host(surface, node) {
+            flag("metadata.hostWindow", "switchOutsideSettings");
+        }
+        if component == Some(Component::SecureField) {
+            for prop in ["value", "control", "onInput", "onChange"] {
+                if node.props.contains_key(prop) {
+                    flag(prop, "secureValueOnSurface");
+                }
+            }
+            if node
+                .props
+                .get("binding")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.is_empty())
+            {
+                flag("binding", "missingSecureBinding");
+            }
+        }
+        if component == Some(Component::ViewerGizmo)
+            && !matches!(
+                super::additions::str_option(node, "kind"),
+                Some("transform" | "rotation" | "anchor" | "path-vertex" | "tangent")
+            )
+        {
+            flag("metadata.pmKit.kind", "invalidGizmo");
+        }
         let needs_name = interactive(node) || component.is_some();
         if needs_name && accessible_label(surface, node).trim().is_empty() {
             flag("label", "missingLabel");
         }
         let style = surface.computed_style(node.id).unwrap_or_default();
         for (key, value) in &style {
-            if !valid_style(key, value, &table) {
+            if !valid_style(key, value, table) {
                 flag(&format!("style.{key}"), "nonTokenValue");
             }
         }
@@ -90,10 +129,10 @@ pub fn validate_panel(surface: &Surface, tokens: &Tokens, layout: &Layout) -> Ve
             let bounds = layout.get(&node.id);
             let width = bounds
                 .map(|r| r.x1 - r.x0)
-                .or_else(|| style.get("minWidth").and_then(|v| token_number(v, &table)));
+                .or_else(|| style.get("minWidth").and_then(|v| token_number(v, table)));
             let height = bounds
                 .map(|r| r.y1 - r.y0)
-                .or_else(|| style.get("minHeight").and_then(|v| token_number(v, &table)));
+                .or_else(|| style.get("minHeight").and_then(|v| token_number(v, table)));
             match (width, height) {
                 (Some(w), Some(h))
                     if w.is_finite()
@@ -113,7 +152,7 @@ pub fn validate_panel(surface: &Surface, tokens: &Tokens, layout: &Layout) -> Ve
         }
         if matches!(
             component,
-            Some(Component::PopoverAnchor | Component::SheetAnchor)
+            Some(Component::PopoverAnchor | Component::SheetAnchor | Component::ColourPopover)
         ) && !node
             .props
             .get("anchor")

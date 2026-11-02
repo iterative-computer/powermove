@@ -1,0 +1,1611 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`switch: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Settings",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "hostWindow": "settings",
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "label": "Reopen Last Project",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "binding": "reopen",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "role": "switch",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "aria-checked": true,
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "control": "toggle",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "switch",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "value": true,
+        },
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`secure-field: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "API Key",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "binding": "keychain:provider",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "tabIndex": 0,
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "secure-field",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "background": {
+              "token": "colors.field",
+            },
+            "borderRadius": {
+              "token": "metrics.control_radius",
+            },
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.field",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`colour-well: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Background",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "binding": "background",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "minimal": true,
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "aria-haspopup": "dialog",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "control": "color",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "colour-well",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "borderRadius": {
+              "token": "metrics.control_radius",
+            },
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.field",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "value": "color(display-p3 1 0.125 0 / .7)",
+        },
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`colour-popover: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "anchored",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Background",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "binding": "background",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "anchor": 0,
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "dialog",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "focusScope": true,
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-dismiss-outside": true,
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-live-edit": true,
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "fill": true,
+              "nativeColourPicker": true,
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "preventDefault": {
+            "keydown": [
+              "Escape",
+            ],
+          },
+        },
+      },
+      {
+        "flags": {
+          "keydown": {
+            "bubble": false,
+            "capture": false,
+            "keys": [
+              "Escape",
+            ],
+            "preventDefault": true,
+          },
+        },
+        "id": 1,
+        "op": "setListeners",
+      },
+      {
+        "flags": {
+          "keydown": {
+            "bubble": true,
+            "capture": false,
+            "keys": [
+              "Escape",
+            ],
+            "preventDefault": true,
+          },
+        },
+        "id": 1,
+        "op": "setListeners",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "colour-popover",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "background": {
+              "token": "colors.floating",
+            },
+            "width": {
+              "token": "metrics.popover_width",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`form-group: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Appearance",
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "role": "heading",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.title",
+            },
+            "fontWeight": {
+              "token": "typography.semibold_weight",
+            },
+            "marginBottom": {
+              "token": "metrics.gap",
+            },
+          },
+        },
+      },
+      {
+        "id": 3,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 3,
+        "op": "setText",
+        "text": "Appearance",
+      },
+      {
+        "before": null,
+        "id": 3,
+        "op": "insertBefore",
+        "parent": 2,
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 4,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 4,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 4,
+        "op": "setProps",
+        "patch": {
+          "label": "Appearance",
+        },
+      },
+      {
+        "id": 4,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "form-group",
+        },
+      },
+      {
+        "id": 4,
+        "op": "setProps",
+        "patch": {
+          "style": {},
+        },
+      },
+      {
+        "id": 5,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "label": "Appearance",
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "form-row",
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "display": "flex",
+            "flexDirection": "row",
+            "justifyContent": "space-between",
+            "padding": {
+              "token": "metrics.inset",
+            },
+          },
+        },
+      },
+      {
+        "id": 6,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 6,
+        "op": "setProps",
+        "patch": {
+          "data-pm-slot": "label",
+        },
+      },
+      {
+        "id": 7,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 7,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+          },
+        },
+      },
+      {
+        "id": 8,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 8,
+        "op": "setText",
+        "text": "Appearance",
+      },
+      {
+        "before": null,
+        "id": 8,
+        "op": "insertBefore",
+        "parent": 7,
+      },
+      {
+        "before": null,
+        "id": 7,
+        "op": "insertBefore",
+        "parent": 6,
+      },
+      {
+        "id": 9,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 9,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.muted",
+            },
+            "fontSize": {
+              "token": "typography.minimum",
+            },
+          },
+        },
+      },
+      {
+        "id": 10,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 10,
+        "op": "setText",
+        "text": "Follow your system setting.",
+      },
+      {
+        "before": null,
+        "id": 10,
+        "op": "insertBefore",
+        "parent": 9,
+      },
+      {
+        "before": null,
+        "id": 9,
+        "op": "insertBefore",
+        "parent": 6,
+      },
+      {
+        "before": null,
+        "id": 6,
+        "op": "insertBefore",
+        "parent": 5,
+      },
+      {
+        "id": 11,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 11,
+        "op": "setProps",
+        "patch": {
+          "data-pm-slot": "control",
+        },
+      },
+      {
+        "id": 12,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "label": "Appearance",
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "binding": "scheme",
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "options": [
+            "system",
+          ],
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "menu": [
+                "system",
+              ],
+            },
+          },
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "background": {
+              "token": "colors.field",
+            },
+            "borderRadius": {
+              "token": "metrics.control_radius",
+            },
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.control",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "control": "select",
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "pop-up-button",
+        },
+      },
+      {
+        "id": 12,
+        "op": "setProps",
+        "patch": {
+          "value": "system",
+        },
+      },
+      {
+        "before": null,
+        "id": 12,
+        "op": "insertBefore",
+        "parent": 11,
+      },
+      {
+        "before": null,
+        "id": 11,
+        "op": "insertBefore",
+        "parent": 5,
+      },
+      {
+        "before": null,
+        "id": 5,
+        "op": "insertBefore",
+        "parent": 4,
+      },
+      {
+        "before": null,
+        "id": 4,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`viewer-gizmo: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Scale Top Left",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "kind": "transform",
+              "position": {
+                "x": 12.5,
+                "y": -2,
+              },
+              "selected": false,
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "viewer-gizmo",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`viewer-overlay: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Viewer Controls",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "viewer-overlay",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {},
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "id": "viewer.zoom",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "label": "Zoom",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "binding": "zoom",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "options": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "Zoom In",
+              "v": "in",
+            },
+          ],
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "menu": [
+                {
+                  "label": "Fit",
+                  "v": "fit",
+                },
+                {
+                  "label": "",
+                  "separator": true,
+                  "v": "separator",
+                },
+                {
+                  "keyEquivalent": "⌘=",
+                  "label": "Zoom In",
+                  "v": "in",
+                },
+              ],
+              "widthSample": "Fit (100 %)",
+            },
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "background": {
+              "token": "colors.field",
+            },
+            "borderRadius": {
+              "token": "metrics.control_radius",
+            },
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.control",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "control": "select",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "pop-up-button",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "value": "fit",
+        },
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`banner: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Media offline in this frame",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "status",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "hasAction": true,
+              "placement": "viewer",
+              "severity": "warning",
+              "symbol": "exclamationmark.triangle",
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "banner",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {},
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "data-pm-slot": "symbol",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "decorative": true,
+              "symbol": "exclamationmark.triangle",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 3,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 3,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+          },
+        },
+      },
+      {
+        "id": 4,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 4,
+        "op": "setText",
+        "text": "Media offline in this frame",
+      },
+      {
+        "before": null,
+        "id": 4,
+        "op": "insertBefore",
+        "parent": 3,
+      },
+      {
+        "before": null,
+        "id": 3,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 5,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "label": "Retry",
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "buttonRole": "normal",
+            },
+          },
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "push-button",
+        },
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.control",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 6,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 6,
+        "op": "setText",
+        "text": "Retry",
+      },
+      {
+        "before": null,
+        "id": 6,
+        "op": "insertBefore",
+        "parent": 5,
+      },
+      {
+        "before": null,
+        "id": 5,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 7,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 7,
+        "op": "setProps",
+        "patch": {
+          "label": "Dismiss",
+        },
+      },
+      {
+        "id": 7,
+        "op": "setProps",
+        "patch": {
+          "title": "Dismiss",
+        },
+      },
+      {
+        "flags": {
+          "click": {
+            "bubble": true,
+            "capture": false,
+            "keys": [],
+            "preventDefault": false,
+          },
+        },
+        "id": 7,
+        "op": "setListeners",
+      },
+      {
+        "id": 7,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "symbol": "xmark",
+            },
+          },
+        },
+      },
+      {
+        "id": 7,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.secondary",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+            "symbolSize": {
+              "token": "metrics.symbol_inline",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 7,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`empty-state: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "No Composition",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "role": "group",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "empty-state",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "alignItems": "center",
+            "display": "flex",
+            "flexDirection": "column",
+            "justifyContent": "center",
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "div",
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "data-pm-slot": "symbol",
+        },
+      },
+      {
+        "id": 2,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "decorative": true,
+              "symbol": "sidebar.trailing",
+            },
+          },
+        },
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 3,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 3,
+        "op": "setProps",
+        "patch": {
+          "role": "heading",
+        },
+      },
+      {
+        "id": 3,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.heading",
+            },
+            "fontWeight": {
+              "token": "typography.semibold_weight",
+            },
+          },
+        },
+      },
+      {
+        "id": 4,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 4,
+        "op": "setText",
+        "text": "No Composition",
+      },
+      {
+        "before": null,
+        "id": 4,
+        "op": "insertBefore",
+        "parent": 3,
+      },
+      {
+        "before": null,
+        "id": 3,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "id": 5,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 5,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.secondary",
+            },
+            "fontSize": {
+              "token": "typography.reading",
+            },
+          },
+        },
+      },
+      {
+        "id": 6,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 6,
+        "op": "setText",
+        "text": "Open a project to start editing.",
+      },
+      {
+        "before": null,
+        "id": 6,
+        "op": "insertBefore",
+        "parent": 5,
+      },
+      {
+        "before": null,
+        "id": 5,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
+
+exports[`push-button: additive wire snapshot and real Rust publication 1`] = `
+[
+  {
+    "baseRevision": 0,
+    "ops": [
+      {
+        "id": 1,
+        "op": "create",
+        "type": "button",
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "label": "Delete…",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "metadata": {
+            "pmKit": {
+              "buttonRole": "destructive",
+            },
+          },
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "data-pm-component": "push-button",
+        },
+      },
+      {
+        "id": 1,
+        "op": "setProps",
+        "patch": {
+          "style": {
+            "color": {
+              "token": "colors.text",
+            },
+            "fontSize": {
+              "token": "typography.body",
+            },
+            "height": {
+              "token": "metrics.control",
+            },
+            "minHeight": {
+              "token": "metrics.hit",
+            },
+            "minWidth": {
+              "token": "metrics.hit",
+            },
+          },
+        },
+      },
+      {
+        "id": 2,
+        "op": "create",
+        "type": "text",
+      },
+      {
+        "id": 2,
+        "op": "setText",
+        "text": "Delete…",
+      },
+      {
+        "before": null,
+        "id": 2,
+        "op": "insertBefore",
+        "parent": 1,
+      },
+      {
+        "before": null,
+        "id": 1,
+        "op": "insertBefore",
+        "parent": 0,
+      },
+    ],
+  },
+]
+`;
