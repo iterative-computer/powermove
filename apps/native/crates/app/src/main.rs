@@ -1,6 +1,9 @@
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
+
+#[path = "surfaces/editing.rs"]
+pub mod editing;
 mod lifecycle;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
