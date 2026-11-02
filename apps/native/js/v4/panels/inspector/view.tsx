@@ -233,7 +233,7 @@ function Field({
         {control.kind === "point" ? (
           <Action
             id={`pad:${row.id}`}
-            label={row.label}
+            label={`${row.label} Pad`}
             disabled={blocked}
             onActivate={(event) =>
               session.nativeRequest({
@@ -298,7 +298,7 @@ function Field({
           {control.hexBinding && control.hex !== undefined ? (
             <TextField
               id={`hex:${row.id}`}
-              label={row.label}
+              label={`${row.label} Hex`}
               binding={control.hexBinding.handle}
               value={control.hex}
               disabled={disabled(control.hexBinding)}
@@ -477,6 +477,7 @@ export function InspectorPanel({
       <EmptyState
         label="No Composition"
         explanation="Open a project to start editing."
+        attr={{ symbol: "sidebar.trailing" }}
         action={null}
       />
     ) : (
@@ -507,6 +508,16 @@ export function InspectorPanel({
                   fontSize: token("typography.title"),
                 }}
               >{` · ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}</text>
+              {target.first.locked ? (
+                <text
+                  attr={{ symbol: "lock" }}
+                  title="Locked layers can’t be edited."
+                  style={{
+                    color: token("colors.muted"),
+                    symbolSize: token("metrics.symbol_inline"),
+                  }}
+                />
+              ) : null}
             </text>
             <AlignmentStrip key={target.key} session={session} />
           </>
@@ -575,6 +586,7 @@ export function InspectorPanel({
         id="inspector:header"
         style={{
           ...horizontal,
+          justifyContent: "space-between",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           paddingRight: token("metrics.inset"),
@@ -589,32 +601,34 @@ export function InspectorPanel({
         >
           Properties
         </text>
-        {target.kind === "layers" && target.first.acceptsEffects ? (
+        <div style={horizontal}>
+          {target.kind === "layers" && target.first.acceptsEffects ? (
+            <Action
+              id="inspector:add-effect"
+              label="Add Effect"
+              disabled={target.first.locked}
+              onActivate={(event) =>
+                session.nativeRequest({
+                  type: "add-effect-menu",
+                  anchor: event.currentTarget,
+                  target: target.first.id,
+                })
+              }
+            />
+          ) : null}
           <Action
-            id="inspector:add-effect"
-            label="Add Effect"
-            disabled={target.first.locked}
+            id="inspector:new-layer"
+            label="New Layer"
+            disabled={target.kind === "no-project"}
             onActivate={(event) =>
               session.nativeRequest({
-                type: "add-effect-menu",
+                type: "new-layer-menu",
                 anchor: event.currentTarget,
-                target: target.first.id,
+                items: newLayerItems,
               })
             }
           />
-        ) : null}
-        <Action
-          id="inspector:new-layer"
-          label="New Layer"
-          disabled={target.kind === "no-project"}
-          onActivate={(event) =>
-            session.nativeRequest({
-              type: "new-layer-menu",
-              anchor: event.currentTarget,
-              items: newLayerItems,
-            })
-          }
-        />
+        </div>
       </div>
       <scroll
         id="inspector:content"
