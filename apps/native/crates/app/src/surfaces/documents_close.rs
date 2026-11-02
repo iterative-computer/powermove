@@ -14,11 +14,13 @@ pub enum Stage {
     ReviewQuit,
     Prompt,
     PickingSave,
+    ChangedOnDisk,
     Saving,
     Refreshing,
     Barrier,
     Closing,
     PreparingQuit,
+    RecordingRecoveries,
     Failed,
     Cancelled,
     Done,
@@ -52,9 +54,16 @@ pub enum Effect {
         target: Target,
         notice: Notice,
     },
-    CloseWindow {
+    /// Retire this session/tab; close its window only when its last tab retires.
+    CloseDocument {
         window: WindowId,
         session: SessionHandle,
+    },
+    /// Resolve each id to its actual originating name/path on a worker and
+    /// durably retain its inline library notice before acknowledging this ticket.
+    ResolveRecoveryCopies {
+        ticket: Ticket,
+        ids: Vec<String>,
     },
     TerminateLater,
     Terminate(bool),
@@ -279,6 +288,7 @@ impl CloseFlow {
                     | Stage::ReviewQuit
                     | Stage::Prompt
                     | Stage::PickingSave
+                    | Stage::ChangedOnDisk
                     | Stage::Saving
                     | Stage::Barrier
                     | Stage::PreparingQuit
@@ -310,26 +320,46 @@ impl CloseFlow {
                 self.index = 0;
                 self.advance(now)
             }
+            (Stage::ChangedOnDisk, Some(Action::SaveAnyway)) => {
+                self.documents[self.index].disk_changed = false;
+                self.save(false, now)
+            }
+            (Stage::ChangedOnDisk, Some(Action::SaveAs)) => self.save(true, now),
             (Stage::Prompt, Some(Action::Save)) => self.save(false, now),
             (Stage::Prompt, Some(Action::DontSave)) => self.discard_current(now),
-            (Stage::Failed, Some(Action::SaveAs)) => self.save(true, now),
+            (Stage::Failed, Some(Action::SaveAs))
+                if self.retry_only && self.index < self.documents.len() =>
+            {
+                self.save(true, now)
+            }
+            (Stage::Failed, Some(Action::Ok)) if !self.retry_only => {
+                self.next(Stage::Cancelled);
+                vec![]
+            }
             _ => vec![],
         }
     }
     fn save(&mut self, force_picker: bool, now: Duration) -> Vec<Effect> {
-        if force_picker || !self.current().has_file || self.current().copy {
-            vec![self.request(
+        match save_preflight(self.current(), force_picker) {
+            SavePreflight::Join(_) => self.wait(now),
+            SavePreflight::Picker(picker) => vec![self.request(
                 Stage::PickingSave,
                 self.current().target(),
-                Presentation::Picker(Picker::save(&self.current().name, self.current().copy)),
-            )]
-        } else {
-            self.started = now;
-            let ticket = self.next(Stage::Saving);
-            vec![Effect::Kernel {
-                ticket,
-                call: ShellCall::Save(self.current().session.clone()),
-            }]
+                Presentation::Picker(picker),
+            )],
+            SavePreflight::ReviewChanged(alert) => vec![self.request(
+                Stage::ChangedOnDisk,
+                self.current().target(),
+                Presentation::Alert(alert),
+            )],
+            SavePreflight::Save => {
+                self.started = now;
+                let ticket = self.next(Stage::Saving);
+                vec![Effect::Kernel {
+                    ticket,
+                    call: ShellCall::Save(self.current().session.clone()),
+                }]
+            }
         }
     }
     pub fn picked(&mut self, ticket: Ticket, path: Option<PathBuf>, now: Duration) -> Vec<Effect> {
@@ -376,6 +406,13 @@ impl CloseFlow {
         }
         self.advance(now)
     }
+    pub fn recoveries_recorded(&mut self, ticket: Ticket) -> Vec<Effect> {
+        if ticket != self.ticket || self.stage != Stage::RecordingRecoveries {
+            return vec![];
+        }
+        self.next(Stage::Done);
+        vec![Effect::Terminate(true)]
+    }
     /// `code` comes from ServiceErrorCode, not error text. Kernel currently
     /// exposes untyped Storage failures: the host must use "unknown" for those.
     pub fn failed(&mut self, ticket: Ticket, code: &str) -> Vec<Effect> {
@@ -383,7 +420,13 @@ impl CloseFlow {
             return vec![];
         }
         let mut effects = self.dismiss_finishing();
-        if self.documents.is_empty() || self.stage == Stage::PreparingQuit {
+        if self.documents.is_empty()
+            || matches!(
+                self.stage,
+                Stage::PreparingQuit | Stage::RecordingRecoveries
+            )
+        {
+            self.retry_only = false;
             let alert = open_error("", code, false);
             effects.push(self.request(
                 Stage::Failed,
@@ -451,16 +494,22 @@ impl CloseFlow {
                 let discard = self.current().dirty
                     && (self.discard_all
                         || self.rejected.as_ref() == Some(&self.current().session));
+                if self.current().dirty && !discard {
+                    effects.extend(self.advance(now));
+                    return effects;
+                }
                 let call = if discard {
                     ShellCall::DiscardClose(self.current().session.clone())
                 } else {
-                    ShellCall::Close(self.current().session.clone())
+                    // Close also saves. A clean release must not rewrite a file
+                    // another app changed, or implicitly save a copy's source.
+                    ShellCall::DeferClose(self.current().session.clone())
                 };
                 let ticket = self.next(Stage::Closing);
                 effects.push(Effect::Kernel { ticket, call });
             }
             Stage::Closing => {
-                effects.push(Effect::CloseWindow {
+                effects.push(Effect::CloseDocument {
                     window: self.current().window,
                     session: self.current().session.clone(),
                 });
@@ -469,8 +518,21 @@ impl CloseFlow {
                 effects.extend(self.advance(now));
             }
             Stage::PreparingQuit => {
-                self.next(Stage::Done);
-                effects.push(Effect::Terminate(true));
+                if let ShellReply::Compacted {
+                    recovery_copies, ..
+                } = reply
+                {
+                    if recovery_copies.is_empty() {
+                        self.next(Stage::Done);
+                        effects.push(Effect::Terminate(true));
+                    } else {
+                        let ticket = self.next(Stage::RecordingRecoveries);
+                        effects.push(Effect::ResolveRecoveryCopies {
+                            ticket,
+                            ids: recovery_copies,
+                        });
+                    }
+                }
             }
             _ => unreachable!(),
         }

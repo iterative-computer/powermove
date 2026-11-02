@@ -307,12 +307,6 @@ pub fn recovery_notices(name: &str, reply: &ShellReply) -> Vec<Notice> {
         | ShellReply::Closed {
             recovery_copy: Some(id),
         } => vec![recovery_copy(name, id.clone())],
-        ShellReply::Compacted {
-            recovery_copies, ..
-        } => recovery_copies
-            .iter()
-            .map(|id| recovery_copy(name, id.clone()))
-            .collect(),
         _ => vec![],
     }
 }
@@ -485,6 +479,8 @@ pub struct Document {
     pub entry: bool,
     pub has_file: bool,
     pub copy: bool,
+    /// Supplied by the file watcher; kernel has no watcher/reload API yet.
+    pub disk_changed: bool,
 }
 impl Document {
     /// Import state belongs to the media host. Everything else comes from the
@@ -506,6 +502,7 @@ impl Document {
             entry: p.entry.is_some(),
             has_file: p.path.is_some(),
             copy: matches!(decision, OpenDecision::AsCopy(_)),
+            disk_changed: false,
         })
     }
     pub fn subtitle(&self) -> &'static str {
@@ -546,4 +543,141 @@ pub fn submit(
     call: ShellCall,
 ) -> pm_kernel::Pending<Result<ShellReply, pm_kernel::KernelFailure>> {
     kernel.shell(call)
+}
+
+/// Shared by Command-S and close-save, so copy-only sessions can never write
+/// their original destination. A watcher must set disk_changed before preflight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavePreflight {
+    Join(Work),
+    Picker(Picker),
+    ReviewChanged(Alert),
+    Save,
+}
+pub fn save_preflight(document: &Document, force_save_as: bool) -> SavePreflight {
+    if let Some(work) = document.work() {
+        return SavePreflight::Join(work);
+    }
+    if force_save_as || document.copy || !document.has_file {
+        return SavePreflight::Picker(Picker::save(&document.name, document.copy));
+    }
+    if document.disk_changed {
+        return SavePreflight::ReviewChanged(changed_on_disk(&document.name));
+    }
+    SavePreflight::Save
+}
+/// Worker supplies path existence; there is no UI-thread filesystem access.
+/// Preserve FileOpenFailure.path even if that path no longer exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileFailure {
+    pub path: PathBuf,
+    pub alert: Alert,
+}
+impl FileFailure {
+    pub fn from_service(
+        path: PathBuf,
+        display_name: &str,
+        code_wire: &str,
+        path_exists: bool,
+    ) -> Self {
+        Self {
+            path,
+            alert: open_error(display_name, code_wire, path_exists),
+        }
+    }
+    pub fn finder_path(&self) -> Option<&std::path::Path> {
+        self.alert
+            .buttons
+            .iter()
+            .any(|b| b.action == Action::ShowInFinder)
+            .then_some(self.path.as_path())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeLocation {
+    Viewer,
+    Library,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeActivation {
+    pub session: SessionHandle,
+    pub action: Action,
+    pub recovery_id: Option<String>,
+}
+/// Lifetime for one visible notice. The host supplies the single viewer slot;
+/// this type does not invent a stacking/reordering policy for simultaneous facts.
+pub struct NoticeSurface {
+    pub session: SessionHandle,
+    pub notice: Notice,
+    pub location: NoticeLocation,
+    pub visible: bool,
+    started: Duration,
+    announced: bool,
+}
+impl NoticeSurface {
+    pub fn new(
+        session: SessionHandle,
+        notice: Notice,
+        location: NoticeLocation,
+        now: Duration,
+    ) -> Self {
+        Self {
+            session,
+            notice,
+            location,
+            visible: true,
+            started: now,
+            announced: false,
+        }
+    }
+    pub fn take_announcement(&mut self) -> Option<(&str, AnnouncementPriority)> {
+        if !self.visible || std::mem::replace(&mut self.announced, true) {
+            return None;
+        }
+        Some((&self.notice.text, self.notice.priority))
+    }
+    /// Returns true only when the visible viewer banner expires this tick.
+    pub fn tick(&mut self, now: Duration) -> bool {
+        if self.visible
+            && self.location == NoticeLocation::Viewer
+            && self
+                .notice
+                .viewer_timeout()
+                .is_some_and(|timeout| now.saturating_sub(self.started) >= timeout)
+        {
+            self.visible = false;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn activate(
+        &mut self,
+        session: &SessionHandle,
+        action: Action,
+    ) -> Option<NoticeActivation> {
+        if !self.visible || session != &self.session {
+            return None;
+        }
+        let allowed = self.notice.action.is_some_and(|(declared, _)| {
+            action == declared
+                || (action == Action::Dismiss && self.location == NoticeLocation::Viewer)
+        });
+        if !allowed {
+            return None;
+        }
+        self.visible = false;
+        Some(NoticeActivation {
+            session: session.clone(),
+            action,
+            recovery_id: self.notice.recovery_id.clone(),
+        })
+    }
+    pub fn document_closed(&mut self, session: &SessionHandle) -> bool {
+        if session != &self.session {
+            return false;
+        }
+        std::mem::replace(&mut self.visible, false)
+    }
 }

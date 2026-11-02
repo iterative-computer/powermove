@@ -16,6 +16,7 @@ fn doc(id: &str, dirty: bool) -> Document {
         entry: false,
         has_file: true,
         copy: false,
+        disk_changed: false,
     }
 }
 fn started(intent: Intent, documents: Vec<Document>) -> CloseFlow {
@@ -182,7 +183,7 @@ fn save_failure_copy_is_exact_and_close_is_abandoned() {
         ["Save As…", "Cancel"]
     );
     assert_eq!(f.stage, Stage::Failed);
-    assert!(!e.iter().any(|e| matches!(e, Effect::CloseWindow { .. })));
+    assert!(!e.iter().any(|e| matches!(e, Effect::CloseDocument { .. })));
     f.choose(f.ticket(), Some(Action::SaveAs), Duration::ZERO);
     assert_eq!(f.stage, Stage::PickingSave);
     f.picked(f.ticket(), Some(PathBuf::from("Film.pmv")), Duration::ZERO);
@@ -270,10 +271,6 @@ fn recovery_ids_are_retained_for_all_reply_shapes() {
         },
         ShellReply::Closed {
             recovery_copy: Some("a".into()),
-        },
-        ShellReply::Compacted {
-            projects: 1,
-            recovery_copies: vec!["a".into()],
         },
     ] {
         assert_eq!(
@@ -387,7 +384,7 @@ fn clean_close_flushes_then_barriers_without_prompt() {
     assert!(matches!(
         &e[0],
         Effect::Kernel {
-            call: ShellCall::Close(_),
+            call: ShellCall::DeferClose(_),
             ..
         }
     ));
@@ -399,7 +396,7 @@ fn clean_close_flushes_then_barriers_without_prompt() {
         Duration::ZERO,
     );
     assert_eq!(f.stage, Stage::Done);
-    assert!(matches!(&e[0], Effect::CloseWindow { .. }));
+    assert!(matches!(&e[0], Effect::CloseDocument { .. }));
 }
 #[test]
 fn dirty_close_selects_tab_before_alert_and_cancel_stops_all_tabs() {
@@ -594,7 +591,7 @@ fn wrong_save_session_or_wrong_reply_fails_closed() {
         Duration::ZERO,
     );
     assert_eq!(f.stage, Stage::Failed);
-    assert!(!e.iter().any(|e| matches!(e, Effect::CloseWindow { .. })));
+    assert!(!e.iter().any(|e| matches!(e, Effect::CloseDocument { .. })));
 }
 #[test]
 fn late_quit_barrier_error_is_application_modal_and_cannot_claim_termination() {
@@ -967,4 +964,246 @@ fn real_open_reply_announces_completion_once_and_late_cancel_retires_generation(
         .unwrap()
         .unwrap();
     a.shutdown();
+}
+
+#[test]
+fn command_save_preflight_never_writes_a_copy_or_unsaved_original() {
+    let mut d = doc("Film", true);
+    assert_eq!(save_preflight(&d, false), SavePreflight::Save);
+    d.disk_changed = true;
+    assert!(matches!(
+        save_preflight(&d, false),
+        SavePreflight::ReviewChanged(_)
+    ));
+    assert!(matches!(save_preflight(&d, true), SavePreflight::Picker(_)));
+    d.copy = true;
+    assert_eq!(
+        save_preflight(&d, false),
+        SavePreflight::Picker(Picker::save("Film", true))
+    );
+    d.saving = true;
+    assert_eq!(save_preflight(&d, false), SavePreflight::Join(Work::Saving));
+}
+#[test]
+fn changed_file_close_requires_explicit_save_anyway_or_save_as() {
+    for action in [Action::SaveAnyway, Action::SaveAs, Action::Cancel] {
+        let mut d = doc("Film", true);
+        d.disk_changed = true;
+        let mut f = started(Intent::Window, vec![d]);
+        let e = f.choose(f.ticket(), Some(Action::Save), Duration::ZERO);
+        assert_eq!(f.stage, Stage::ChangedOnDisk);
+        assert_eq!(alert(&e).buttons[0].label, "Save Anyway");
+        f.choose(f.ticket(), Some(action), Duration::ZERO);
+        assert_eq!(
+            f.stage,
+            match action {
+                Action::SaveAnyway => Stage::Saving,
+                Action::SaveAs => Stage::PickingSave,
+                _ => Stage::Cancelled,
+            }
+        );
+    }
+}
+
+#[test]
+fn quit_recovery_copies_are_resolved_by_id_not_misnamed_as_the_last_document() {
+    let mut f = started(Intent::Quit, vec![]);
+    let e = f.reply(
+        f.ticket(),
+        ShellReply::Compacted {
+            projects: 2,
+            recovery_copies: vec!["recovery-a".into(), "recovery-b".into()],
+        },
+        Duration::ZERO,
+    );
+    assert_eq!(f.stage, Stage::RecordingRecoveries);
+    assert!(
+        matches!(&e[0],Effect::ResolveRecoveryCopies {ids,..} if ids==&["recovery-a","recovery-b"])
+    );
+    assert!(
+        !e.iter()
+            .any(|e| matches!(e, Effect::Terminate(true) | Effect::Notice { .. }))
+    );
+    assert!(f.recoveries_recorded(Ticket(0)).is_empty());
+    assert!(matches!(
+        &f.recoveries_recorded(f.ticket())[0],
+        Effect::Terminate(true)
+    ));
+}
+
+#[test]
+fn passive_viewer_notice_expires_at_four_seconds_and_announces_once() {
+    let mut s = NoticeSurface::new(
+        handle("a"),
+        reloaded("Film"),
+        NoticeLocation::Viewer,
+        Duration::ZERO,
+    );
+    assert_eq!(
+        s.take_announcement(),
+        Some((
+            "“Film” was updated from another app.",
+            AnnouncementPriority::Medium
+        ))
+    );
+    assert!(s.take_announcement().is_none());
+    assert!(!s.tick(Duration::from_millis(3999)));
+    assert!(s.tick(Duration::from_secs(4)));
+    assert!(!s.tick(Duration::from_secs(5)));
+}
+#[test]
+fn action_banner_persists_until_action_or_dismiss_and_rejects_stale_generation() {
+    let mut s = NoticeSurface::new(
+        handle("a"),
+        recovery_copy("Film", "recovery-a".into()),
+        NoticeLocation::Viewer,
+        Duration::ZERO,
+    );
+    assert!(!s.tick(Duration::from_secs(100)));
+    assert!(s.visible);
+    assert!(s.activate(&handle("b"), Action::ShowInFinder).is_none());
+    assert!(s.activate(&handle("a"), Action::Save).is_none());
+    let a = s.activate(&handle("a"), Action::ShowInFinder).unwrap();
+    assert_eq!(a.recovery_id.as_deref(), Some("recovery-a"));
+    assert!(!s.visible);
+    assert!(s.activate(&handle("a"), Action::ShowInFinder).is_none());
+    let mut s = NoticeSurface::new(
+        handle("a"),
+        uncertain_save("Film"),
+        NoticeLocation::Viewer,
+        Duration::ZERO,
+    );
+    assert_eq!(s.take_announcement().unwrap().1, AnnouncementPriority::High);
+    assert!(s.activate(&handle("a"), Action::Dismiss).is_some());
+}
+#[test]
+fn library_notice_does_not_acquire_viewer_timeout_or_dismiss_control() {
+    let mut s = NoticeSurface::new(
+        handle("a"),
+        reloaded("Film"),
+        NoticeLocation::Library,
+        Duration::ZERO,
+    );
+    assert!(!s.tick(Duration::from_secs(100)));
+    assert!(s.activate(&handle("a"), Action::Dismiss).is_none());
+    assert!(!s.document_closed(&handle("b")));
+    assert!(s.visible);
+    assert!(s.document_closed(&handle("a")));
+    assert!(s.take_announcement().is_none());
+}
+#[test]
+fn passive_banner_has_no_implicit_action() {
+    let mut s = NoticeSurface::new(
+        handle("a"),
+        reloaded("Film"),
+        NoticeLocation::Viewer,
+        Duration::ZERO,
+    );
+    assert!(s.activate(&handle("a"), Action::Dismiss).is_none());
+    assert!(s.visible);
+}
+
+#[test]
+fn new_edits_during_close_barrier_are_reviewed_instead_of_implicitly_saved() {
+    let mut f = started(Intent::Window, vec![doc("a", false)]);
+    f.observe(doc("a", true));
+    let e = f.reply(f.ticket(), ShellReply::Durable, Duration::ZERO);
+    assert_eq!(f.stage, Stage::Prompt);
+    assert_eq!(alert(&e).message, "Save changes to “a” before closing?");
+    assert!(
+        !e.iter()
+            .any(|e| matches!(e, Effect::Kernel { .. } | Effect::CloseDocument { .. }))
+    );
+}
+#[test]
+fn real_clean_release_does_not_write_and_quit_keeps_external_authored_intent() {
+    let (dir, a, s) = fixture();
+    let k = a.handle();
+    let path = dir.path().canonicalize().unwrap().join("Film.pmv");
+    submit(
+        &k,
+        ShellCall::SaveAs {
+            session: s,
+            path: path.clone(),
+        },
+    )
+    .wait()
+    .unwrap()
+    .unwrap();
+    // Create the external replacement with the real writer, so final quit
+    // compaction can open it as a valid independently authored project.
+    let (other_dir, other_actor, other_session) = fixture();
+    let other_kernel = other_actor.handle();
+    edit(&other_kernel);
+    let other_path = other_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("External.pmv");
+    submit(
+        &other_kernel,
+        ShellCall::SaveAs {
+            session: other_session,
+            path: other_path.clone(),
+        },
+    )
+    .wait()
+    .unwrap()
+    .unwrap();
+    let changed = std::fs::read(other_path).unwrap();
+    other_actor.shutdown();
+    std::fs::write(&path, &changed).unwrap();
+    let expected = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+    let d = Document::from_published(
+        &k.published("a").unwrap(),
+        1,
+        "Film".into(),
+        false,
+        &OpenDecision::Writable,
+    )
+    .unwrap();
+    assert!(!d.dirty);
+    let mut f = started(Intent::Quit, vec![d]);
+    let e = f.reply(f.ticket(), ShellReply::Durable, Duration::ZERO);
+    let Effect::Kernel { ticket, call } = e.into_iter().next().unwrap() else {
+        panic!()
+    };
+    assert!(matches!(call, ShellCall::DeferClose(_)));
+    let reply = submit(&k, call).wait().unwrap().unwrap();
+    let e = f.reply(ticket, reply, Duration::ZERO);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        changed,
+        "the clean release itself must never save"
+    );
+    let (_, call) = e
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::Kernel { ticket, call } => Some((ticket, call)),
+            _ => None,
+        })
+        .unwrap();
+    submit(&k, call).wait().unwrap().unwrap();
+    // Existing kernel compaction may append an identical PMV4 record. Verify
+    // authored document and replayable history, rather than physical layout.
+    let reopened = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+    assert_eq!(reopened.document.to_value(), expected.document.to_value());
+    assert_eq!(
+        reopened.history.map(|h| h.snapshot().to_saved_packed()),
+        expected.history.map(|h| h.snapshot().to_saved_packed())
+    );
+    a.shutdown();
+}
+
+#[test]
+fn windowless_error_rejects_unoffered_save_as_without_indexing_a_document() {
+    let mut f = started(Intent::Quit, vec![]);
+    f.failed(f.ticket(), "unknown");
+    assert!(
+        f.choose(f.ticket(), Some(Action::SaveAs), Duration::ZERO)
+            .is_empty()
+    );
+    assert_eq!(f.stage, Stage::Failed);
+    f.choose(f.ticket(), Some(Action::Ok), Duration::ZERO);
+    assert_eq!(f.stage, Stage::Cancelled);
 }

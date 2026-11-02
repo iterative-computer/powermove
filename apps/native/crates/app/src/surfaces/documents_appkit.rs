@@ -7,6 +7,10 @@ use objc2_app_kit::*;
 use objc2_foundation::{NSArray, NSString};
 use std::sync::mpsc::Sender;
 
+// UTType is discovered dynamically; ensure its defining framework is loaded.
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
+unsafe extern "C" {}
+
 pub struct AppKitHost {
     windows: BTreeMap<WindowId, Retained<NSWindow>>,
     active: BTreeMap<Ticket, Retained<NSWindow>>,
@@ -101,7 +105,8 @@ impl AppKitHost {
                 };
                 let _ = output.send((ticket, Response::Paths(paths)));
             };
-            self.active.insert(ticket, panel.clone().into_super());
+            self.active
+                .insert(ticket, panel.clone().into_super().into_super());
             if let Some(owner) = self.owner(&request.target) {
                 panel.beginSheetModalForWindow_completionHandler(
                     owner,
@@ -142,7 +147,7 @@ impl AppKitHost {
                 let _ = output.send((ticket, Response::Paths(paths)));
             };
             self.active
-                .insert(ticket, panel.clone().into_super().into_super());
+                .insert(ticket, panel.clone().into_super().into_super().into_super());
             if let Some(owner) = self.owner(&request.target) {
                 panel.beginSheetModalForWindow_completionHandler(
                     owner,
@@ -208,5 +213,71 @@ fn set_content_types(panel: &NSSavePanel, values: &[String], extensions: bool) {
     let types = NSArray::from_retained_slice(&types);
     unsafe {
         let _: () = msg_send![panel,setAllowedContentTypes:&*types];
+    }
+}
+
+/// The shell supplies its existing frame/default frame and content view. No
+/// document-close delegate is installed here: the caller routes window close
+/// to Popout::return_to_layout, and project close bypasses that return path.
+pub fn create_popout(
+    spec: &windows::PopoutSpec,
+    frame: objc2_foundation::NSRect,
+    content: &NSView,
+    tokens: &pm_design::Tokens,
+) -> Option<Retained<NSWindow>> {
+    use objc2::MainThreadOnly;
+    if !spec.eligible() {
+        return None;
+    }
+    let mtm = MainThreadMarker::new()?;
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Miniaturizable
+                | NSWindowStyleMask::Resizable,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe {
+        window.setReleasedWhenClosed(false);
+    }
+    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+    window.setTitle(&NSString::from_str(&spec.title()));
+    let rgb = tokens.colors.panel;
+    window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from((rgb >> 16) & 255) / 255.,
+        f64::from((rgb >> 8) & 255) / 255.,
+        f64::from(rgb & 255) / 255.,
+        1.,
+    )));
+    let name = NSString::from_str(&spec.autosave_name());
+    window.setFrameUsingName(&name);
+    window.setFrameAutosaveName(&name);
+    window.setContentView(Some(content));
+    Some(window)
+}
+/// System VoiceOver announcements for delayed open/completion and banners.
+/// NSAlert itself already provides alert semantics and needs no extra call.
+pub fn announce(window: &NSWindow, text: &str, priority: AnnouncementPriority) {
+    use objc2_foundation::{NSDictionary, NSNumber};
+    let text = NSString::from_str(text);
+    let priority = NSNumber::new_isize(match priority {
+        AnnouncementPriority::Medium => NSAccessibilityPriorityLevel::Medium.0,
+        AnnouncementPriority::High => NSAccessibilityPriorityLevel::High.0,
+    });
+    unsafe {
+        let info = NSDictionary::from_slices(
+            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+            &[&*text as &AnyObject, &*priority as &AnyObject],
+        );
+        NSAccessibilityPostNotificationWithUserInfo(
+            window,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
     }
 }
