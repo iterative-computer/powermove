@@ -78,7 +78,7 @@ Design references below are relative to `docs/native/design/`:
 | S002 P0 | Unsaved tab/window/quit confirmation; wait for active save/import; save failure keeps work open | `R/legacy/app.ts`; `M/save.ts`; `M/windows.ts` | No complete spec. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S002](design/surfaces/documents.md). | `pm-kernel::session` close/save/dirty policies; `pm-shell::session` windows. Dialog/quit wiring pending. **spec+model** |
 | S003 P0 | External project changed, uncertain save, recovery copy/backup and save destination failures | `M/project-files.ts`; `M/save.ts`; `R/legacy/app.ts` | Services review has generic errors, not conflict decisions. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S003](design/surfaces/documents.md). | `pm-kernel::{session,project_io,locks}` preserves conflict copies and typed save outcomes. **spec+model** |
 | S004 P0 | Invalid/locked/read-only/cloud-volume project open errors and copy policy | `M/save.ts`; `M/project-files.ts`; `R/legacy/app.ts` | Services review gives failed-open copy and Show in Finder; no complete lock/copy flow. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S004](design/surfaces/documents.md). | `pm-kernel::{locks,session}`; `pm-services::entrypoints::{EntryQueue,FileOpenFailure}`. **spec+model** |
-| S005 P0 | Project Trash, restore and permanent-delete confirmation | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review specifies Move to Trash / Put Back / Recently Deleted only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S005](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::{persistence,commands::library}`. N4 requires archives, not shipped irreversible deletion. **spec+model** |
+| S005 P0 | Project Trash, restore and permanent-delete confirmation | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review specifies Move to Trash / Put Back / Recently Deleted only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S005](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::{persistence,commands::library}`. N4 requires archives, not shipped irreversible deletion. **spec+model** **Library lane 2026-11-01:** confirmation/critical-alert contracts, first-save-in-Trash/Undo reducer and kernel Trash/Restore worker tested; archive-delete and open-session Trash APIs remain absent; AppKit alert adapter cross-checks, host routing/runtime review pending. |
 | S006 P0 | Offline/changed source badges, locate/relink/replace and missing-original export warning | `R/panels/AssetsPanel.svelte`; `R/legacy/core/media.ts`; `R/legacy/gl/raster.ts`; `R/legacy/core/project-file.ts` | Media and Export cover entry points/warnings. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S006](design/surfaces/media.md). | `pm-panel-media::{model,edit}`; `pm-promedia::media::{Availability,MediaCatalog}`; `pm-engine-service` media mapping. **spec+model** (partial) |
 | S007 P0 | Cloud-media download consent, per-file progress/cancel/retry and automatic-download preference | `M/cloud-media.ts`; `R/legacy/core/cloud-media.ts`; `R/settings/SettingsScreen.svelte` | Settings specifies the preference; Media covers availability. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S007](design/surfaces/media.md). | `pm-panel-media` host effects; `pm-services::media::ImportQueue` is partial queue backing, not cloud hydration. Production cloud adapter absent. **spec+model** |
 | S008 P0 | Store Full Access trust alert and revoke/retrust entry points | `M/cloud/trust.ts`; `M/cloud/store-ipc.ts`; `R/store/StoreScreen.svelte` | Store-host review specifies alert, exact trust copy, Cancel default, identity fallback and stale handling. | `pm-store-host::permission::{PermissionRequest,Admission}` and stored decisions; host alert wiring pending. **spec+model** |
@@ -90,9 +90,9 @@ Design references below are relative to `docs/native/design/`:
 | S014 P1 | Main editor windows, title/dirty indicator, project tabs, tab menu, move tab to another/new window, restore | `M/windows.ts`; `M/index.ts`; `R/shell/Titlebar.svelte`; `R/legacy/app.ts` | Shell review covers native window/tab/title behavior. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S014](design/surfaces/documents.md). | `pm-shell::{session,native}`; `pm-kernel::session`; native window/kernel ownership integration remains. **spec+model** (partial) |
 | S015 P1 | Docked panels, headers, collapse/hide, splitters, drag/drop previews, add/close/move panel menu | `R/layout/Dock.svelte`; `R/layout/DockLayout.svelte`; `R/layout/Splitter.svelte`; `R/legacy/ui/layout.ts` | Shared and Shell review specify native docking, context menus, previews and header state. | `pm-shell::layout::{Layout,DropTarget,DropPreview}`; app must connect arbitrary extension panel ids. **spec+model** |
 | S016 P1 | Popped-out panel window, focus/close/return and shared project ownership | `M/panel-popout.ts`; `R/layout/PanelPool.svelte`; `R/legacy/ui/layout.ts` | Shared mentions Pop Out; no full popout lifecycle spec. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S016](design/surfaces/documents.md). | `pm-shell` window/layout models and engine independent viewer support are partial; arbitrary panel detach/reattach host remains. **spec+model** |
-| S017 P1 | Home/project library: recent/all projects, search/sort, grid/list, project cards and empty state | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review defines row facts/vocabulary; no complete Project Library window design. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S017](design/surfaces/library.md). | `pm-services::library::{ProjectEntry,ProjectSummary,LibraryService}`; `pm-kernel` library. **spec+model** |
-| S018 P1 | New Project dialog, defaults and creation errors | `R/legacy/app.ts`; `R/legacy/ui/project-settings.ts` | No dedicated spec. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S018](design/surfaces/library.md). | `pm-kernel::{session,commands::library}` creates projects; dialog state/host missing. **spec+model** |
-| S019 P1 | Rename/duplicate project, project-card/context actions | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review has library vocabulary/data only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S019](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::session`. **spec+model** |
+| S017 P1 | Home/project library: recent/all projects, search/sort, grid/list, project cards and empty state | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review defines row facts/vocabulary; no complete Project Library window design. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S017](design/surfaces/library.md). | `pm-services::library::{ProjectEntry,ProjectSummary,LibraryService}`; `pm-kernel` library. **spec+model** **Library lane 2026-11-01:** ID-driven controller, exact empty/loading/unavailable copy, search/sort, virtual viewport, keyboard/AX contract and headless host tested; native window/UI-kit renderer, autosaved frame and shell entry-point wiring pending. |
+| S018 P1 | New Project dialog, defaults and creation errors | `R/legacy/app.ts`; `R/legacy/ui/project-settings.ts` | No dedicated spec. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S018](design/surfaces/library.md). | `pm-kernel::{session,commands::library}` creates projects; dialog state/host missing. **spec+model** **Library lane 2026-11-01:** live form validation, inherited exact format/timecode, uniqued name, stale-owner and retry state wired to kernel creation; AppKit sheet/colour-popover host and missing design tokens pending. |
+| S019 P1 | Rename/duplicate project, project-card/context actions | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review has library vocabulary/data only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S019](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::session`. **spec+model** **Library lane 2026-11-01:** in-place rename/duplicate reducer and kernel open-session rename/duplicate tested; unopened-slot rename API and native editable cell/title-menu host pending. |
 | S020 P1 | Open/Save/Save As `.pmv` system picker; import/export file and directory pickers | `M/save.ts`; `M/render-encoder.ts`; `R/legacy/app.ts` | Export specifies export destination picker; no complete project open/save picker policy. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S020](design/surfaces/documents.md). | `pm-kernel::{session,project_io}`; `pm-services::entrypoints`; platform picker adapter required. **spec+model** |
 | S021 P1 | New Composition / Composition Settings dialog; size/FPS/duration/background | `R/legacy/ui/compositions.ts`; `R/legacy/ui/project-settings.ts`; `E/inspector/CompositionSection.svelte` | Inspector and Settings cover inline fields; no complete standalone dialog spec. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S021](design/surfaces/dialogs.md). | `pm-kernel::commands::comps`; `pm-panel-inspector` composition bindings. **spec+model** |
 | S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
@@ -346,3 +346,83 @@ already existed: 23 rows **model only → spec+model**; S011 and S040 stay
 native-only rows still need an Opus specification. A spec is not a visual
 approval: each lane's built surface still goes through
 [review-checklist.md](design/review-checklist.md).
+
+## Library lane implementation coverage — 2026-11-01
+
+S005/S017/S018/S019 now have a registered app module at
+`apps/native/crates/app/src/surfaces/library.rs`, a nonblocking kernel-worker
+port, a drivable reducer, an immutable/virtual presentation and a Linux
+`LibraryHost` double. The macOS module presents the specified system NSAlert
+as an asynchronous sheet, with explicit default/destructive behavior and both
+Return and Escape when Cancel is default. This is **controller and host-contract
+coverage**, not an installed Project Library window or visual approval.
+
+The 44 tests cover exact copy, empty/search/Trash/loading/unavailable states,
+keyboard and AX labels, modal focus isolation, alert ownership/ordering/stale
+callbacks, validation and timecode, duplicate/rename/Undo, 60,000-project
+virtualization and real actor persistence. Synthetic profiles are canonicalized
+before use. A disposable harness compiles these exact module files and checks
+that every dependency version/checksum matches `apps/native/Cargo.lock`.
+No workspace manifest, dependency or lockfile change is needed.
+
+Reproduce from the repository root after activating the shell:
+
+```sh
+mkdir -p work
+rustc --edition=2024 apps/native/crates/app/src/surfaces/library_check.rs -o work/library-check
+work/library-check prepare
+work/library-check test --locked
+work/library-check clippy --locked --all-targets -- -D warnings
+work/library-check fmt --check
+rustfmt --edition=2024 --check apps/native/crates/app/src/surfaces/library_check.rs
+work/library-check check --locked --target x86_64-apple-darwin
+```
+
+The normal `cargo test --locked --manifest-path apps/native/Cargo.toml -p
+pm-native-app` is blocked on Linux by unconditional Apple-framework dependencies
+(`objc2`). The harness cross-check requires the matching Rust target; it checks
+types and does not link or run AppKit. ARM cross-check additionally requires an
+Apple-capable C compiler for the existing `sha2-asm` dependency. No native
+runtime pass is claimed.
+
+Decisions and selecting rules:
+
+- **N3/design ownership:** use the exact Opus copy and existing token values;
+  unresolved tokens stay symbolic. No layout, wording or interaction was invented.
+- **N3/W006:** keep the tagged Recents default and 12-item limit until a search,
+  alongside the native spec's removal of pagination. Native Name sort delegates
+  to system locale collation; the Linux test comparator is deterministic only.
+- **N4/N6/prune rule:** preserve every existing consumer and every project byte;
+  there is no deletion fallback or hidden open/save/close rename workaround.
+- **N7/N8:** all requests/completions/targets carry IDs; IO/search and file save
+  packing run on workers, with nonblocking enqueue/poll/wake at the UI boundary.
+- **N1/N3:** missing kernel operations report an inspectable integration gap
+  and the approved generic error, never a successful placeholder result.
+
+Changes required outside this lane: implement `LibraryHost` with the actual
+NSToolbar/sidebar/grid/table and AppKit New Project sheet, wire File ▸ Project
+Library / Welcome ▸ Show All Projects / New Project and the editor title menu,
+route first-save-in-Trash/Save As through the document owner, and connect the
+worker wake/publication to the app executor. The host must restore/persist frame
+and library preferences, keep one window, use the system relative-date formatter,
+honor sheet focus/Tab order and graft the AX list/table into the window tree.
+Kernel owners must add unopened-slot rename, open-session Trash and an
+ArchiveReason-backed library archive-delete operation, and typed storage errors.
+Saved index rows still lack complete duration/rate/thumbnail capability facts;
+the presentation retains unknown values rather than fabricating zeroes.
+
+`DESIGN-TODO(opus)` items (also inspectable as `library_surface::GAPS`):
+
+- Add the already specified `metrics.thumbnail_min`, `metrics.sheet_inset`,
+  `metrics.sheet_value_column` and `colors.media_badge` to pm-design.
+- Specify missing-summary card/VoiceOver wording, size-link toggle accessible
+  name/initial state, loading reason and empty-state symbols.
+- Define Duration/Size/Frame Rate column sort mapping/direction, drop-frame
+  timecode input, how a duplicate outside the current search/filter is revealed,
+  and cancellation once a New Project creation is already admitted.
+
+On macOS, verify real sheet/alert ownership and focus return, Cancel's Return
+and Escape behavior, in-place text/IME, title menu, Finder reveal, singleton
+window/frame restoration, native date/collation, accessibility/keyboard scrolling
+through 60,000 rows, colour-popover anchoring, light/dark and all accessibility
+settings. All visual output remains provisional pending Opus review.
