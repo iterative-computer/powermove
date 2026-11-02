@@ -32,3 +32,7 @@ pub mod recovery_wire;
 // Public controllers are intentionally available before those callers migrate.
 #[allow(dead_code)]
 pub mod documents;
+
+// Kit2 adapters are installed by the owning shell's main-thread controller.
+#[allow(dead_code)]
+pub mod kit_native;
