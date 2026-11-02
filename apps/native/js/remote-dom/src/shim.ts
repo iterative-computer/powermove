@@ -64,6 +64,23 @@ function patchDOM() {
     });
   }
   const ep = DOM.Element.prototype as N;
+  for (const prototype of new Set([
+    ep,
+    DOM.HTMLElement.prototype,
+    DOM.SVGElement.prototype,
+    DOM.HTMLTemplateElement.prototype
+  ])) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'innerHTML');
+    if (!descriptor?.set) continue;
+    Object.defineProperty(prototype, 'innerHTML', {
+      ...descriptor,
+      set(value: unknown) {
+        if (typeof value === 'symbol')
+          throw new TypeError('Cannot convert a Symbol value to a string');
+        descriptor.set!.call(this, value === null ? '' : String(value));
+      }
+    });
+  }
   const parentPrototype = Object.getPrototypeOf(ep);
   for (const name of ['querySelector', 'querySelectorAll']) {
     const original = parentPrototype[name];
