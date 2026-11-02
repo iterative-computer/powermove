@@ -4771,6 +4771,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-export-panel-wire"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-expr"
 version = "0.1.0"
 dependencies = [
@@ -5130,6 +5139,7 @@ name = "pm-promedia"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pm-protocol",
  "pm-time",
  "serde",
  "serde_json",
