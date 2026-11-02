@@ -79,6 +79,12 @@ Design references below are relative to `docs/native/design/`:
 | S003 P0 | External project changed, uncertain save, recovery copy/backup and save destination failures | `M/project-files.ts`; `M/save.ts`; `R/legacy/app.ts` | Services review has generic errors, not conflict decisions. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S003](design/surfaces/documents.md). | `pm-kernel::{session,project_io,locks}` preserves conflict copies and typed save outcomes. **spec+model** |
 | S004 P0 | Invalid/locked/read-only/cloud-volume project open errors and copy policy | `M/save.ts`; `M/project-files.ts`; `R/legacy/app.ts` | Services review gives failed-open copy and Show in Finder; no complete lock/copy flow. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S004](design/surfaces/documents.md). | `pm-kernel::{locks,session}`; `pm-services::entrypoints::{EntryQueue,FileOpenFailure}`. **spec+model** |
 | S005 P0 | Project Trash, restore and permanent-delete confirmation | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review specifies Move to Trash / Put Back / Recently Deleted only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S005](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::{persistence,commands::library}`. N4 requires archives, not shipped irreversible deletion. **spec+model** **Library lane 2026-11-01:** confirmation/critical-alert contracts, first-save-in-Trash/Undo reducer and kernel Trash/Restore worker tested; archive-delete and open-session Trash APIs remain absent; AppKit alert adapter cross-checks, host routing/runtime review pending. |
+
+| S001 P0 | Editor crash/OOM alert: Reload or Close Window; recovered project on relaunch | `M/renderer-recovery.ts`; `R/legacy/core/projects.ts`; `M/index.ts` | Services review specifies recovered-document notice and error vocabulary only. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S001](design/surfaces/recovery.md). | `pm-services::diagnostics::CrashRecord`; `pm-kernel::{journal,session}`. Native crash capture/host presentation pending. **spec+model** |
+| S002 P0 | Unsaved tab/window/quit confirmation; wait for active save/import; save failure keeps work open | `R/legacy/app.ts`; `M/save.ts`; `M/windows.ts` | No complete spec. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S002](design/surfaces/documents.md). **Documents lane (2026-11-01):** Document controllers, FIFO system-host boundary and kernel-backed close/quit tests implemented; lifecycle caller integration and Finishing Up sheet metrics remain. See documents lane update below. | `pm-kernel::session` close/save/dirty policies; `pm-shell::session` windows. Dialog/quit wiring pending. **spec+model** |
+| S003 P0 | External project changed, uncertain save, recovery copy/backup and save destination failures | `M/project-files.ts`; `M/save.ts`; `R/legacy/app.ts` | Services review has generic errors, not conflict decisions. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S003](design/surfaces/documents.md). **Documents lane (2026-11-01):** Exact notices, changed-file Save preflight and recovery-id resolution gate implemented; file-watcher/reload and notice delivery integration remain. See documents lane update below. | `pm-kernel::{session,project_io,locks}` preserves conflict copies and typed save outcomes. **spec+model** |
+| S004 P0 | Invalid/locked/read-only/cloud-volume project open errors and copy policy | `M/save.ts`; `M/project-files.ts`; `R/legacy/app.ts` | Services review gives failed-open copy and Show in Finder; no complete lock/copy flow. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S004](design/surfaces/documents.md). **Documents lane (2026-11-01):** All eight CopyReason lines, service-code copy, retained failed-open path and native alert adapter implemented/tested; entrypoint callers remain to connect. See documents lane update below. | `pm-kernel::{locks,session}`; `pm-services::entrypoints::{EntryQueue,FileOpenFailure}`. **spec+model** |
+| S005 P0 | Project Trash, restore and permanent-delete confirmation | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review specifies Move to Trash / Put Back / Recently Deleted only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S005](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::{persistence,commands::library}`. N4 requires archives, not shipped irreversible deletion. **spec+model** |
 | S006 P0 | Offline/changed source badges, locate/relink/replace and missing-original export warning | `R/panels/AssetsPanel.svelte`; `R/legacy/core/media.ts`; `R/legacy/gl/raster.ts`; `R/legacy/core/project-file.ts` | Media and Export cover entry points/warnings. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S006](design/surfaces/media.md). | `pm-panel-media::{model,edit}`; `pm-promedia::media::{Availability,MediaCatalog}`; `pm-engine-service` media mapping. **spec+model** (partial) |
 | S007 P0 | Cloud-media download consent, per-file progress/cancel/retry and automatic-download preference | `M/cloud-media.ts`; `R/legacy/core/cloud-media.ts`; `R/settings/SettingsScreen.svelte` | Settings specifies the preference; Media covers availability. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S007](design/surfaces/media.md). | `pm-panel-media` host effects; `pm-services::media::ImportQueue` is partial queue backing, not cloud hydration. Production cloud adapter absent. **spec+model** |
 
@@ -105,6 +111,17 @@ Design references below are relative to `docs/native/design/`:
 | S020 P1 | Open/Save/Save As `.pmv` system picker; import/export file and directory pickers | `M/save.ts`; `M/render-encoder.ts`; `R/legacy/app.ts` | Export specifies export destination picker; no complete project open/save picker policy. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S020](design/surfaces/documents.md). | `pm-kernel::{session,project_io}`; `pm-services::entrypoints`; platform picker adapter required. **spec+model** |
 | S021 P1 | New Composition / Composition Settings dialog; size/FPS/duration/background | `R/legacy/ui/compositions.ts`; `R/legacy/ui/project-settings.ts`; `E/inspector/CompositionSection.svelte` | Inspector and Settings cover inline fields; no complete standalone dialog spec. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S021](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** exact-copy/validation/keyboard descriptors and guarded kernel settings/create adapters tested; AppKit form renderer awaits the missing sheet metric tokens and shell binding. | `pm-kernel::commands::comps`; `pm-panel-inspector` composition bindings. **spec+model** |
 | S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** pre-compose states and delete NSAlert adapter added; kernel `CompCommand::Precompose` still returns `NotImplemented` (including duration/open-after integration). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
+
+| S013 P0 | Extension panel crashed/hung/unavailable: recovery, reload, disable | `R/kernel/sandbox-host.ts`; `R/kernel/sandbox-view.ts`; `R/legacy/ui/extension-settings.ts` | Shared error states and Store-host lifecycle review are not a full recovery design. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S013](design/surfaces/recovery.md). | `pm-store-host::view::{ViewStatus,RecoveryPolicy,Action}`; runtime/compat lifecycle models. Full application watchdog wiring pending. **spec+model** |
+| S014 P1 | Main editor windows, title/dirty indicator, project tabs, tab menu, move tab to another/new window, restore | `M/windows.ts`; `M/index.ts`; `R/shell/Titlebar.svelte`; `R/legacy/app.ts` | Shell review covers native window/tab/title behavior. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S014](design/surfaces/documents.md). **Documents lane (2026-11-01):** Deferred transfer/snap-back and restore-error contracts implemented/tested; shell ownership callbacks remain to connect. See documents lane update below. | `pm-shell::{session,native}`; `pm-kernel::session`; native window/kernel ownership integration remains. **spec+model** (partial) |
+| S015 P1 | Docked panels, headers, collapse/hide, splitters, drag/drop previews, add/close/move panel menu | `R/layout/Dock.svelte`; `R/layout/DockLayout.svelte`; `R/layout/Splitter.svelte`; `R/legacy/ui/layout.ts` | Shared and Shell review specify native docking, context menus, previews and header state. | `pm-shell::layout::{Layout,DropTarget,DropPreview}`; app must connect arbitrary extension panel ids. **spec+model** |
+| S016 P1 | Popped-out panel window, focus/close/return and shared project ownership | `M/panel-popout.ts`; `R/layout/PanelPool.svelte`; `R/legacy/ui/layout.ts` | Shared mentions Pop Out; no full popout lifecycle spec. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S016](design/surfaces/documents.md). **Documents lane (2026-11-01):** Popout lifecycle, system NSWindow constructor and v4 header implemented/tested; existing content/delegates/persistence remain to connect. See documents lane update below. | `pm-shell` window/layout models and engine independent viewer support are partial; arbitrary panel detach/reattach host remains. **spec+model** |
+| S017 P1 | Home/project library: recent/all projects, search/sort, grid/list, project cards and empty state | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review defines row facts/vocabulary; no complete Project Library window design. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S017](design/surfaces/library.md). | `pm-services::library::{ProjectEntry,ProjectSummary,LibraryService}`; `pm-kernel` library. **spec+model** |
+| S018 P1 | New Project dialog, defaults and creation errors | `R/legacy/app.ts`; `R/legacy/ui/project-settings.ts` | No dedicated spec. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S018](design/surfaces/library.md). | `pm-kernel::{session,commands::library}` creates projects; dialog state/host missing. **spec+model** |
+| S019 P1 | Rename/duplicate project, project-card/context actions | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review has library vocabulary/data only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S019](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::session`. **spec+model** |
+| S020 P1 | Open/Save/Save As `.pmv` system picker; import/export file and directory pickers | `M/save.ts`; `M/render-encoder.ts`; `R/legacy/app.ts` | Export specifies export destination picker; no complete project open/save picker policy. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S020](design/surfaces/documents.md). **Documents lane (2026-11-01):** Typed picker descriptions and AppKit NSOpenPanel/NSSavePanel adapter implemented; macOS filter/overwrite/extension behavior and caller integration remain. See documents lane update below. | `pm-kernel::{session,project_io}`; `pm-services::entrypoints`; platform picker adapter required. **spec+model** |
+| S021 P1 | New Composition / Composition Settings dialog; size/FPS/duration/background | `R/legacy/ui/compositions.ts`; `R/legacy/ui/project-settings.ts`; `E/inspector/CompositionSection.svelte` | Inspector and Settings cover inline fields; no complete standalone dialog spec. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S021](design/surfaces/dialogs.md). | `pm-kernel::commands::comps`; `pm-panel-inspector` composition bindings. **spec+model** |
+| S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
 | S023 P1 | Viewer canvas/chrome: zoom/fit/custom zoom, quality, safe areas, controls, focus/fullscreen, return-to-composition and offscreen recovery | `E/viewer/viewer.ts`; `E/viewer/index.ts`; `R/legacy/core/preview-resolution.ts` | Viewer and Viewer review specify chrome, quality and recovery banners. | `pm-panel-viewerchrome::{Navigation,ViewModel,Controller}`; `pm-engine-service` presentation. Physical EDR/input/performance gates open. **spec+model** |
 | S024 P1 | Source-preview viewer: image/audio/video, scrub/play/time/range, close and drag source | `E/viewer/source-preview.ts`; `R/panels/AssetsPanel.svelte` | Viewer and Media specify source mode; decoder-error states were missing. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S024](design/surfaces/media.md). | `pm-panel-media::preview`; `pm-panel-viewerchrome::source`; engine independent source viewers. Host/media leases pending. **spec+model** (partial) **Media lane, 2026-11-01:** Rust source-failure states plus v4 `surfaces/media/SourceError`, exact copy/actions and wire projection; keep-last-frame/video flags. Engine/source lease and viewer-banner installation remain. |
 | S025 P1 | On-canvas selection, transform/anchor/rotation, shape/pen/mask editing, text caret/selection/paragraph box and gizmos | `E/viewer/viewer.ts`; `E/viewer/path-editing.ts`; `E/viewer/text-editor.ts`; `E/viewer/text-geometry.ts` | Viewer covers gizmo appearance; Inspector covers properties. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S025](design/surfaces/editing.md). | Viewer model supplies selection/overlay plans; `pm-kernel::commands::{transform,masks,text}` and engine geometry. Full pointer/text/path editing host remains. **spec+model** (partial) |
@@ -138,6 +155,10 @@ Design references below are relative to `docs/native/design/`:
 | S053 P1 | Toast/error notices, expandable diagnostic details/copy, retry/fix actions | `R/overlays/Toasts.svelte`; `R/errors/ToastError.svelte`; `R/errors/ErrorNotice.svelte`; `R/errors/ErrorLog.svelte`; `R/errors/ErrorFix.svelte` | Shared inline-error policy + Services review typed copy; not every notice/repair state is covered. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S053](design/surfaces/recovery.md). **Recovery lane (2026-11-01):** ten-code copy catalog, typed one-action notices, Error Log selection/copy/clear model and native table/split-view recipe tested. Native host rendering/service subscription pending. | `pm-services::{error,diagnostics}` and agent error facts; no full native notice/log UI model. **spec+model** |
 | S054 P1 | Status bar: playback/performance/status contributions and “What is slowing the editor down” details modal | `R/shell/StatusBar.svelte`; `R/runtime/performance-monitor.ts` | Shell review covers status-bar vocabulary; no slowdown-details design. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S054](design/surfaces/recovery.md). **Recovery lane (2026-11-01):** ordered status/AX facts, Unicode-safe extension contributions and revision-fenced slowdown popover recipe/actions tested. Shell/telemetry attachment and NSPopover rendering pending. | Shell status state and engine telemetry are partial. **spec+model** |
 | S055 P1 | Project opening ghost/loading overlay and delayed transitions; retained tab intent | `R/overlays/ProjectGhost.svelte`; `R/overlays/project-ghost.ts`; `R/legacy/app.ts` | Shared loading states do not specify project-level overlay. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S055](design/surfaces/documents.md). | Kernel async session/open and shell tab state exist; ghost/overlay model absent. **spec+model** |
+
+| S053 P1 | Toast/error notices, expandable diagnostic details/copy, retry/fix actions | `R/overlays/Toasts.svelte`; `R/errors/ToastError.svelte`; `R/errors/ErrorNotice.svelte`; `R/errors/ErrorLog.svelte`; `R/errors/ErrorFix.svelte` | Shared inline-error policy + Services review typed copy; not every notice/repair state is covered. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S053](design/surfaces/recovery.md). | `pm-services::{error,diagnostics}` and agent error facts; no full native notice/log UI model. **spec+model** |
+| S054 P1 | Status bar: playback/performance/status contributions and “What is slowing the editor down” details modal | `R/shell/StatusBar.svelte`; `R/runtime/performance-monitor.ts` | Shell review covers status-bar vocabulary; no slowdown-details design. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S054](design/surfaces/recovery.md). | Shell status state and engine telemetry are partial. **spec+model** |
+| S055 P1 | Project opening ghost/loading overlay and delayed transitions; retained tab intent | `R/overlays/ProjectGhost.svelte`; `R/overlays/project-ghost.ts`; `R/legacy/app.ts` | Shared loading states do not specify project-level overlay. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S055](design/surfaces/documents.md). **Documents lane (2026-11-01):** Delayed opening/cancel/recovery/error controller and v4 loading view implemented/tested; launch host/AX announcement callbacks remain to connect. See documents lane update below. | Kernel async session/open and shell tab state exist; ghost/overlay model absent. **spec+model** |
 | S056 P2 | Agent launcher/popover, float/pin/dock/resize and busy/unread indication | `R/shell/AgentLauncher.svelte`; `R/panels/register-agent.ts`; `R/panels/agent-shell.ts`; `R/legacy/assistant/spatial.ts` | Agent explicitly chooses popover with pinning; owner decision supersedes competing presentation proposals. | `pm-panel-agentpanel::placement`; `pm-shell` Agent toolbar action. App placement adapter pending. **spec+model** |
 | S057 P2 | Agent conversation: streaming text/Markdown, reasoning/tool activity groups, timeline/working timer, follow/scroll and plan preview | `R/panels/AgentPanel.svelte`; `R/panels/agent/Conversation.svelte`; `R/panels/agent/Timeline.svelte`; `R/panels/agent/Turn.svelte`; `R/panels/agent/Markdown.svelte`; `R/panels/agent/PlanPreview.svelte` | Agent covers main conversation and states. **DESIGN-TODO(opus):** any unlisted plan/archived-tool-detail layouts. | `pm-panel-agentpanel::{activity,model,view}`; `pm-agents::{conversation,persistence}`. Renderer/provider host integration pending. **spec+model** |
 | S058 P2 | Agent composer, attachment chips, slash menu, draft/clipboard/selection and send/stop | `R/panels/agent/Composer.svelte`; `R/panels/agent/AttachmentChips.svelte`; `R/panels/agent/SlashMenu.svelte`; `R/panels/agent/attachments.ts` | Agent specifies composer and local focus/keyboard rules. | `pm-panel-agentpanel::{composer,input,interaction}`; native attachment/clipboard effects remain host-owned. **spec+model** |
@@ -715,6 +736,82 @@ announcement priorities; app-modal presentation rejects Window ownership.
 The serialized service/store seam is checked against the actual backing crate
 values. Developer text is never part of panel, banner or table message copy.
 
+## Documents lane implementation — 2026-11-01
+
+Coverage updates above apply **only** to S002/S003/S004/S014/S016/S020/S055.
+These are implementation contracts and headless/native-target verification, not
+running-app completion or Opus visual approval.
+
+Owned source: `apps/native/crates/app/src/surfaces/documents*.rs`, module
+registration, and `apps/native/js/v4/surfaces/documents/`. Public reducers expose
+stable window IDs, generation-checked `SessionHandle`s and unique request
+tickets. `Document::from_published` reads the real kernel publication;
+`submit` returns the real actor `Pending`, never blocks the UI thread. The
+service boundary uses `ServiceErrorCode`'s reviewed serde wire values; tests
+exercise every real service code and `FileOpenFailure.path`, without showing
+diagnostics or exposing lock owners. `save_preflight` is shared by Command-S
+and close-save: active work joins, copies/never-saved documents use Save As,
+and changed files require the specified choice.
+
+Implemented behavior includes flush/join/recheck before close, per-tab review,
+multi-document quit, archive-on-discard, cancelled Save panel cancellation,
+failed-save abandonment, stale-result rejection, recovery-copy receipts,
+delayed opening and announcements, cancelled-open retirement by generation,
+restore aggregation, deferred tab transfer, and popout return/restore policy.
+Compacted recovery IDs must be resolved to their **actual** document names and
+their library notices retained before acknowledging `recoveries_recorded` and
+terminating; they are never labeled with the last closing document's name.
+`CloseDocument` retires a session/tab; it closes its native window only when
+that window's final tab retires.
+
+The macOS adapter uses real NSAlert/NSOpenPanel/NSSavePanel and standard titled,
+resizable, non-floating NSWindow popouts with tabbing disallowed and per-panel
+frame autosave. Alert key equivalents are Return/Esc/Command-D and destructive
+actions are never default. Pickers use UniformTypeIdentifiers, preserve the
+system extension-hidden preference and delegate overwrite confirmation to the
+system. `announce` posts real NSAccessibility announcements. The v4 views use
+existing kit components/tokens and six atomic ops for opening, inline/viewer
+notices and the popout header; no browser APIs or JS timers own the lifecycle.
+Viewer material/placement metadata must be consumed by the native host.
+
+Required work outside this lane's ownership:
+
+- App integration must connect `session.rs`, `lifecycle.rs` and existing picker
+  callers to these effects, await kernel work off the UI thread, feed fresh
+  publications/import state in tab order (including before barrier replies), gate
+  new native/extension/agent edits during final release, and route AppKit completion tickets
+  through `PresentationQueue`. Replace neither old caller until all its
+  consumers migrate. `applicationShouldTerminate` must honor `TerminateLater`
+  and eventually call `reply(toApplicationShouldTerminate:)` for the result.
+- Shell integration must retire tabs by session, select the reviewed tab, defer
+  ownership transfer until saves finish, route popout close/button/menu to the
+  same reducer, preserve actual panel content, and persist popped-out state.
+  Project close bypasses the normal popout-return delegate. Cancelled late opens
+  must dispatch DeferClose for the returned generation, never save it.
+- Services/kernel integration must supply external-change observations and
+  successful reload receipts: there is no watcher/reload API to call today.
+  `ShellReply::Changed(bool)` currently acknowledges unrelated library/session
+  operations and is **not** proof that a file was reloaded. Preserve dirty state
+  on uncertain durability; map untyped kernel Storage failures to `unknown`
+  rather than parsing diagnostics. Resolve recovery IDs/path existence on a
+  worker and retain inline notices when no viewer survives the close.
+- Native/v4 hosting must attach the views to their owning viewer/library/header,
+  consume the existing pm-design ViewerOverlay material in dark scheme, and
+  deliver the announcement/lifetime/action/dismiss semantics. Action banners
+  persist; passive viewer banners expire after four seconds. Standard native
+  buttons supply keyboard activation and VoiceOver semantics.
+
+`DESIGN-TODO(opus)` placeholders, with no lane-invented visual substitute:
+
+- surfaces/README §2 names `m.sheet_inset` and `m.sheet_value_column`, neither
+  exists in pm-design. The AppKit Finishing Up request reports an inspectable
+  `Unavailable` result until the design tokens exist; it does not substitute
+  an alert or guessed geometry. Its exact title/line/Cancel semantics and
+  one-second delay are implemented and tested.
+- The notice grammar requires a symbol but does not name the info/warning
+  symbols. The v4 notice leaves that slot empty with a `DESIGN-TODO(opus)`
+  metadata marker. Other specified symbols, copy and AX labels are exact.
+
 Decisions and selecting rules:
 
 | Decision | Selecting rule |
@@ -887,6 +984,19 @@ resolve these gaps.
 
 Linux reproduction (all fixtures are owned Rust source; Python is unnecessary):
 
+| Use real system controls, exact reviewed copy and existing kit/tokens; keep missing visuals as explicit placeholders. | N1/N3 and Opus ownership; no design choices by this lane. |
+| Recheck fresh published dirtiness after a joined/completed save; cancel only close/quit intent. | N3 authored intent and N4 retained work. |
+| Use DiscardClose and retain every recovery ID; never delete a version or infer a recovery name. | N4 archive-never-delete; N3 correctness. |
+| Release clean sessions with DeferClose after the barrier; Close would save again and could rewrite an external version. Re-prompt on new edits during the barrier. | N3 authored intent; N4 no silent loss. |
+| Session generation and process-unique tickets gate callbacks; expose reducer stages and effects by ID. | N7 agent-native; kernel single-writer contract. |
+| Queue asynchronous Rust/AppKit work; v4 views own no IO or lifecycle timer. | N8 UI thread never waits on JS; N6 existing extension contracts untouched. |
+| Keep all existing lifecycle consumers and edit only owned registration/coverage paths. | Prune rule and lane ownership. |
+| Follow S016's Viewer/Tools dock-only policy instead of copying the tagged timeline prohibition. | N3 specified intent wins over implementation imitation. |
+| Use OK as the explicit default for S004/S014 acknowledgements even where prose lists Finder/Library first. | N3 specific default instruction and shared NSAlert first-button grammar. |
+
+Reproduction (from the repository root; all test/build/check commands use the
+locked dependency graph):
+
 ```sh
 source /workspace/.tools/activate.sh
 cd /workspace/powermove
@@ -931,3 +1041,85 @@ there is no checked-in lockfile delta to own. Full-app `cargo fmt -p
 pm-native-app --check` also reports pre-existing formatting in the unowned
 `app/src/smoke.rs` call to `media::for_session`; the touched registration and all
 owned modules pass formatting checks. The app owner can format that call.
+
+rustc --edition=2024 apps/native/crates/app/src/surfaces/documents_check.rs -o work/documents-check-tool
+work/documents-check-tool
+work/documents-check-tool --check-macos
+cd apps/native
+cargo test --locked -p pm-kernel
+cd js/v4
+bun install --frozen-lockfile
+cd surfaces/documents
+bun test
+../../node_modules/.bin/tsc --noEmit -p tsconfig.json
+../../node_modules/.bin/prettier --check index.tsx documents.test.tsx tsconfig.json
+```
+
+The portable driver compiles the **actual owned modules** against pm-kernel
+and pm-services using a disposable `work/` manifest seeded from the workspace
+lockfile. It runs `cargo test --locked --manifest-path
+work/documents-check/Cargo.toml` (with an absolute manifest path), Clippy with
+`--locked --all-targets -- -D warnings`, and formatting. `--check-macos` runs
+`cargo check --locked` and Clippy for `x86_64-apple-darwin`; it is a type check,
+not execution. The existing app manifest unconditionally links macOS UI, so
+Linux cannot execute `cargo test -p pm-native-app`. No new workspace crate,
+production dependency or production lockfile change is required.
+
+macOS still must verify actual sheet ownership/queuing/placement, app-modal
+fallback, terminate-later/cancel, open/save/import/folder filtering, extension
+visibility and overwrite behavior, save/import races, tab transfer/snap-back,
+popout restoration/focus, system AX announcements/labels/keyboard, and native
+v4 material/placement rendering in every appearance/accessibility setting.
+All visual output remains provisional until Opus review.
+
+### Documents lane merge validation — 2026-11-01
+
+Merged `origin/feat/native-engine` at
+`edc3c6e07164f6ac2bd71f1ef2405ff8d11520c3` with no conflicts. The remote's
+narrow fetch mapping initially left its tracking ref stale; an explicit refspec
+fetch corrected it, and the final fetch/merge verified FETCH_HEAD and the
+tracking ref both equal this commit. Only owned files differ from this base;
+only the seven named design-coverage cells changed, each by appending text.
+The production lockfiles match the merged base (including its upstream changes).
+
+Post-merge results using the commands above:
+
+- Documents: **53 Rust tests passed** (50 controller/kernel/lifetime tests and
+  three real service-contract tests); zero failed/ignored. Linux Clippy
+  `--locked --all-targets -- -D warnings` and owned-source rustfmt pass.
+- v4 documents: **7 tests passed**, 60 assertions, including real Rust six-op,
+  kit-diagnostic and accessibility/focus projection; TypeScript and Prettier pass.
+- Kernel: `cd apps/native && cargo test --locked -p pm-kernel`:
+  **273 passed, 1 existing ignored** (`smoke_real_store_copy_counts_only`,
+  which requires a real-store copy and is intentionally not run on user data).
+  Frozen v1.2.0/v1.3.0 reader-oracle tests pass after fetching their existing tags.
+- macOS-target `cargo check --locked` and Clippy `--locked -- -D warnings`
+  pass for the actual document modules/adapter on `x86_64-apple-darwin`.
+  No AppKit/GPUI/Metal runtime or macOS visual test is claimed.
+- `git diff --check`, append-safe coverage/ownership checks and staged gitleaks
+  scans pass before commits. No new crate or production dependency was added.
+
+One pre-existing whole-app formatting issue remains **outside owned paths**:
+`cargo fmt --manifest-path apps/native/Cargo.toml -p pm-native-app -- --check`
+reports the packed `for_session(&p.snapshot, &p.media, p.path.as_deref(), …)`
+arguments at `apps/native/crates/app/src/smoke.rs:90`. That file is byte-identical
+to the merged engine base; its owner should expand those arguments with rustfmt.
+The portable lane driver checks every owned Rust source without changing it.
+
+The clean-release regression verifies byte-identical external file contents
+through the release itself and exact authored document/replayable history
+through final kernel compaction. Existing `PrepareQuit` may append an identical
+PMV4 record for a deferred journal; this lane does not claim physical-file
+identity across that existing compaction operation. Watcher/reload integration
+and the two Opus placeholders listed above remain open.
+
+A repeated post-merge kernel run exposed one intermittent failure in the
+existing `slice3::selection_is_atomic_ephemeral_deduplicated_and_published_before_event`
+test (`slice3.rs:135`, first received event was not Published). Its isolated
+locked rerun passed, and the subsequent complete locked kernel rerun passed
+273/273 with the same one existing ignored test. Kernel sources/tests are
+unchanged by this lane. The public actor code replies to Open before emitting
+Opened; the test subscribes after awaiting that reply, so a late Opened event
+can race its first-event assertion. The kernel owner should synchronize the
+subscription/setup with Opened while retaining the Published-before-SelectionChanged
+assertion. No test was ignored, weakened, or edited to obtain the rerun pass.

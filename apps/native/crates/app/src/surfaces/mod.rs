@@ -27,3 +27,8 @@ pub mod recovery_macos;
 pub mod recovery_native;
 #[allow(dead_code)]
 pub mod recovery_wire;
+
+//! Native secondary surfaces. Callers are connected by the app integration lane.
+// Public controllers are intentionally available before those callers migrate.
+#[allow(dead_code)]
+pub mod documents;
