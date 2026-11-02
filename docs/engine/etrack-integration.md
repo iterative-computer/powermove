@@ -310,3 +310,55 @@ No visual/UX decisions or DESIGN-TODO placeholders were introduced.
 Gate E remains open: see e2e-ledger.md and gate-e.json for implementation,
 consumer-binding, platform and qualification blockers. A complete inventory
 is not a completed rendering gate.
+
+## macOS integration replay — base Apple M5 (2026-11-01)
+
+The integration branch includes the engine-finish, native pro-media and
+export-parity merges. The first build of the combined tree ran no engine tests:
+Studio still used retired material slots/mesh groups and omitted the output
+color-space label. Those compile failures are repaired against the current
+whole-mesh material API; Studio's already tone-mapped output is explicitly
+encoded. Regression tests retain the current material and output contracts.
+
+Additional repairs found by the Mac replay:
+
+- Move the proxy chart's independent f64 color reference into test support;
+  it no longer imports the deleted S2 spike. Keep the Sharma CIEDE2000 vectors.
+- Honor PNG cICP precedence over ICC when ImageIO/sips produces both. Preserve
+  supported gamma/linear/log transfer readings and reject unknown explicit tags.
+- Preserve low-bit-depth samples and original 16-bit unprofiled TIFF palette
+  entries through ImageIO. Independent authored TIFF and packed-index tests
+  verify the original codes rather than a converter's rescaled RGB8 palette.
+- Allocate a real mip chain for stills and prepare native material maps for
+  the standalone 3D entry point. Keep video normalization and zero-copy checks;
+  still AVIF tests now compare their retained native YCbCr planes as well.
+- Use normalized Lanczos-3 reconstruction for AVIF still chroma. The complete
+  still standards sweep passes its original bounds, including tagged HDR
+  samples; video keeps its separately qualified playback filter.
+- Make the typography fixture explicitly Helvetica, the face whose metrics
+  produced its frozen numbers. Keep those numbers. Make the still gate's
+  project depth explicitly 32-bit so its requested float comparison is real.
+- Isolate independent fake audio devices and native compiler fixtures from
+  process-wide pools. Preserve deadline, PCM, shader and admission assertions.
+- Restore the export conversion helper with an HDR-before-mutation regression;
+  repair the three export-parity Mac failures described in [export.md](export.md).
+- Update the generated desktop protocol hash and native lockfile dependency
+  edges. The VFR probe is correct on this Mac: ffprobe reports an explicit
+  final duration. Tests separately verify reported timing and refusal of absent,
+  unknown or zero final duration without inventing timing.
+
+The original frozen corpus and real project are unavailable. New synthetic v1
+witnesses are captured on this build Mac (base M5), one category at a time,
+using a temporary Electron profile. They are **not the original frozen
+capture**. Strict fingerprints and numerical limits are unchanged. Recorded
+category results and the remaining Gate E qualifications are in
+[e2e-ledger.md](e2e-ledger.md) and [gate-e.json](gate-e.json).
+
+### WIP owner handoff
+
+Validation was stopped at the orchestrator's request before the full engine
+integration replay finished. Jude takes over with the original frozen corpus
+and projects. The exact failure register, verified subsets, environment and
+next steps are in [the Mac engine handoff](../native/handoff/engine-macos.md).
+The branch is not all green; Gate E and the cold distinct-voice AUDIO-2 gate
+remain open. The last TIFF palette integration repair also needs a full replay.

@@ -786,8 +786,8 @@ The existing platform test targets compile to zero tests on Linux and are not
 included in the passing count. The generated v1.2.0 H.264/ProRes comparison uses
 a decoded RGBA RMS limit of 3 eight-bit CV; this proves only those synthetic
 fixtures. PCM tolerances are 1e-12 float RMS, 1e-7 PCM24, and 4e-5 PCM16. AAC's
-short first-packet transient is separately bounded (whole-clip RMS 0.02,
-steady-state 0.003), not attributed to the mixer. No performance gate or full
+startup and flush transients are separately bounded (whole-clip RMS 0.02,
+steady-state 0.003 outside the first and last 1024-frame blocks), not attributed to the mixer. No performance gate or full
 project/Electron equality is claimed.
 
 Reproduce from the repository (activate the installed toolchain first):
@@ -816,3 +816,28 @@ custom sizes, working depths, motion blur/captions, queue/agent cancellation and
 long exports; verify archive recovery and atomic moves on APFS/exFAT; perform
 calibrated HDR/mastering and quiet paired performance gates. No claim here
 substitutes for those tests or for Opus's eventual design review.
+
+
+### macOS integration replay (base Apple M5, 2026-11-01)
+
+The first complete Mac replay of the merged export lane passed **139 tests**
+with **7 pre-existing ignored measurements/manual cases**. In particular,
+`bars_delivery` passed 5/5, `software` 14/14 and `videotoolbox` 16/16.
+This is synthetic Metal/VideoToolbox/AudioToolbox evidence, not calibrated HDR,
+real-player, full-corpus or performance qualification.
+
+Three failures were reproduced and repaired without increasing their bounds:
+
+- The AAC steady-state window included its final flush transient. It now
+  excludes one AAC frame at both ends; whole-clip RMS, length, rate and channel
+  checks remain in force.
+- Successful replacement correctly archives the old destination. The test now
+  checks the delivered file, exactly one archive entry and the old bytes.
+- AVFoundation's BGRA readback introduced an extra asymmetric conversion error
+  in the 8-bit chart. The independent macOS reader now requests CPU ARGB and
+  normalizes byte order. Packed-pixel readback uses CoreVideo's actual ARGB
+  constant (numeric 32), with the original chart bounds retained.
+
+The reusable RGBA8 conversion entry point was also restored, sharing the
+validated dimensions and encoder conversion path. Explicit HDR tags are refused
+by that 8-bit entry point before mutating the reusable destination.

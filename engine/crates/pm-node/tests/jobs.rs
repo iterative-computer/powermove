@@ -37,6 +37,10 @@ use serde_json::{Value, json};
 
 const HOST: PortId = PortId(1);
 
+// Independent fake devices must not consume one another's two-slot compiler
+// admission budget. Real contention is covered by pm-glsl/compiler_process.
+static DEVICE_FIXTURE: Mutex<()> = Mutex::new(());
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
@@ -160,10 +164,13 @@ struct Host {
     host_requests: Vec<&'static str>,
     /// `compatFrame` asks (answered as with no editor window open).
     compat_asks: Vec<pm_protocol::snapshot::CompatFrameRequest>,
+    // Last field: release admission isolation after the engine has shut down.
+    _device_fixture: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Host {
     fn new(name: &str, env: &[(&str, &str)]) -> Host {
+        let device_fixture = DEVICE_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
         let pending = Arc::new((Mutex::new(false), Condvar::new()));
         let p2 = pending.clone();
         let sink: pm_node::ActionSink = Arc::new(move |actions: Vec<Action>| {
@@ -203,6 +210,7 @@ impl Host {
             statuses: vec![],
             host_requests: vec![],
             compat_asks: vec![],
+            _device_fixture: device_fixture,
         };
         host.handle(out);
         host

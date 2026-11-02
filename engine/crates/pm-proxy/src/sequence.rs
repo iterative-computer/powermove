@@ -194,6 +194,26 @@ fn float_outside_sdr(still: &pm_media::image::StillImage) -> Result<bool> {
         .map_err(|e| ProxyError::InvalidMedia(format!("sequence pixels: {e}")))
 }
 
+// PNG cICP takes precedence over iCCP (the reader clears that profile).
+// AVIF keeps its ICC profile, which overrides nclx primaries/transfer.
+fn cicp_color(color: &pm_media::image::ImageColor) -> Result<Option<(Primaries, Transfer)>> {
+    if color.icc.is_some() {
+        return Ok(None);
+    }
+    color
+        .cicp
+        .map(|cicp| {
+            pm_media::interpret::still_cicp(cicp)
+                .map(|(p, t, _)| (p, t))
+                .ok_or_else(|| {
+                    ProxyError::InvalidMedia(format!(
+                        "unsupported sequence color code points: {cicp:?}"
+                    ))
+                })
+        })
+        .transpose()
+}
+
 fn direct_color(
     still: &pm_media::image::StillImage,
     _path: &Path,
@@ -204,14 +224,18 @@ fn direct_color(
     {
         return Ok(None);
     }
-    let primaries = if let Some(ch) = still.color.chromaticities {
+    let tagged = cicp_color(&still.color)?;
+    let primaries = if let Some((primaries, _)) = tagged {
+        Some(primaries)
+    } else if let Some(ch) = still.color.chromaticities {
         exr_primaries(ch)
     } else if still.color.icc_class == Some(IccClass::DisplayP3) {
         Some(Primaries::DisplayP3)
     } else {
         Some(Primaries::Bt709)
     };
-    Ok(match (primaries, still.color.transfer) {
+    let transfer = tagged.map_or(still.color.transfer, |(_, t)| t);
+    Ok(match (primaries, transfer) {
         (Some(Primaries::Bt709), Transfer::DisplayE) => Some(SequenceColor::Srgb),
         (Some(Primaries::DisplayP3), Transfer::DisplayE) => Some(SequenceColor::DisplayP3),
         (Some(Primaries::Bt709), Transfer::Linear) => Some(SequenceColor::Linear709),
@@ -376,6 +400,10 @@ fn exr_to_bt2020(ch: [f32; 8]) -> Result<Mat3> {
 }
 
 fn source_to_bt2020(still: &pm_media::image::StillImage) -> Result<Mat3> {
+    if let Some((primaries, _)) = cicp_color(&still.color)? {
+        return pm_color::primaries::conversion(primaries, Primaries::Bt2020)
+            .ok_or_else(|| ProxyError::InvalidMedia("unsupported sequence primaries".into()));
+    }
     if matches!(still.color.transfer, Transfer::Pq | Transfer::Hlg) {
         return Ok(pm_color::primaries::conversion(Primaries::Bt2020, Primaries::Bt2020).unwrap());
     }
@@ -388,25 +416,6 @@ fn source_to_bt2020(still: &pm_media::image::StillImage) -> Result<Mat3> {
         Primaries::Bt709
     };
     Ok(pm_color::primaries::conversion(source, Primaries::Bt2020).unwrap())
-}
-
-#[cfg(test)]
-mod color_tests {
-    use super::*;
-
-    #[test]
-    fn arbitrary_d60_exr_white_adapts_to_bt2020_without_a_color_cast() {
-        // ACEScg AP1 primaries and D60 white. A neutral scene value remains
-        // neutral after Bradford adaptation to BT.2020's D65 white.
-        let matrix =
-            exr_to_bt2020([0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767]).unwrap();
-        let neutral = pm_color::primaries::apply(&matrix, [1.0; 3]);
-        for channel in neutral {
-            assert!((channel - 1.0).abs() < 0.002, "{neutral:?}");
-        }
-        assert!(pq_code(4.0) > pq_code(1.0));
-        assert!((source_linear(Transfer::Pq, pq_code(4.0)) - 4.0).abs() < 1e-9);
-    }
 }
 
 /// ST 2084, treating scene-linear 1.0 as reference white at 100 cd/m².
@@ -495,7 +504,7 @@ fn write_normalized_frame(
     let mut stream = writer
         .stream_writer()
         .map_err(|e| ProxyError::InvalidMedia(format!("sequence PNG stream: {e}")))?;
-    let transfer = still.color.transfer;
+    let transfer = cicp_color(&still.color)?.map_or(still.color.transfer, |(_, t)| t);
     let alpha_mode = still.color.alpha;
     let result = still
         .frame
@@ -943,4 +952,40 @@ pub(crate) fn generate_sequence(
         stored,
         reused: false,
     })
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_cicp_preserves_p3_and_hdr_and_refuses_unknown_codes() {
+        let mut color = pm_media::image::ImageColor::plain(Transfer::DisplayE, AlphaMode::Opaque);
+        for (codes, expected) in [
+            ([12, 13, 0, 1], (Primaries::DisplayP3, Transfer::DisplayE)),
+            ([9, 16, 0, 1], (Primaries::Bt2020, Transfer::Pq)),
+        ] {
+            color.cicp = Some(codes);
+            assert_eq!(cicp_color(&color).unwrap(), Some(expected));
+        }
+        color.cicp = Some([255, 13, 0, 1]);
+        assert!(cicp_color(&color).is_err());
+        // AVIF ICC overrides nclx. PNG's reader removes overridden ICC.
+        color.icc = Some(vec![0]);
+        assert_eq!(cicp_color(&color).unwrap(), None);
+    }
+
+    #[test]
+    fn arbitrary_d60_exr_white_adapts_to_bt2020_without_a_color_cast() {
+        // ACEScg AP1 primaries and D60 white. A neutral scene value remains
+        // neutral after Bradford adaptation to BT.2020's D65 white.
+        let matrix =
+            exr_to_bt2020([0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767]).unwrap();
+        let neutral = pm_color::primaries::apply(&matrix, [1.0; 3]);
+        for channel in neutral {
+            assert!((channel - 1.0).abs() < 0.002, "{neutral:?}");
+        }
+        assert!(pq_code(4.0) > pq_code(1.0));
+        assert!((source_linear(Transfer::Pq, pq_code(4.0)) - 4.0).abs() < 1e-9);
+    }
 }

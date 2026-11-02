@@ -341,6 +341,41 @@ fn interactive_buffer(supported: &cpal::SupportedBufferSize, sample_rate: u32) -
     }
 }
 
+/// CoreAudio adapter for the platform-independent device lifecycle policy.
+pub struct SystemDeviceProbe;
+
+impl crate::device_policy::DeviceProbe for SystemDeviceProbe {
+    type Error = AudioError;
+    fn snapshot(&mut self) -> Result<Option<crate::device_policy::DeviceSnapshot>> {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(id) = coreaudio::default_output() else {
+                return Ok(None);
+            };
+            let info = default_output_info()?;
+            // Detect a device switch during the configuration query; retry
+            // on the next poll rather than committing a mixed snapshot.
+            if coreaudio::default_output() != Some(id) {
+                return Ok(None);
+            }
+            Ok(Some(crate::device_policy::DeviceSnapshot {
+                id: u64::from(id),
+                sample_rate: info.sample_rate,
+                channels: u16::try_from(info.channels)
+                    .map_err(|_| AudioError::Device("channel count overflows".into()))?,
+                latency_frames: info.latency_frames,
+                buffer_frames: info.buffer_frames,
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(AudioError::Device(
+                "system output probing requires CoreAudio".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,40 +411,5 @@ mod tests {
             interactive_buffer(&cpal::SupportedBufferSize::Unknown, 48_000),
             Default
         );
-    }
-}
-
-/// CoreAudio adapter for the platform-independent device lifecycle policy.
-pub struct SystemDeviceProbe;
-
-impl crate::device_policy::DeviceProbe for SystemDeviceProbe {
-    type Error = AudioError;
-    fn snapshot(&mut self) -> Result<Option<crate::device_policy::DeviceSnapshot>> {
-        #[cfg(target_os = "macos")]
-        {
-            let Some(id) = coreaudio::default_output() else {
-                return Ok(None);
-            };
-            let info = default_output_info()?;
-            // Detect a device switch during the configuration query; retry
-            // on the next poll rather than committing a mixed snapshot.
-            if coreaudio::default_output() != Some(id) {
-                return Ok(None);
-            }
-            Ok(Some(crate::device_policy::DeviceSnapshot {
-                id: u64::from(id),
-                sample_rate: info.sample_rate,
-                channels: u16::try_from(info.channels)
-                    .map_err(|_| AudioError::Device("channel count overflows".into()))?,
-                latency_frames: info.latency_frames,
-                buffer_frames: info.buffer_frames,
-            }))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(AudioError::Device(
-                "system output probing requires CoreAudio".into(),
-            ))
-        }
     }
 }

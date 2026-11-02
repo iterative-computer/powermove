@@ -579,12 +579,10 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
             assert_eq!(actual, poster);
             assert!(strip.iter().all(|frame| frame == &actual));
             for (pixel, (value, alpha)) in actual.chunks_exact(4).zip(stored) {
-                let encoded = if gamma == 45_455 {
-                    // ImageIO's measured sRGB window uses the sRGB curve.
-                    f64::from(value) / 255.0
-                } else {
-                    display_encode((f64::from(value) / 255.0).powf(100_000.0 / f64::from(gamma)))
-                };
+                // PNG gAMA alone is a pure power, including 0.45455;
+                // only an sRGB/iCCP/cICP chunk replaces that curve.
+                let encoded =
+                    display_encode((f64::from(value) / 255.0).powf(100_000.0 / f64::from(gamma)));
                 let expected = (encoded * f64::from(alpha)).round() as u8;
                 assert!(
                     pixel[..3].iter().all(|&v| v.abs_diff(expected) <= 1),
@@ -597,7 +595,7 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
                     alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
                     ..Default::default()
                 };
-                let error = renderer
+                let opaque = renderer
                     .source_rgba8(
                         &path,
                         Ticks::ZERO,
@@ -606,8 +604,15 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
                         Some(&interpretation),
                         false,
                     )
-                    .unwrap_err();
-                assert!(error.contains("gAMA"), "{error}");
+                    .unwrap();
+                for (pixel, (value, _)) in opaque.chunks_exact(4).zip(stored) {
+                    let expected = (display_encode(
+                        (f64::from(value) / 255.0).powf(100_000.0 / f64::from(gamma)),
+                    ) * 255.0)
+                        .round() as u8;
+                    assert!(pixel[..3].iter().all(|&v| v.abs_diff(expected) <= 1));
+                    assert_eq!(pixel[3], 255, "alpha override keeps the PNG curve");
+                }
                 interpretation.transfer = Some(pm_protocol::color::Transfer::Linear);
                 assert!(
                     renderer

@@ -10,6 +10,7 @@ pub mod reference;
 pub mod reference_substitutions;
 pub mod sampling_reference;
 pub mod still_reference;
+mod svg_f64;
 pub mod text;
 pub mod text_group_reference;
 pub mod text_mask_reference;
@@ -78,7 +79,9 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
 /// approved residuals require their captures there; elsewhere they report
 /// and pass vacuously).
 pub fn corpus_root() -> Option<PathBuf> {
-    Some(dirs_home()?.join("Library/Application Support/Powermove Engine Corpus"))
+    std::env::var_os("PM_ENGINE_CORPUS_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| Some(dirs_home()?.join("Library/Application Support/Powermove Engine Corpus")))
         .filter(|p| p.is_dir())
 }
 

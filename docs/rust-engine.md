@@ -1,7 +1,14 @@
 # Powermove native engine: plan and design
 
+Mac integration is **WIP, handed back to Jude** before full validation. See
+[the exact failures and reproduction commands](native/handoff/engine-macos.md).
+Gate E remains open.
+
 > Native-app E-track status (2026-11-01): the five open author branches are
 > integrated with dispositions in [engine/etrack-integration.md](engine/etrack-integration.md).
+> The base-M5 macOS integration includes the export-parity lane; its initial
+> export replay passed 139 tests. Fresh synthetic v1 captures on that build Mac
+> are new witnesses, not the unavailable original frozen corpus.
 > The exhaustive [Gate E ledger](engine/e2e-ledger.md#gate-e--native-engine-integration-2026-11-01)
 > remains open. The GPUI/in-process/V8 architecture in docs/native supersedes
 > this document's older Electron-host assumptions. Native H.273 Log100/Log316

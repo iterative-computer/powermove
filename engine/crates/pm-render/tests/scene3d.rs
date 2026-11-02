@@ -935,6 +935,48 @@ fn programs_come_from_the_disk_cache_and_keys_follow_content() {
     assert_ne!(key, bg.content_key());
 }
 
+#[test]
+fn studio_uses_the_whole_mesh_and_object_material_despite_persisted_slots() {
+    let fixture = fixture();
+    let c = fixture
+        .iter()
+        .find(|c| text(obj(c).get("id")) == Some("slots-and-groups".into()))
+        .map(|c| case(c, Path::new("/nonexistent")))
+        .expect("slot fixture");
+    let mut checked = 0;
+    for (plan, _) in &c.outputs {
+        let Render3d::Layer { depth_set, .. } = &plan.kind else {
+            continue;
+        };
+        let studio = pm_render::scene3d::studio::studio_scene(&plan.scene, depth_set).unwrap();
+        let expected: Vec<_> = depth_set
+            .iter()
+            .filter_map(|&i| plan.scene.objects.get(i))
+            .filter(|o| o.visible && !o.missing)
+            .flat_map(|o| &o.meshes)
+            .filter(|m| m.geometry.geometry.vertex_count() >= 3 && m.materials.0.opacity > 0.0)
+            .collect();
+        assert_eq!(studio.objects.len(), expected.len());
+        for (object, mesh) in studio.objects.iter().zip(expected) {
+            let geometry = &mesh.geometry.geometry;
+            let count = if geometry.indexed() {
+                geometry.indices().len()
+            } else {
+                geometry.vertex_count()
+            };
+            assert_eq!(object.mesh.indices.len(), count / 3);
+            let color = mesh.materials.0.color.map(|c| c as f32);
+            let material = &studio.materials[object.material];
+            assert_eq!(
+                material.base,
+                pm_studio::math::v3(color[0], color[1], color[2])
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+}
+
 /// Studio (pm-studio, path traced) renders the same object layers: each
 /// layer covers its own object's silhouette (within a few percent of the
 /// rasterizer's) and nothing of the others, and shades it differently.
@@ -955,6 +997,9 @@ fn studio_renders_object_layers_with_their_own_pixels() {
             )
             .unwrap();
         gpu.queue.submit([encoder.finish()]);
+        if out.color.texture.format() == wgpu::TextureFormat::Rgba8Unorm {
+            assert_eq!(out.color_space, pm_render::scene3d::OutputColor3d::Encoded);
+        }
         (
             pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap(),
             out.color.width(),

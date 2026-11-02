@@ -35,8 +35,7 @@ use pm_reference::effects::Open;
 use pm_render::AssetResolver;
 use pm_vector::kurbo::{Affine, Point};
 
-#[path = "svg_f64.rs"]
-mod svg_f64;
+use super::svg_f64;
 
 /// Coverage cells per pixel side for paths and solids.
 pub const PATH_SAMPLES: usize = 16;

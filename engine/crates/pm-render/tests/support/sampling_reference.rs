@@ -107,11 +107,9 @@ impl Bitmap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn constants_and_edges_survive_the_declared_filter() {
-        let b = Bitmap {
+        let b = super::Bitmap {
             width: 2,
             height: 2,
             rgba: [0.31, 0.2, 0.1, 0.5].repeat(4),
@@ -133,9 +131,9 @@ mod tests {
 
     #[test]
     fn mip_zero_selection_uses_the_major_axis_of_the_affine_map() {
-        assert!(Bitmap::mip_zero((3.0, 0.0), (0.0, 2.0)));
-        assert!(Bitmap::mip_zero((0.0, 3.0), (-2.0, 0.0)));
-        assert!(!Bitmap::mip_zero((4.01, 0.0), (0.0, 1.0)));
-        assert!(!Bitmap::mip_zero((f64::NAN, 0.0), (0.0, 1.0)));
+        assert!(super::Bitmap::mip_zero((3.0, 0.0), (0.0, 2.0)));
+        assert!(super::Bitmap::mip_zero((0.0, 3.0), (-2.0, 0.0)));
+        assert!(!super::Bitmap::mip_zero((4.01, 0.0), (0.0, 1.0)));
+        assert!(!super::Bitmap::mip_zero((f64::NAN, 0.0), (0.0, 1.0)));
     }
 }

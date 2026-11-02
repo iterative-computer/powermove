@@ -433,64 +433,66 @@ fn running_encode_cancel_releases_process_and_retains_partial_output() {
     assert_reaped(&pid);
     assert_eq!(fs::read(output).unwrap(), b"private partial");
 }
+// FFmpeg releases differ in whether Matroska's DefaultDuration is exposed on
+// decoded frames. Exercise the absent-duration contract with explicit probe
+// records, rather than relying on one release to omit the last duration.
+#[cfg(unix)]
+fn variable_timing_probe(root: &Path, last_duration: &str) -> SoftwareEncoder {
+    use std::os::unix::fs::PermissionsExt;
+    let tool = root.join("timing-probe.py");
+    let streams = serde_json::json!({"streams": [{
+        "codec_type": "video", "width": 4, "height": 2, "pix_fmt": "bgra",
+        "r_frame_rate": "25/1", "time_base": "1/1000"
+    }]});
+    let frames = format!(
+        "best_effort_timestamp=0|duration=40\nbest_effort_timestamp=40|duration=40\nbest_effort_timestamp=160|duration=40\nbest_effort_timestamp=360{last_duration}\n"
+    );
+    fs::write(&tool, format!(
+        "#!/usr/bin/python3\nimport sys\nprint({:?} if '-show_streams' in sys.argv else {:?})\n",
+        streams.to_string(), frames,
+    )).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    SoftwareEncoder {
+        ffprobe: tool,
+        ffmpeg: "unused".into(),
+    }
+}
+
 #[test]
+#[cfg(unix)]
 fn unverifiable_variable_duration_is_refused_without_inventing_timing() {
     let dir = TempDir::new().unwrap();
-    let cfr = fixture(dir.path(), false, false);
-    let source = dir.path().join("variable.mkv");
-    assert!(
-        Command::new("ffmpeg")
-            .args(["-v", "error", "-nostdin", "-i"])
-            .arg(cfr)
-            .args([
-                "-vf",
-                "setpts=N*N/(25*TB)",
-                "-fps_mode",
-                "passthrough",
-                "-c:v",
-                "ffv1",
-                "-level",
-                "3",
-                "-threads:v",
-                "1"
-            ])
-            .arg(&source)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let source = fixture(dir.path(), false, false);
     let bytes = fs::read(&source).unwrap();
-    // Some ffmpeg builds (e.g. Homebrew on macOS) rewrite these timestamps to a
-    // constant rate. Only assert refusal when the fixture really is variable.
-    let pts = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "packet=pts",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(&source)
-        .output()
-        .unwrap();
-    let pts: Vec<i64> = String::from_utf8_lossy(&pts.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .collect();
-    let steps: std::collections::BTreeSet<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
-    if steps.len() < 2 {
-        eprintln!(
-            "ffmpeg produced constant-rate timestamps {pts:?}; variable-duration fixture unavailable here"
-        );
-        return;
+    // Missing, unknown and zero durations must never fall back to 25 fps or
+    // the previous PTS gap, including for the final sample.
+    for last in ["", "|duration=N/A", "|duration=0"] {
+        let error = variable_timing_probe(dir.path(), last)
+            .probe(&source)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exact sample duration"));
     }
-    let error = SoftwareEncoder::default().probe(&source).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("exact sample duration"));
     assert_eq!(fs::read(source).unwrap(), bytes);
+}
+
+#[test]
+#[cfg(unix)]
+fn reported_variable_timing_is_preserved_without_frame_rate_inference() {
+    let dir = TempDir::new().unwrap();
+    let probe = variable_timing_probe(dir.path(), "|duration=40")
+        .probe(&dir.path().join("source"))
+        .unwrap();
+    let mut expected = blake3::Hasher::new();
+    for pts in [0i64, 40, 160, 360] {
+        expected.update(&pts.to_le_bytes());
+        expected.update(&40i64.to_le_bytes());
+        expected.update(&0i64.to_le_bytes());
+    }
+    assert_eq!(probe.video.samples, 4);
+    assert_eq!(probe.video.start, 0);
+    assert_eq!(probe.video.duration, 400);
+    assert_eq!(probe.video.digest, *expected.finalize().as_bytes());
 }
 
 #[test]

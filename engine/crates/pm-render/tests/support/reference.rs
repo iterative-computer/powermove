@@ -33,7 +33,6 @@ use pm_eval::node;
 use pm_eval::{Comp, Evaluator, Scope};
 use pm_model::{Document, Node};
 use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
-use pm_reference::compare::{Class, classify};
 use pm_reference::composite::{Blend, Rgba, blend, scale};
 use pm_reference::coverage::{FillRule, fill};
 use pm_render::AssetResolver;
@@ -41,8 +40,7 @@ use pm_vector::kurbo::{Affine, Point};
 
 use super::sampling_reference::Bitmap;
 
-#[path = "svg_f64.rs"]
-mod svg_f64;
+use super::svg_f64;
 
 pub const PATH_SAMPLES: usize = 16;
 
@@ -159,6 +157,8 @@ struct Depth {
     matte: usize,
 }
 
+// Individual gate binaries consume different parts of this shared facade.
+#[allow(unused_imports)]
 pub use super::effect_reference::{
     Chain, Reference, Transition, apply_effects, apply_transition, composite_open, effect_chain,
     isolated_effect_layer, layer_transition,

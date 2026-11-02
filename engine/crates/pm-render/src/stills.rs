@@ -84,10 +84,10 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         | ImageFormat::Exr
         | ImageFormat::Dpx => {}
         ImageFormat::Heif => {
-            // ImageIO supplies oriented integer RGBA with its ICC profile
-            // and alpha reading intact.
+            // ImageIO supplies oriented RGBA with its ICC profile and
+            // alpha reading intact, including half-float SDR on newer macOS.
             if !matches!(still.bit_depth, 8 | 16) {
-                return unsupported("HEIF stills outside the integer 8/16-bit decoder layouts");
+                return unsupported("HEIF stills outside the 8/16-bit component decoder layouts");
             }
         }
         // Container transforms are applied in the reader, as Blink does.
@@ -426,7 +426,7 @@ fn png<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                 let tag = array::<4, _>(r)?;
                 body_read = 4;
                 if !(matches!(tag[0], 1 | 9 | 12)
-                    && matches!(tag[1], 13 | 16 | 18)
+                    && pm_media::interpret::still_cicp(tag).is_some()
                     && tag[2..] == [0, 1])
                 {
                     return Ok(unsupported(format!(
@@ -771,10 +771,10 @@ mod tests {
         let late = png_with_bodies(8, &[(b"cHRM", &[0; 32])], &[(b"sRGB", &[0])]);
         assert!(png(late.clone()).is_ok());
         assert!(png(b"\x89PNG\r\n\x1a".to_vec()).is_err());
-        // The 3 × 3 compared CICP pairs, full range RGB.
+        // Native H.273 readings, including the logarithmic input curves.
         let cicp = |tag: [u8; 4]| png_with_bodies(16, &[(b"cICP", &tag)], &[]);
         for p in [1, 9, 12] {
-            for t in [13, 16, 18] {
+            for t in [1, 4, 6, 8, 9, 10, 13, 14, 15, 16, 18] {
                 assert!(png(cicp([p, t, 0, 1])).is_ok(), "{p}/{t}");
             }
         }
@@ -782,8 +782,8 @@ mod tests {
             [9, 16, 0, 0],
             [9, 16, 9, 1],
             [2, 16, 0, 1],
-            [9, 1, 0, 1],
-            [9, 14, 0, 1],
+            [9, 7, 0, 1],
+            [9, 255, 0, 1],
         ] {
             assert!(png(cicp(tag)).is_err(), "{tag:?}");
         }
@@ -1110,12 +1110,12 @@ mod tests {
     #[test]
     fn static_formats() {
         assert!(static_format("png", "").is_ok());
-        assert!(static_format("", "photo.JPG").is_err());
-        assert!(static_format("avif", "x.avif").is_err());
+        assert!(static_format("", "photo.JPG").is_ok());
+        assert!(static_format("avif", "x.avif").is_ok());
         assert!(static_format("HEIC", "x").is_ok());
         assert!(static_format("bmp", "x.bmp").is_ok());
         assert!(static_format("gif", "x.gif").is_ok());
-        assert!(static_format("exr", "x.exr").is_err());
+        assert!(static_format("exr", "x.exr").is_ok());
         assert!(static_format("", "noextension").is_err());
     }
 }

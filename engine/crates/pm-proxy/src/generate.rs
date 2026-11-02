@@ -121,8 +121,7 @@ pub fn generate_with_disk_probe(
     validate(
         request.source,
         temp.path(),
-        request.ffmpeg,
-        request.ffprobe,
+        (request.ffmpeg, request.ffprobe),
         &native_source,
         &input,
         &output,
@@ -243,10 +242,10 @@ fn u32_field(v: &Value, key: &str) -> Result<u32> {
 }
 
 fn bit_depth(v: &Value) -> Result<u8> {
-    if let Some(bits) = string(v, "bits_per_raw_sample").and_then(|s| s.parse::<u8>().ok()) {
-        if bits > 0 {
-            return Ok(bits);
-        }
+    if let Some(bits) = string(v, "bits_per_raw_sample").and_then(|s| s.parse::<u8>().ok())
+        && bits > 0
+    {
+        return Ok(bits);
     }
     let pix = string(v, "pix_fmt")
         .ok_or_else(|| ProxyError::InvalidMedia("unknown pixel format".into()))?;
@@ -398,10 +397,12 @@ fn transcode(
         }
     }
     // MOV's timescale follows source video units when their denominator fits.
-    if let Some((num, den)) = string(source_video, "time_base").and_then(parse_ratio) {
-        if num == 1 && den > 0 && den <= i32::MAX as i128 {
-            cmd.arg("-video_track_timescale").arg(den.to_string());
-        }
+    if let Some((num, den)) = string(source_video, "time_base").and_then(parse_ratio)
+        && num == 1
+        && den > 0
+        && den <= i32::MAX as i128
+    {
+        cmd.arg("-video_track_timescale").arg(den.to_string());
     }
     cmd.args(["-movflags", "use_metadata_tags", "-f", "mov"]);
     cmd.arg(destination);
@@ -597,8 +598,7 @@ fn canonical_pcm_hash(ffmpeg: &Path, path: &Path, stream: usize) -> Result<Vec<u
 fn validate(
     source_path: &Path,
     output_path: &Path,
-    ffmpeg: &Path,
-    ffprobe: &Path,
+    (ffmpeg, ffprobe): (&Path, &Path),
     source_native: &pm_media::probe::Probed,
     source: &Value,
     output: &Value,
@@ -635,10 +635,10 @@ fn validate(
         "Content light level metadata",
         "Frame Cropping",
     ] {
-        if let Some(a) = side_data(src, kind) {
-            if side_data(dst, kind) != Some(a) {
-                return Err(ProxyError::Validation(format!("proxy changed {kind}")));
-            }
+        if let Some(a) = side_data(src, kind)
+            && side_data(dst, kind) != Some(a)
+        {
+            return Err(ProxyError::Validation(format!("proxy changed {kind}")));
         }
     }
     let output_native = pm_media::probe::probe(output_path)
@@ -705,10 +705,10 @@ fn validate(
         if rgb_source && matches!(key, "color_space" | "color_range") {
             continue;
         }
-        if let Some(source_value) = string(src, key).filter(|s| *s != "unknown" && *s != "N/A") {
-            if string(dst, key) != Some(source_value) {
-                return Err(ProxyError::Validation(format!("proxy changed {key}")));
-            }
+        if let Some(source_value) = string(src, key).filter(|s| *s != "unknown" && *s != "N/A")
+            && string(dst, key) != Some(source_value)
+        {
+            return Err(ProxyError::Validation(format!("proxy changed {key}")));
         }
     }
     if string(src, "color_space") == Some("gbr") {
@@ -765,10 +765,10 @@ fn validate(
         if !string(b, "codec_name").is_some_and(|s| s.starts_with("pcm_")) {
             return Err(fail("proxy audio is not PCM"));
         }
-        if let Some(codec) = pcm_source_codec(a)? {
-            if string(b, "codec_name") != Some(codec) {
-                return Err(fail("proxy changed PCM coding or sample depth"));
-            }
+        if let Some(codec) = pcm_source_codec(a)?
+            && string(b, "codec_name") != Some(codec)
+        {
+            return Err(fail("proxy changed PCM coding or sample depth"));
         }
         for key in ["sample_rate", "channels", "channel_layout"] {
             if !a[key].is_null() && a[key] != b[key] {

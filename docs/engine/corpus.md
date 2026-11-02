@@ -361,3 +361,31 @@ it is not a capture.
 - Audio is not rendered; evaluation dumps record the audio channels.
 - Chromium color measurement for tagged and HDR sources (section 25, Phase 0) is a
   separate task.
+
+## Recreating synthetic witnesses on another Mac
+
+The original frozen corpus is not copied by Git. If it is unavailable, a new
+capture is a new witness, not a replacement for the original qualification or
+its pending fingerprints. The 2026-11-01 integration run recaptured synthetic
+projects on the build Mac (base Apple M5); it did not use the original frozen
+capture or a real user project.
+
+Capture and check one category at a time when storage is limited:
+
+```sh
+unset ELECTRON_RUN_AS_NODE
+flock /tmp/pm-build.lock flock /tmp/pm-electron.lock nice -n 20 \
+  bun engine/corpus/src/capture.ts --label v1 --id v1-local-layers \
+  --only layers/ --skip-real --skip-scenarios --root /private/tmp/pm-engine-corpus
+PM_ENGINE_CORPUS=/private/tmp/pm-engine-corpus/v1-local-layers \
+PM_RENDER_ONLY=layers/ PM_TEXT_ONLY=layers/ \
+  flock /tmp/pm-build.lock nice -n 20 cargo test --locked \
+  --manifest-path engine/Cargo.toml -p pm-render --test corpus --test text_corpus
+```
+
+The capture tool creates and removes its own temporary Electron profile. Save
+the results before deleting that category's capture, then repeat with the next
+category prefix and a unique id. A category-filtered pass does not qualify the
+whole frozen corpus. The auxiliary mask, Canvas and SVG gates use
+`PM_ENGINE_CORPUS_ROOT` to find their named captures under a nondefault root;
+without it they continue to search the normal Application Support folder.

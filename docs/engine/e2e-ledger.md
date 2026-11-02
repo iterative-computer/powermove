@@ -348,3 +348,90 @@ known cross-lane failure; it is not an all-green full-suite result.
 The Linux validation counts and exact command limitations are recorded in
 [etrack-integration.md](etrack-integration.md). **Gate E stays open until the
 above missing implementations and physical/corpus proofs close.**
+
+
+### macOS integration evidence — base Apple M5 (2026-11-01)
+
+The native engine integration now also includes the export-parity lane. Its
+first complete macOS replay passed **139 pm-export tests**, with **7 existing
+ignored measurements/manual cases**. The three reported export failures were
+reproduced and repaired: AAC startup/flush attribution, archive-aware atomic
+replacement, and the AVFoundation chart reader's packed RGB conversion.
+The numeric bounds, decoded lengths, rates and channel checks remain intact.
+See [export.md](export.md#macos-integration-replay-base-apple-m5-2026-11-01).
+
+The generated desktop protocol id is updated and the strict regeneration test
+passes. `cargo check -p pm-native-app` also passes after the export merge. The
+complete native replay passed **pm-native-app 28 tests (1 ignored)** and
+**pm-promedia 116 tests**. Engine totals and remaining gate results are recorded
+in [etrack-integration.md](etrack-integration.md).
+
+The original frozen corpus and the original real project are unavailable on
+this Mac. Fresh captures use the documented tool with `--label v1`, synthetic
+projects only, a temporary Electron profile, and
+`--root /private/tmp/pm-engine-corpus`. **These were recaptured on the build Mac
+(base M5); they are not the original frozen capture.** Capture and parity run
+one category at a time; captures are deleted after their results are recorded.
+No original pending fingerprint or numerical bound is replaced by these new
+measurements.
+
+The first category captured 12 layer projects, 34 frames (3 float frames),
+and 34 evaluation dumps; verification found no missing or unlisted files.
+The renderer compared 30 frames and found a binding-quirk/reference mismatch.
+The initial replay also reported unvisited pending entries outside that single
+category; subsequent category runs use the explicit category filter and retain
+the global qualification requirement. Gate E remains **OPEN**.
+
+
+G-V2 was also recaptured on this M5 using all **54** synthetic mask cases and
+the current legacy coverage source. The Metal gate passed every case against
+those new witnesses and the independent f64 coverage/Gaussian reference,
+including HD/UHD, subtraction, feathering and exact unfeathered geometry.
+Its precision and parity bounds are unchanged. Category captures were removed
+after recording results. This closes the Mac mask execution check, not the
+whole-engine frozen-corpus or physical/performance qualification.
+
+The Canvas/vector witness was also recaptured on this M5: **556 synthetic
+cases captured**, **474 compared** by G-V1, and **18 Rust tests passed**. The
+vector
+gate's edge max/p99.9/mean checks and exact stroke regions passed unchanged;
+its capture was deleted after results were recorded.
+
+The Mac S4 inventory ran the bounded native compiler and Metal draw, including
+MSL byte-equivalence checking: **812 source cases / 2,143 variants**, **656
+successful Metal draws**. The other cases stopped at ES validation (115),
+resource binding (33), source limits (5), or Naga validation (3). This set
+includes deliberate negative probes. It establishes execution evidence, not a
+claim that all input sources are supported or that the historical WebGL pixel
+gaps are qualified. Private shader sources, diagnostics and pixel digests are
+excluded from this ledger.
+
+G-V3 also passed against fresh M5 witnesses: **383 Chromium semantic probe
+captures**, **374 probe rasters compared** (existing documented intrinsic-size
+and radius decisions retained), plus **43 actual legacy-app frame captures**
+for common placements, 25–800% scale and animated scale. The latter replay
+passed **8 Rust tests**, including both frame gates. Source and frame hashes,
+versions, dimensions and premultiplied row encoding were checked. Engine
+frames stayed RGBA32F, independent f64 references and all existing numerical
+bounds stayed unchanged, and each capture set was removed after recording its
+results. These are new build-Mac witnesses, not the original frozen captures.
+
+The final replay of the 15 requested crates' library targets passed **908
+tests, 0 failed, 2 existing ignored**. The extra Mac replay passed
+**pm-node 254 tests (21 existing ignored)** and **pm-vector 73 tests**.
+
+The seven-crate Mac `cargo clippy --locked --all-targets ... -- -D warnings`
+check passes. Mechanical lint repairs retain the existing conversions and
+assertions; the two reference painters now share one SVG reference module.
+The Mac encoding-core replay with `pm-export --no-default-features` also
+passes **69 tests, 0 failed**. Its QoS callback installer is available to the
+Mac unit tests even when the renderer integration feature is disabled.
+
+### WIP owner handoff
+
+Validation was stopped at the orchestrator's request before the full engine
+integration replay finished. Jude takes over with the original frozen corpus
+and projects. The exact failure register, verified subsets, environment and
+next steps are in [the Mac engine handoff](../native/handoff/engine-macos.md).
+The branch is not all green; Gate E and the cold distinct-voice AUDIO-2 gate
+remain open. The last TIFF palette integration repair also needs a full replay.

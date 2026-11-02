@@ -89,6 +89,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 
 /// Material maps, shadow-map samplers, and the LTC tables, kept across
 /// frames.
+#[derive(Default)]
 pub struct Textures {
     maps: HashMap<MapKey, MapEntry>,
     /// Maps of a file version that did not load (`resolve_maps` drops or
@@ -112,24 +113,6 @@ pub struct Textures {
     pub shadow_compare: Option<wgpu::Sampler>,
     pub ltc_sampler: Option<wgpu::Sampler>,
     linear_clamp: Option<wgpu::Sampler>,
-}
-
-impl Default for Textures {
-    fn default() -> Self {
-        Textures {
-            maps: HashMap::new(),
-            failed: HashMap::new(),
-            generation: 0,
-            mip: None,
-            store: None,
-            ltc: None,
-            repeat_trilinear: None,
-            clamp_nearest: None,
-            shadow_compare: None,
-            ltc_sampler: None,
-            linear_clamp: None,
-        }
-    }
 }
 
 fn stamp(path: &Path) -> Option<(u64, Option<std::time::SystemTime>)> {

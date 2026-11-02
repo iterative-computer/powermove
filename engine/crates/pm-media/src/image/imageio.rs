@@ -305,7 +305,7 @@ pub fn rgba_unit(f: &crate::frame::DecodedFrame) -> Result<Vec<f32>> {
             // SAFETY: the plane holds `height` rows of `stride` bytes.
             let row = |n: usize| unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride), n) };
             match format {
-                PlaneFormat::Rgba8 => out.extend(row(w * 4).iter().map(|&v| f32::from(v) / 255.0)),
+                PlaneFormat::Rgba8 => out.extend(row(w * 4).iter().map(|&v| f32::from(v) / max)),
                 PlaneFormat::Rgba16 => out.extend(
                     row(w * 8)
                         .chunks_exact(2)
@@ -330,6 +330,7 @@ pub fn rgba_unit(f: &crate::frame::DecodedFrame) -> Result<Vec<f32>> {
 const MODEL_MONOCHROME: i32 = 0;
 const MODEL_RGB: i32 = 1;
 const MODEL_CMYK: i32 = 2;
+const MODEL_INDEXED: i32 = 5;
 const ALPHA_MASK: u32 = 0x1F;
 const FLOAT: u32 = 1 << 8;
 const ORDER_MASK: u32 = 0x7000;
@@ -501,6 +502,27 @@ pub fn read_frame(
             class,
             icc_bytes,
         )
+    } else if model == MODEL_INDEXED
+        && matches!(bpc, 1 | 2 | 4 | 8)
+        && bpp == bpc
+        && !embedded_profile(path, format)?
+    {
+        // Untagged RGB palette entries are sRGB samples. Drawing their
+        // device RGB base through ColorSync would silently assign a profile.
+        let table = super::raster::tiff_palette(path)?
+            .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?;
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        (
+            Unpacked::U16(indexed_rgb(&bytes, w, h, row, bpc, &table)?),
+            16,
+            false,
+            false,
+            None,
+            None,
+        )
     } else if model == MODEL_CMYK && !embedded_profile(path, format)? {
         // CMYK without a profile has no colorimetry: device CMYK, read as
         // the shipped converter reads it (R = (1 − C)(1 − K), likewise G and
@@ -643,6 +665,39 @@ unsafe fn draw_linear(img: CGImageRef, w: usize, h: usize) -> Result<Vec<f32>> {
 /// 34675; other containers' CMYK readings always carry their own).
 fn embedded_profile(path: &Path, format: ImageFormat) -> Result<bool> {
     Ok(format != ImageFormat::Tiff || super::raster::tiff_icc(path)?.is_some())
+}
+
+/// Expands MSB-first packed indices without changing their RGB entries.
+fn indexed_rgb(
+    bytes: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    bits: usize,
+    table: &[[u16; 3]],
+) -> Result<Vec<u16>> {
+    if !matches!(bits, 1 | 2 | 4 | 8)
+        || stride < (w * bits).div_ceil(8)
+        || bytes.len() < stride * h
+        || table.is_empty()
+    {
+        return Err(MediaError::Image("invalid RGB palette layout".into()));
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let bit = x * bits;
+            let index = usize::from(
+                (bytes[y * stride + bit / 8] >> (8 - bits - bit % 8)) & ((1u16 << bits) - 1) as u8,
+            );
+            let rgb = table
+                .get(index)
+                .ok_or_else(|| MediaError::Image("palette index outside its table".into()))?;
+            rgba.extend_from_slice(rgb);
+            rgba.push(u16::MAX);
+        }
+    }
+    Ok(rgba)
 }
 
 /// Device CMYK (ink amounts, 8 or 16-bit, with or without a trailing alpha)
@@ -884,4 +939,81 @@ fn unpack(
         (16, _) => Unpacked::U16(out.into_iter().map(|v| v as u16).collect()),
         _ => Unpacked::F32(out.into_iter().map(|v| v as f32).collect()),
     })
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    #[test]
+    fn unprofiled_tiff_palette_entries_are_not_color_matched() {
+        // One index into a 16-bit TIFF RGB color table, independently authored.
+        let tags = 9u32;
+        let palette_at = 8 + 2 + tags * 12 + 4;
+        let pixel_at = palette_at + 3 * 256 * 2;
+        let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&(tags as u16).to_le_bytes());
+        for (tag, ty, count, value) in [
+            (256u16, 4u16, 1u32, 1u32),
+            (257, 4, 1, 1),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),
+            (273, 4, 1, pixel_at),
+            (277, 3, 1, 1),
+            (279, 4, 1, 1),
+            (320, 3, 768, palette_at),
+        ] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&ty.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for code in [36u16, 72, 252] {
+            bytes.extend_from_slice(&(code * 257).to_le_bytes());
+            bytes.extend_from_slice(&[0; 255 * 2]);
+        }
+        bytes.push(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("palette.tiff");
+        std::fs::write(&path, bytes).unwrap();
+        let still = read_frame(&path, 0, &FramePool::new(0), ImageFormat::Tiff).unwrap();
+        assert_eq!(still.color.icc_class, None);
+        assert_eq!(still.color.transfer, Transfer::DisplayE);
+        let rgba = rgba_unit(&still.frame).unwrap();
+        for (actual, code) in rgba.iter().zip([36.0, 72.0, 252.0, 255.0]) {
+            assert!((actual * 255.0 - code).abs() < 0.01, "{rgba:?}");
+        }
+    }
+
+    #[test]
+    fn packed_palette_indices_preserve_entries_and_validate_bounds() {
+        let table = [[65535, 0, 0], [0, 65535, 0], [0, 0, 65535], [65535; 3]];
+        assert_eq!(
+            indexed_rgb(&[0b00011011, 0], 4, 1, 2, 2, &table).unwrap(),
+            [
+                65535, 0, 0, 65535, 0, 65535, 0, 65535, 0, 0, 65535, 65535, 65535, 65535, 65535,
+                65535
+            ]
+        );
+        assert!(indexed_rgb(&[3], 1, 1, 1, 8, &table[..3]).is_err());
+        assert!(indexed_rgb(&[], 4, 1, 1, 2, &table).is_err());
+    }
+
+    #[test]
+    fn packed_byte_samples_use_the_declared_precision() {
+        let pool = FramePool::new(0);
+        let frame = super::super::pool_rgba(
+            &pool,
+            1,
+            1,
+            Rgba::U8(&[0, 1, 2, 3]),
+            false,
+            2,
+            "2-bit samples".into(),
+        )
+        .unwrap();
+        assert_eq!(rgba_unit(&frame).unwrap(), [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+    }
 }

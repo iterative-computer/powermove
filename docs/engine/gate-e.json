@@ -36,7 +36,7 @@
         "pm-render/tests/headless.rs::capability_check_lists_what_the_renderer_cannot_draw",
         "pm-render/tests/headless.rs::every_feature_is_supported_and_frames_are_deterministic"
       ],
-      "verified": false
+      "verified": true
     },
     "Transition": {
       "state": "native",
@@ -124,13 +124,13 @@
       "verified": false
     },
     "Request": {
-      "state": "needs-macOS",
-      "condition": "Precision/target limits require the Metal adapter; configured-font requests need CoreText. Invalid requests remain named errors.",
+      "state": "native",
+      "condition": "Validated on base-M5 Metal for precision/target limits and CoreText font configuration; invalid requests remain named errors. Other required machine/performance rows retain their separate qualification.",
       "evidence": [
         "pm-render/tests/headless.rs::requests_are_validated",
         "pm-render/tests/headless.rs::render_into_a_callers_target_equals_render"
       ],
-      "verified": false
+      "verified": true
     },
     "Definition": {
       "state": "native",
@@ -201,11 +201,11 @@
     },
     "Corpus and performance": {
       "verified": false,
-      "requirement": "External frozen captures and Apple hardware unavailable; G-C/G-T/G-I/G-E/G-X, cadence/AV sync, full corpus and preview=export need requalification. Pending fingerprints remain unmodified."
+      "requirement": "Original frozen captures are unavailable on the build Mac. Fresh v1 synthetic captures on base Apple M5 are new witnesses, not replacements for the original frozen evidence. Requalify G-C/G-T/G-I/G-E/G-X, pending fingerprints, cadence/AV sync, full corpus and preview=export; required physical/machine rows remain open."
     },
     "Desktop protocol consumer": {
-      "verified": false,
-      "requirement": "pm-protocol::wire::typescript_regeneration_is_a_no_op fails because the generated desktop index build id is stale. The exact owned-documentation patch is ready; only its desktop owner may apply/regenerate that out-of-lane path. Do not relax the handshake or drift test."
+      "verified": true,
+      "requirement": "Generated desktop build id updated to protocol-f1801e99aec59477; the unmodified wire::typescript_regeneration_is_a_no_op test passes on macOS."
     }
   },
   "references": {
@@ -279,8 +279,8 @@
       "engine/crates/pm-render/src/media.rs:540",
       "engine/crates/pm-render/src/media.rs:549",
       "engine/crates/pm-render/src/media.rs:570",
-      "engine/crates/pm-render/src/media.rs:1334",
-      "engine/crates/pm-render/src/media.rs:1377",
+      "engine/crates/pm-render/src/media.rs:1349",
+      "engine/crates/pm-render/src/media.rs:1392",
       "engine/crates/pm-render/src/stills.rs:30",
       "engine/crates/pm-render/src/stills.rs:34"
     ],
@@ -317,5 +317,95 @@
       "engine/crates/pm-render/src/plan.rs:2098",
       "engine/crates/pm-render/src/renderer/layer_raster.rs:137"
     ]
+  },
+  "mac_validation": {
+    "machine": "base Apple M5",
+    "date": "2026-11-01",
+    "original_frozen_corpus_available": false,
+    "recapture": "Synthetic v1 only; one category at a time in /private/tmp/pm-engine-corpus, temporary Electron profile, no real project. Fresh build-Mac witness, not the original frozen capture.",
+    "export_first_complete_replay": {
+      "passed": 139,
+      "failed": 0,
+      "ignored": 7
+    },
+    "native_check": "passed on current production source before handoff",
+    "corpus_initial_layers": {
+      "projects": 12,
+      "frames": 34,
+      "float_frames": 3,
+      "manifest_problems": 0,
+      "render_frames_compared": 30,
+      "actual_render_mismatches": 1,
+      "qualification": "Incomplete; category-filtered replay and the remaining synthetic categories are required."
+    },
+    "qualification": "OPEN: platform test passes do not establish original frozen parity, complete native resource bindings or physical/performance qualification.",
+    "native_tests": {
+      "pm-native-app": {
+        "passed": 28,
+        "failed": 0,
+        "ignored": 1
+      },
+      "pm-promedia": {
+        "passed": 116,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "path_masks": {
+      "legacy_cases_recaptured": 54,
+      "metal_gate": "passed",
+      "numerical_bounds": "unchanged",
+      "witness": "fresh base-M5 synthetic witness; original frozen capture unavailable"
+    },
+    "canvas_vector": {
+      "legacy_cases_recaptured": 556,
+      "legacy_cases_compared": 474,
+      "rust_tests_passed": 18,
+      "rust_tests_failed": 0,
+      "metal_gate": "passed",
+      "numerical_bounds": "unchanged",
+      "witness": "fresh base-M5 synthetic witness; original frozen capture unavailable"
+    },
+    "shader_inventory": {
+      "source_cases": 812,
+      "variants": 2143,
+      "metal_draws": 656,
+      "stopped_at": {
+        "es_validate": 115,
+        "bind": 33,
+        "limits": 5,
+        "naga_validate": 3
+      },
+      "qualification": "Includes deliberately invalid/resource probes. Native compilation/draw evidence only; no historical WebGL pixel qualification."
+    },
+    "svg_semantics": {
+      "chromium_cases_recaptured": 383,
+      "probe_rasters_compared": 374,
+      "test": "passed",
+      "numerical_bounds": "unchanged; existing intrinsic-size/radius decisions retained",
+      "witness": "fresh base-M5 synthetic witness; original frozen capture unavailable"
+    },
+    "svg_frames": {
+      "legacy_app_frames_recaptured": 43,
+      "common_placements_and_animated_scale": "passed",
+      "rust_tests_passed": 8,
+      "rust_tests_failed": 0,
+      "numerical_bounds": "unchanged; engine RGBA32F versus independent f64 references and actual legacy-app RGBA8 frames",
+      "witness": "fresh base-M5 synthetic witness; original frozen capture unavailable"
+    },
+    "all_target_clippy": "passed: pm-media, pm-gpu, pm-render, pm-export, pm-audio, pm-node, pm-proxy; -D warnings; final output-origin fixture-only isolation was added afterward and its 19 tests passed",
+    "export_no_default_features": {
+      "passed": 69,
+      "failed": 0,
+      "ignored": 0
+    },
+    "handoff": {
+      "state": "WIP: stopped at orchestrator handoff to engine owner",
+      "engine_target_batches_recorded": 69,
+      "engine_target_batches_planned": 140,
+      "full_replay_complete": false,
+      "open": "Cold distinct-voice AUDIO-2 deadline; final TIFF palette integration replay; original frozen-corpus qualification and remaining Gate E work",
+      "document": "docs/native/handoff/engine-macos.md"
+    }
   }
 }

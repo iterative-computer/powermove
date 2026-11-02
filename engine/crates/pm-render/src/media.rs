@@ -866,6 +866,7 @@ fn convert_format(
     factors: Factors,
     reuse: Option<Target>,
     format: wgpu::TextureFormat,
+    still_chroma: bool,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -889,6 +890,12 @@ fn convert_format(
             )
         });
     let mut uniform = source_uniform(color, working, precision, chroma_info);
+    if still_chroma && chroma_info.is_some() {
+        // Reconstruct original AVIF stills with the full Lanczos-3 source
+        // filter. Video keeps its separately qualified playback kernel.
+        uniform.b[2] = if factors.x > 1 { 3 } else { 0 };
+        uniform.b[3] = if factors.y > 1 { 3 } else { 0 };
+    }
     if format != working_format(Precision::Float16) {
         // Only half-float storage rounds through f16; any other format
         // stores the f32 conversion directly.
@@ -1140,8 +1147,16 @@ impl MediaCache {
                 still.frame.format.log2_chroma_w,
                 still.frame.format.log2_chroma_h,
             ),
-            None,
+            Some(Target::with_mips(
+                device,
+                "pm still source",
+                still.frame.format.width as u32,
+                still.frame.format.height as u32,
+                format,
+                pm_gpu::target::working_usage(),
+            )),
             format,
+            true,
         );
         pipelines
             .resample
@@ -1543,6 +1558,7 @@ impl MediaCache {
             factors,
             reuse,
             format,
+            false,
         );
         if fields.is_none() {
             importer.recycle(normalized);

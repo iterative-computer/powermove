@@ -51,6 +51,8 @@ fn render(renderer: &mut Renderer, path: &Path, (w, h): (usize, usize), level: u
         )],
     );
     value["layers"][0]["compat"] = json!(level);
+    // Project depth is authoritative; a Float32 request alone is not.
+    value["colorDepth"] = json!(32);
     asset(&mut value, "clip", "image", &ext, w as u32, h as u32, 1.0);
     let mut resolver = pm_render::MapResolver::default();
     resolver.paths.insert("clip".into(), path.to_path_buf());
@@ -75,6 +77,7 @@ fn render(renderer: &mut Renderer, path: &Path, (w, h): (usize, usize), level: u
         )
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
     renderer.read_rgba(&frame).unwrap()
 }
 
@@ -99,8 +102,8 @@ fn stills_are_at_least_as_close_to_the_reference_as_today() {
     let rows: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(fixture("chromium.json")).unwrap()).unwrap();
     let mut renderer = Renderer::headless().unwrap();
-    let mut ledger: BTreeMap<String, (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<String>)> =
-        BTreeMap::new();
+    type Reading = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<String>);
+    let mut ledger: BTreeMap<String, Reading> = BTreeMap::new();
     let (mut drawn, mut rejected) = (0, 0);
     let mut failures = Vec::new();
     for row in &rows {

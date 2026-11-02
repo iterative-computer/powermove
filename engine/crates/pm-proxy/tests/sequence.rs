@@ -4,8 +4,7 @@ use std::path::Path;
 use pm_proxy::{SequenceFrame, SequenceManifest, SequenceRate};
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
-#[path = "../../../spikes/s2-precision/src/color.rs"]
+#[path = "support/color.rs"]
 mod color;
 
 #[test]
@@ -223,7 +222,7 @@ mod real {
         let height = first.stored.recipe.height as usize;
         assert_eq!(decoded.stdout.len(), width * height * 8);
         let mut max_delta_e = 0.0_f64;
-        for i in 0..40 {
+        for (i, sample) in expected.iter().enumerate().take(40) {
             let x = (i % 8) * (width / 8) + width / 16;
             let y = (i / 8) * (height / 5) + height / 10;
             let offset = (y * width + x) * 8;
@@ -235,7 +234,7 @@ mod real {
                 ) as f64
                     / 65535.0
             });
-            let original = expected[i].map(|code| f64::from(code) / 65535.0);
+            let original = sample.map(|code| f64::from(code) / 65535.0);
             max_delta_e = max_delta_e.max(color::delta_e2000(lab(original), lab(actual)));
         }
         eprintln!("original 16-bit PNG → ProRes 4444 chart max ΔE2000 {max_delta_e:.4}");

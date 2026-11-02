@@ -263,15 +263,22 @@ impl PixelBuffer {
     /// example `BGRA` from a decoder, in tests and measurements).
     pub fn bytes(&self) -> Result<Vec<u8>, Error> {
         let (w, h) = (self.width(), self.height());
-        let bytes_per_pixel = match &self.format().to_be_bytes() {
-            b"BGRA" | b"RGBA" | b"ARGB" => 4,
-            b"l64r" | b"RGhA" => 8,
-            other => {
-                return Err(Error::Verify(format!(
-                    "'{}' is not a packed RGB format",
-                    String::from_utf8_lossy(other)
-                )));
-            }
+        let format = self.format();
+        let bytes_per_pixel = if [
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_32RGBA,
+            kCVPixelFormatType_32ARGB,
+        ]
+        .contains(&format)
+        {
+            4
+        } else if [kCVPixelFormatType_64RGBALE, kCVPixelFormatType_64RGBAHalf].contains(&format) {
+            8
+        } else {
+            return Err(Error::Verify(format!(
+                "'{}' is not a packed RGB format",
+                String::from_utf8_lossy(&format.to_be_bytes())
+            )));
         };
         self.with_lock(true, |pb| {
             let (base, bpr, rows) = Self::geometry(pb, false, 0);

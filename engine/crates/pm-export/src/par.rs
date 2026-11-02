@@ -15,16 +15,16 @@ thread_local! {
 
 /// Installs a playback-aware refresh callback for conversions on this thread.
 /// A nested call restores its predecessor when the scope exits.
-#[cfg(all(feature = "engine", target_os = "macos"))]
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 pub(crate) fn install_qos_refresh(refresh: Option<Refresh>) -> RefreshGuard {
     let previous = QOS_REFRESH.with(|slot| slot.replace(refresh));
     RefreshGuard(previous)
 }
 
-#[cfg(all(feature = "engine", target_os = "macos"))]
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 pub(crate) struct RefreshGuard(Option<Refresh>);
 
-#[cfg(all(feature = "engine", target_os = "macos"))]
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 impl Drop for RefreshGuard {
     fn drop(&mut self) {
         QOS_REFRESH.with(|slot| {

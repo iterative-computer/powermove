@@ -20,6 +20,14 @@ use super::describe::{self, DrawDesc, DrawState, Layer3d, PassDesc, TextureRef};
 use super::model::Scene3d;
 use super::textures::{MapError, Textures};
 
+/// Native material-map upload supplied by the compositor or standalone cache.
+type StillMapLoader<'a> = dyn FnMut(
+        &mut wgpu::CommandEncoder,
+        &std::path::Path,
+        bool,
+    ) -> Result<(wgpu::Texture, bool), MapError>
+    + 'a;
+
 #[path = "chrome_gpu.rs"]
 mod chrome;
 
@@ -311,7 +319,7 @@ pub enum OutputColor3d {
         background: Option<[f32; 3]>,
         weighted: bool,
     },
-    /// The legacy OBJ mesh pass already yields encoded color.
+    /// The legacy OBJ mesh pass and Studio presentation already yield encoded color.
     Encoded,
 }
 
@@ -351,6 +359,9 @@ pub struct Scene3dRenderer {
     depth_surface: Option<DepthSurface>,
     chrome: Option<chrome::Targets>,
     textures: Textures,
+    // The standalone render entry point also supports native-depth maps.
+    // The full compositor supplies its shared media cache separately.
+    standalone_media: Option<(crate::pipelines::Pipelines, crate::media::MediaCache)>,
     empty: Option<wgpu::TextureView>,
     cache: Option<cache::ProgramCache>,
     cache_hits: u64,
@@ -384,6 +395,7 @@ impl Default for Scene3dRenderer {
             depth_surface: None,
             chrome: None,
             textures: Textures::default(),
+            standalone_media: None,
             empty: None,
             cache: None,
             cache_hits: 0,
@@ -1738,11 +1750,7 @@ impl Scene3dRenderer {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         plan: &super::Object3dPlan,
-        still: &mut dyn FnMut(
-            &mut wgpu::CommandEncoder,
-            &std::path::Path,
-            bool,
-        ) -> Result<(wgpu::Texture, bool), MapError>,
+        still: &mut StillMapLoader<'_>,
     ) {
         for object in &plan.scene.objects {
             for mesh in &object.meshes {
@@ -1752,6 +1760,7 @@ impl Scene3dRenderer {
                         if map.svg.is_some() || self.textures.has_result(&map.path, map.srgb) {
                             continue;
                         }
+                        self.resolved = None;
                         match still(encoder, &map.path, map.srgb) {
                             Ok((texture, deep)) => self
                                 .textures
@@ -1821,6 +1830,30 @@ impl Scene3dRenderer {
         plan: &super::Object3dPlan,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
+        self.prepare_svg_maps(device, queue, encoder, plan);
+        let needs_images = plan
+            .scene
+            .objects
+            .iter()
+            .flat_map(|o| &o.meshes)
+            .flat_map(|m| m.materials.iter())
+            .flat_map(|m| m.maps.all())
+            .filter_map(|(_, map)| map)
+            .any(|map| map.svg.is_none() && !self.textures.has_result(&map.path, map.srgb));
+        if needs_images {
+            let (pipelines, mut media) = self.standalone_media.take().unwrap_or_else(|| {
+                (
+                    crate::pipelines::Pipelines::new(device),
+                    crate::media::MediaCache::new(device),
+                )
+            });
+            self.prepare_image_maps(device, encoder, plan, &mut |encoder, path, srgb| {
+                super::textures::still_map(
+                    &mut media, device, queue, &pipelines, encoder, path, srgb,
+                )
+            });
+            self.standalone_media = Some((pipelines, media));
+        }
         self.render_at_precision(
             device,
             queue,
@@ -1855,8 +1888,7 @@ impl Scene3dRenderer {
             },
             false,
         ) = (self.studio.as_mut(), &plan.kind, depth_surface)
-        {
-            if let Some(color) = studio.render_layer(
+            && let Some(color) = studio.render_layer(
                 device,
                 queue,
                 pool,
@@ -1864,9 +1896,14 @@ impl Scene3dRenderer {
                 *object,
                 depth_set,
                 *background,
-            ) {
-                return Ok(Rendered3d { color, depth: None });
-            }
+            )
+        {
+            return Ok(Rendered3d {
+                color,
+                depth: None,
+                // Studio's present shader already tone maps and sRGB-encodes.
+                color_space: OutputColor3d::Encoded,
+            });
         }
         match &plan.kind {
             super::Render3d::Layer {

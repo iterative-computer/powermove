@@ -447,10 +447,8 @@ fn full_pixel_quad(draw: &Draw, width: u32, height: u32, uv: [f64; 4]) -> bool {
 
 fn render_comp(comp: &CompPlan, facts: &LayerFacts<'_>) -> Result<Option<TextReference>, String> {
     let result = render_draws(&comp.draws, comp.width, comp.height, facts)?;
-    if result.is_some() {
-        if !matches!(&comp.background, Background::Transparent) {
-            return Err("text precomp has nontransparent background".into());
-        }
+    if result.is_some() && !matches!(&comp.background, Background::Transparent) {
+        return Err("text precomp has nontransparent background".into());
     }
     Ok(result)
 }

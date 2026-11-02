@@ -678,17 +678,14 @@ fn avif_color_descriptions_blink_reads_as_srgb_are_drawn() {
         let p = encode(1, t, m);
         assert_eq!(probe_image(&p), Ok(()), "{}", p.display());
     }
-    // Linear, gamma 2.2, SMPTE 240M, xvYCC, BT.1361 transfers and BT.601
-    // and BT.470 primaries stay named unsupported classes.
-    for (p, t, m) in [
-        (1, 4, 1),
-        (1, 7, 1),
-        (1, 8, 1),
-        (1, 11, 1),
-        (1, 12, 1),
-        (6, 6, 6),
-        (5, 13, 5),
-    ] {
+    // Native gamma 2.2 and linear readings are admitted and remain distinct.
+    for t in [4, 8] {
+        let path = encode(1, t, 1);
+        assert_eq!(probe_image(&path), Ok(()));
+        assert_ne!(render(&mut renderer, &path).0, srgb);
+    }
+    // SMPTE 240M, xvYCC, BT.1361 and BT.601/BT.470 primaries remain explicit.
+    for (p, t, m) in [(1, 7, 1), (1, 11, 1), (1, 12, 1), (6, 6, 6), (5, 13, 5)] {
         let f = encode(p, t, m);
         let why = unsupported(&f);
         eprintln!("{p}/{t}/{m}: {why}");
@@ -702,22 +699,23 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
     let pool = pm_media::pool::FramePool::new(0);
     let still =
         pm_media::image::read(path, &pool).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(still.bit_depth, 8, "{}", path.display());
-    still
-        .frame
-        .with_planes(|planes| {
-            let p = &planes[0];
-            let row = p.desc.width * 4;
-            let mut out = Vec::with_capacity(row * p.desc.height);
-            for y in 0..p.desc.height {
-                // SAFETY: the plane view covers `height` rows of `stride` bytes.
-                out.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), row)
-                });
-            }
-            out
+    // Palette/CMYK ImageIO conversions retain half/16-bit precision.
+    // Compare their display codes rather than assuming a packed u8 plane.
+    let pixels = pm_media::image::imageio::rgba_unit(&still.frame).unwrap();
+    pixels
+        .chunks_exact(4)
+        .flat_map(|pixel| {
+            std::array::from_fn::<_, 4, _>(|c| {
+                let value = if c < 3 && still.color.transfer == pm_protocol::color::Transfer::Linear
+                {
+                    pm_color::transfer::display_encode_f32(pixel[c])
+                } else {
+                    pixel[c]
+                };
+                (value.clamp(0.0, 1.0) * 255.0).round() as u8
+            })
         })
-        .unwrap()
+        .collect()
 }
 
 /// The samples pm-media decodes as 0…1 RGBA, at their depth.
@@ -923,20 +921,15 @@ fn additional_integer_decoder_classes_are_drawn() {
     let palette = d.join("palette.tiff");
     ffmpeg(&palette, &["-pix_fmt", "pal8"]);
     assert_eq!(probe_image(&palette), Ok(()));
-    let converted = d.join("palette.png");
-    let bin = PathBuf::from(std::env::var("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    // The file stores the RGB 3:3:2 palette itself: R/G at 0,36,…,252,
+    // B at 0,85,…,255. FFmpeg's RGB8 conversion rescales those entries;
+    // the native reader must preserve the actual TIFF color table.
+    let palette_pixels = decoded_rgba8(&palette);
     assert!(
-        Command::new(bin)
-            .args(["-v", "error", "-y", "-i"])
-            .arg(&palette)
-            .args(["-frames:v", "1", "-c:v", "png"])
-            .arg(&converted)
-            .status()
-            .unwrap()
-            .success()
+        palette_pixels
+            .chunks_exact(4)
+            .all(|p| { p[0] % 36 == 0 && p[1] % 36 == 0 && p[2] % 85 == 0 && p[3] == 255 })
     );
-    // Palette indices expand as the shipped converter expands them.
-    assert_eq!(decoded_rgba8(&palette), decoded_rgba8(&converted));
     std::fs::remove_dir_all(d).unwrap();
 }
 

@@ -159,7 +159,8 @@ mod tests {
         let profile = Some(vec![1, 2, 3]);
         type Chunks<'a> = &'a [(&'a [u8; 4], &'a [u8])];
         // (chunks, the decoder's iCCP profile, cicp, chromaticities, gamma, profile kept)
-        let cases: [(Chunks, bool, Option<[u8; 4]>, bool, Option<f32>, bool); 9] = [
+        type Case<'a> = (Chunks<'a>, bool, Option<[u8; 4]>, bool, Option<f32>, bool);
+        let cases: [Case<'_>; 9] = [
             (&[], false, None, false, None, false),
             (
                 &[(b"gAMA", &g(70_000))],

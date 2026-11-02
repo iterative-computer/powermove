@@ -648,6 +648,7 @@ mod tests {
     /// pixels are uploaded once however many frames draw them.
     #[test]
     fn a_pipeline_the_device_refuses_goes_to_the_runner_on_first_contact() {
+        let _compiler_fixture = crate::compiler_fixture();
         // Unique code: the refusal is recorded for the process.
         let code = "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0) + vec4(uv * 0.0, 0.0, 0.0); } // exec refusal probe";
         let doc = document(code);
@@ -710,6 +711,7 @@ mod tests {
     /// refusal (`compile`) is final.
     #[test]
     fn a_lost_runner_context_is_retried_and_the_layer_draws_again() {
+        let _compiler_fixture = crate::compiler_fixture();
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{Duration, Instant};
@@ -774,6 +776,7 @@ mod tests {
     /// layer as `Feature::ShaderFallback`.
     #[test]
     fn a_pipeline_the_device_refuses_routes_without_a_runner() {
+        let _compiler_fixture = crate::compiler_fixture();
         let doc = document(
             "void main(){ fragColor = vec4(0.5) + vec4(uv * 0.0, 0.0, 0.0); } // headless refusal probe",
         );

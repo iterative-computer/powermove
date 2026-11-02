@@ -314,15 +314,23 @@ fn all_audio_codings_preserve_rate_channels_length_and_tone() {
                 / want.len() as f64)
                 .sqrt();
             if codec == AudioCodec::Aac {
-                let first = 1024 * usize::from(channels);
-                let steady = (got[first..want.len()]
+                // AAC's first and final transform blocks contain startup/flush
+                // transients. Judge the steady signal between them; the full
+                // program, including both ends, still has its RMS bound below.
+                let margin = 1024 * usize::from(channels);
+                let end = want.len() - margin;
+                assert!(end > margin);
+                let steady = (got[margin..end]
                     .iter()
-                    .zip(&want[first..])
+                    .zip(&want[margin..end])
                     .map(|(a, b)| f64::from(a - b).powi(2))
                     .sum::<f64>()
-                    / (want.len() - first) as f64)
+                    / (end - margin) as f64)
                     .sqrt();
-                assert!(steady < 0.003, "AAC steady-state RMS {steady}");
+                assert!(
+                    steady < 0.003,
+                    "AAC {sample_rate} Hz {channels} channels steady-state RMS {steady}"
+                );
             }
             assert!(
                 rms < if codec == AudioCodec::Aac {

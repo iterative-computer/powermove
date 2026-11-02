@@ -20,7 +20,7 @@
 struct Params {
     // kind (0 RGB, 1 Y′CbCr), transfer, working (0 Standard, 1 linear), alpha plan.
     a: vec4<u32>,
-    // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom).
+    // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
     // chroma plane width, height; quantize to f16; convert primaries.
     c: vec4<u32>,
@@ -63,6 +63,14 @@ fn catmull_rom(t: f32) -> vec4<f32> {
     );
 }
 
+// Separable, normalized Lanczos-3, with edge extension by chroma_at.
+fn lanczos3(x: f32) -> f32 {
+    if (abs(x) < 0.000001) { return 1.0; }
+    if (abs(x) >= 3.0) { return 0.0; }
+    let p = 3.141592653589793 * x;
+    return sin(p) / p * sin(p / 3.0) / (p / 3.0);
+}
+
 // One chroma row j sampled horizontally at luma column x.
 fn chroma_row(x: u32, j: i32) -> vec2<f32> {
     let kind = P.b.z;
@@ -82,6 +90,16 @@ fn chroma_row(x: u32, j: i32) -> vec2<f32> {
     if (t == 0.0) {
         return chroma_at(i, j);
     }
+    if (kind == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_at(i + offset, j) * w;
+            weight += w;
+        }
+        return sum / weight;
+    }
     let w = catmull_rom(t);
     return chroma_at(i - 1, j) * w.x + chroma_at(i, j) * w.y + chroma_at(i + 1, j) * w.z
         + chroma_at(i + 2, j) * w.w;
@@ -97,6 +115,16 @@ fn chroma_sample(x: u32, y: u32) -> vec2<f32> {
     let j = i32(fj);
     if (t == 0.0) {
         return chroma_row(x, j);
+    }
+    if (P.b.w == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_row(x, j + offset) * w;
+            weight += w;
+        }
+        return sum / weight;
     }
     return chroma_row(x, j) * (1.0 - t) + chroma_row(x, j + 1) * t;
 }

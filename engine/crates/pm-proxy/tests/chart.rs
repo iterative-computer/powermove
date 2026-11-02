@@ -13,8 +13,7 @@ use std::sync::atomic::AtomicBool;
 use pm_protocol::priority::{ProxyFormat, ProxySize};
 use pm_proxy::{GenerationControl, GenerationRequest, ProxyStore, generate_with_disk_probe};
 
-#[allow(dead_code)]
-#[path = "../../../spikes/s2-precision/src/color.rs"]
+#[path = "support/color.rs"]
 mod color;
 
 const WIDTH: usize = 640;

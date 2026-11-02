@@ -375,6 +375,24 @@ fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
     });
 }
 
+/// Convert to full-range RGBA8 while reusing the caller's allocation.
+/// Invalid dimensions or sample counts leave the destination untouched.
+pub fn convert_rgba8_into(
+    frame: &WorkingFrame,
+    params: &ConvertParams,
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
+    working_dimensions(frame)?;
+    if params.tags.is_hdr() {
+        return Err(Error::InvalidSpec(
+            "RGBA8 cannot represent HDR output".into(),
+        ));
+    }
+    out.resize(frame.rgba.len(), 0);
+    fill_rgba8(frame, params, out);
+    Ok(())
+}
+
 /// Converts one working frame to `format`. Rows are converted in parallel
 /// (`crate::par`); every sample depends only on its own inputs, so the result is
 /// the same bytes on any number of threads.
@@ -588,8 +606,8 @@ pub fn convert_tagged(
                 });
                 vec![u16_plane(out, w * 4, h)]
             } else {
-                let mut out = vec![0u8; w * h * 4];
-                fill_rgba8(frame, params, &mut out);
+                let mut out = Vec::new();
+                convert_rgba8_into(frame, params, &mut out)?;
                 vec![u8_plane(out, w * 4, h)]
             }
         }
@@ -963,6 +981,21 @@ mod tests {
             ));
             assert_eq!(out, before);
         }
+        let mut hdr = params;
+        hdr.tags = ColorTags::Rec2100Pq { white_nits: 203 };
+        assert!(matches!(
+            convert_rgba8_into(
+                &WorkingFrame {
+                    width: 1,
+                    height: 1,
+                    rgba: &[1.0; 4]
+                },
+                &hdr,
+                &mut out
+            ),
+            Err(Error::InvalidSpec(_))
+        ));
+        assert_eq!(out, before);
     }
 
     #[test]

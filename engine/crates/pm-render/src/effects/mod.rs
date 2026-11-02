@@ -896,6 +896,7 @@ mod tests {
 
     #[test]
     fn every_builtin_translates() {
+        let _compiler_fixture = crate::compiler_fixture();
         let mut effects = Effects::new("test");
         let failures = effects.set_snapshot(&builtin_definitions()).unwrap();
         assert!(failures.is_empty(), "{failures:#?}");

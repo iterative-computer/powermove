@@ -137,15 +137,14 @@ fn maps_with_transparency_draw_and_missing_maps_draw_without_them() {
     let mapped = render(&mut r, &textured(true), &with).unwrap();
     assert_ne!(mapped, plain, "the map colors the model");
 
-    // A map with translucent pixels draws too: three.js samples Chromium's
-    // premultiplied bitmap (tests/threed_maps.rs), so the model darkens
-    // where the map is translucent; nothing is listed.
+    // A color map keeps its straight colors under partial alpha. Color-map
+    // alpha does not change an opaque material's opacity; alpha maps do.
     let with_clear = resolver("tex", &clear);
     assert!(pm_render::unsupported_with_media(&doc, "Ptest-root", &with_clear).is_empty());
     let translucent = render(&mut r, &textured(true), &with_clear).unwrap();
-    assert_ne!(
+    assert_eq!(
         translucent, mapped,
-        "premultiplied texels differ from the opaque map's"
+        "partial alpha must not darken straight color texels"
     );
     assert_ne!(translucent, plain);
 
