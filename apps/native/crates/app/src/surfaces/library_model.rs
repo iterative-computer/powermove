@@ -252,7 +252,7 @@ impl Alert {
         Self {
         message: format!("Delete “{name}” immediately?"),
         detail: "The project is archived in Powermove’s storage and can’t be opened from the Library again.".into(),
-        buttons: vec!["Delete", "Cancel"], default: 1, destructive: Some(0), critical: true,
+        buttons: vec!["Cancel", "Delete"], default: 0, destructive: Some(1), critical: true,
     }
     }
     pub fn save_in_trash(name: &str) -> Self {

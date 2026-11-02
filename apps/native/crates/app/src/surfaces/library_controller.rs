@@ -497,10 +497,10 @@ impl<P: LibraryPort> LibraryController<P> {
             self.form = None;
             self.effects.push_back(HostEffect::CloseNewProject);
             self.effects.push_back(HostEffect::Banner(
-                "Project was changed, so the dialog closed.",
+                "The project was changed, so the dialog closed.",
             ));
             self.effects.push_back(HostEffect::Announce {
-                text: "Project was changed, so the dialog closed.".into(),
+                text: "The project was changed, so the dialog closed.".into(),
                 high: false,
             });
         }
@@ -556,7 +556,7 @@ impl<P: LibraryPort> LibraryController<P> {
         let prompt = self.prompts.pop_front().expect("front");
         let result = match (prompt.action, button) {
             (PromptAction::Trash(id), Some(0)) => self.send(Command::Trash(id)),
-            (PromptAction::Archive(id), Some(0)) => self.send(Command::Archive(id)),
+            (PromptAction::Archive(id), Some(1)) => self.send(Command::Archive(id)),
             (PromptAction::Save(id), Some(0)) => self.send(Command::PutBackAndSave(id)),
             (PromptAction::Save(id), Some(1)) => {
                 self.effects.push_back(HostEffect::SaveAs(id));

@@ -18,13 +18,13 @@ pub const FORM_ROWS: &[&str] = &[
     "Background",
 ];
 pub const FIELD_LABELS: &[&str] = &[
-    "Project name",
-    "Resolution preset",
-    "Width in pixels",
-    "Height in pixels",
-    "Frame rate",
-    "Duration in seconds",
-    "Background colour",
+    "Name",
+    "Resolution",
+    "Width",
+    "Height",
+    "Frame Rate",
+    "Duration",
+    "Background",
 ];
 pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
@@ -34,7 +34,7 @@ pub const SHEET_TITLE: &str = "New Project";
 pub const SHEET_BUTTONS: &[&str] = &["Cancel", "Create"];
 pub const CUSTOM_PRESET: &str = "Custom";
 pub const UNITS: &[&str] = &["px", "fps", "s"];
-pub const INITIAL_FOCUS: &str = "Project name";
+pub const INITIAL_FOCUS: &str = "Name";
 pub const SELECT_INITIAL_CONTENTS: bool = true;
 
 #[derive(Clone, Debug, PartialEq)]

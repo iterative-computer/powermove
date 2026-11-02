@@ -531,9 +531,9 @@ fn delete_is_critical_archival_copy_and_cancel_is_default() {
         prompt.detail,
         "The project is archived in Powermove’s storage and can’t be opened from the Library again."
     );
-    assert_eq!(prompt.buttons, vec!["Delete", "Cancel"]);
-    assert_eq!(prompt.default, 1);
-    assert_eq!(prompt.destructive, Some(0));
+    assert_eq!(prompt.buttons, vec!["Cancel", "Delete"]);
+    assert_eq!(prompt.default, 0);
+    assert_eq!(prompt.destructive, Some(1));
     assert!(prompt.critical);
     let count = c.port.sent.len();
     c.answer(serial, None).unwrap();
@@ -678,13 +678,13 @@ fn sheet_fields_and_voiceover_labels_preserve_the_shipped_contract() {
     assert_eq!(
         FIELD_LABELS,
         &[
-            "Project name",
-            "Resolution preset",
-            "Width in pixels",
-            "Height in pixels",
-            "Frame rate",
-            "Duration in seconds",
-            "Background colour"
+            "Name",
+            "Resolution",
+            "Width",
+            "Height",
+            "Frame Rate",
+            "Duration",
+            "Background"
         ]
     );
 }
@@ -793,7 +793,7 @@ fn stale_sheet_owner_closes_with_exact_banner_and_escape_never_creates() {
     assert!(c.form.is_none());
     assert!(effects(&mut c).iter().any(|e| matches!(
         e,
-        HostEffect::Banner("Project was changed, so the dialog closed.")
+        HostEffect::Banner("The project was changed, so the dialog closed.")
     )));
     c.begin_new("owner:2".into(), None, &format()).unwrap();
     let count = c.port.sent.len();
@@ -894,7 +894,7 @@ fn disconnected_service_and_unsupported_operations_are_not_successes() {
     let mut c = ready();
     c.menu("c", MenuAction::DeleteImmediately).unwrap();
     let (serial, _) = alert(&mut c);
-    c.answer(serial, Some(0)).unwrap();
+    c.answer(serial, Some(1)).unwrap();
     let serial = c.port.sent.last().unwrap().serial;
     complete(
         &mut c,
@@ -1152,7 +1152,7 @@ fn sheet_contract_contains_default_button_focus_selection_and_units() {
     assert_eq!(SHEET_BUTTONS, &["Cancel", "Create"]);
     assert_eq!(CUSTOM_PRESET, "Custom");
     assert_eq!(UNITS, &["px", "fps", "s"]);
-    assert_eq!(INITIAL_FOCUS, "Project name");
+    assert_eq!(INITIAL_FOCUS, "Name");
     let mut c = ready();
     c.begin_new("owner".into(), None, &format()).unwrap();
     let form = c.presentation(Duration::ZERO, 0..1).form.unwrap();
