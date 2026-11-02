@@ -14,10 +14,11 @@ struct State {
     pins: BTreeMap<(String, u64), (Source, usize)>,
     missing: BTreeSet<String>,
     dom: Vec<Value>,
+    invalidated: bool,
 }
-#[derive(Default)]
 pub struct NativeHost {
     state: Mutex<State>,
+    kernel: Mutex<crate::kernel::KernelAdapter>,
 }
 fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
@@ -34,6 +35,18 @@ fn dimension(value: Option<&Value>) -> Result<u32> {
         .ok_or(Error::Invalid("canvas dimension"))
 }
 impl NativeHost {
+    pub fn new(initial: &Value) -> Result<Self> {
+        Ok(Self {
+            state: Mutex::new(State::default()),
+            kernel: Mutex::new(crate::kernel::KernelAdapter::new(initial)?),
+        })
+    }
+    pub fn publication(&self) -> Value {
+        self.kernel.lock().unwrap().publication()
+    }
+    pub fn take_presentation_request(&self) -> bool {
+        std::mem::take(&mut self.state.lock().unwrap().invalidated)
+    }
     pub fn diagnostics(&self) -> Value {
         let state = self.state.lock().unwrap();
         json!({"missing":state.missing,"surfaces":state.surfaces.len(),"pins":state.pins.len(),"dom_pending":state.dom.len()})
@@ -343,6 +356,25 @@ impl EngineProxy for NativeHost {
         budget: HostBudget,
     ) -> Result<Value> {
         budget.check()?;
+        match operation {
+            "presentation.invalidate" => {
+                self.state.lock().unwrap().invalidated = true;
+                return Ok(Value::Null);
+            }
+            "kernel.call" => return self.kernel.lock().unwrap().call(input),
+            "kernel.query" => return self.kernel.lock().unwrap().query(input),
+            "kernel.pin" | "kernel.unpin" => {
+                let handle = input["handle"]
+                    .as_str()
+                    .ok_or(Error::Invalid("generation pin"))?;
+                self.kernel
+                    .lock()
+                    .unwrap()
+                    .pin(handle, operation == "kernel.pin");
+                return Ok(Value::Null);
+            }
+            _ => (),
+        }
         if operation == "dom.batch" {
             let mut state = self.state.lock().unwrap();
             if state.dom.len() >= 64 {

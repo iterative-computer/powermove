@@ -7,6 +7,36 @@ import { JSDOM } from 'jsdom';
 import type { Batch } from '../src/protocol';
 
 describe('remote DOM mirror and real-document applier', () => {
+  test('innerHTML applies browser DOMString coercion before parsing', () => {
+    const h = harness();
+    const reference = new JSDOM();
+    try {
+      for (const tag of ['div', 'template', 'svg']) {
+        const remote =
+          tag === 'svg'
+            ? h.shim.document.createElementNS('http://www.w3.org/2000/svg', tag)
+            : h.shim.document.createElement(tag);
+        const real =
+          tag === 'svg'
+            ? reference.window.document.createElementNS('http://www.w3.org/2000/svg', tag)
+            : reference.window.document.createElement(tag);
+        for (const value of [42, false, undefined, null, { toString: () => '<b>Synthetic</b>' }]) {
+          remote.innerHTML = value;
+          (real as any).innerHTML = value;
+          expect(remote.innerHTML).toBe(real.innerHTML);
+        }
+        expect(() => {
+          remote.innerHTML = Symbol('synthetic');
+        }).toThrow(TypeError);
+        expect(() => {
+          (real as any).innerHTML = Symbol('synthetic');
+        }).toThrow();
+      }
+    } finally {
+      h.close();
+      reference.window.close();
+    }
+  });
   test('HTML templates, SVG namespaces, selectors and exact text/attribute/style writes', async () => {
     const h = harness(),
       d = h.shim.document;
