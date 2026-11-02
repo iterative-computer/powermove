@@ -104,11 +104,8 @@ impl Panel {
             .values()
             .filter_map(|node| {
                 Component::of(node).map(|kind| {
-                    let dark;
                     let local = if additions::over_image(&surface, node) {
-                        dark =
-                            pm_design::Tokens::new(pm_design::Scheme::Dark, tokens.accessibility);
-                        &dark
+                        image_tokens
                     } else {
                         tokens
                     };

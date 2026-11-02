@@ -238,7 +238,11 @@ fn colour_well_and_popover_use_native_recipe_with_exact_geometry() {
         ),
         &t,
     );
-    assert_eq!(p.components[&1].width, Some(t.metrics.field));
+    assert_eq!(p.components[&1].width, None);
+    assert_eq!(p.components[&1].visual_height, None);
+    assert_eq!(p.components[&1].radius, None);
+    let standard = panel(surface(Component::ColourWell, json!({})), &t);
+    assert_eq!(standard.components[&1].width, Some(t.metrics.field));
     let Decoration::ColourWell { minimal, checker } = &p.decorations[&1] else {
         panic!()
     };
@@ -796,6 +800,15 @@ fn empty_state_symbol_is_decorative_in_ax() {
     let p = panel(s, &tokens());
     assert!(ax(&p, 2).is_hidden());
     assert_eq!(ax(&p, 1).role(), Role::Group);
+    let Decoration::EmptyState {
+        symbol_size,
+        symbol_color,
+    } = &p.decorations[&1]
+    else {
+        panic!()
+    };
+    assert_eq!(*symbol_size, tokens().metrics.symbol_panel * 2.);
+    assert_eq!(*symbol_color, tokens().colors.muted);
 }
 #[test]
 fn menu_presentation_is_published_with_separators_details_and_measurement_sample() {

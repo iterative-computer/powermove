@@ -107,6 +107,10 @@ pub struct MenuItemPresentation {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decoration {
+    EmptyState {
+        symbol_size: f32,
+        symbol_color: u32,
+    },
     PopUpButton {
         menu: Vec<MenuItemPresentation>,
         width_sample: Option<String>,
@@ -212,6 +216,10 @@ pub(crate) fn settings_host(surface: &Surface, node: &Node) -> bool {
 pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Option<Decoration> {
     let metric = |name| TokenMetric::new(name, table);
     Some(match Component::of(node)? {
+        Component::EmptyState => Decoration::EmptyState {
+            symbol_size: t.metrics.symbol_panel + t.metrics.symbol_panel,
+            symbol_color: t.colors.muted,
+        },
         Component::PopUpButton => Decoration::PopUpButton {
             menu: options(node)
                 .and_then(|o| o.get("menu"))
@@ -436,6 +444,12 @@ impl Decoration {
 
 pub(crate) fn customize(recipe: &mut Recipe, node: &Node, t: &Tokens, table: &DesignTokenTable) {
     match Component::of(node) {
+        Some(Component::ColourWell) if bool_option(node, "minimal") => {
+            // NSColorWell .minimal owns its geometry in Settings.
+            recipe.width = None;
+            recipe.visual_height = None;
+            recipe.radius = None;
+        }
         Some(Component::FormGroup) => {
             recipe.background = if t.scheme == Scheme::Light {
                 t.colors.field
