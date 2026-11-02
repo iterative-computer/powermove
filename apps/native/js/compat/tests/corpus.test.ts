@@ -250,6 +250,7 @@ test("frozen host graph regenerates exactly from v1.2.0 plus recorded adaptation
     "drop",
     "binding",
     "pm-facades",
+    "icons",
   ]) {
     const expected = await frozen(name),
       actual = await Bun.file(

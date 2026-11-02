@@ -1,12 +1,13 @@
 //! Executes the actual compat bundle in the sandbox-enabled V8 runtime.
-//! The executable owns no UI; missing kernel/panel adapters fail explicitly.
+//! The executable owns no UI. Its disposable native kernel never opens a profile.
 use pm_runtime_v8::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
+mod kernel;
 mod recorder;
 pub use recorder::NativeHost;
 
@@ -18,7 +19,8 @@ pub struct CompatRunner {
 
 impl CompatRunner {
     pub fn new(bundle: &str, initial: &Value) -> Result<Self> {
-        let host = Arc::new(NativeHost::default());
+        let host = Arc::new(NativeHost::new(initial)?);
+        let initial = host.publication();
         let pool = RuntimePool::new(
             "extcheck",
             Config {
@@ -87,6 +89,9 @@ impl CompatRunner {
     pub fn take_dom_batches(&self) -> Vec<Value> {
         self.host.take_dom_batches()
     }
+    pub fn take_presentation_request(&self) -> bool {
+        self.host.take_presentation_request()
+    }
     /// The embedder delivers applier feedback on this owner, outside AppKit/main.
     pub fn receive_dom(&self, message: &Value) -> Result<Value> {
         self.json(&format!(
@@ -101,15 +106,13 @@ impl Drop for CompatRunner {
 }
 
 pub fn initial() -> Value {
-    json!({"revision":0,"document":{"id":"synthetic","name":"Synthetic extension check","created":0,
-        "w":320,"h":180,"fps":30,"dur":2,"layers":[],"comps":{}},
-        "selection":{"layers":[],"keys":[],"chan":null},"workspace":{},
-        "facts":{"historyBusy":false,"canUndo":false,"canRedo":false,"editLive":false}})
+    serde_json::from_str(include_str!("initial.json")).expect("frozen synthetic initial project")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::OnceLock;
     fn bundle() -> &'static str {
         static BUNDLE: OnceLock<String> = OnceLock::new();
@@ -190,7 +193,7 @@ mod tests {
         );
     }
     #[test]
-    fn missing_kernel_and_panel_backend_never_report_success() {
+    fn attached_kernel_executes_history_in_the_native_authority() {
         let runner = runner();
         let result = runner
             .activate(
@@ -198,8 +201,41 @@ mod tests {
                 "var ExtCheckModule={default(api){api.history.begin('Synthetic')}}",
             )
             .unwrap();
-        assert_eq!(result["ok"], false);
-        assert_eq!(runner.diagnostics()["missing"][0], "kernel.call");
+        assert_eq!(result["ok"], true);
+        assert_eq!(runner.json("PM.hist.busy()").unwrap(), true);
+        assert!(
+            runner.diagnostics()["missing"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn native_kernel_history_round_trip_and_external_closures() {
+        let runner = runner();
+        let value=runner.json("(()=>{const before=PM.proj.name;const result=__extcheck.realm.history.do('Synthetic',()=>{PM.proj.name='Edited';return 7});const edited=PM.proj.name;const undo=PM.hist.undo();const restored=PM.proj.name;const redo=PM.hist.redo();return [result,edited,undo,restored===before,redo,PM.proj.name]})()").unwrap();
+        assert_eq!(value, json!([7, "Edited", true, true, true, "Edited"]));
+        assert_eq!(runner.json("(()=>{let count=0;__extcheck.realm.history.external('Synthetic closure',()=>count--,()=>count++);return [PM.hist.undo(),count,PM.hist.redo(),count]})()").unwrap(),json!([true,-1,true,0]));
+    }
+    #[test]
+    fn native_kernel_publication_exposes_the_legacy_open_composition() {
+        let runner = runner();
+        assert_eq!(runner.json("PM.proj").unwrap(), initial()["document"]);
+        let result=runner.json("(()=>{__extcheck.realm.history.do('Synthetic marker',()=>PM.proj.markers.push({id:'synthetic-marker',t:0,name:'Synthetic'}));const count=PM.proj.markers.length;PM.hist.undo();return [count,PM.proj.markers.length,PM.proj.w,PM.proj.compId]})()").unwrap();
+        assert_eq!(result, json!([1, 0, 320, "synthetic-comp"]));
+    }
+    #[test]
+    fn missing_kernel_method_is_acknowledged_without_poisoning_the_channel() {
+        let runner = runner();
+        assert_eq!(runner.json("(()=>{try{__extcheck.realm.channel.call('synthetic.unavailable')}catch{}return [__extcheck.realm.channel.pending,PM.hist.canUndo()]})()").unwrap(),json!([false,false]));
+    }
+    #[test]
+    fn invalidation_publishes_coalesced_demand_to_the_native_presenter() {
+        let runner = runner();
+        assert!(!runner.take_presentation_request());
+        runner.eval("PM.invalidate();PM.invalidate() ").unwrap();
+        assert!(runner.take_presentation_request());
+        assert!(!runner.take_presentation_request());
     }
     #[test]
     fn recorder_pixels_are_native_and_source_versions_survive_disposal() {

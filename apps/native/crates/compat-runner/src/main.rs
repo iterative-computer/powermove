@@ -21,7 +21,8 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
             .ok_or("compat_bundle required")?,
     )?;
     let module = fs::read_to_string(input["module"].as_str().ok_or("module required")?)?;
-    let runner = CompatRunner::new(&bundle, &initial())?;
+    let initial = input.get("initial").cloned().unwrap_or_else(initial);
+    let runner = CompatRunner::new(&bundle, &initial)?;
     let activation = runner.activate(&input["manifest"], &module)?;
     let mut results = vec![];
     if activation["ok"] == true {
