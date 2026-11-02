@@ -10,6 +10,7 @@ pub mod kernel;
 pub mod model;
 pub mod placement;
 pub mod questions;
+pub mod v4;
 pub mod view;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
