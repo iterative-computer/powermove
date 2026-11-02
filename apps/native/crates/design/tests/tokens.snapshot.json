@@ -36,7 +36,8 @@
         "green": 12968913,
         "teal": 12772067,
         "gray": 14474464
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -84,7 +85,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -149,7 +153,8 @@
         "green": 12968913,
         "teal": 12772067,
         "gray": 14474464
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -197,7 +202,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -262,7 +270,8 @@
         "green": 12968913,
         "teal": 12772067,
         "gray": 14474464
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -310,7 +319,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -375,7 +387,8 @@
         "green": 12968913,
         "teal": 12772067,
         "gray": 14474464
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -423,7 +436,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -488,7 +504,8 @@
         "green": 2379834,
         "teal": 2050898,
         "gray": 3815994
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -536,7 +553,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -601,7 +621,8 @@
         "green": 2379834,
         "teal": 2050898,
         "gray": 3815994
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -649,7 +670,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -714,7 +738,8 @@
         "green": 2379834,
         "teal": 2050898,
         "gray": 3815994
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -762,7 +787,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,
@@ -827,7 +855,8 @@
         "green": 2379834,
         "teal": 2050898,
         "gray": 3815994
-      }
+      },
+      "media_badge": 0
     },
     "metrics": {
       "gap": 6.0,
@@ -875,7 +904,10 @@
       "hit": 24.0,
       "popover_width": 260.0,
       "sheet_width": 480.0,
-      "agent_width": 360.0
+      "agent_width": 360.0,
+      "kind_badge": 18.0,
+      "thumbnail_min": 120.0,
+      "status_dot": 6.0
     },
     "typography": {
       "minimum": 11.0,

@@ -43,6 +43,8 @@ pub struct Colors {
     pub success: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
+    /// Over-media badge RGB; alpha is panels::MEDIA_BADGE_ALPHA.
+    pub media_badge: u32,
 }
 /// Eight label colours, in menu order. Fills are muted so artwork stays the loudest thing on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +151,9 @@ pub struct Metrics {
     pub popover_width: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
+    pub kind_badge: f32,
+    pub thumbnail_min: f32,
+    pub status_dot: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -282,6 +287,7 @@ impl Tokens {
                 danger: 0xf36357,
                 warning: 0xf59e0b,
                 success: 0x3fcf8e,
+                media_badge: 0x000000,
                 labels: Labels {
                     blue: 0x3b4250,
                     violet: 0x4a3b6b,
@@ -314,6 +320,7 @@ impl Tokens {
                 danger: 0xc22a1f,
                 warning: 0xa15c00,
                 success: 0x117a52,
+                media_badge: 0x000000,
                 labels: Labels {
                     blue: 0xc9d4e8,
                     violet: 0xd8cff0,
@@ -377,6 +384,9 @@ impl Tokens {
                 popover_width: 260.,
                 sheet_width: 480.,
                 agent_width: 360.,
+                kind_badge: 18.,
+                thumbnail_min: 120.,
+                status_dot: 6.,
             },
             typography: TypeScale {
                 minimum: 11.,
@@ -446,6 +456,10 @@ impl Tokens {
         typography.minimum: size, typography.body: size, typography.label: size,
         typography.title: size, typography.reading: size, typography.heading: size,
         typography.display: size,
+        colors.media_badge: color,
+        metrics.kind_badge: size,
+        metrics.thumbnail_min: size,
+        metrics.status_dot: size,
     }
     /// Apply a translated theme's `nativePatch` (field name → number). Fields are
     /// applied in order; accessibility overrides are re-applied afterwards, so a
@@ -478,4 +492,11 @@ pub mod workspace {
     pub const DEFAULT_RIGHT: f32 = 300.;
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
+}
+
+/// Additive panel recipes from the 2026-11-01 Opus reviews. Kept outside the
+/// existing token table so parallel token additions cannot change old values.
+pub mod panels {
+    /// Shared panel spec §6: alpha for colors.media_badge, both schemes.
+    pub const MEDIA_BADGE_ALPHA: f64 = 0.55;
 }
