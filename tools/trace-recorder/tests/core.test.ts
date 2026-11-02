@@ -1,8 +1,24 @@
 import {describe,test,expect} from 'bun:test';
 import {Recorder} from '../core';
 import {validateTrace} from '../validate';
+import {admitFixtureWorkspace} from '../../extcheck/fixture-aliases.mjs';
 
 describe('observational recorder',()=>{
+  test('fresh workspace identities compare deterministically without changing fixture state or reading id accessors',()=>{
+    const capture=(id:string)=>{
+      const workspace={id,name:'Synthetic workspace'};
+      const recorder=new Recorder(()=>({workspace}),{});
+      admitFixtureWorkspace({PM:{WS:{current:workspace}},__PMTrace:{recorder}});
+      recorder.call('workspace.current',[],()=>workspace);
+      expect(workspace.id).toBe(id);
+      return recorder.finish();
+    };
+    expect(capture('synthetic-first-generated-id')).toBe(capture('synthetic-second-generated-id'));
+    let reads=0;
+    const recorder=new Recorder(()=>null,{});
+    admitFixtureWorkspace({PM:{WS:{current:{get id(){reads++;return 'synthetic';}}}},__PMTrace:{recorder}});
+    expect(reads).toBe(0);
+  });
   test('preserves return/error identities, nesting, event order and snapshots',()=>{
     const state={name:'before',depth:0};const recorder=new Recorder(()=>state,{synthetic:true});
     const sentinel={answer:42};const error=new Error('synthetic');

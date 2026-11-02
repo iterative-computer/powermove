@@ -9,7 +9,11 @@ use std::{
 };
 mod kernel;
 mod recorder;
+mod store_kernel;
+mod store_runtime;
 pub use recorder::NativeHost;
+pub use store_kernel::KernelStoreAdapter;
+pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
 
 pub struct CompatRunner {
     realm: Realm,

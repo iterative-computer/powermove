@@ -27,7 +27,20 @@ try {
   );
   await writeFile(
     path.join(input, "index.ts"),
-    `export default function(api){api.storage.set('value',17);api.commands.register({id:'synthetic',label:'Synthetic',run(){return api.storage.get('value')}})}`,
+    `export default function(api){
+      api.storage.set('value',17);
+      api.commands.register({id:'synthetic',label:'Synthetic',run(){return api.storage.get('value')}});
+      const target=document.createElement('section');document.body.append(target);
+      api.onDispose(()=>target.remove());
+      api.onDispose(api.host.mount(api.ui.controls.TextField,target,{
+        api,get:()=>api.project.get().name,edit:{mode:'local',label:'Synthetic',set(){}}
+      }));
+      api.onDispose(api.host.mount(api.ui.controls.SelectField,target,{
+        api,get:()=>api.project.get().name,
+        options:['Synthetic extension check','Synthetic changed'],
+        edit:{mode:'set',label:'Synthetic selection',set(value){api.project.get().name=value}}
+      }));
+    }`,
   );
   execFileSync(
     "bun",
@@ -55,14 +68,27 @@ try {
           "__extcheck.realm.kernel.commands.get('synthetic').run()",
           "typeof PowermoveCompat.runtimeModules.svelte.mount",
           "Array.isArray(PM.proj.markers)",
+          "__extcheck.dom.document.querySelector('input').value",
+          "(()=>{__extcheck.realm.history.do('Synthetic control update',()=>PM.proj.name='Synthetic changed');PowermoveCompat.runtimeModules.svelte.flushSync();return __extcheck.dom.document.querySelector('input').value})()",
+          "(()=>{const select=document.querySelector('select');select.value='0';select.dispatchEvent(new Event('change',{bubbles:true}));PowermoveCompat.runtimeModules.svelte.flushSync();return [PM.proj.name,document.querySelector('input').value,select.selectedIndex]})()",
+          "(()=>{__extcheck.realm.history.undo();PowermoveCompat.runtimeModules.svelte.flushSync();return [PM.proj.name,document.querySelector('input').value]})()",
           "__extcheck.dispose()",
         ],
       }),
     }),
   );
   assert.equal(result.logic, "runtime-v8");
-  assert.equal(result.activation.ok, true);
-  assert.deepEqual(result.results, [17, "function", true, true]);
+  assert.equal(result.activation.ok, true, JSON.stringify(result.activation));
+  assert.deepEqual(result.results, [
+    17,
+    "function",
+    true,
+    "Synthetic extension check",
+    "Synthetic changed",
+    ["Synthetic extension check", "Synthetic extension check", 0],
+    ["Synthetic changed", "Synthetic changed"],
+    true,
+  ]);
   assert.deepEqual(result.diagnostics.missing, []);
   assert.equal(result.gates.webkit_panels, false);
   console.log(
