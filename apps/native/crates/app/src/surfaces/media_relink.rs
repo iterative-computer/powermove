@@ -71,13 +71,11 @@ impl Metadata {
             ));
         }
         if self.has_audio != original.has_audio {
-            // DESIGN-TODO(opus): positive-audio mismatch copy (chosen has audio,
-            // original does not) is absent from S006. Do not invent that sentence.
             lines.push(
-                if !self.has_audio {
-                    "It has no audio; the original did."
+                if self.has_audio {
+                    "It has audio; the original didn’t."
                 } else {
-                    ""
+                    "It has no audio; the original did."
                 }
                 .into(),
             );
@@ -89,7 +87,6 @@ impl Metadata {
 pub enum Check {
     Match,
     Mismatch(Alert),
-    NeedsDesign,
 }
 pub fn check(
     target: Target,
@@ -100,9 +97,6 @@ pub fn check(
     let differences = probed.differences(original)?;
     if differences.is_empty() {
         return Some(Check::Match);
-    }
-    if differences.iter().any(String::is_empty) {
-        return Some(Check::NeedsDesign);
     }
     Some(Check::Mismatch(Alert {
         target,
@@ -127,7 +121,11 @@ pub fn respond(target: Target, chosen: String, action: Action) -> Option<Command
 pub fn others(target: Target, count: usize, folder: &str) -> Option<Alert> {
     (count > 0).then(|| Alert {
         target,
-        message: format!("Relink {count} other missing files in “{folder}”?"),
+        message: if count == 1 {
+            format!("Relink 1 other missing file in “{folder}”?")
+        } else {
+            format!("Relink {count} other missing files in “{folder}”?")
+        },
         informative: "They have the same names as missing media in this project.".into(),
         buttons: vec![Action::RelinkAll, Action::JustThisOne],
         suppression: None,

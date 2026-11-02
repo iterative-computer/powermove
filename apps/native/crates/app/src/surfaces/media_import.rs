@@ -240,12 +240,12 @@ impl Import {
         } else if self.stopped {
             format!("Import stopped · {imported} of {total} imported")
         } else if self.terminal() && imported == 0 {
-            format!("Couldn’t import {total} files")
+            format!("Couldn’t import {}", files_noun(total))
         } else if self.terminal() && failed {
             format!("{imported} of {total} files imported")
         } else {
             match &self.origin {
-                Origin::Files => format!("Importing {total} files"),
+                Origin::Files => format!("Importing {}", files_noun(total)),
                 Origin::Folder(folder) => format!("Importing “{folder}”"),
                 Origin::Paste => "Pasting media".into(),
             }
@@ -302,5 +302,14 @@ impl Import {
                 action: Some(Action::ShowDetails),
             }),
         }
+    }
+}
+
+/// `1 file` / `{n} files`.
+fn files_noun(n: usize) -> String {
+    if n == 1 {
+        "1 file".into()
+    } else {
+        format!("{n} files")
     }
 }

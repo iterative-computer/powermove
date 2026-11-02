@@ -123,7 +123,7 @@ fn mismatch_copy_is_capped_at_three_differences_and_buttons_keep_order() {
     assert_eq!(a.key(Key::Escape), Some(Action::Cancel));
 }
 #[test]
-fn audio_mismatch_and_unspecified_positive_audio_case() {
+fn audio_mismatch_in_both_directions() {
     let mut chosen = metadata();
     chosen.has_audio = false;
     let Some(relink::Check::Mismatch(a)) = relink::check(target("a"), "a", &chosen, &metadata())
@@ -131,10 +131,11 @@ fn audio_mismatch_and_unspecified_positive_audio_case() {
         panic!()
     };
     assert_eq!(a.informative, "It has no audio; the original did.");
-    assert_eq!(
-        relink::check(target("a"), "a", &metadata(), &chosen),
-        Some(relink::Check::NeedsDesign)
-    );
+    let Some(relink::Check::Mismatch(a)) = relink::check(target("a"), "a", &metadata(), &chosen)
+    else {
+        panic!()
+    };
+    assert_eq!(a.informative, "It has audio; the original didn’t.");
 }
 #[test]
 fn invalid_probe_never_looks_like_a_match() {
@@ -517,7 +518,7 @@ fn no_import_has_error_row_and_persistent_details_banner() {
         &mut h,
     );
     let row = i.row();
-    assert_eq!(row.title, "Couldn’t import 1 files");
+    assert_eq!(row.title, "Couldn’t import 1 file");
     assert_eq!(row.severity, Severity::Error);
     assert_eq!(
         row.banner.unwrap(),

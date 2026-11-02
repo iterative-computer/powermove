@@ -337,8 +337,8 @@ impl Cloud {
             .any(|f| matches!(f.state, FileState::Downloading { .. }))
         {
             format!(
-                "Downloading {} files from {}",
-                self.files.len(),
+                "Downloading {} from {}",
+                files_noun(self.files.len()),
                 self.provider
             )
         } else {
@@ -365,5 +365,14 @@ impl Cloud {
             FileState::Failed => ("Download failed", Some("Retry Download"), None),
             FileState::Downloaded => ("", None, None),
         }
+    }
+}
+
+/// `1 file` / `{n} files`.
+fn files_noun(n: usize) -> String {
+    if n == 1 {
+        "1 file".into()
+    } else {
+        format!("{n} files")
     }
 }

@@ -67,7 +67,7 @@ mod tests {
         )
         .unwrap();
         let value = import_task(&i);
-        assert_eq!(value["title"], "Couldn’t import 1 files");
+        assert_eq!(value["title"], "Couldn’t import 1 file");
         assert_eq!(value["progress"], 1.0);
         assert_eq!(value["severity"], "error");
         assert_eq!(
