@@ -144,7 +144,12 @@ test("S034 disabled animator keeps native property wells editable and has exact 
   expect(byLabel(root, "Fade, animator 1 of 1").props.role).toBe("group");
   expect(byLabel(root, "Fade enabled", "checkbox").props.value).toBe(false);
   expect(byLabel(root, "Opacity", "number-field").props.disabled).toBe(false);
-  expect(byLabel(root, "Shuffle").props.title).toBe("Shuffle");
+  expect(byLabel(root, "Shuffle Order").props.title).toBe("Shuffle Order");
+  expect(
+    (byLabel(root, "Shuffle Order").props.attr as Record<string, string>)[
+      "data-pm-symbol"
+    ],
+  ).toBe("shuffle");
 });
 test("S034 collapsed animated header removes fields and preserves half diamond state", async () => {
   const { root, services } = record();

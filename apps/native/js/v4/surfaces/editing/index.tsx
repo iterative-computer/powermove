@@ -230,9 +230,8 @@ function AnimatorGroup({
               {field.id === "order" && field.value === "random" ? (
                 <SymbolButton
                   id={`${base}/shuffle`}
-                  label="Shuffle"
-                  // DESIGN-TODO(opus): Shuffle's glyph is unspecified; this is
-                  // a named neutral placeholder, with no lane-chosen symbol.
+                  label="Shuffle Order"
+                  symbol="shuffle"
                   disabled={p.locked}
                   action={() => {
                     send({ type: "shuffle", animator: a.id });
