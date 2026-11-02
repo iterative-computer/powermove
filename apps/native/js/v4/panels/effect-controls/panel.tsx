@@ -152,6 +152,8 @@ export function EffectControls(props: PanelProps) {
         style={{
           display: "flex",
           flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
           height: t("metrics.header"),
           paddingLeft: t("metrics.inset"),
         }}
@@ -224,9 +226,7 @@ export function EffectControls(props: PanelProps) {
                 ? "Select a layer to see its effects."
                 : "This kind of layer can’t have effects."
           }
-          attr={
-            p.target === "NoProject" ? { symbol: "wand.and.rays" } : undefined
-          }
+          attr={{ symbol: "wand.and.rays" }}
           action={null}
         />
       ) : p.count === 0 ? (
@@ -353,6 +353,7 @@ export function EffectControls(props: PanelProps) {
                       display: "flex",
                       flexDirection: "row",
                       alignItems: "center",
+                      justifyContent: "space-between",
                       color: t(
                         p.locked || !row.enabled
                           ? "colors.muted"
@@ -373,64 +374,81 @@ export function EffectControls(props: PanelProps) {
                         : {}),
                     }}
                   >
-                    <UI.ToolbarItem
-                      label={row.label}
-                      tabIndex={-1}
-                      disabled={p.locked}
-                      aria-expanded={row.expanded}
-                      attr={{ symbol: "chevron.right", expanded: row.expanded }}
-                      onClick={(e) => {
-                        stop(e);
-                        send({
-                          type: "disclose",
-                          id: row.id,
-                          open: !row.expanded,
-                        });
-                      }}
-                      style={{ symbolSize: t("metrics.symbol_inline") }}
-                    />
-                    <UI.Checkbox
-                      preventDefault={{ click: true }}
-                      label={`Enable ${row.label}`}
-                      binding={`${PANEL_ID}:enable:${row.id}`}
-                      value={row.enabled}
-                      disabled={p.locked}
-                      tabIndex={-1}
-                      onClick={(e) => {
-                        stop(e);
-                        send({ type: "toggle", id: row.id });
-                      }}
-                      onKeyDown={stop}
-                    />
-                    <text
-                      onClick={(e) => {
-                        stop(e);
-                        send({
-                          type: "select",
-                          id: row.id,
-                          meta: !!e.metaKey,
-                          ctrl: !!e.ctrlKey,
-                          shift: !!e.shiftKey,
-                        });
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
                       }}
                     >
-                      {row.label}
-                    </text>
-                    {row.missing && (
+                      <UI.ToolbarItem
+                        label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+                        tabIndex={-1}
+                        disabled={p.locked}
+                        aria-expanded={row.expanded}
+                        attr={{
+                          symbol: "chevron.right",
+                          expanded: row.expanded,
+                        }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({
+                            type: "disclose",
+                            id: row.id,
+                            open: !row.expanded,
+                          });
+                        }}
+                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                      />
+                      <UI.Checkbox
+                        preventDefault={{ click: true }}
+                        label={`Enable ${row.label}`}
+                        binding={`${PANEL_ID}:enable:${row.id}`}
+                        value={row.enabled}
+                        disabled={p.locked}
+                        tabIndex={-1}
+                        onClick={(e) => {
+                          stop(e);
+                          send({ type: "toggle", id: row.id });
+                        }}
+                        onKeyDown={stop}
+                      />
                       <text
-                        attr={{ symbol: "exclamationmark.triangle.fill" }}
-                        style={{
-                          color: t("colors.warning"),
-                          fontSize: t("typography.minimum"),
+                        onClick={(e) => {
+                          stop(e);
+                          send({
+                            type: "select",
+                            id: row.id,
+                            meta: !!e.metaKey,
+                            ctrl: !!e.ctrlKey,
+                            shift: !!e.shiftKey,
+                          });
                         }}
                       >
-                        Not installed
+                        {row.label}
                       </text>
-                    )}
+                      {row.missing && (
+                        <text
+                          attr={{ symbol: "exclamationmark.triangle.fill" }}
+                          style={{
+                            color: t("colors.warning"),
+                            fontSize: t("typography.minimum"),
+                          }}
+                        >
+                          Not installed
+                        </text>
+                      )}
+                    </div>
                     {(hover === row.id ||
                       row.selected ||
                       (keyboard && p.focus === row.id)) && (
-                      <>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "row",
+                          alignItems: "center",
+                        }}
+                      >
                         <UI.ToolbarItem
                           label={`Reset ${row.label}`}
                           title="Reset Effect"
@@ -455,7 +473,7 @@ export function EffectControls(props: PanelProps) {
                           }}
                           style={{ symbolSize: t("metrics.symbol_inline") }}
                         />
-                      </>
+                      </div>
                     )}
                   </UI.ListItem>
                 ),
@@ -473,6 +491,13 @@ export function EffectControls(props: PanelProps) {
       )}
     </div>
   );
+}
+/** Read-only text for a value without a registry control (design review T4). */
+function scalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  return undefined;
 }
 function ParameterView({
   row,
@@ -520,8 +545,16 @@ function ParameterView({
     );
   else
     field = (
-      <text label={p.label}>
-        {typeof p.value === "string" ? p.value : JSON.stringify(p.value)}
+      <text
+        label={`${p.label}, ${scalar(p.value) ?? "custom value"}, read only`}
+        style={{
+          color: t(
+            scalar(p.value) === undefined ? "colors.muted" : "colors.secondary",
+          ),
+          fontSize: t("typography.body"),
+        }}
+      >
+        {scalar(p.value) ?? "Custom value"}
       </text>
     );
   const state = p.keyAtPlayhead
