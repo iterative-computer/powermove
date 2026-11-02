@@ -8,7 +8,6 @@ use pm_native_migrate::{
 };
 use std::{fs, io::Write};
 use support::*;
-use tempfile::tempdir;
 
 #[test]
 fn independent_electron_44_fixture_decodes_every_record_and_file() {

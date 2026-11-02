@@ -102,10 +102,8 @@ impl Snapshot {
         let reserve = match policy {
             BlobCopy::All => blob_bytes_before,
             BlobCopy::CloneAll { min_free } | BlobCopy::Deferred { min_free } => {
-                ensure!(
-                    fs2::available_space(&parent)? >= min_free.max(MIN_FREE),
-                    "clone snapshot free-space floor required"
-                );
+                check_capacity_above(fs2::available_space(&parent)?, min_free.max(MIN_FREE), 0)
+                    .context("clone snapshot free-space floor required")?;
                 0
             }
             BlobCopy::Sample { max_bytes, .. } => {
@@ -359,16 +357,16 @@ impl Snapshot {
                 device: m.dev(),
             })
         };
-        ensure!(
+        check_capacity_above(
             fs2::available_space(
                 destination
                     .parent()
-                    .context("blob destination needs parent")?
-            )?
-            .saturating_sub(expected.size)
-                >= min_free.max(MIN_FREE),
-            "disk_floor: deferred payload reserve required"
-        );
+                    .context("blob destination needs parent")?,
+            )?,
+            min_free.max(MIN_FREE),
+            expected.size,
+        )
+        .context("disk_floor: deferred payload reserve required")?;
         let before = open_regular(&source)?;
         ensure!(
             &stamp(before.metadata()?)? == expected,
@@ -489,12 +487,53 @@ fn inventory(root: &Path, recursive: bool) -> Result<BTreeMap<PathBuf, Stamp>> {
     Ok(out)
 }
 pub(crate) fn check_space(root: &Path, needed: u64) -> Result<()> {
-    let free = fs2::available_space(root)?;
-    ensure!(
-        free >= MIN_FREE && free.saturating_sub(MIN_FREE) >= needed,
-        "insufficient free space (4 GiB reserve required)"
-    );
+    check_capacity(fs2::available_space(root)?, needed)
+}
+fn check_capacity(free: u64, needed: u64) -> Result<()> {
+    check_capacity_above(free, MIN_FREE, needed)
+}
+fn check_capacity_above(free: u64, floor: u64, needed: u64) -> Result<()> {
+    if free < floor || free.saturating_sub(floor) < needed {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSPC)).context(format!(
+            "ENOSPC: insufficient free space ({floor} reserve bytes required; {free} bytes available; {needed} payload bytes required)"
+        ));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_and_payload_capacity_fail_with_explicit_enospc() {
+        for (available, needed) in [(MIN_FREE - 1, 0), (MIN_FREE + 7, 8)] {
+            let error = check_capacity(available, needed).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(libc::ENOSPC)
+            );
+            let message = format!("{error:#}");
+            assert!(message.contains("ENOSPC"), "{message}");
+            assert!(
+                message.contains(&format!("{available} bytes available")),
+                "{message}"
+            );
+        }
+        check_capacity(MIN_FREE, 0).unwrap();
+        check_capacity(MIN_FREE + 8, 8).unwrap();
+        let error = check_capacity_above(MIN_FREE, MIN_FREE + 1, 0).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ENOSPC)
+        );
+    }
 }
 pub(crate) fn open_regular(path: &Path) -> Result<File> {
     let f = OpenOptions::new()
@@ -549,10 +588,8 @@ fn copy_snapshot_file(
     if let BlobCopy::CloneAll { min_free } | BlobCopy::Deferred { min_free } = policy {
         let parent = destination.parent().context("clone needs parent")?;
         let floor = min_free.max(MIN_FREE);
-        ensure!(
-            fs2::available_space(parent)? >= floor,
-            "clone snapshot free-space floor required"
-        );
+        check_capacity_above(fs2::available_space(parent)?, floor, 0)
+            .context("clone snapshot free-space floor required")?;
         let input = open_regular(source)?;
         ensure!(input.metadata()?.len() == size, "source length changed");
         ensure!(
@@ -564,10 +601,8 @@ fn copy_snapshot_file(
             fs::metadata(destination)?.len() == size,
             "clone length mismatch"
         );
-        ensure!(
-            fs2::available_space(parent)? >= floor,
-            "clone snapshot free-space floor required"
-        );
+        check_capacity_above(fs2::available_space(parent)?, floor, 0)
+            .context("clone snapshot free-space floor required")?;
         Ok(())
     } else {
         copy_verified_length(source, destination, size)
