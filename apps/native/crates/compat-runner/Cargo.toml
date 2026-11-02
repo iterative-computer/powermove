@@ -11,6 +11,9 @@ macos-sandbox = ["pm-runtime-v8/macos-sandbox"]
 [dependencies]
 pm-runtime-v8 = { path = "../runtime-v8" }
 pm-recorder = { path = "../recorder" }
+pm-kernel = { path = "../kernel" }
+pm-mcp = { path = "../mcp" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
 serde_json = "=1.0.150"
 
 [[bin]]
