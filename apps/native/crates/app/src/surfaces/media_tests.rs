@@ -951,3 +951,22 @@ fn sequence_command_carries_exact_numbered_span_and_authored_gap_and_size_polici
         .is_none()
     );
 }
+#[test]
+fn individual_cloud_retry_keeps_other_downloads_live_and_rejects_late_failed_attempt() {
+    let mut c = cloud(2, true);
+    let mut h = InspectHost::default();
+    c.start(&mut h);
+    assert!(c.observe(&target("cloud"), "0", FileState::Failed));
+    assert!(c.retry_file(&target("cloud"), "0", &mut h));
+    assert_eq!(
+        h.commands.last().unwrap().operation,
+        Operation::Download {
+            assets: vec!["0".into()]
+        }
+    );
+    assert!(!c.observe(&target("cloud"), "0", FileState::Downloaded));
+    assert!(c.observe(&target("cloud"), "1", FileState::Downloaded));
+    let retried = c.file_target("0").unwrap();
+    assert!(c.observe(&retried, "0", FileState::Downloaded));
+    assert_eq!(c.task_title(), "2 of 2 downloaded");
+}

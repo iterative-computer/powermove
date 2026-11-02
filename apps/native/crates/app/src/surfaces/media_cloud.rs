@@ -18,6 +18,7 @@ pub struct Cloud {
     target: Target,
     provider: String,
     files: Vec<File>,
+    attempts: BTreeMap<String, u64>,
     consent: bool,
     decided: bool,
     cancelled: bool,
@@ -50,7 +51,12 @@ impl Cloud {
         {
             return None;
         }
+        let attempts = files
+            .iter()
+            .map(|f| (f.id.clone(), target.generation))
+            .collect();
         Some(Self {
+            attempts,
             target,
             provider,
             files,
@@ -163,6 +169,9 @@ impl Cloud {
         if assets.is_empty() {
             return false;
         }
+        for id in &assets {
+            self.attempts.insert(id.clone(), self.target.generation);
+        }
         self.cancelled = false;
         host.enqueue(Command {
             target: self.target.clone(),
@@ -171,7 +180,11 @@ impl Cloud {
         true
     }
     pub fn observe(&mut self, target: &Target, id: &str, state: FileState) -> bool {
-        if target != &self.target || self.cancelled {
+        if target.owner != self.target.owner
+            || target.id != self.target.id
+            || self.attempts.get(id).copied() != Some(target.generation)
+            || self.cancelled
+        {
             return false;
         }
         let Some(file) = self.files.iter_mut().find(|f| f.id == id) else {
@@ -197,7 +210,55 @@ impl Cloud {
         file.state = state;
         true
     }
+    fn next_generation(&self) -> Option<u64> {
+        self.attempts
+            .values()
+            .copied()
+            .chain([self.target.generation])
+            .max()?
+            .checked_add(1)
+    }
+    pub fn file_target(&self, id: &str) -> Option<Target> {
+        let mut target = self.target.clone();
+        target.generation = *self.attempts.get(id)?;
+        Some(target)
+    }
+    /// Retry one failed card immediately, while unrelated downloads continue.
+    /// A per-file generation rejects a late completion from its failed attempt.
+    pub fn retry_file(&mut self, target: &Target, id: &str, host: &mut impl MediaHost) -> bool {
+        if self.file_target(id).as_ref() != Some(target) {
+            return false;
+        }
+        let Some(next) = target.generation.checked_add(1) else {
+            return false;
+        };
+        let Some(file) = self
+            .files
+            .iter_mut()
+            .find(|f| f.id == id && f.state == FileState::Failed)
+        else {
+            return false;
+        };
+        file.state = FileState::Downloading {
+            bytes: 0,
+            total: None,
+        };
+        self.attempts.insert(id.to_owned(), next);
+        self.cancelled = false;
+        let mut target = target.clone();
+        target.generation = next;
+        host.enqueue(Command {
+            target,
+            operation: Operation::Download {
+                assets: vec![id.to_owned()],
+            },
+        });
+        true
+    }
     pub fn cancel(&mut self, host: &mut impl MediaHost) -> bool {
+        let Some(next) = self.next_generation() else {
+            return false;
+        };
         let jobs = self
             .files
             .iter_mut()
@@ -214,7 +275,7 @@ impl Cloud {
             return false;
         }
         self.cancelled = true;
-        self.target.generation += 1;
+        self.target.generation = next;
         host.enqueue(Command {
             target: self.target.clone(),
             operation: Operation::CancelRemaining {
@@ -236,7 +297,10 @@ impl Cloud {
         if !failed {
             return false;
         }
-        self.target.generation += 1;
+        let Some(next) = self.next_generation() else {
+            return false;
+        };
+        self.target.generation = next;
         let assets = self
             .files
             .iter_mut()
@@ -251,7 +315,10 @@ impl Cloud {
                     None
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        for id in &assets {
+            self.attempts.insert(id.clone(), self.target.generation);
+        }
         self.cancelled = false;
         host.enqueue(Command {
             target: self.target.clone(),
