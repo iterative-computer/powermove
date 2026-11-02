@@ -27,14 +27,22 @@ pub struct StoreDataStores {
 impl StoreDataStores {
     /// Call once per app. Keeping this registry alive preserves extension storage
     /// across hosts; distinct extensions never receive the same data-store object.
-    fn get(&mut self, trust: &Trust) -> Retained<WKWebsiteDataStore> {
+    fn get_for(
+        &mut self,
+        trust: &Trust,
+        identity: Option<&pm_store_host::identity::DataStoreIdentity>,
+    ) -> Retained<WKWebsiteDataStore> {
         match trust {
             Trust::Trusted => unsafe {
                 WKWebsiteDataStore::nonPersistentDataStore(MainThreadMarker::new().unwrap())
             },
             Trust::Store { extension, .. } => self
                 .stores
-                .entry(extension.clone())
+                .entry(
+                    identity
+                        .map(|id| format!("profile:{}", id.key))
+                        .unwrap_or_else(|| format!("legacy:{extension}")),
+                )
                 .or_insert_with(|| unsafe {
                     WKWebsiteDataStore::nonPersistentDataStore(MainThreadMarker::new().unwrap())
                 })
@@ -124,6 +132,14 @@ impl Shared {
         };
         let payload = m["payload"].clone();
         match kind {
+            "remote_dom" => {
+                // Hidden pages still acknowledge DOM/layout; only input needs a slot.
+                if payload["kind"] == "event" && self.panels.borrow().items[&id].slot.is_none() {
+                    return Err(Error::Forbidden);
+                }
+                self.handler.remote_dom(&context, payload)?;
+                Ok(Value::Null)
+            }
             "overlays" => {
                 let rects = serde_json::from_value(payload).map_err(|_| Error::InvalidGeometry)?;
                 let old = self.panels.borrow().items[&id].overlays.clone();
@@ -394,6 +410,7 @@ pub struct MacDomHost {
     slot: Retained<SlotView>,
     activity: Option<Activity>,
     job_count: u32,
+    dedicated_document: bool,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -404,6 +421,56 @@ struct Activity {
     next_sibling: Option<Retained<NSView>>,
 }
 impl MacDomHost {
+    pub fn new_store_remote_dom(
+        mtm: MainThreadMarker,
+        session: &pm_store_host::adapter::StoreSession,
+        handler: Rc<dyn SyncHandler>,
+        stores: &mut StoreDataStores,
+        page_bundle: &str,
+    ) -> Result<Self> {
+        let permissions = session
+            .grants
+            .iter()
+            .map(|p| {
+                serde_json::to_value(p)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let trust = Trust::Store {
+            extension: session.data_store.extension.as_str().into(),
+            permissions,
+        };
+        let applier = format!("{page_bundle}\n{REMOTE_DOM_SHELL}");
+        let mut host = Self::new_configured(
+            mtm,
+            trust,
+            handler,
+            stores,
+            BTreeMap::new(),
+            &applier,
+            Some(&session.data_store),
+        )?;
+        host.dedicated_document = true;
+        Ok(host)
+    }
+    /// A dedicated WebKit document using the production protocol applier bundle.
+    /// `page_bundle` is host-built code exposing PMRemoteDOM.PageApplier.
+    pub fn new_remote_dom(
+        mtm: MainThreadMarker,
+        trust: Trust,
+        handler: Rc<dyn SyncHandler>,
+        stores: &mut StoreDataStores,
+        page_bundle: &str,
+    ) -> Result<Self> {
+        let applier = format!("{page_bundle}\n{REMOTE_DOM_SHELL}");
+        let mut host =
+            Self::new_with_applier(mtm, trust, handler, stores, BTreeMap::new(), &applier)?;
+        host.dedicated_document = true;
+        Ok(host)
+    }
     /// `methods` maps Store method names to manifest permission names. Unknown
     /// Store methods are denied; the kernel must independently recheck admission.
     pub fn new(
@@ -424,6 +491,17 @@ impl MacDomHost {
         stores: &mut StoreDataStores,
         methods: BTreeMap<String, String>,
         applier: &str,
+    ) -> Result<Self> {
+        Self::new_configured(mtm, trust, handler, stores, methods, applier, None)
+    }
+    fn new_configured(
+        mtm: MainThreadMarker,
+        trust: Trust,
+        handler: Rc<dyn SyncHandler>,
+        stores: &mut StoreDataStores,
+        methods: BTreeMap<String, String>,
+        applier: &str,
+        identity: Option<&pm_store_host::identity::DataStoreIdentity>,
     ) -> Result<Self> {
         if objc2_core_graphics::CGSessionCopyCurrentDictionary().is_none() {
             return Err(Error::Unsupported("compat_gui_session_unavailable"));
@@ -446,7 +524,7 @@ impl MacDomHost {
             unsafe { msg_send![super(Bridge::alloc(mtm).set_ivars(shared.clone())), init] };
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
         unsafe {
-            config.setWebsiteDataStore(&stores.get(&trust));
+            config.setWebsiteDataStore(&stores.get_for(&trust, identity));
             config.setURLSchemeHandler_forURLScheme(
                 Some(ProtocolObject::from_ref(&*bridge)),
                 &NSString::from_str("pmcompat"),
@@ -476,6 +554,7 @@ impl MacDomHost {
             slot,
             activity: None,
             job_count: 0,
+            dedicated_document: false,
         };
         host.load();
         Ok(host)
@@ -783,6 +862,9 @@ impl DomPanelHost for MacDomHost {
         self.shared.channel.borrow().generation
     }
     fn create(&mut self, panel: PanelSpec) -> Result<()> {
+        if self.dedicated_document && !self.shared.panels.borrow().items.is_empty() {
+            return Err(Error::DuplicatePanel);
+        }
         if self.shared.panels.borrow().items.contains_key(&panel.id) {
             return Err(Error::DuplicatePanel);
         }
@@ -842,6 +924,11 @@ impl DomPanelHost for MacDomHost {
             .send(json!({"kind":"batch","panel":id,"batch":batch}))
     }
     fn send_event(&mut self, g: Generation, id: PanelId, event: Value) -> Result<()> {
+        if self.dedicated_document {
+            return Err(Error::Unsupported(
+                "remote DOM input must enter through the page or owner queue",
+            ));
+        }
         self.check(g, id)?;
         if !self.shared.ready.get() {
             return Err(Error::Backpressure);

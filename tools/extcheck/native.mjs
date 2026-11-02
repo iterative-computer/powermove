@@ -40,6 +40,9 @@ try {
           compat_bundle: path.join(out, "compat.js"),
           module: path.join(out, "extension.js"),
           manifest,
+          initial: JSON.parse(
+            await readFile(path.join(out, "initial.json"), "utf8"),
+          ),
           expressions: ["__extcheck.dispose()"],
         }),
         encoding: "utf8",

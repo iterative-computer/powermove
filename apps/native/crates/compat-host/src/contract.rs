@@ -123,6 +123,13 @@ pub struct RequestContext {
 pub trait SyncHandler {
     fn call(&self, context: &RequestContext, method: &str, args: Value) -> Result<Value>;
     fn event(&self, event: HostEvent);
+    /// Only enqueue to a bounded routing-owner mailbox. Never enter V8 or wait
+    /// on that owner here. Refusal must be explicit; no dropped acknowledgements.
+    fn remote_dom(&self, _context: &RequestContext, _payload: Value) -> Result<()> {
+        Err(Error::Unsupported(
+            "remote DOM feedback queue is not attached",
+        ))
+    }
     /// Called BEFORE reset. Seal acknowledged gestures and revoke the old bridge
     /// generation. Returning Err aborts Stop without touching the page.
     fn prepare_reset(&self, _generation: Generation) -> Result<()> {
