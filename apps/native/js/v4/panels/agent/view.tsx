@@ -30,6 +30,13 @@ const title = {
   fontSize: t("typography.title"),
   fontWeight: t("typography.semibold_weight"),
 };
+/** Question/approval card (agent-panel.md §3, design review 2026-11-01). */
+const card = (popover: boolean) => ({
+  ...vertical,
+  background: t(popover ? "colors.panel" : "colors.panel_secondary"),
+  borderRadius: t("metrics.control_radius"),
+  padding: t("metrics.inset"),
+});
 const copy = {
   editor: "Composition only",
   supervised: "Supervised",
@@ -60,10 +67,12 @@ function Placeholder({
   );
 }
 /** A neutral description of the unavailable push button, not a custom control. */
-function Push({ label }: { label: string }) {
+function Push({ label, danger }: { label: string; danger?: boolean }) {
   return (
     <Placeholder gap="pushButton" label={label}>
-      <text style={body}>{label}</text>
+      <text style={danger ? { ...body, color: t("colors.danger") } : body}>
+        {label}
+      </text>
     </Placeholder>
   );
 }
@@ -138,12 +147,13 @@ function Message({
   }
   if (kind === "question" && v.status === "closed")
     return (
-      <Placeholder
-        gap="richText"
-        label={`Question from the agent: ${questionTitle}`}
+      <div
+        role="listitem"
+        label={`Not answered: ${questionTitle}`}
+        metadata={{ rowId: row.id }}
       >
-        <text style={body}>{questionTitle}</text>
-      </Placeholder>
+        <text style={muted}>Not answered</text>
+      </div>
     );
 
   if (v.role === "user")
@@ -152,15 +162,19 @@ function Message({
         role="listitem"
         label={`You said: ${text}`}
         metadata={{ rowId: row.id, apiGap: "richText" }}
-        style={{
-          ...reading,
-          background: t("colors.field"),
-          borderRadius: t("metrics.panel_radius"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
+        style={{ display: "flex", flexDirection: "row", justifyContent: "end" }}
       >
-        <text>{text}</text>
+        <div
+          style={{
+            ...reading,
+            background: t("colors.field"),
+            borderRadius: t("metrics.panel_radius"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+          }}
+        >
+          <text>{text}</text>
+        </div>
       </div>
     );
   if (kind === "thought")
@@ -171,8 +185,8 @@ function Message({
           v.live === true
             ? "Thinking…"
             : typeof v.endedAt === "number" && typeof v.startedAt === "number"
-              ? `Thought for ${Math.max(0, v.endedAt - v.startedAt) / 1000} s`
-              : text
+              ? `Thought for ${Math.max(1, Math.round((v.endedAt - v.startedAt) / 1000))} s`
+              : "Thought"
         }
         open={row.open}
         onChange={(open) => send({ type: "disclose", id: row.commandId, open })}
@@ -187,43 +201,40 @@ function Message({
         role="listitem"
         label={`Question from the agent: ${questionTitle}`}
         metadata={{ rowId: row.id, apiGap: "pushButton" }}
-        style={{
-          ...vertical,
-          background: t(
-            n.presentation === "popover"
-              ? "colors.panel"
-              : "colors.panel_secondary",
-          ),
-          borderRadius: t("metrics.control_radius"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
+        style={card(n.presentation === "popover")}
       >
         <text style={title}>{questionTitle}</text>
-        <Placeholder gap="pushButton" label="Answer">
-          {Array.isArray(v.questions) &&
-            v.questions.map((q) =>
-              q && typeof q === "object" && !Array.isArray(q) ? (
-                <text style={body}>{str(q.question)}</text>
-              ) : null,
-            )}
-        </Placeholder>
+        {questions.map((q) =>
+          q && typeof q === "object" && !Array.isArray(q) ? (
+            <Placeholder gap="pushButton" label={str(q.question)}>
+              <text style={body}>{str(q.question)}</text>
+            </Placeholder>
+          ) : null,
+        )}
+        {v.transport === "reply" && <Push label="Skip" />}
         <Push label="Answer" />
-        <Push label="Skip" />
       </div>
     );
   if (kind === "approval")
     return (
-      <Placeholder gap="pushButton" label={text}>
+      <div
+        role="listitem"
+        label={text}
+        metadata={{ rowId: row.id, apiGap: "pushButton" }}
+        style={card(n.presentation === "popover")}
+      >
         <text style={title}>{text}</text>
         <Push label="Allow" />
         <Push label="Allow for This Thread" />
-        <Push label="Deny" />
-      </Placeholder>
+        <Push label="Deny" danger />
+      </div>
     );
   if (kind === "visual")
     return (
       <Placeholder gap="preview" label={str(v.title)}>
+        {v.status === "error" && (
+          <div metadata={{ symbol: "exclamationmark.triangle.fill" }} />
+        )}
         <text style={title}>{str(v.title)}</text>
         <text
           style={
@@ -247,7 +258,7 @@ function Message({
         label={text}
         metadata={{ rowId: row.id, symbol: "exclamationmark.triangle.fill" }}
       >
-        <text style={body}>{text}</text>
+        <text style={{ ...body, color: t("colors.text") }}>{text}</text>
         <Push label="Try Again" />
       </div>
     );
@@ -276,7 +287,20 @@ function Message({
         }}
       >
         <text style={body}>{str(v.output)}</text>
-        {state && <text style={muted}>{state}</text>}
+        {state && (
+          <text
+            style={
+              status === "error"
+                ? { ...body, color: t("colors.danger") }
+                : muted
+            }
+            metadata={
+              status === "error" ? { symbol: "xmark.circle.fill" } : undefined
+            }
+          >
+            {state}
+          </text>
+        )}
         {status === "running" && (
           <UI.ToolbarItem
             label={`Stop ${label}`}
@@ -291,8 +315,8 @@ function Message({
   if (v.nativeResult || kind === "result")
     return (
       <Placeholder gap="preview" label="Rendered result">
-        <text style={reading}>{text}</text>
         <text style={title}>Rendered result</text>
+        <text style={reading}>{text}</text>
         <Push label="Keep Change" />
         <Push label="Undo Change" />
         <Push label="Add to Timeline" />
@@ -368,42 +392,49 @@ export function AgentView({
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
+          justifyContent: "space-between",
           height: t("metrics.header"),
           paddingLeft: t("metrics.inset"),
         }}
       >
         <text style={title}>Agent</text>
-        <UI.ToolbarItem
-          id="agent-threads"
-          label="Switch Thread"
-          title="Switch Thread"
-          disabled
-          metadata={{ apiGap: "threadPicker" }}
-        />
-        <UI.ToolbarItem
-          disabled={s.composerDisabled}
-          id="agent-new"
-          label="New Thread"
-          title="New Thread"
-          onClick={() => {
-            if (!s.composerDisabled) send({ type: "newThread" });
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
           }}
-        />
-        <UI.ToolbarItem
-          id="agent-presentation"
-          label={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
-          title={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
-          onClick={() =>
-            send({
-              type: "shell",
-              action: n.presentation === "popover" ? "pin" : "close",
-            })
-          }
-        />
+        >
+          <UI.ToolbarItem
+            id="agent-threads"
+            label="Switch Thread"
+            title="Switch Thread"
+            disabled
+            metadata={{ apiGap: "threadPicker" }}
+          />
+          <UI.ToolbarItem
+            disabled={s.composerDisabled}
+            id="agent-new"
+            label="New Thread"
+            title="New Thread"
+            onClick={() => {
+              if (!s.composerDisabled) send({ type: "newThread" });
+            }}
+          />
+          <UI.ToolbarItem
+            id="agent-presentation"
+            label={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
+            title={n.presentation === "popover" ? "Pin to Workspace" : "Close"}
+            onClick={() =>
+              send({
+                type: "shell",
+                action: n.presentation === "popover" ? "pin" : "close",
+              })
+            }
+          />
+        </div>
       </div>
       <div
-        role="group"
-        label="Agent conversation"
         style={{
           ...vertical,
           paddingLeft: t("metrics.inset"),
@@ -442,7 +473,7 @@ export function AgentView({
         ) : (
           <>
             {n.loadingHistory && (
-              <UI.ProgressRow label="Agent conversation" children={[]} />
+              <UI.ProgressRow label="Loading earlier messages…" />
             )}
             {s.rows.count === 0 ? (
               <UI.EmptyState
@@ -465,7 +496,11 @@ export function AgentView({
           </>
         )}
         {s.stopError && (
-          <div role="status" label="Couldn’t stop this task.">
+          <div
+            role="status"
+            label="Couldn’t stop this task."
+            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+          >
             <text style={{ ...body, color: t("colors.danger") }}>
               Couldn’t stop this task.
             </text>
@@ -526,7 +561,15 @@ export function AgentView({
           </div>
         ))}
         <Placeholder gap="composer" label="Message Powermove agent">
-          <text style={s.draft.text ? reading : muted}>
+          <text
+            style={
+              n.dropTarget
+                ? { ...body, color: t("colors.accent_text") }
+                : s.draft.text
+                  ? reading
+                  : muted
+            }
+          >
             {n.dropTarget ? "Drop to attach" : s.draft.text || placeholder}
           </text>
         </Placeholder>
@@ -582,7 +625,7 @@ export function AgentView({
           )}
         </div>
         {s.slash.visible && (
-          <Placeholder gap="composer" label="Message Powermove agent">
+          <Placeholder gap="composer" label="Shortcuts">
             {s.slash.choices.slice(0, 6).map((c) =>
               n.slashCopy[c.id] ? (
                 <UI.ToolbarItem

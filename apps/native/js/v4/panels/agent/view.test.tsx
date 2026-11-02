@@ -321,7 +321,7 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
   }));
   await root.render(<AgentView publication={withRows(rows)} send={() => {}} />);
   expect(
-    root.inspect().nodes.some((n) => n.props.label === "Thought for 3.2 s"),
+    root.inspect().nodes.some((n) => n.props.label === "Thought for 3 s"),
   ).toBe(true);
   assertWire(commits);
   root.dispose();
