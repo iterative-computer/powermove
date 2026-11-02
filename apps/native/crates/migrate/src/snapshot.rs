@@ -19,7 +19,19 @@ pub const MAX_BLOB_COPY: u64 = 1024 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub enum BlobCopy {
     All,
-    Sample { max_bytes: u64, max_files: usize },
+    Sample {
+        max_bytes: u64,
+        max_files: usize,
+    },
+    /// Complete APFS snapshot, with no streaming fallback. Check the caller's
+    /// free-space floor before and after every clone, regardless of logical size.
+    CloneAll {
+        min_free: u64,
+    },
+    /// Snapshot LevelDB and blob identities; copy referenced payloads later.
+    Deferred {
+        min_free: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -39,6 +51,10 @@ struct Inventory {
     blob_files_before: usize,
     blob_bytes_before: u64,
     complete: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    deferred_blobs: BTreeMap<PathBuf, Stamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deferred_min_free: Option<u64>,
 }
 
 pub struct Snapshot {
@@ -85,6 +101,13 @@ impl Snapshot {
         let blob_bytes_before = total(&blob_before)?;
         let reserve = match policy {
             BlobCopy::All => blob_bytes_before,
+            BlobCopy::CloneAll { min_free } | BlobCopy::Deferred { min_free } => {
+                ensure!(
+                    fs2::available_space(&parent)? >= min_free.max(MIN_FREE),
+                    "clone snapshot free-space floor required"
+                );
+                0
+            }
             BlobCopy::Sample { max_bytes, .. } => {
                 max_bytes.min(MAX_BLOB_COPY).min(blob_bytes_before)
             }
@@ -105,13 +128,16 @@ impl Snapshot {
             let mut hashes = BTreeMap::new();
             for (relative, stamp) in &before {
                 let out = target.join("leveldb").join(relative);
-                copy_verified_length(&leveldb.join(relative), &out, stamp.size)?;
+                copy_snapshot_file(&leveldb.join(relative), &out, stamp.size, policy)?;
                 hashes.insert(relative.clone(), hash_file(&out)?.0);
             }
             let mut copied_blobs = BTreeMap::new();
             let mut copied_bytes = 0u64;
             if let Some(source) = blobs {
                 for (relative, stamp) in &blob_before {
+                    if matches!(policy, BlobCopy::Deferred { .. }) {
+                        continue;
+                    }
                     if let BlobCopy::Sample {
                         max_bytes,
                         max_files,
@@ -125,7 +151,7 @@ impl Snapshot {
                     let out = target.join("blobs").join(relative);
                     fs::create_dir_all(out.parent().unwrap())?;
                     if let Err(error) =
-                        copy_verified_length(&source.join(relative), &out, stamp.size)
+                        copy_snapshot_file(&source.join(relative), &out, stamp.size, policy)
                     {
                         let permission = error.downcast_ref::<std::io::Error>().is_some_and(|e| {
                             e.kind() == std::io::ErrorKind::PermissionDenied
@@ -162,8 +188,18 @@ impl Snapshot {
                 source_roots,
                 leveldb: before,
                 leveldb_hashes: hashes,
-                complete: matches!(policy, BlobCopy::All)
+                complete: matches!(policy, BlobCopy::All | BlobCopy::CloneAll { .. })
                     && copied_blobs.len() == blob_before.len(),
+                deferred_blobs: if matches!(policy, BlobCopy::Deferred { .. }) {
+                    blob_before.clone()
+                } else {
+                    BTreeMap::new()
+                },
+                deferred_min_free: if let BlobCopy::Deferred { min_free } = policy {
+                    Some(min_free)
+                } else {
+                    None
+                },
                 blobs: copied_blobs,
                 blob_files_before: blob_before.len(),
                 blob_bytes_before,
@@ -185,7 +221,12 @@ impl Snapshot {
         let inventory: Inventory =
             serde_json::from_reader(open_regular(&root.join("snapshot.json"))?)?;
         ensure!(inventory.version == 1, "unsupported snapshot version");
-        for p in inventory.leveldb.keys().chain(inventory.blobs.keys()) {
+        for p in inventory
+            .leveldb
+            .keys()
+            .chain(inventory.blobs.keys())
+            .chain(inventory.deferred_blobs.keys())
+        {
             validate_relative(p)?;
         }
         let result = Self { root, inventory };
@@ -268,6 +309,119 @@ impl Snapshot {
         } else {
             Ok(None)
         }
+    }
+    /// Materialize one captured identity into a caller-owned batch. A changed,
+    /// replaced or missing source is refused; never read it as the old snapshot.
+    pub fn copy_blob(
+        &self,
+        database: u64,
+        number: u64,
+        destination: &Path,
+        min_free: u64,
+    ) -> Result<()> {
+        let relative = PathBuf::from(format!(
+            "{database:x}/{:02x}/{number:x}",
+            (number >> 8) & 255
+        ));
+        let stamp = self
+            .inventory
+            .deferred_blobs
+            .get(&relative)
+            .context("blob was not deferred by this snapshot")?;
+        self.ensure_destination(
+            destination
+                .parent()
+                .context("blob destination needs parent")?,
+        )?;
+        self.copy_deferred(&relative, stamp, destination, min_free)
+    }
+    fn copy_deferred(
+        &self,
+        relative: &Path,
+        expected: &Stamp,
+        destination: &Path,
+        min_free: u64,
+    ) -> Result<()> {
+        let source = self
+            .inventory
+            .source_roots
+            .get(1)
+            .context("missing captured blob root")?
+            .join(relative);
+        let stamp = |m: std::fs::Metadata| -> Result<Stamp> {
+            Ok(Stamp {
+                size: m.len(),
+                modified: m
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos(),
+                inode: m.ino(),
+                device: m.dev(),
+            })
+        };
+        ensure!(
+            fs2::available_space(
+                destination
+                    .parent()
+                    .context("blob destination needs parent")?
+            )?
+            .saturating_sub(expected.size)
+                >= min_free.max(MIN_FREE),
+            "disk_floor: deferred payload reserve required"
+        );
+        let before = open_regular(&source)?;
+        ensure!(
+            &stamp(before.metadata()?)? == expected,
+            "deferred blob source changed since snapshot"
+        );
+        ensure!(
+            matches!(fs::symlink_metadata(destination), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+            "deferred blob destination already exists or is inaccessible"
+        );
+        let result = (|| {
+            copy_snapshot_file(
+                &source,
+                destination,
+                expected.size,
+                BlobCopy::CloneAll { min_free },
+            )?;
+            ensure!(
+                &stamp(open_regular(&source)?.metadata()?)? == expected,
+                "deferred blob source changed during copy"
+            );
+            ensure!(
+                hash_file(&source)? == hash_file(destination)?,
+                "deferred blob checksum mismatch"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(destination);
+        }
+        result
+    }
+    pub(crate) fn wrapper_blob(&self, database: u64, number: u64) -> Result<Option<PathBuf>> {
+        if let Some(p) = self.blob_path(database, number)? {
+            return Ok(Some(p));
+        }
+        let relative = PathBuf::from(format!(
+            "{database:x}/{:02x}/{number:x}",
+            (number >> 8) & 255
+        ));
+        let Some(stamp) = self.inventory.deferred_blobs.get(&relative) else {
+            return Ok(None);
+        };
+        let path = self.root.join("wrappers").join(relative);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap())?;
+            self.copy_deferred(
+                path.strip_prefix(self.root.join("wrappers"))?,
+                stamp,
+                &path,
+                self.inventory.deferred_min_free.unwrap_or(MIN_FREE),
+            )?;
+        }
+        Ok(Some(path))
     }
 }
 fn validate_relative(p: &Path) -> Result<()> {
@@ -385,6 +539,39 @@ pub(crate) fn copy_verified_length(source: &Path, destination: &Path, size: u64)
         "copy length mismatch"
     );
     Ok(())
+}
+fn copy_snapshot_file(
+    source: &Path,
+    destination: &Path,
+    size: u64,
+    policy: BlobCopy,
+) -> Result<()> {
+    if let BlobCopy::CloneAll { min_free } | BlobCopy::Deferred { min_free } = policy {
+        let parent = destination.parent().context("clone needs parent")?;
+        let floor = min_free.max(MIN_FREE);
+        ensure!(
+            fs2::available_space(parent)? >= floor,
+            "clone snapshot free-space floor required"
+        );
+        let input = open_regular(source)?;
+        ensure!(input.metadata()?.len() == size, "source length changed");
+        ensure!(
+            try_clone(source, destination)?,
+            "clone-only snapshot requires filesystem cloning"
+        );
+        File::open(destination)?.sync_all()?;
+        ensure!(
+            fs::metadata(destination)?.len() == size,
+            "clone length mismatch"
+        );
+        ensure!(
+            fs2::available_space(parent)? >= floor,
+            "clone snapshot free-space floor required"
+        );
+        Ok(())
+    } else {
+        copy_verified_length(source, destination, size)
+    }
 }
 #[cfg(target_os = "macos")]
 fn try_clone(source: &Path, target: &Path) -> Result<bool> {

@@ -320,3 +320,103 @@ fn sample_skips_unreadable_blobs_but_full_capture_fails() {
     );
     fs::set_permissions(blobs.join("1/00/2"), fs::Permissions::from_mode(0o600)).unwrap();
 }
+
+#[test]
+fn clone_only_snapshot_refuses_impossible_floor_without_touching_source() {
+    let t = tempdir().unwrap();
+    let source = fixture().join("indexeddb");
+    let before = fs::read(source.join("CURRENT")).unwrap();
+    assert_error(
+        Snapshot::capture(
+            &source,
+            None,
+            &t.path().join("clone"),
+            BlobCopy::CloneAll { min_free: u64::MAX },
+        ),
+        "free-space floor",
+    );
+    assert!(!t.path().join("clone").exists());
+    assert_eq!(before, fs::read(source.join("CURRENT")).unwrap());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn clone_only_snapshot_is_complete_and_mutating_copy_preserves_source() {
+    let t = tempdir().unwrap();
+    let source = fixture().join("indexeddb");
+    let s = Snapshot::capture(
+        &source,
+        Some(&fixture().join("blobs")),
+        &t.path().join("clone"),
+        BlobCopy::CloneAll {
+            min_free: 6 * 1024 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    assert!(s.complete());
+    assert_eq!(indexeddb::read(&s).unwrap().records.len(), 5);
+    let before = fs::read(source.join("CURRENT")).unwrap();
+    fs::write(s.leveldb().join("CURRENT"), b"synthetic copy edit").unwrap();
+    assert_eq!(before, fs::read(source.join("CURRENT")).unwrap());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn deferred_snapshot_copies_only_requested_payload_and_refuses_changed_source() {
+    let t = tempdir().unwrap();
+    let blobs = t.path().join("source-blobs");
+    fs::create_dir_all(blobs.join("1/00")).unwrap();
+    for n in 1..=3 {
+        fs::write(blobs.join(format!("1/00/{n:x}")), b"synthetic original").unwrap();
+    }
+    let s = Snapshot::capture(
+        &fixture().join("indexeddb"),
+        Some(&blobs),
+        &t.path().join("deferred"),
+        BlobCopy::Deferred {
+            min_free: 6 * 1024 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    assert!(!s.complete());
+    assert_eq!(s.blob_counts().2, 0);
+    assert!(s.blob_path(1, 1).unwrap().is_none());
+    let batch = t.path().join("batch");
+    fs::create_dir(&batch).unwrap();
+    s.copy_blob(1, 1, &batch.join("first"), 6 * 1024 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        fs::read(batch.join("first")).unwrap(),
+        b"synthetic original"
+    );
+    fs::write(batch.join("first"), b"private edit").unwrap();
+    assert_eq!(
+        fs::read(blobs.join("1/00/1")).unwrap(),
+        b"synthetic original"
+    );
+    fs::write(blobs.join("1/00/2"), b"changed").unwrap();
+    assert_error(
+        s.copy_blob(1, 2, &batch.join("changed"), 6 * 1024 * 1024 * 1024),
+        "source changed",
+    );
+    assert!(!batch.join("changed").exists());
+    // A caller's existing destination must never be removed on refusal.
+    assert!(
+        s.copy_blob(1, 3, &batch.join("first"), 6 * 1024 * 1024 * 1024)
+            .is_err()
+    );
+    assert_eq!(fs::read(batch.join("first")).unwrap(), b"private edit");
+    let dangling = batch.join("dangling");
+    std::os::unix::fs::symlink(batch.join("absent"), &dangling).unwrap();
+    assert!(
+        s.copy_blob(1, 3, &dangling, 6 * 1024 * 1024 * 1024)
+            .is_err()
+    );
+    assert!(
+        fs::symlink_metadata(&dangling)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_dir(batch).unwrap().count(), 2);
+}
