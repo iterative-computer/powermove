@@ -25,11 +25,11 @@ fn every_real_store_status_and_failure_maps_to_the_surface() {
         );
     }
     for (source, expected) in [
-        (host::Failure::Crash, Failure::Crash),
-        (host::Failure::Hang, Failure::Hang),
-        (host::Failure::UserStop, Failure::UserStop),
-        (host::Failure::ReadyTimeout, Failure::ReadyTimeout),
-        (host::Failure::PlatformFailure, Failure::PlatformFailure),
+        (host::Failure::Crash, ViewFailure::Crash),
+        (host::Failure::Hang, ViewFailure::Hang),
+        (host::Failure::UserStop, ViewFailure::UserStop),
+        (host::Failure::ReadyTimeout, ViewFailure::ReadyTimeout),
+        (host::Failure::PlatformFailure, ViewFailure::PlatformFailure),
     ] {
         assert_eq!(
             recovery_wire::view_failure(&to_value(source).unwrap()),

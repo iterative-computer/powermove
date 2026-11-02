@@ -305,17 +305,22 @@ impl AlertQueue {
         owner: &Owner,
         host: &mut P,
     ) -> Result<(), QueueError<P::Error>> {
-        if self.visible.contains(owner)
-            && let Some(prompt) = self.active(owner)
-        {
+        let dismiss = self
+            .visible
+            .contains(owner)
+            .then(|| self.active(owner).cloned())
+            .flatten();
+        // Window closure is authoritative even when native dismissal delivery
+        // fails. No late callback may retain permission to mutate its project.
+        self.owners.remove(owner);
+        self.visible.remove(owner);
+        if let Some(prompt) = dismiss {
             host.enqueue(Presentation::Dismiss {
-                id: prompt.id.clone(),
+                id: prompt.id,
                 owner: owner.clone(),
             })
             .map_err(QueueError::Platform)?;
         }
-        self.owners.remove(owner);
-        self.visible.remove(owner);
         Ok(())
     }
 }

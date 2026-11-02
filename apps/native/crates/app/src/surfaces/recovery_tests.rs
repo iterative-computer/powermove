@@ -233,7 +233,7 @@ fn failed_publication_does_not_consume_prompt_id() {
     assert!(q.active(&owner).is_none());
     q.push(prompt("first", owner), &mut p).unwrap();
 }
-fn content(status: ViewStatus, failure: Option<Failure>) -> Content {
+fn content(status: ViewStatus, failure: Option<ViewFailure>) -> Content {
     PanelSnapshot {
         panel: "Tools",
         extension: "Example",
@@ -249,49 +249,49 @@ fn every_extension_failure_row_has_exact_copy_and_one_fix() {
     let cases = [
         (
             ViewStatus::Starting,
-            Failure::ReadyTimeout,
+            ViewFailure::ReadyTimeout,
             "Tools Didn’t Start",
             Some("Example took too long to start."),
             Some("Try Again"),
         ),
         (
             ViewStatus::WaitingToRestart,
-            Failure::Crash,
+            ViewFailure::Crash,
             "Tools Stopped",
             Some("It will restart in a moment."),
             Some("Restart Now"),
         ),
         (
             ViewStatus::WaitingToRestart,
-            Failure::Hang,
+            ViewFailure::Hang,
             "Tools Stopped Responding",
             Some("Powermove stopped it and will restart it in a moment."),
             Some("Restart Now"),
         ),
         (
             ViewStatus::Disabled,
-            Failure::Crash,
+            ViewFailure::Crash,
             "Tools Is Turned Off",
             Some("Example stopped working several times."),
             Some("Turn On"),
         ),
         (
             ViewStatus::StopFailed,
-            Failure::Hang,
+            ViewFailure::Hang,
             "Tools Couldn’t Be Stopped",
             Some("Quit and reopen Powermove to stop it."),
             None,
         ),
         (
             ViewStatus::Starting,
-            Failure::PlatformFailure,
+            ViewFailure::PlatformFailure,
             "Tools Can’t Run",
             Some("This Mac couldn’t start Example."),
             Some("Try Again"),
         ),
         (
             ViewStatus::Disabled,
-            Failure::UserStop,
+            ViewFailure::UserStop,
             "Tools Is Stopped",
             None,
             Some("Restart"),
@@ -357,7 +357,7 @@ fn realm_alert_suppresses_panel_buttons_even_in_disabled_state() {
         panel: "Tools",
         extension: "Example",
         status: ViewStatus::Disabled,
-        failure: Some(Failure::Hang),
+        failure: Some(ViewFailure::Hang),
         elapsed: Duration::ZERO,
         realm_prompt_open: true,
     }
@@ -370,7 +370,7 @@ fn realm_alert_suppresses_panel_buttons_even_in_disabled_state() {
 }
 #[test]
 fn restart_button_is_generation_fenced() {
-    let c = content(ViewStatus::WaitingToRestart, Some(Failure::Crash));
+    let c = content(ViewStatus::WaitingToRestart, Some(ViewFailure::Crash));
     assert!(restart_request("view", 4, 5, &c).is_none());
     assert_eq!(restart_request("view", 5, 5, &c).unwrap().generation, 5);
     assert!(restart_request("view", 5, 5, &content(ViewStatus::Stopping, None)).is_none());
@@ -676,4 +676,22 @@ fn next_sheet_failure_keeps_accepted_action_and_can_retry() {
         q.respond(&owner, "second", 3, Action::OpenAsCopy, &mut host),
         Ok(Action::OpenAsCopy)
     );
+}
+
+#[test]
+fn failed_native_dismissal_cannot_keep_a_closed_window_actionable() {
+    let owner = Owner::Window("closing".into());
+    let mut q = AlertQueue::default();
+    let mut host = HeadlessPlatform::default();
+    q.push(prompt("first", owner.clone()), &mut host).unwrap();
+    host.fail_next = true;
+    assert!(matches!(
+        q.close(&owner, &mut host),
+        Err(QueueError::Platform(_))
+    ));
+    assert_eq!(
+        q.respond(&owner, "first", 3, Action::Recover, &mut host),
+        Err(QueueError::Stale)
+    );
+    assert!(q.active(&owner).is_none());
 }

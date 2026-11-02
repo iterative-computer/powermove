@@ -57,10 +57,12 @@ path = "../../apps/native/crates/app/src/surfaces/recovery_source_tests.rs"
 [workspace]
 "#;
     let manifest_path = dir.join("Cargo.toml");
+    let shared_lock = fs::read(root.join("apps/native/Cargo.lock"))?;
     if fs::read_to_string(&manifest_path).ok().as_deref() != Some(manifest)
         || !fs::read_to_string(dir.join("Cargo.lock"))
             .unwrap_or_default()
             .contains("name = \"pm-recovery-surfaces\"")
+        || fs::read(dir.join("base.Cargo.lock")).ok().as_deref() != Some(shared_lock.as_slice())
     {
         fs::write(&manifest_path, manifest)?;
         fs::copy(root.join("apps/native/Cargo.lock"), dir.join("Cargo.lock"))?;
@@ -71,6 +73,7 @@ path = "../../apps/native/crates/app/src/surfaces/recovery_source_tests.rs"
             .arg(&manifest_path)
             .args(["--format-version", "1"])
             .stdout(std::process::Stdio::null()))?;
+        fs::write(dir.join("base.Cargo.lock"), shared_lock)?;
     }
     let mut command = Command::new("cargo");
     command

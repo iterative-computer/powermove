@@ -254,15 +254,17 @@ impl ErrorLog {
         if self.rows.iter().any(|r| r.id == row.id) {
             return false;
         }
-        // Newest first; stable insertion order for equal instants.
+        // Newest first; newest arrival first for equal instants.
         let index = self.rows.partition_point(|r| r.time > row.time);
         self.rows.insert(index, row);
         true
     }
     pub fn select(&mut self, ids: impl IntoIterator<Item = String>) {
+        let existing: std::collections::BTreeSet<_> =
+            self.rows.iter().map(|r| r.id.as_str()).collect();
         self.selected = ids
             .into_iter()
-            .filter(|id| self.rows.iter().any(|r| &r.id == id))
+            .filter(|id| existing.contains(id.as_str()))
             .collect();
     }
     pub fn details(&self) -> Option<&str> {

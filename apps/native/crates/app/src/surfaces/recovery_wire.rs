@@ -35,8 +35,8 @@ pub fn view_status(value: &Value) -> Option<super::recovery::panels::ViewStatus>
         _ => return None,
     })
 }
-pub fn view_failure(value: &Value) -> Option<super::recovery::panels::Failure> {
-    use super::recovery::panels::Failure::*;
+pub fn view_failure(value: &Value) -> Option<super::recovery::panels::ViewFailure> {
+    use super::recovery::panels::ViewFailure::*;
     Some(match value.as_str()? {
         "Crash" => Crash,
         "Hang" => Hang,
@@ -74,15 +74,15 @@ pub fn crash_banner(record: &Value, truncated: bool) -> Option<super::recovery::
 
 #[cfg(test)]
 mod tests {
+    use super::super::recovery::panels::*;
     use super::*;
-    use crate::recovery::panels::*;
     #[test]
     fn empty_state_wire_retains_exact_ax_copy_and_only_one_action() {
         let content = PanelSnapshot {
             panel: "Tools",
             extension: "Example",
             status: ViewStatus::WaitingToRestart,
-            failure: Some(Failure::Hang),
+            failure: Some(ViewFailure::Hang),
             elapsed: std::time::Duration::ZERO,
             realm_prompt_open: false,
         }

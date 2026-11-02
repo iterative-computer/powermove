@@ -17,7 +17,7 @@ pub enum ViewStatus {
     Closed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Failure {
+pub enum ViewFailure {
     Crash,
     Hang,
     UserStop,
@@ -67,13 +67,13 @@ pub struct PanelSnapshot<'a> {
     pub panel: &'a str,
     pub extension: &'a str,
     pub status: ViewStatus,
-    pub failure: Option<Failure>,
+    pub failure: Option<ViewFailure>,
     pub elapsed: Duration,
     pub realm_prompt_open: bool,
 }
 impl PanelSnapshot<'_> {
     pub fn content(&self) -> Content {
-        use Failure::*;
+        use ViewFailure::*;
         use ViewStatus::*;
         let empty = |title: String, line: Option<String>, label: Option<&'static str>| {
             Content::EmptyState {
