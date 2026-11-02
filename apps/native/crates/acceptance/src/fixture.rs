@@ -110,7 +110,7 @@ impl Fixture {
         );
         let saved: Value = serde_json::from_str(&pm_model::json::to_canonical_string(&realized))
             .map_err(|e| e.to_string())?;
-        assert_eq!(saved, before);
+        assert_eq!(without_revision(saved), before);
         Ok(())
     }
     pub fn revision(&self) -> u64 {

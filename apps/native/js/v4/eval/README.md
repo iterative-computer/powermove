@@ -24,11 +24,24 @@ The ten owner-approved briefs now include behavior, inputs/interactions, require
 host reads/writes, edge cases and checks in `tasks.ts`. Their synthetic fixtures
 in `scenarios.tsx` run through public snapshots/events in every CLI mode. They
 are authored models with explicit service seams, not independent extension ports.
-`fixtureStatus: pass` means those checks passed; `status: fail` with
-`failureKind: api-gap` means full acceptance still needs the listed `blockedBy`
-capabilities. Missing host services never become a fabricated task pass.
+`fixtureStatus` and `serviceStatus` describe executable headless checks. Every
+owner run crosses HostClient -> Rust HostRouter/HostDataService -> synthetic
+KernelData; project/selection/time/evaluated queries, initial and later
+subscriptions, acknowledged atomic edits and settings are exercised. The
+annotation fixture also drives these services and inspects the current native
+text through the public snapshot. Domain/media logic in other fixtures still
+uses explicit synthetic seams.
 
-Run `bun run eval --include-held-out` for all 40 records or `--group=owner` for
-the ten owner fixtures. The documented JS-only follow-up is 27 pass / 13 fail /
-0 pending, including ten passing owner fixtures with full acceptance blocked.
-See `docs/native/v4-eval.md` for per-task limits and wire-dependent failures.
+The CLI reports `status: pass` for this headless contract scope and retains
+`productionReady: false`, `fullAcceptance: blocked-on-production-integration`,
+`integrationGates` and `ownerProductionBlocked`. **40/40 headless passes do not
+mean ten production owner panels are accepted.** The older static API-gap failure
+classification is preserved in the historical evaluation report, not used as an
+unconditional failure after executable data-service checks have been added.
+
+Run `bun run eval --include-held-out` for all 40 records, and add `--wire` to build
+and replay all commits through the standalone Rust surface validator. Native
+host-service checks and negative protocol tests use real Rust validators in
+both modes. `--wire=PATH` still selects an existing surface wire binary. Plain
+`bun test` builds/configures the examples automatically; failed native builds
+fail the suite. See `docs/native/v4-eval.md` for counts and the freeze hold.

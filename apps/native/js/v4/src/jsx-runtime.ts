@@ -26,11 +26,57 @@ export interface SurfaceProps {
   onFocus?: (event: SurfaceEvent) => void;
   onBlur?: (event: SurfaceEvent) => void;
   onPointerDown?: (event: SurfaceEvent) => void;
-  [unknownProp: string]: unknown;
+  title?: string;
+  metadata?: Record<string, Json>;
+  control?: string;
+  mixed?: boolean;
+  options?: Json[];
+  selected?: string;
+  open?: boolean;
+  focusRequest?: string;
+  "aria-checked"?: boolean | "mixed";
+  "aria-haspopup"?: string;
+  "aria-expanded"?: boolean;
+  "aria-controls"?: string;
+  "aria-selected"?: boolean;
+  "aria-pressed"?: boolean;
+  "aria-modal"?: boolean;
+  "aria-valuenow"?: number;
+  "data-pm-component"?: string;
+  "data-pm-slot"?: string;
+  "data-pm-system-placement"?: "system";
+  "data-pm-dismiss-outside"?: boolean;
+  "data-pm-live-edit"?: boolean;
+  "data-pm-indeterminate"?: boolean;
+  onKeyUp?: (event: SurfaceEvent) => void;
+  onPointerMove?: (event: SurfaceEvent) => void;
+  onPointerUp?: (event: SurfaceEvent) => void;
+  onPointerCancel?: (event: SurfaceEvent) => void;
+  onDoubleClick?: (event: SurfaceEvent) => void;
+  onCompositionStart?: (event: SurfaceEvent) => void;
+  onCompositionUpdate?: (event: SurfaceEvent) => void;
+  onCompositionEnd?: (event: SurfaceEvent) => void;
+  onSelect?: (event: SurfaceEvent) => void;
+  onChange?: (event: SurfaceEvent) => void;
+  onDragStart?: (event: SurfaceEvent) => void;
+  onDrag?: (event: SurfaceEvent) => void;
+  onDragEnd?: (event: SurfaceEvent) => void;
+  onDragEnter?: (event: SurfaceEvent) => void;
+  onDragLeave?: (event: SurfaceEvent) => void;
+  onDragOver?: (event: SurfaceEvent) => void;
+  onDrop?: (event: SurfaceEvent) => void;
+  onWheel?: (event: SurfaceEvent) => void;
+  onRangeChange?: (event: SurfaceEvent) => void;
 }
 export namespace JSX {
   export type Element = PreactJSX.Element;
   export type ElementType = Primitive | Exclude<PreactJSX.ElementType, string>;
   export type ElementChildrenAttribute = { children: unknown };
-  export type IntrinsicElements = { [K in Primitive]: SurfaceProps };
+  export type IntrinsicElements = {
+    [K in Primitive]: {
+      [P in keyof import("./schemas").PrimitiveProps[K]]:
+        | import("./schemas").PrimitiveProps[K][P]
+        | null;
+    };
+  };
 }

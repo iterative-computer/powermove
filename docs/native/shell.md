@@ -204,3 +204,44 @@ titlebar and a unified-compact NSToolbar, invokes the same `toggleTabBar:` selec
 as Window ▸ Show Tab Bar, checks both AppKit's visibility flag and a non-hidden,
 positive-height accessory, then hides the bar again and quits. No replacement
 accessory or visual design change is introduced. See the P-120 validation in S2.
+
+## Shell keyboard access and AX inspection
+
+Tab / Shift-Tab walk the native toolbar, then each visible panel in visual
+(top-to-bottom, left-to-right) order, then splitters and the status workspace
+pop-up. Each panel is a focus group: its container, tabs/close buttons and header
+controls precede its content. Control-Tab / Control-Shift-Tab (the design-language
+keys) and Control-F6 / Control-Shift-F6 cycle panel groups; collapsed/closed panels
+are skipped. In the native tool group use the arrow keys to select a tool.
+Enter/Space activate a focused control. Splitter arrows resize; Enter collapses
+a dock splitter. GPUI focus uses the existing `colors.focus` ring, AppKit controls
+the system ring.
+
+Save Workspace cycles Name → Cancel → Save → Name, including reverse traversal.
+Return saves and Escape cancels. The existing palette row is labelled Save Layout…
+(it opens Save Workspace; visible copy is unchanged in the accessibility lane).
+Command-K opens the palette at Search; Tab moves
+through filtered rows and returns to Search, Shift-Tab reverses, arrows select,
+Return executes, Escape dismisses and restores the previous responder. Marked
+text continues through AppKit's input-method path.
+
+Inspect the **disposable test app only** (no production profile or project):
+
+```sh
+mkdir -p /tmp/pm-a11y
+swiftc apps/native/scripts/shell-ax.swift -o /tmp/pm-a11y/shell-ax
+/tmp/pm-a11y/shell-ax <test-pid> --main
+/tmp/pm-a11y/shell-ax <test-pid> --sheet --expect-focus Cancel
+/tmp/pm-a11y/shell-ax <test-pid> --palette --expect-focus Search
+# Starts/quits its own temporary apps and owns the GUI lock:
+python3 apps/native/scripts/check-shell-startup.py --binary <dev-bundle-binary> --runs 3
+```
+
+The external AXUIElement probe dumps actual roles, labels, values, focus and
+selected states, excludes the system menu bar/Recent Items, and returns nonzero
+for assertion failures. `--main` assumes the default workspace with no project;
+`--sheet` and `--palette` inspect those open surfaces. Accessibility permission
+is required; absence returns exit 2 without prompting or changing settings.
+These assertions verify AX exposure, independently of a spoken VoiceOver pass.
+Keep raw dumps/screenshots outside Git under `/tmp/pm-a11y/`. Screen verification
+must hold `/tmp/pm-shots/gui.lock` and first check `/tmp/pm-shots/is_locked.sh`.

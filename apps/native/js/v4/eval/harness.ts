@@ -7,6 +7,7 @@ import {
   type ListenerFlags,
   type SurfaceEvent,
 } from "powermove-v4";
+import { nativeWire } from "./native-wire";
 
 export interface SnapshotNode {
   id: number;
@@ -63,11 +64,7 @@ export class Evaluation {
     );
   }
   replay(commits: Commit[], allowWebview = true): WireResult[] {
-    ok(
-      this.wire,
-      "real Rust wire validator required for rejection/opt-in checks",
-    );
-    const child = Bun.spawnSync([this.wire], {
+    const child = Bun.spawnSync([this.wire ?? nativeWire().surface], {
       stdin: new TextEncoder().encode(
         commits.map((commit) => JSON.stringify(commit)).join("\n") + "\n",
       ),
@@ -251,6 +248,6 @@ export class Evaluation {
     deepStrictEqual(rejected.revision, before.revision, "no revision consumed");
   }
   async dispose() {
-    if (!this.root.inspect().fenced) await this.root.dispose();
+    await this.root.dispose();
   }
 }

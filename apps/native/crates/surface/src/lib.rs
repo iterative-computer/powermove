@@ -24,3 +24,8 @@ impl NativeHost for InspectHost {
         self.diagnostics = diagnostics;
     }
 }
+
+pub mod events;
+pub mod host_api;
+pub mod host_data;
+pub mod schema;

@@ -18,6 +18,7 @@ fn surface(kind: Component) -> Surface {
     let mut s = Surface::default();
     let primitive = match kind {
         Component::NumberField | Component::TextField => "input",
+        Component::PopoverAnchor | Component::SheetAnchor => "anchored",
         _ => "div",
     };
     let mut p = props(

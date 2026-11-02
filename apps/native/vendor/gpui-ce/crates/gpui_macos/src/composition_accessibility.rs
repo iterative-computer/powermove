@@ -289,6 +289,29 @@ unsafe extern "C" fn focus(this: &AnyObject, _: Sel) -> *mut AnyObject {
                     };
                 }
             }
+            // A native titlebar/toolbar control is outside the published slots.
+            // Forward its real focus as well; asking the unfocused AccessKit
+            // adapter here loses AXFocusedUIElement even while its ring is visible.
+            if Retained::as_ptr(&responder) as usize != gpui {
+                let is_view: bool =
+                    unsafe { msg_send![&*responder, isKindOfClass: objc2::class!(NSView)] };
+                // Never re-enter this content-view adapter via its own responder
+                // (e.g. a palette restoring the initial content responder).
+                let outside_content =
+                    is_view && unsafe { !msg_send![&*responder, isDescendantOf: &*content] };
+                if outside_content {
+                    let focused: *mut AnyObject =
+                        unsafe { msg_send![&*responder, accessibilityFocusedUIElement] };
+                    if !focused.is_null() {
+                        return focused;
+                    }
+                    let unignored =
+                        unsafe { objc2_app_kit::NSAccessibilityUnignoredAncestor(&responder) };
+                    if let Some(unignored) = unignored {
+                        return Retained::autorelease_return(unignored);
+                    }
+                }
+            }
         }
     }
     unsafe { msg_send![super(this, previous), accessibilityFocusedUIElement] }

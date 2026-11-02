@@ -5,7 +5,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
-use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
 /// A tab drag in progress: the layout it started from, the pointer and the
 /// target it would drop on. Escape restores `original`.
@@ -41,6 +41,9 @@ pub struct Editor {
     dock_bounds: Rect,
     gesture: Option<Gesture>,
     focus: FocusHandle,
+    panel_focus: HashMap<String, FocusHandle>,
+    panel_order: Vec<String>,
+    workspace_focus: FocusHandle,
     pub status: String,
     store: LayoutStore,
     path: Option<PathBuf>,
@@ -99,6 +102,9 @@ impl Editor {
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
+            panel_focus: HashMap::new(),
+            panel_order: vec![],
+            workspace_focus: cx.focus_handle().tab_stop(true).tab_index(2000),
             status,
             store,
             path,
@@ -394,6 +400,67 @@ impl Editor {
             if let (Some(token), Some(host)) = (cmd.token, &self.host) {
                 host.borrow_mut().replayed(token);
             }
+            return;
+        }
+        if matches!(
+            cmd.name.as_str(),
+            "shellFocusNext" | "shellFocusPrevious" | "shellPanelNext" | "shellPanelPrevious"
+        ) {
+            let reverse = cmd.name.ends_with("Previous");
+            if cmd.name.starts_with("shellPanel") {
+                let current = self
+                    .panel_order
+                    .iter()
+                    .position(|id| self.panel_focus[id].contains_focused(window, cx));
+                if !self.panel_order.is_empty() {
+                    let n = self.panel_order.len();
+                    let index = current.map_or(if reverse { n - 1 } else { 0 }, |i| {
+                        if reverse {
+                            (i + n - 1) % n
+                        } else {
+                            (i + 1) % n
+                        }
+                    });
+                    window.focus(&self.panel_focus[&self.panel_order[index]], cx);
+                }
+            } else {
+                let first = self.panel_order.first().map(|id| &self.panel_focus[id]);
+                let from_toolbar = cmd.args.first().and_then(|v| v.as_bool()) == Some(true);
+                let boundary = window.focused(cx).is_none()
+                    || if reverse {
+                        first.is_some_and(|h| h.is_focused(window))
+                    } else {
+                        self.workspace_focus.is_focused(window)
+                    };
+                if boundary
+                    && !from_toolbar
+                    && self
+                        .host
+                        .as_ref()
+                        .is_some_and(|h| h.borrow().focus_toolbar(reverse))
+                {
+                    // Native toolbar focus must not leave a second GPUI ring behind.
+                    window.blur(cx);
+                    cx.notify();
+                    return;
+                }
+                if from_toolbar {
+                    if reverse {
+                        window.focus(&self.workspace_focus, cx);
+                    } else if let Some(first) = first {
+                        window.focus(first, cx);
+                    }
+                } else if reverse {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+            }
+            self.split_focus = None;
+            if let Some(h) = &self.host {
+                h.borrow_mut().splitter_focus = false;
+            }
+            cx.notify();
             return;
         }
         eprintln!(
@@ -755,6 +822,26 @@ impl Render for Editor {
             h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
         };
         self.geometry = self.layout.geometry(self.dock_bounds, &t);
+        let mut ordered = self.geometry.panels.clone();
+        ordered.sort_by(|a, b| {
+            a.rect
+                .y
+                .total_cmp(&b.rect.y)
+                .then(a.rect.x.total_cmp(&b.rect.x))
+        });
+        self.panel_order = ordered
+            .iter()
+            .map(|p| {
+                self.layout.docks[p.dock].groups[p.group]
+                    .active()
+                    .to_string()
+            })
+            .collect();
+        for id in &self.panel_order {
+            self.panel_focus
+                .entry(id.clone())
+                .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0));
+        }
         let viewer = self
             .geometry
             .panels
@@ -770,6 +857,11 @@ impl Render for Editor {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
             h.publish_menu_state(&self.menu_state());
+            h.keyboard_control_focus.set(
+                w.focused(cx).is_some_and(|f| {
+                    f != self.focus && !self.panel_focus.values().any(|p| *p == f)
+                }),
+            );
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
@@ -953,7 +1045,7 @@ impl Render for Editor {
             Some(Gesture::Panel(d)) if d.moved => Some(d.id.clone()),
             _ => None,
         };
-        for p in self.geometry.panels.clone() {
+        for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
             let is_viewer = id == "viewer";
@@ -963,6 +1055,10 @@ impl Render for Editor {
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
+                .tab_group()
+                .tab_index(self.panel_order.iter().position(|v| v == &id).unwrap_or(0) as isize)
+                .track_focus(&self.panel_focus[&id])
+                .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                 .accessibility_id(format!("shell.panel.{id}"))
                 .aria_label(layout::panel_title(&id).to_string())
                 .rounded(px(m.panel_radius))
@@ -984,6 +1080,8 @@ impl Render for Editor {
             let menu_header = id.clone();
             let mut header = div()
                 .id(format!("header-{}-{}", p.dock, p.group))
+                .role(Role::Group)
+                .aria_label(format!("{} header", layout::panel_title(&id)))
                 .group(group_name.clone())
                 .flex()
                 .items_center()
@@ -1028,6 +1126,15 @@ impl Render for Editor {
                         .id(format!("tab-{tab}"))
                         .group(tab_group.clone())
                         .role(Role::Tab)
+                        .accessibility_id(format!("shell.tab.{tab}"))
+                        .aria_selected(selected)
+                        .tab_index(0)
+                        .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.layout.docks[p.dock].groups[p.group].active = ti;
+                            this.save();
+                            cx.notify();
+                        }))
                         .aria_label(title.clone())
                         .relative()
                         .flex()
@@ -1050,6 +1157,12 @@ impl Render for Editor {
                                 .id(format!("close-{tab}"))
                                 .aria_label(format!("Close {title}"))
                                 .role(Role::Button)
+                                .tab_index(0)
+                                .focus_style(|s| {
+                                    s.opacity(1.)
+                                        .ring(px(m.border * 2.))
+                                        .ring_color(rgb(c.focus))
+                                })
                                 .absolute()
                                 .left(px(m.border))
                                 .top_0()
@@ -1072,6 +1185,7 @@ impl Render for Editor {
                                 )
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.shell_command(&format!("panel:close:{close_id}"), cx);
                                 })),
                         );
@@ -1109,6 +1223,11 @@ impl Render for Editor {
                         .group(add_group.clone())
                         .role(Role::Button)
                         .aria_label("Add Panel")
+                        .tab_index(tabs.len() as isize)
+                        .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _, _| {
+                            this.add_menu(dock, gi, e.position())
+                        }))
                         .tooltip(tooltip(&t, "Add Panel"))
                         .ml_auto()
                         .relative()
@@ -1144,13 +1263,7 @@ impl Render for Editor {
                                     w,
                                 )),
                         )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.add_menu(dock, gi, e.position);
-                            }),
-                        ),
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                 );
             }
             panel = panel.child(header);
@@ -1170,6 +1283,8 @@ impl Render for Editor {
                             .id(format!("empty-action-{id}"))
                             .role(Role::Button)
                             .aria_label(label)
+                            .tab_index(100)
+                            .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                             .mt(px(m.gap))
                             .h(px(m.control))
                             .px(px(m.inset))
@@ -1198,11 +1313,30 @@ impl Render for Editor {
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
+            let key_divider = d.clone();
             root = root.child(
                 positioned(d.rect)
                     .id(format!("splitter-{i}"))
                     .role(Role::Splitter)
                     .aria_label("Resize dock")
+                    .tab_index(1000 + i as isize)
+                    .focus_style(|s| s.bg(rgb(c.focus)))
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
+                        let delta = match e.keystroke.key.as_str() {
+                            "left" | "up" => -this.tokens.metrics.keyboard_step,
+                            "right" | "down" => this.tokens.metrics.keyboard_step,
+                            "enter" if key_divider.group.is_none() => {
+                                this.layout.docks[key_divider.dock].collapsed =
+                                    !this.layout.docks[key_divider.dock].collapsed;
+                                0.
+                            }
+                            _ => return,
+                        };
+                        this.layout.resize(&key_divider, delta, &this.tokens);
+                        this.save();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
                     .cursor(if d.horizontal {
                         CursorStyle::ResizeUpDown
                     } else {
@@ -1283,6 +1417,10 @@ impl Render for Editor {
                 h: m.status,
             })
             .id("status-bar")
+            .accessibility_id("shell.status")
+            .role(Role::Status)
+            .aria_label("Status")
+            .aria_value(left.clone())
             .flex()
             .items_center()
             .gap(px(m.inset))
@@ -1293,6 +1431,12 @@ impl Render for Editor {
             .child(
                 div()
                     .id("status-workspace")
+                    .track_focus(&self.workspace_focus)
+                    .tab_index(2000)
+                    .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
+                    .on_click(
+                        cx.listener(|this, e: &ClickEvent, _, _| this.workspace_menu(e.position())),
+                    )
                     .role(Role::Button)
                     .aria_label(format!("Workspace: {workspace}"))
                     .flex()
@@ -1310,14 +1454,175 @@ impl Render for Editor {
                         crate::symbol::Weight::Medium,
                         c.muted,
                         w,
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, e: &MouseDownEvent, _, _| {
-                            this.workspace_menu(e.position)
-                        }),
-                    ),
+                    )),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn app() -> HeadlessAppContext {
+        HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(
+                gpui_parley::SystemFonts::Load,
+            )),
+            Arc::new(()),
+            || None,
+        )
+    }
+    fn command(name: &str) -> Command {
+        Command {
+            name: name.into(),
+            args: vec![],
+            token: None,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn panels_cycle_both_ways_and_skip_closed_panels() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, w, cx| {
+                assert_eq!(
+                    v.panel_order,
+                    ["assets", "viewer", "inspector", "timeline", "fxbrowser"]
+                );
+                let order = v.panel_order.clone();
+                for id in order.iter().chain(order.iter().take(1)) {
+                    v.command(command("shellPanelNext"), w, cx);
+                    assert!(v.panel_focus[id].is_focused(w), "{id}");
+                }
+                v.command(command("shellPanelPrevious"), w, cx);
+                assert!(v.panel_focus[order.last().unwrap()].is_focused(w));
+                w.focus(&v.panel_focus["timeline"], cx);
+                v.run_shell_command("panel:close:fxbrowser", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, w, cx| {
+                assert!(!v.panel_order.iter().any(|id| id == "fxbrowser"));
+                v.command(command("shellPanelPrevious"), w, cx);
+                assert!(v.panel_focus["inspector"].is_focused(w));
+            })
+            .unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn tab_and_shift_tab_are_inverse_and_include_groups_controls_and_status() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, w, cx| {
+                let first = v.panel_focus[&v.panel_order[0]].clone();
+                w.focus(&first, cx);
+                let mut stops = vec![first.clone()];
+                for _ in 0..100 {
+                    v.command(command("shellFocusNext"), w, cx);
+                    let focused = w.focused(cx).expect("Tab must have a focused element");
+                    if focused == first {
+                        break;
+                    }
+                    assert!(
+                        !stops.contains(&focused),
+                        "focus loop before returning to start"
+                    );
+                    stops.push(focused);
+                }
+                assert!(first.is_focused(w), "Tab wraps");
+                assert_eq!(
+                    stops.last(),
+                    Some(&v.workspace_focus),
+                    "workspace follows panels/splitters"
+                );
+                for handle in v.panel_order.iter().map(|id| &v.panel_focus[id]) {
+                    assert!(stops.contains(handle));
+                }
+                assert!(
+                    stops.len() > v.panel_order.len() * 2,
+                    "tabs/add controls/splitters are reachable"
+                );
+                for expected in stops.iter().rev() {
+                    v.command(command("shellFocusPrevious"), w, cx);
+                    assert_eq!(w.focused(cx).as_ref(), Some(expected));
+                }
+            })
+            .unwrap();
+    }
+    #[::core::prelude::v1::test]
+    fn keyboard_close_does_not_activate_the_removed_parent_tab() {
+        let mut cx = app();
+        let window = cx
+            .open_window(size(px(1440.), px(900.)), |_, cx| {
+                cx.new(|cx| {
+                    Editor::new(
+                        Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                        None,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, w, cx| {
+                w.focus(&v.panel_focus["assets"], cx);
+                // Project tab, Close Project, Effect Controls tab, Close Effect Controls.
+                for _ in 0..4 {
+                    w.focus_next(cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, w, cx| {
+            let keystroke = Keystroke::parse("enter").unwrap();
+            w.dispatch_event(
+                KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            w.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, _| {
+                assert!(!v.layout.open_panels().contains(&"layer-effects"));
+                let group = &v.layout.docks[0].groups[0];
+                assert_eq!(group.tabs, ["assets"]);
+                assert_eq!(group.active, 0);
+            })
+            .unwrap();
     }
 }

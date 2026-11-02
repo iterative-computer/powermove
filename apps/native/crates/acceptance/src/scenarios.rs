@@ -20,6 +20,66 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "A539",
+            workflow: "W031",
+            title: "MCP evaluated structural lint, source bounds and measured audio peaks",
+            run: crate::closure_mcp::lint,
+        },
+        Scenario {
+            id: "A529",
+            workflow: "W033",
+            title: "MCP simplification scopes retain locked, expressed and nonredundant tracks",
+            run: crate::closure_mcp::simplify,
+        },
+        Scenario {
+            id: "B258",
+            workflow: "W057",
+            title: "MCP slip preserves strip and animation, enforces handles and persists Undo/Redo",
+            run: crate::closure_mcp::slip,
+        },
+        Scenario {
+            id: "A504",
+            workflow: "W033",
+            title: "All atomic strip operations, refusal and persisted history",
+            run: crate::closure_mcp::strips,
+        },
+        Scenario {
+            id: "A508",
+            workflow: "W050",
+            title: "3D scene digest against independent tagged fixtures",
+            run: crate::closure_mcp::scene,
+        },
+        Scenario {
+            id: "A513",
+            workflow: "W031",
+            title: "Media status, nested references, locks and paging",
+            run: crate::closure_mcp::list_media,
+        },
+        Scenario {
+            id: "A516",
+            workflow: "W031",
+            title: "Media folders, metadata, deletion refusal and persisted Undo/Redo",
+            run: crate::closure_mcp::manage_media,
+        },
+        Scenario {
+            id: "A530",
+            workflow: "W033",
+            title: "All nine MCP video edits, exact source timing and persisted Undo/Redo",
+            run: crate::closure_mcp::video,
+        },
+        Scenario {
+            id: "A550",
+            workflow: "W067",
+            title: "SRT/WebVTT composition-time clipping, normalization and escaping",
+            run: crate::closure_mcp::captions,
+        },
+        Scenario {
+            id: "W057.mcp-refusals",
+            workflow: "W057",
+            title: "MCP source handles and locked edits refuse atomically",
+            run: crate::closure_mcp::video_refusals,
+        },
+        Scenario {
             id: "A494",
             workflow: "W033",
             title: "MCP union exposes frozen tools and implemented catalog members",

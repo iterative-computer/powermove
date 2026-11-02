@@ -428,6 +428,7 @@ export async function exercise(
 export async function exerciseOwner(
   index: number,
   e: import("./harness").Evaluation,
+  host: import("./host-fixture").OwnerHost,
 ) {
   switch (index) {
     case 1: {
@@ -445,6 +446,7 @@ export async function exerciseOwner(
             <input
               key={axis}
               id={`coordinate-${axis}`}
+              control="number"
               value={value}
               onKeyDown={(event) => {
                 if (event.key === "ArrowRight") handles[axis] += 0.05;
@@ -1238,32 +1240,54 @@ export async function exerciseOwner(
     case 10: {
       let time = 2.5,
         value = "",
-        status = "waiting",
-        reject = false,
-        active = true;
+        status = "waiting";
       const annotations = [{ slot: 9, time: 2.5, value: "Synthetic entry" }];
       const writes: { slot?: number; time: number; value: string }[] = [];
-      const observe = (next: number) => {
-        if (!active) return;
-        time = next;
-        value =
-          annotations.find((annotation) => annotation.time === time)?.value ??
-          "";
+      host.fixture("project", { annotations });
+      host.fixture("time", time);
+      const document = (await host.client.query("project")).value as {
+        annotations: typeof annotations;
       };
+      const stop = await host.client.subscribe(
+        "annotation-time",
+        "time",
+        (next) => {
+          time = next as number;
+          value =
+            document.annotations.find((annotation) => annotation.time === time)
+              ?.value ?? "";
+        },
+      );
+      let pending = Promise.resolve();
       const submit = () => {
         if (!value.trim()) {
           status = "missing-text";
           return;
         }
-        if (reject) {
-          status = "edit-refused";
-          return;
-        }
-        const existing = annotations.find(
+        const existing = document.annotations.find(
           (annotation) => annotation.time === time,
         );
-        writes.push({ slot: existing?.slot, time, value: value.trim() });
-        status = "acknowledged";
+        const edit = { slot: existing?.slot, time, value: value.trim() };
+        pending = host.client
+          .edit("Synthetic annotation", [
+            {
+              command: "annotation.upsert",
+              args: {
+                ...(edit.slot === undefined ? {} : { slot: edit.slot }),
+                time: edit.time,
+                value: edit.value,
+              },
+            },
+          ])
+          .then(
+            () => {
+              writes.push(edit);
+              status = "acknowledged";
+            },
+            () => {
+              status = "edit-refused";
+            },
+          );
       };
       const view = () => (
         <div>
@@ -1286,54 +1310,55 @@ export async function exerciseOwner(
           </text>
         </div>
       );
-      observe(time);
       await e.render(view());
       e.props("annotation-input", { value: "Synthetic entry" });
       e.assert(
         typeof e.node("annotation-input").props.labelledBy === "string",
         "annotation field has a label",
       );
-      // No UI input echo is claimed: replies are explicitly republished through
-      // render. The full native-input inspector limitation remains in apiGaps.
       await e.event("annotation-input", "input", { value: "  " });
       await e.render(view());
       await e.event("submit-annotation", "click");
+      await pending;
       e.equal(writes, [], "blank annotation has no edit");
       await e.event("annotation-input", "input", {
         value: "  Invented replacement  ",
       });
       await e.render(view());
+      e.props("annotation-input", { value: "  Invented replacement  " });
       await e.event("annotation-input", "keydown", { key: "Enter" });
+      await pending;
       e.equal(
         writes,
         [{ slot: 9, time: 2.5, value: "Invented replacement" }],
-        "exact-time annotation updated by identity",
+        "exact-time annotation acknowledged by identity",
       );
-      observe(4.75);
+      host.fixture("time", 4.75);
+      host.publish();
       await e.render(view());
       e.props("annotation-input", { value: "" });
       await e.event("annotation-input", "input", {
         value: "Invented new entry",
       });
       await e.render(view());
-      reject = true;
+      host.rejectNextEdit();
       await e.event("submit-annotation", "click");
+      await pending;
       await e.render(view());
-      e.equal(
-        e.nativeObservations.get(e.node("annotation-input").id),
-        "Invented new entry",
-        "test host retains the rejected draft observation",
-      );
+      // Assert the public accepted inspection, not a test-only observation map.
+      e.props("annotation-input", { value: "Invented new entry" });
       e.equal(status, "edit-refused", "negative acknowledgement visible");
-      reject = false;
+      e.equal(writes.length, 1, "rejected edit was not acknowledged");
       await e.event("submit-annotation", "click");
+      await pending;
       e.equal(
         writes[1],
         { slot: undefined, time: 4.75, value: "Invented new entry" },
         "empty playhead position creates annotation",
       );
-      active = false;
-      observe(12);
+      await stop();
+      host.fixture("time", 12);
+      e.equal(host.publish(), [], "unsubscribed time has no publication");
       e.equal(time, 4.75, "retired time subscription is detached");
       break;
     }

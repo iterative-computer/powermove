@@ -1,24 +1,16 @@
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 import { runExtension, consultations } from "./extensions";
 import { tasks } from "./tasks";
 import { Evaluation } from "./harness";
 const wire = process.env.PM_SURFACE_WIRE;
 const wireTest = test.skipIf(!wire);
-const knownFailures: Record<string, string> = {
-  "builtin-06": "complete accepted snapshot",
-  "wild-10": "complete accepted snapshot",
-};
 for (const task of tasks.filter((task) => task.group !== "owner")) {
   wireTest(`independent extension ${task.id}`, async () => {
     const result = await runExtension(task.id, wire);
     if (task.status === "pending-owner") {
       expect(result.status).toBe("pending-owner");
       expect("lines" in result).toBe(false);
-    } else if (knownFailures[task.id]) {
-      expect(result.status).toBe("fail");
-      expect("error" in result && result.error).toContain(
-        knownFailures[task.id],
-      );
     } else expect(result.status, JSON.stringify(result)).toBe("pass");
   });
 }
@@ -50,13 +42,10 @@ wireTest(
   },
 );
 wireTest(
-  "negative protocol checks cannot silently pass without a real validator",
+  "negative protocol checks build and use the real validator without an explicit wire",
   async () => {
     const result = await runExtension("held-out-10");
-    expect(result.status).toBe("fail");
-    expect("error" in result && result.error).toContain(
-      "real Rust wire validator required",
-    );
+    expect(result.status, JSON.stringify(result)).toBe("pass");
   },
 );
 wireTest(
@@ -89,7 +78,7 @@ wireTest(
         "-e",
         `import "powermove-v4/refresh"; import {runExtension} from "./eval/extensions"; const r=await runExtension("held-out-07",${JSON.stringify(wire)}); console.log(JSON.stringify(r)); process.exitCode=r.status==="pass"?0:1;`,
       ],
-      { cwd: new URL("..", import.meta.url).pathname },
+      { cwd: fileURLToPath(new URL("..", import.meta.url)) },
     );
     expect(child.exitCode, new TextDecoder().decode(child.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(child.stdout)).status).toBe(
@@ -99,16 +88,17 @@ wireTest(
 );
 
 for (const task of tasks.filter((task) => task.group === "owner")) {
-  test(`owner default evaluation ${task.id} keeps API gaps visible`, async () => {
+  test(`owner default evaluation ${task.id} exercises data service and keeps production gates visible`, async () => {
     const result = await runExtension(task.id);
     expect(result).toMatchObject({
       id: task.id,
-      status: "fail",
+      status: "pass",
       fixtureStatus: "pass",
-      failureKind: "api-gap",
+      serviceStatus: "pass",
+      productionReady: false,
       wire: false,
     });
-    expect("blockedBy" in result && result.blockedBy).toEqual(
+    expect("integrationGates" in result && result.integrationGates).toEqual(
       task.behavior!.apiGaps,
     );
     expect("commits" in result && result.commits).toBeGreaterThan(0);
