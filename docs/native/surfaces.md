@@ -473,7 +473,7 @@ The AppKit unit probe requires the main thread and explicitly reports a skip
 when run on a normal Rust test worker; no native UI runtime pass is claimed.
 
 Reconciled with `origin/feat/native-engine` at
-`9897e48dd6986574b1beddccb47bab986dfa7bf4`, no conflicts. The commands
+`edc3c6e07164f6ac2bd71f1ef2405ff8d11520c3`, no conflicts. The commands
 above were re-run after the final fetch/merge. No new crate or dependency was added, so
 there is no checked-in lockfile delta to own. Full-app `cargo fmt -p
 pm-native-app --check` also reports pre-existing formatting in the unowned
