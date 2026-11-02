@@ -66,8 +66,10 @@ impl Status {
                 format!("{} fps", self.rate),
                 self.workspace.clone(),
             ],
-            indicator_label: (issue_count > 0)
-                .then(|| format!("Editor slowed down, {issue_count} issues")),
+            indicator_label: (issue_count > 0).then(|| match issue_count {
+                1 => "Editor slowed down, 1 issue".to_string(),
+                n => format!("Editor slowed down, {n} issues"),
+            }),
         }
     }
 }

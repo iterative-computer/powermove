@@ -128,7 +128,8 @@ impl PanelSnapshot<'_> {
                 line: format!("Starting {e}…"),
             },
             (Starting, _) => Content::Unchanged,
-            (WaitingToRestart, Some(Crash)) => empty(
+            // A restart without a recorded failure reads as a plain stop.
+            (WaitingToRestart, Some(Crash) | None) => empty(
                 format!("{p} Stopped"),
                 Some("It will restart in a moment.".into()),
                 Some("Restart Now"),
@@ -137,9 +138,6 @@ impl PanelSnapshot<'_> {
                 format!("{p} Stopped Responding"),
                 Some("Powermove stopped it and will restart it in a moment.".into()),
                 Some("Restart Now"),
-            ),
-            (WaitingToRestart, None) => Content::DesignTodo(
-                "DESIGN-TODO(opus): WaitingToRestart without a Failure has no specified content.",
             ),
         }
     }

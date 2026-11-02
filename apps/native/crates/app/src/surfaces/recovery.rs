@@ -103,7 +103,7 @@ pub fn editor_failure(reason: EditorFailure) -> Alert {
         informative: format!(
             "{reason} Reload restores the latest local recovery. The most recent edits may be missing."
         ),
-        // DESIGN-TODO(opus): spec assigns no Esc action for this alert.
+        // No Esc action: neither button leaves the failed window as it is.
         buttons: vec![
             Button::new("Reload", Action::Reload).default(),
             Button::new("Close Window", Action::CloseWindow),
