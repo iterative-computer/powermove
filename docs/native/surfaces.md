@@ -514,3 +514,14 @@ through final kernel compaction. Existing `PrepareQuit` may append an identical
 PMV4 record for a deferred journal; this lane does not claim physical-file
 identity across that existing compaction operation. Watcher/reload integration
 and the two Opus placeholders listed above remain open.
+
+A repeated post-merge kernel run exposed one intermittent failure in the
+existing `slice3::selection_is_atomic_ephemeral_deduplicated_and_published_before_event`
+test (`slice3.rs:135`, first received event was not Published). Its isolated
+locked rerun passed, and the subsequent complete locked kernel rerun passed
+273/273 with the same one existing ignored test. Kernel sources/tests are
+unchanged by this lane. The public actor code replies to Open before emitting
+Opened; the test subscribes after awaiting that reply, so a late Opened event
+can race its first-event assertion. The kernel owner should synchronize the
+subscription/setup with Opened while retaining the Published-before-SelectionChanged
+assertion. No test was ignored, weakened, or edited to obtain the rerun pass.
