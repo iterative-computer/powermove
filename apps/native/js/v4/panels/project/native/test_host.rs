@@ -18,7 +18,12 @@ impl MediaRuntime for Runtime {
         }
     }
 }
+/// Kernel waits are illegal on the macOS main thread (actor.rs), so the host
+/// loop runs on a worker thread.
 fn main() {
+    std::thread::spawn(run).join().expect("project model host");
+}
+fn run() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
     let mut bridge = ProjectBridge::default();

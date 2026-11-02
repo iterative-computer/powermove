@@ -61,6 +61,7 @@ test("panel styles have no visual literals; only kit tokens and structural keywo
     "row",
     "column",
     "center",
+    "space-between",
     "nowrap",
     "hidden",
     "tabular-nums",

@@ -279,6 +279,7 @@ export function ProjectView(props: ProjectViewProps) {
                   key={action.label}
                   label={action.label}
                   title={action.label}
+                  attr={{ symbol: action.symbol }}
                   tabIndex={-1}
                   disabled={action.disabled}
                   onPointerDown={(event) => event.stopPropagation()}
@@ -419,6 +420,7 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
+          justifyContent: "space-between",
           height: token("metrics.header"),
           paddingLeft: token("metrics.inset"),
           paddingRight: token("metrics.inset"),
@@ -435,21 +437,31 @@ export function ProjectView(props: ProjectViewProps) {
             native.activatePanel(id as "assets" | "layer-effects")
           }
         />
-        <ToolbarItem
-          label="Search Media"
-          title="Search Media"
-          disabled={!view}
-          active={searchOpen}
-          onClick={() => setSearchOpen(!searchOpen)}
-          style={{ symbolSize: token("metrics.symbol_panel") }}
-        />
-        <ToolbarItem
-          label="Add"
-          title="Add"
-          disabled={!view}
-          onClick={(e) => props.menu(null, e.currentTarget)}
-          style={{ symbolSize: token("metrics.symbol_panel") }}
-        />
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <ToolbarItem
+            label="Search Media"
+            attr={{ symbol: "magnifyingglass" }}
+            title="Search Media"
+            disabled={!view}
+            active={searchOpen}
+            onClick={() => setSearchOpen(!searchOpen)}
+            style={{ symbolSize: token("metrics.symbol_panel") }}
+          />
+          <ToolbarItem
+            label="Add"
+            title="Add"
+            attr={{ symbol: "plus" }}
+            disabled={!view}
+            onClick={(e) => props.menu(null, e.currentTarget)}
+            style={{ symbolSize: token("metrics.symbol_panel") }}
+          />
+        </div>
       </div>
       {searchOpen && view ? (
         <div
@@ -487,8 +499,20 @@ export function ProjectView(props: ProjectViewProps) {
             flexDirection: "row",
           }}
         >
-          {crumbItems.map((crumb, index) => (
+          {crumbItems.map((crumb, index) => [
+            index > 0 ? (
+              <text
+                key={`separator:${index}`}
+                style={{
+                  color: token("colors.muted"),
+                  fontSize: token("typography.body"),
+                }}
+              >
+                {" / "}
+              </text>
+            ) : null,
             <ToolbarItem
+              attr={index === 0 ? { symbol: "chevron.left" } : undefined}
               key={crumb.id ?? "root"}
               id={`media-crumb:${index}`}
               label={crumb.name}
@@ -523,8 +547,8 @@ export function ProjectView(props: ProjectViewProps) {
               }}
             >
               {crumb.name}
-            </ToolbarItem>
-          ))}
+            </ToolbarItem>,
+          ])}
         </div>
       ) : null}
       <List
@@ -563,6 +587,7 @@ export function ProjectView(props: ProjectViewProps) {
           <EmptyState
             label="No Project"
             explanation="Open a project to see its media."
+            attr={{ symbol: "photo.on.rectangle" }}
             action={null}
           />
         ) : view.page.total === 0 ? (
@@ -581,12 +606,14 @@ export function ProjectView(props: ProjectViewProps) {
             <EmptyState
               label="Empty Folder"
               explanation="Drag media or files here."
+              attr={{ symbol: "folder" }}
               action={null}
             />
           ) : (
             <EmptyState
               label="No Media"
               explanation="Drag files here or import from your computer."
+              attr={{ symbol: "photo.on.rectangle.angled" }}
               action={
                 <ToolbarItem
                   label="Import…"
@@ -636,16 +663,26 @@ export function ProjectView(props: ProjectViewProps) {
           </virtual-list>
         )}
         {view?.external_drag ? (
-          <EmptyState
-            label="Add to Project Media"
-            explanation="Drops here don’t touch the timeline."
-            action={null}
+          <div
             style={{
               background: token("colors.accent_wash"),
-              borderRadius: token("metrics.panel_radius"),
-              padding: token("metrics.inset"),
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
-          />
+          >
+            <EmptyState
+              label="Add to Project Media"
+              explanation="Drops here don’t touch the timeline."
+              action={null}
+              attr={{ symbol: "plus" }}
+              style={{
+                background: token("colors.floating"),
+                borderRadius: token("metrics.panel_radius"),
+                padding: token("metrics.inset"),
+              }}
+            />
+          </div>
         ) : null}
       </List>
       {view && view.selected_count >= 2 ? (
@@ -657,14 +694,18 @@ export function ProjectView(props: ProjectViewProps) {
             borderRadius: token("metrics.control_radius"),
             height: token("metrics.row"),
             margin: token("metrics.inset"),
+            paddingLeft: token("metrics.inset"),
             display: "flex",
             flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
           }}
         >
           <text style={text}>{`${view.selected_count} selected`}</text>
           <ToolbarItem
             label="Delete selected media"
             title="Delete Selected Media…"
+            attr={{ symbol: "trash" }}
             onClick={() => invoke("DeleteAssets")}
             style={{ color: token("colors.danger") }}
           />

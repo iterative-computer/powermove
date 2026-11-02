@@ -80,6 +80,16 @@ export function meta(row: Row): string {
       .join(" · ") || (runtime.availability === "Ready" ? "Ready to use" : "")
   );
 }
+/** Spoken forms of the visible meta values (design review 2026-11-01). */
+function spokenSeconds(seconds: number) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${s} ${s === 1 ? "second" : "seconds"}`;
+}
+function spokenSize(bytes: number) {
+  return mediaSize(bytes)
+    .replace(" KB", " kilobytes")
+    .replace(" MB", " megabytes");
+}
 export function accessibleName(row: Row): string {
   const selected = row.selected ? ["selected"] : [];
   if ("Folder" in row.data)
@@ -92,12 +102,12 @@ export function accessibleName(row: Row): string {
   ];
   if (a.width !== null && a.height !== null)
     parts.push(`${a.width} by ${a.height}`);
-  if (a.duration !== null) parts.push(`${a.duration} seconds`);
+  if (a.duration !== null) parts.push(spokenSeconds(a.duration));
   if ("Composition" in row.data) {
     if (row.data.Composition.open) parts.push("open in the timeline");
   } else {
     if (row.data.Asset[0].bytes !== null)
-      parts.push(`${row.data.Asset[0].bytes / (1024 * 1024)} megabytes`);
+      parts.push(spokenSize(row.data.Asset[0].bytes));
     const availability = row.data.Asset[1].availability;
     if (availability === "Offline") parts.push("offline");
     if (availability === "Loading") parts.push("loading");
@@ -141,6 +151,8 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
 }
 export interface CardAction {
   label: string;
+  /** SF Symbol for the over-image button (media-browser §2 Hover actions). */
+  symbol: string;
   input: import("./contract").Input;
   disabled?: boolean;
 }
@@ -149,6 +161,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     return [
       {
         label: "Delete Folder",
+        symbol: "trash",
         input: { Invoke: { DeleteFolder: row.data.Folder.id } },
       },
     ];
@@ -157,11 +170,13 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     return [
       {
         label: "Add to Timeline",
+        symbol: "plus",
         input: { Invoke: { NestComposition: c.id } },
         disabled: !c.can_nest,
       },
       {
         label: "Delete Composition…",
+        symbol: "trash",
         input: { Invoke: { DeleteComposition: c.id } },
         disabled: compositions <= 1,
       },
@@ -173,10 +188,12 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     if (a.source_path)
       result.push({
         label: "Show in Finder",
+        symbol: "folder",
         input: { Invoke: { Reveal: a.id } },
       });
     result.push({
       label: "Add to Timeline",
+      symbol: "plus",
       input: { Invoke: { AddAsset: a.id } },
     });
   } else if (
@@ -185,6 +202,7 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
   )
     result.push({
       label: "Locate File…",
+      symbol: "link",
       input: { Invoke: { Replace: a.id } },
     });
   else if (typeof r.availability === "object" && "Cloud" in r.availability)
@@ -193,10 +211,15 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
         typeof r.availability.Cloud.download === "object"
           ? "Retry Download"
           : "Download from Cloud",
+      symbol: "icloud.and.arrow.down",
       input: { Invoke: { Download: a.id } },
       disabled: r.availability.Cloud.download === "Downloading",
     });
-  result.push({ label: "Delete Media", input: { DeleteAsset: a.id } });
+  result.push({
+    label: "Delete Media",
+    symbol: "trash",
+    input: { DeleteAsset: a.id },
+  });
   return result;
 }
 
