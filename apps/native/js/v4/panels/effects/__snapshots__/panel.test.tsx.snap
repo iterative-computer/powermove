@@ -529,6 +529,9 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "listeners": {},
       "parent": 7,
       "props": {
+        "attr": {
+          "symbol": "wand.and.rays",
+        },
         "data-pm-component": "empty-state",
         "label": "No Effects",
         "role": "group",
@@ -766,6 +769,16 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -778,20 +791,10 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       ],
       "disabled": false,
       "expanded": true,
-      "id": 18,
+      "id": 19,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 19,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -805,26 +808,26 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 21,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 21,
+      "id": 22,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 22,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -842,7 +845,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "disabled": false,
       "expanded": null,
       "id": 24,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -872,6 +875,26 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "disabled": false,
       "expanded": null,
       "id": 27,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 28,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -996,18 +1019,22 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -1097,20 +1124,41 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -1183,27 +1231,6 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "text": "",
       "type": "div",
     },
-    "19": {
-      "children": [
-        20,
-      ],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
     "2": {
       "children": [
         3,
@@ -1236,21 +1263,42 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "type": "text",
     },
     "20": {
-      "children": [],
+      "children": [
+        21,
+      ],
       "id": 20,
       "input": null,
       "listeners": {},
       "parent": 19,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
-        27,
+        23,
+        28,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {
         "click": {
@@ -1309,18 +1357,22 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -1334,16 +1386,16 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "text": "",
       "type": "div",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
         24,
-        26,
+        25,
+        27,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {
         "style": {
           "color": {
@@ -1361,24 +1413,24 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "text": "",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
+        26,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "fontWeight": {
@@ -1389,22 +1441,12 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "text": "",
       "type": "text",
     },
-    "25": {
-      "children": [],
-      "id": 25,
-      "input": null,
-      "listeners": {},
-      "parent": 24,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "26": {
       "children": [],
       "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 25,
       "props": {},
       "text": "",
       "type": "text",
@@ -1414,7 +1456,38 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 23,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "28": {
+      "children": [
+        29,
+      ],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "29": {
+      "children": [],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 28,
       "props": {},
       "text": "",
       "type": "text",
@@ -1616,8 +1689,8 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       "children": [
         8,
         11,
-        18,
-        21,
+        19,
+        22,
       ],
       "id": 7,
       "input": null,
@@ -1987,6 +2060,16 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -1998,7 +2081,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       ],
       "disabled": false,
       "expanded": null,
-      "id": 18,
+      "id": 19,
       "label": "Add Gaussian Blur",
       "role": "Button",
       "selected": null,
@@ -2012,20 +2095,10 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       ],
       "disabled": false,
       "expanded": true,
-      "id": 19,
+      "id": 20,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 20,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -2039,26 +2112,26 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 22,
+      "id": 23,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 23,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -2076,7 +2149,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 25,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -2106,6 +2179,26 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 28,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 30,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -2170,7 +2263,6 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "children": [
         12,
         17,
-        18,
       ],
       "id": 11,
       "input": null,
@@ -2231,6 +2323,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "background": {
             "token": "colors.selected_fill",
           },
@@ -2240,12 +2333,15 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -2335,18 +2431,40 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+        19,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
-      "props": {},
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
       "text": "",
-      "type": "text",
+      "type": "div",
     },
     "18": {
       "children": [],
       "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "19": {
+      "children": [],
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -2362,7 +2480,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "preventDefault": false,
         },
       },
-      "parent": 11,
+      "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -2394,11 +2512,42 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "button",
     },
-    "19": {
+    "2": {
       "children": [
-        20,
+        3,
       ],
-      "id": 19,
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "role": "heading",
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+          "height": {
+            "token": "metrics.header",
+          },
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "20": {
+      "children": [
+        21,
+      ],
+      "id": 20,
       "input": null,
       "listeners": {
         "click": {
@@ -2471,45 +2620,14 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "2": {
+    "21": {
       "children": [
-        3,
+        22,
       ],
-      "id": 2,
+      "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 1,
-      "props": {
-        "role": "heading",
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-          "height": {
-            "token": "metrics.header",
-          },
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "20": {
-      "children": [
-        21,
-      ],
-      "id": 20,
-      "input": null,
-      "listeners": {},
-      "parent": 19,
+      "parent": 20,
       "props": {
         "style": {
           "color": {
@@ -2523,22 +2641,22 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
-        28,
+        24,
+        29,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {
         "click": {
@@ -2597,18 +2715,22 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -2622,16 +2744,16 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
         25,
-        27,
+        26,
+        28,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "color": {
@@ -2649,24 +2771,24 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
+        27,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {
         "style": {
           "fontWeight": {
@@ -2677,22 +2799,12 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 25,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "27": {
       "children": [],
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 26,
       "props": {},
       "text": "",
       "type": "text",
@@ -2702,10 +2814,31 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
+    },
+    "29": {
+      "children": [
+        30,
+      ],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 23,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [],
@@ -2715,6 +2848,16 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "parent": 2,
       "props": {},
       "text": "Effects",
+      "type": "text",
+    },
+    "30": {
+      "children": [],
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 29,
+      "props": {},
+      "text": "",
       "type": "text",
     },
     "4": {
@@ -2904,8 +3047,8 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       "children": [
         8,
         11,
-        19,
-        22,
+        20,
+        23,
       ],
       "id": 7,
       "input": null,
@@ -3275,6 +3418,16 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -3286,7 +3439,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       ],
       "disabled": false,
       "expanded": null,
-      "id": 18,
+      "id": 19,
       "label": "Add Gaussian Blur",
       "role": "Button",
       "selected": null,
@@ -3300,20 +3453,10 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       ],
       "disabled": false,
       "expanded": true,
-      "id": 19,
+      "id": 20,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 20,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -3327,26 +3470,26 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 22,
+      "id": 23,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 23,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -3364,7 +3507,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "disabled": false,
       "expanded": null,
       "id": 25,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -3394,6 +3537,26 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "disabled": false,
       "expanded": null,
       "id": 28,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 30,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -3458,7 +3621,6 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "children": [
         12,
         17,
-        18,
       ],
       "id": 11,
       "input": null,
@@ -3519,6 +3681,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "background": {
             "token": "colors.hover",
           },
@@ -3528,12 +3691,15 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -3623,18 +3789,40 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+        19,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
-      "props": {},
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
       "text": "",
-      "type": "text",
+      "type": "div",
     },
     "18": {
       "children": [],
       "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "19": {
+      "children": [],
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -3650,7 +3838,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "preventDefault": false,
         },
       },
-      "parent": 11,
+      "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -3682,11 +3870,42 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "button",
     },
-    "19": {
+    "2": {
       "children": [
-        20,
+        3,
       ],
-      "id": 19,
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "role": "heading",
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+          "height": {
+            "token": "metrics.header",
+          },
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "20": {
+      "children": [
+        21,
+      ],
+      "id": 20,
       "input": null,
       "listeners": {
         "click": {
@@ -3759,45 +3978,14 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "div",
     },
-    "2": {
+    "21": {
       "children": [
-        3,
+        22,
       ],
-      "id": 2,
+      "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 1,
-      "props": {
-        "role": "heading",
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-          "height": {
-            "token": "metrics.header",
-          },
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "20": {
-      "children": [
-        21,
-      ],
-      "id": 20,
-      "input": null,
-      "listeners": {},
-      "parent": 19,
+      "parent": 20,
       "props": {
         "style": {
           "color": {
@@ -3811,22 +3999,22 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
-        28,
+        24,
+        29,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {
         "click": {
@@ -3885,18 +4073,22 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -3910,16 +4102,16 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "div",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
         25,
-        27,
+        26,
+        28,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "color": {
@@ -3937,24 +4129,24 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
+        27,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {
         "style": {
           "fontWeight": {
@@ -3965,22 +4157,12 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 25,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "27": {
       "children": [],
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 26,
       "props": {},
       "text": "",
       "type": "text",
@@ -3990,10 +4172,31 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
+    },
+    "29": {
+      "children": [
+        30,
+      ],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 23,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [],
@@ -4003,6 +4206,16 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "parent": 2,
       "props": {},
       "text": "Effects",
+      "type": "text",
+    },
+    "30": {
+      "children": [],
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 29,
+      "props": {},
+      "text": "",
       "type": "text",
     },
     "4": {
@@ -4192,8 +4405,8 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       "children": [
         8,
         11,
-        19,
-        22,
+        20,
+        23,
       ],
       "id": 7,
       "input": null,
@@ -4563,6 +4776,16 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -4574,7 +4797,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       ],
       "disabled": false,
       "expanded": null,
-      "id": 18,
+      "id": 19,
       "label": "Add Gaussian Blur",
       "role": "Button",
       "selected": null,
@@ -4588,20 +4811,10 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       ],
       "disabled": false,
       "expanded": true,
-      "id": 19,
+      "id": 20,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 20,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -4615,26 +4828,26 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 22,
+      "id": 23,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 23,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -4652,7 +4865,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "disabled": false,
       "expanded": null,
       "id": 25,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -4682,6 +4895,26 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "disabled": false,
       "expanded": null,
       "id": 28,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 30,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -4746,7 +4979,6 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "children": [
         12,
         17,
-        18,
       ],
       "id": 11,
       "input": null,
@@ -4807,18 +5039,22 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -4908,18 +5144,40 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+        19,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
-      "props": {},
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
       "text": "",
-      "type": "text",
+      "type": "div",
     },
     "18": {
       "children": [],
       "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "19": {
+      "children": [],
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -4935,7 +5193,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "preventDefault": false,
         },
       },
-      "parent": 11,
+      "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -4967,11 +5225,42 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "button",
     },
-    "19": {
+    "2": {
       "children": [
-        20,
+        3,
       ],
-      "id": 19,
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "role": "heading",
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+          "height": {
+            "token": "metrics.header",
+          },
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "20": {
+      "children": [
+        21,
+      ],
+      "id": 20,
       "input": null,
       "listeners": {
         "click": {
@@ -5044,45 +5333,14 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "div",
     },
-    "2": {
+    "21": {
       "children": [
-        3,
+        22,
       ],
-      "id": 2,
+      "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 1,
-      "props": {
-        "role": "heading",
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-          "height": {
-            "token": "metrics.header",
-          },
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "20": {
-      "children": [
-        21,
-      ],
-      "id": 20,
-      "input": null,
-      "listeners": {},
-      "parent": 19,
+      "parent": 20,
       "props": {
         "style": {
           "color": {
@@ -5096,22 +5354,22 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
-        28,
+        24,
+        29,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {
         "click": {
@@ -5170,18 +5428,22 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -5195,16 +5457,16 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "div",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
         25,
-        27,
+        26,
+        28,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "color": {
@@ -5222,24 +5484,24 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
+        27,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {
         "style": {
           "fontWeight": {
@@ -5250,22 +5512,12 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 25,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "27": {
       "children": [],
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 26,
       "props": {},
       "text": "",
       "type": "text",
@@ -5275,10 +5527,31 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
+    },
+    "29": {
+      "children": [
+        30,
+      ],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 23,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [],
@@ -5288,6 +5561,16 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "parent": 2,
       "props": {},
       "text": "Effects",
+      "type": "text",
+    },
+    "30": {
+      "children": [],
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 29,
+      "props": {},
+      "text": "",
       "type": "text",
     },
     "4": {
@@ -5477,8 +5760,8 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       "children": [
         8,
         11,
-        19,
-        22,
+        20,
+        23,
       ],
       "id": 7,
       "input": null,
@@ -5848,6 +6131,16 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -5856,7 +6149,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "actions": [],
       "disabled": true,
       "expanded": null,
-      "id": 18,
+      "id": 19,
       "label": "Add Gaussian Blur",
       "role": "Button",
       "selected": null,
@@ -5870,20 +6163,10 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       ],
       "disabled": false,
       "expanded": true,
-      "id": 19,
+      "id": 20,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 20,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -5897,26 +6180,26 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 22,
+      "id": 23,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 23,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -5934,7 +6217,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 25,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -5964,6 +6247,26 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 28,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 30,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -6028,7 +6331,6 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "children": [
         12,
         17,
-        18,
       ],
       "id": 11,
       "input": null,
@@ -6089,6 +6391,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "background": {
             "token": "colors.selected_fill",
           },
@@ -6098,12 +6401,15 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -6193,18 +6499,40 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+        19,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
-      "props": {},
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
       "text": "",
-      "type": "text",
+      "type": "div",
     },
     "18": {
       "children": [],
       "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "19": {
+      "children": [],
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -6220,7 +6548,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "preventDefault": false,
         },
       },
-      "parent": 11,
+      "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": true,
@@ -6252,11 +6580,42 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "button",
     },
-    "19": {
+    "2": {
       "children": [
-        20,
+        3,
       ],
-      "id": 19,
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "role": "heading",
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+          "height": {
+            "token": "metrics.header",
+          },
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "20": {
+      "children": [
+        21,
+      ],
+      "id": 20,
       "input": null,
       "listeners": {
         "click": {
@@ -6329,45 +6688,14 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "2": {
+    "21": {
       "children": [
-        3,
+        22,
       ],
-      "id": 2,
+      "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 1,
-      "props": {
-        "role": "heading",
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-          "height": {
-            "token": "metrics.header",
-          },
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "20": {
-      "children": [
-        21,
-      ],
-      "id": 20,
-      "input": null,
-      "listeners": {},
-      "parent": 19,
+      "parent": 20,
       "props": {
         "style": {
           "color": {
@@ -6381,22 +6709,22 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
-        28,
+        24,
+        29,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {
         "click": {
@@ -6455,18 +6783,22 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -6480,16 +6812,16 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
         25,
-        27,
+        26,
+        28,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "color": {
@@ -6507,24 +6839,24 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
+        27,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {
         "style": {
           "fontWeight": {
@@ -6535,22 +6867,12 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 25,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "27": {
       "children": [],
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 26,
       "props": {},
       "text": "",
       "type": "text",
@@ -6560,10 +6882,31 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
+    },
+    "29": {
+      "children": [
+        30,
+      ],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 23,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [],
@@ -6573,6 +6916,16 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "parent": 2,
       "props": {},
       "text": "Effects",
+      "type": "text",
+    },
+    "30": {
+      "children": [],
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 29,
+      "props": {},
+      "text": "",
       "type": "text",
     },
     "4": {
@@ -6762,8 +7115,8 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       "children": [
         8,
         11,
-        19,
-        22,
+        20,
+        23,
       ],
       "id": 7,
       "input": null,
@@ -7133,6 +7486,26 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 19,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -7256,18 +7629,22 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -7357,11 +7734,55 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+        19,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {
+        "attr": {
+          "symbol": "exclamationmark.triangle.fill",
+        },
+        "style": {
+          "color": {
+            "token": "colors.warning",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "19": {
+      "children": [],
+      "id": 19,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
@@ -7959,6 +8380,16 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -7971,20 +8402,10 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       ],
       "disabled": false,
       "expanded": true,
-      "id": 18,
+      "id": 19,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 19,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -7998,26 +8419,26 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 21,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 21,
+      "id": 22,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 22,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -8035,7 +8456,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "disabled": false,
       "expanded": null,
       "id": 24,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -8065,6 +8486,26 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "disabled": false,
       "expanded": null,
       "id": 27,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 28,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -8189,18 +8630,22 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -8290,20 +8735,41 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -8376,27 +8842,6 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "text": "",
       "type": "div",
     },
-    "19": {
-      "children": [
-        20,
-      ],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
     "2": {
       "children": [
         3,
@@ -8429,21 +8874,42 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "type": "text",
     },
     "20": {
-      "children": [],
+      "children": [
+        21,
+      ],
       "id": 20,
       "input": null,
       "listeners": {},
       "parent": 19,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
-        27,
+        23,
+        28,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {
         "click": {
@@ -8502,18 +8968,22 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -8527,16 +8997,16 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "text": "",
       "type": "div",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
         24,
-        26,
+        25,
+        27,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {
         "style": {
           "color": {
@@ -8554,24 +9024,24 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "text": "",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
+        26,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "fontWeight": {
@@ -8582,22 +9052,12 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "text": "",
       "type": "text",
     },
-    "25": {
-      "children": [],
-      "id": 25,
-      "input": null,
-      "listeners": {},
-      "parent": 24,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "26": {
       "children": [],
       "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 25,
       "props": {},
       "text": "",
       "type": "text",
@@ -8607,7 +9067,38 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 23,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "28": {
+      "children": [
+        29,
+      ],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "29": {
+      "children": [],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 28,
       "props": {},
       "text": "",
       "type": "text",
@@ -8809,8 +9300,8 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       "children": [
         8,
         11,
-        18,
-        21,
+        19,
+        22,
       ],
       "id": 7,
       "input": null,
@@ -9180,6 +9671,16 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -9192,20 +9693,10 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       ],
       "disabled": false,
       "expanded": true,
-      "id": 18,
+      "id": 19,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 19,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -9219,26 +9710,26 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 21,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 21,
+      "id": 22,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 22,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -9256,7 +9747,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "disabled": false,
       "expanded": null,
       "id": 24,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -9286,6 +9777,26 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "disabled": false,
       "expanded": null,
       "id": 27,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 28,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -9410,18 +9921,22 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -9511,20 +10026,41 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -9597,27 +10133,6 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "text": "",
       "type": "div",
     },
-    "19": {
-      "children": [
-        20,
-      ],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
     "2": {
       "children": [
         3,
@@ -9650,21 +10165,42 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "type": "text",
     },
     "20": {
-      "children": [],
+      "children": [
+        21,
+      ],
       "id": 20,
       "input": null,
       "listeners": {},
       "parent": 19,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
-        27,
+        23,
+        28,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {
         "click": {
@@ -9723,18 +10259,22 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -9748,16 +10288,16 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "text": "",
       "type": "div",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
         24,
-        26,
+        25,
+        27,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {
         "style": {
           "color": {
@@ -9775,24 +10315,24 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "text": "",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
+        26,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "fontWeight": {
@@ -9803,22 +10343,12 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "text": "",
       "type": "text",
     },
-    "25": {
-      "children": [],
-      "id": 25,
-      "input": null,
-      "listeners": {},
-      "parent": 24,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "26": {
       "children": [],
       "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 25,
       "props": {},
       "text": "",
       "type": "text",
@@ -9828,7 +10358,38 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 23,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "28": {
+      "children": [
+        29,
+      ],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "29": {
+      "children": [],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 28,
       "props": {},
       "text": "",
       "type": "text",
@@ -10030,8 +10591,8 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       "children": [
         8,
         11,
-        18,
-        21,
+        19,
+        22,
       ],
       "id": 7,
       "input": null,
@@ -10401,6 +10962,16 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "expanded": null,
       "id": 17,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -10413,20 +10984,10 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       ],
       "disabled": false,
       "expanded": true,
-      "id": 18,
+      "id": 19,
       "label": "Stylize, 1 effects, expanded",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 19,
-      "label": "Stylize",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -10440,26 +11001,26 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 21,
+      "label": "Stylize",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 21,
+      "id": 22,
       "label": "Glow, effect, Stylize",
       "role": "TreeItem",
       "selected": true,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 22,
-      "label": "Glow",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -10477,7 +11038,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "disabled": false,
       "expanded": null,
       "id": 24,
-      "label": null,
+      "label": "Glow",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -10513,13 +11074,33 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 28,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 28,
+      "id": 30,
       "label": "Add Glow",
       "role": "Button",
       "selected": null,
@@ -10644,18 +11225,22 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -10745,20 +11330,41 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {
         "click": {
@@ -10831,27 +11437,6 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "text": "",
       "type": "div",
     },
-    "19": {
-      "children": [
-        20,
-      ],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
     "2": {
       "children": [
         3,
@@ -10884,22 +11469,42 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "type": "text",
     },
     "20": {
-      "children": [],
+      "children": [
+        21,
+      ],
       "id": 20,
       "input": null,
       "listeners": {},
       "parent": 19,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {},
       "text": "Stylize",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [
-        22,
-        27,
+        23,
         28,
       ],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {
         "click": {
@@ -10958,6 +11563,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "background": {
             "token": "colors.selected_fill",
           },
@@ -10967,12 +11573,15 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -10986,16 +11595,16 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "text": "",
       "type": "div",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
         24,
-        26,
+        25,
+        27,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 22,
       "props": {
         "style": {
           "color": {
@@ -11013,24 +11622,24 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "text": "",
       "type": "text",
     },
-    "23": {
+    "24": {
       "children": [],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {},
       "text": "Glow",
       "type": "text",
     },
-    "24": {
+    "25": {
       "children": [
-        25,
+        26,
       ],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "style": {
           "fontWeight": {
@@ -11041,22 +11650,12 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "text": "",
       "type": "text",
     },
-    "25": {
-      "children": [],
-      "id": 25,
-      "input": null,
-      "listeners": {},
-      "parent": 24,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "26": {
       "children": [],
       "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 25,
       "props": {},
       "text": "",
       "type": "text",
@@ -11066,14 +11665,56 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 21,
+      "parent": 23,
       "props": {},
       "text": "",
       "type": "text",
     },
     "28": {
-      "children": [],
+      "children": [
+        29,
+        30,
+      ],
       "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "29": {
+      "children": [],
+      "id": 29,
+      "input": null,
+      "listeners": {},
+      "parent": 28,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "3": {
+      "children": [],
+      "id": 3,
+      "input": null,
+      "listeners": {},
+      "parent": 2,
+      "props": {},
+      "text": "Effects",
+      "type": "text",
+    },
+    "30": {
+      "children": [],
+      "id": 30,
       "input": null,
       "listeners": {
         "click": {
@@ -11089,7 +11730,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "preventDefault": false,
         },
       },
-      "parent": 21,
+      "parent": 28,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -11120,16 +11761,6 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       },
       "text": "",
       "type": "button",
-    },
-    "3": {
-      "children": [],
-      "id": 3,
-      "input": null,
-      "listeners": {},
-      "parent": 2,
-      "props": {},
-      "text": "Effects",
-      "type": "text",
     },
     "4": {
       "children": [
@@ -11318,8 +11949,8 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       "children": [
         8,
         11,
-        18,
-        21,
+        19,
+        22,
       ],
       "id": 7,
       "input": null,
@@ -12642,6 +13273,16 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "disabled": false,
       "expanded": null,
       "id": 14,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 15,
       "label": "Blur & Sharpen",
       "role": "Label",
       "selected": null,
@@ -12651,7 +13292,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 15,
+      "id": 16,
       "label": "Blur & Sharpen",
       "role": "Label",
       "selected": null,
@@ -12760,6 +13401,27 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "parent": 8,
       "props": {
         "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "15": {
+      "children": [
+        16,
+      ],
+      "id": 15,
+      "input": null,
+      "listeners": {},
+      "parent": 14,
+      "props": {
+        "style": {
           "color": {
             "token": "colors.muted",
           },
@@ -12771,12 +13433,12 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       "text": "",
       "type": "text",
     },
-    "15": {
+    "16": {
       "children": [],
-      "id": 15,
+      "id": 16,
       "input": null,
       "listeners": {},
-      "parent": 14,
+      "parent": 15,
       "props": {},
       "text": "Blur & Sharpen",
       "type": "text",
@@ -13144,18 +13806,22 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -13361,6 +14027,16 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "expanded": null,
       "id": 14,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 15,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -13372,20 +14048,10 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       ],
       "disabled": false,
       "expanded": null,
-      "id": 15,
+      "id": 16,
       "label": "Gaussian Blur, effect, Blur & Sharpen",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 16,
-      "label": "Gaussian Blur",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -13403,7 +14069,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "disabled": false,
       "expanded": null,
       "id": 18,
-      "label": null,
+      "label": "Gaussian Blur",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -13433,6 +14099,26 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "disabled": false,
       "expanded": null,
       "id": 21,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 23,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -13532,21 +14218,42 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "type": "text",
     },
     "14": {
-      "children": [],
+      "children": [
+        15,
+      ],
       "id": 14,
       "input": null,
       "listeners": {},
       "parent": 8,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "15": {
+      "children": [],
+      "id": 15,
+      "input": null,
+      "listeners": {},
+      "parent": 14,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "15": {
+    "16": {
       "children": [
-        16,
-        21,
+        17,
+        22,
       ],
-      "id": 15,
+      "id": 16,
       "input": null,
       "listeners": {
         "click": {
@@ -13605,18 +14312,22 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -13630,16 +14341,16 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "text": "",
       "type": "div",
     },
-    "16": {
+    "17": {
       "children": [
-        17,
         18,
-        20,
+        19,
+        21,
       ],
-      "id": 16,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {
         "style": {
           "color": {
@@ -13657,24 +14368,24 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "text": "",
       "type": "text",
     },
-    "17": {
+    "18": {
       "children": [],
-      "id": 17,
+      "id": 18,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {},
       "text": "Gaussian Blur",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {
         "style": {
           "fontWeight": {
@@ -13682,16 +14393,6 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           },
         },
       },
-      "text": "",
-      "type": "text",
-    },
-    "19": {
-      "children": [],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {},
       "text": "",
       "type": "text",
     },
@@ -13731,7 +14432,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 19,
       "props": {},
       "text": "",
       "type": "text",
@@ -13741,7 +14442,38 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 17,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "22": {
+      "children": [
+        23,
+      ],
+      "id": 22,
+      "input": null,
+      "listeners": {},
+      "parent": 16,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "23": {
+      "children": [],
+      "id": 23,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
       "props": {},
       "text": "",
       "type": "text",
@@ -13946,7 +14678,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
     "7": {
       "children": [
         8,
-        15,
+        16,
       ],
       "id": 7,
       "input": null,
@@ -14083,18 +14815,22 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -14368,6 +15104,16 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "expanded": null,
       "id": 20,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 21,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -14599,18 +15345,22 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -14731,11 +15481,32 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       "type": "text",
     },
     "20": {
-      "children": [],
+      "children": [
+        21,
+      ],
       "id": 20,
       "input": null,
       "listeners": {},
       "parent": 14,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {},
       "text": "",
       "type": "text",
@@ -15246,7 +16017,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "disabled": false,
       "expanded": null,
       "id": 11,
-      "label": "Gaussian Blur",
+      "label": "Gaussian Blur, preset, Blur & Sharpen",
       "role": "TreeItem",
       "selected": false,
       "value": null,
@@ -15306,6 +16077,16 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "disabled": false,
       "expanded": null,
       "id": 17,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 18,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -15413,7 +16194,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "aria-selected": false,
         "data-pm-component": "tree-item",
         "id": "fxbrowser:row:item:group%3ABlur%2520%2526%2520Sharpen:blur",
-        "label": "Gaussian Blur",
+        "label": "Gaussian Blur, preset, Blur & Sharpen",
         "metadata": {
           "definitionFailed": false,
           "draggable": true,
@@ -15430,18 +16211,22 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -15531,11 +16316,32 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "type": "text",
     },
     "17": {
-      "children": [],
+      "children": [
+        18,
+      ],
       "id": 17,
       "input": null,
       "listeners": {},
       "parent": 11,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
@@ -16099,6 +16905,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "expanded": null,
       "id": 14,
       "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 15,
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16110,20 +16926,10 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       ],
       "disabled": false,
       "expanded": null,
-      "id": 15,
+      "id": 16,
       "label": "Effect 29998, effect, Blur & Sharpen",
       "role": "TreeItem",
       "selected": false,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 16,
-      "label": "Effect 29998",
-      "role": "Label",
-      "selected": null,
       "value": null,
     },
     {
@@ -16141,7 +16947,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 18,
-      "label": null,
+      "label": "Effect 29998",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16177,13 +16983,33 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 22,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 23,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 22,
+      "id": 24,
       "label": "Effect 29999, effect, Blur & Sharpen",
       "role": "TreeItem",
       "selected": false,
@@ -16193,28 +17019,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 23,
-      "label": "Effect 29999",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 24,
-      "label": "Effect 29999",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
       "id": 25,
-      "label": null,
+      "label": "Effect 29999",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16224,7 +17030,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 26,
-      "label": null,
+      "label": "Effect 29999",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16250,13 +17056,43 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "value": null,
     },
     {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 29,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 30,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 31,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
       "actions": [
         "Focus",
         "Click",
       ],
       "disabled": false,
       "expanded": null,
-      "id": 29,
+      "id": 32,
       "label": "Effect 30000, effect, Blur & Sharpen",
       "role": "TreeItem",
       "selected": false,
@@ -16266,38 +17102,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 30,
-      "label": "Effect 30000",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 31,
-      "label": "Effect 30000",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 32,
-      "label": null,
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
       "id": 33,
-      "label": null,
+      "label": "Effect 30000",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16307,7 +17113,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 34,
-      "label": null,
+      "label": "Effect 30000",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16323,16 +17129,13 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "value": null,
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
+      "actions": [],
       "disabled": false,
       "expanded": null,
       "id": 36,
-      "label": "Effect 30001, effect, Blur & Sharpen",
-      "role": "TreeItem",
-      "selected": false,
+      "label": null,
+      "role": "Label",
+      "selected": null,
       "value": null,
     },
     {
@@ -16340,7 +17143,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 37,
-      "label": "Effect 30001",
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16350,8 +17153,8 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 38,
-      "label": "Effect 30001",
-      "role": "Label",
+      "label": null,
+      "role": "GenericContainer",
       "selected": null,
       "value": null,
     },
@@ -16366,13 +17169,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "value": null,
     },
     {
-      "actions": [],
+      "actions": [
+        "Focus",
+        "Click",
+      ],
       "disabled": false,
       "expanded": null,
       "id": 40,
-      "label": null,
-      "role": "Label",
-      "selected": null,
+      "label": "Effect 30001, effect, Blur & Sharpen",
+      "role": "TreeItem",
+      "selected": false,
       "value": null,
     },
     {
@@ -16380,7 +17186,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 41,
-      "label": null,
+      "label": "Effect 30001",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16390,22 +17196,19 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 42,
-      "label": null,
+      "label": "Effect 30001",
       "role": "Label",
       "selected": null,
       "value": null,
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
+      "actions": [],
       "disabled": false,
       "expanded": null,
       "id": 43,
-      "label": "Effect 30002, effect, Blur & Sharpen",
-      "role": "TreeItem",
-      "selected": false,
+      "label": null,
+      "role": "Label",
+      "selected": null,
       "value": null,
     },
     {
@@ -16413,7 +17216,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 44,
-      "label": "Effect 30002",
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16423,7 +17226,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "disabled": false,
       "expanded": null,
       "id": 45,
-      "label": "Effect 30002",
+      "label": null,
       "role": "Label",
       "selected": null,
       "value": null,
@@ -16434,7 +17237,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "expanded": null,
       "id": 46,
       "label": null,
-      "role": "Label",
+      "role": "GenericContainer",
       "selected": null,
       "value": null,
     },
@@ -16449,10 +17252,43 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "value": null,
     },
     {
-      "actions": [],
+      "actions": [
+        "Focus",
+        "Click",
+      ],
       "disabled": false,
       "expanded": null,
       "id": 48,
+      "label": "Effect 30002, effect, Blur & Sharpen",
+      "role": "TreeItem",
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 49,
+      "label": "Effect 30002",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 50,
+      "label": "Effect 30002",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 51,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -16462,7 +17298,37 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 49,
+      "id": 52,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 53,
+      "label": null,
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 54,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 55,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -16562,21 +17428,42 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "type": "text",
     },
     "14": {
-      "children": [],
+      "children": [
+        15,
+      ],
       "id": 14,
       "input": null,
       "listeners": {},
       "parent": 8,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "15": {
+      "children": [],
+      "id": 15,
+      "input": null,
+      "listeners": {},
+      "parent": 14,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "15": {
+    "16": {
       "children": [
-        16,
-        21,
+        17,
+        22,
       ],
-      "id": 15,
+      "id": 16,
       "input": null,
       "listeners": {
         "click": {
@@ -16635,18 +17522,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -16660,16 +17551,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "16": {
+    "17": {
       "children": [
-        17,
         18,
-        20,
+        19,
+        21,
       ],
-      "id": 16,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {
         "style": {
           "color": {
@@ -16687,24 +17578,24 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "17": {
+    "18": {
       "children": [],
-      "id": 17,
+      "id": 18,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {},
       "text": "Effect 29998",
       "type": "text",
     },
-    "18": {
+    "19": {
       "children": [
-        19,
+        20,
       ],
-      "id": 18,
+      "id": 19,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 17,
       "props": {
         "style": {
           "fontWeight": {
@@ -16712,16 +17603,6 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           },
         },
       },
-      "text": "",
-      "type": "text",
-    },
-    "19": {
-      "children": [],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {},
       "text": "",
       "type": "text",
     },
@@ -16761,7 +17642,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 16,
+      "parent": 19,
       "props": {},
       "text": "",
       "type": "text",
@@ -16771,7 +17652,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "id": 21,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 17,
       "props": {},
       "text": "",
       "type": "text",
@@ -16779,9 +17660,40 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
     "22": {
       "children": [
         23,
-        28,
       ],
       "id": 22,
+      "input": null,
+      "listeners": {},
+      "parent": 16,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "23": {
+      "children": [],
+      "id": 23,
+      "input": null,
+      "listeners": {},
+      "parent": 22,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "24": {
+      "children": [
+        25,
+        30,
+      ],
+      "id": 24,
       "input": null,
       "listeners": {
         "click": {
@@ -16840,18 +17752,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -16865,16 +17781,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "23": {
+    "25": {
       "children": [
-        24,
-        25,
+        26,
         27,
+        29,
       ],
-      "id": 23,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 24,
       "props": {
         "style": {
           "color": {
@@ -16892,24 +17808,24 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "24": {
+    "26": {
       "children": [],
-      "id": 24,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 25,
       "props": {},
       "text": "Effect 29999",
       "type": "text",
     },
-    "25": {
+    "27": {
       "children": [
-        26,
+        28,
       ],
-      "id": 25,
+      "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 25,
       "props": {
         "style": {
           "fontWeight": {
@@ -16920,9 +17836,19 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "26": {
+    "28": {
       "children": [],
-      "id": 26,
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "29": {
+      "children": [],
+      "id": 29,
       "input": null,
       "listeners": {},
       "parent": 25,
@@ -16930,32 +17856,53 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "27": {
+    "3": {
       "children": [],
-      "id": 27,
+      "id": 3,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 2,
       "props": {},
-      "text": "",
+      "text": "Effects",
       "type": "text",
     },
-    "28": {
-      "children": [],
-      "id": 28,
-      "input": null,
-      "listeners": {},
-      "parent": 22,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "29": {
+    "30": {
       "children": [
-        30,
-        35,
+        31,
       ],
-      "id": 29,
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 24,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "31": {
+      "children": [],
+      "id": 31,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "32": {
+      "children": [
+        33,
+        38,
+      ],
+      "id": 32,
       "input": null,
       "listeners": {
         "click": {
@@ -17014,18 +17961,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -17039,26 +17990,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "3": {
-      "children": [],
-      "id": 3,
-      "input": null,
-      "listeners": {},
-      "parent": 2,
-      "props": {},
-      "text": "Effects",
-      "type": "text",
-    },
-    "30": {
+    "33": {
       "children": [
-        31,
-        32,
         34,
+        35,
+        37,
       ],
-      "id": 30,
+      "id": 33,
       "input": null,
       "listeners": {},
-      "parent": 29,
+      "parent": 32,
       "props": {
         "style": {
           "color": {
@@ -17076,24 +18017,24 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "31": {
+    "34": {
       "children": [],
-      "id": 31,
+      "id": 34,
       "input": null,
       "listeners": {},
-      "parent": 30,
+      "parent": 33,
       "props": {},
       "text": "Effect 30000",
       "type": "text",
     },
-    "32": {
+    "35": {
       "children": [
-        33,
+        36,
       ],
-      "id": 32,
+      "id": 35,
       "input": null,
       "listeners": {},
-      "parent": 30,
+      "parent": 33,
       "props": {
         "style": {
           "fontWeight": {
@@ -17104,42 +18045,94 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "33": {
+    "36": {
       "children": [],
-      "id": 33,
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 33,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "38": {
+      "children": [
+        39,
+      ],
+      "id": 38,
       "input": null,
       "listeners": {},
       "parent": 32,
-      "props": {},
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
       "text": "",
-      "type": "text",
+      "type": "div",
     },
-    "34": {
+    "39": {
       "children": [],
-      "id": 34,
+      "id": 39,
       "input": null,
       "listeners": {},
-      "parent": 30,
+      "parent": 38,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "35": {
-      "children": [],
-      "id": 35,
-      "input": null,
-      "listeners": {},
-      "parent": 29,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "36": {
+    "4": {
       "children": [
-        37,
-        42,
+        5,
+        6,
       ],
-      "id": 36,
+      "id": 4,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+          "height": {
+            "token": "metrics.row",
+          },
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+          "paddingRight": {
+            "token": "metrics.inset",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "40": {
+      "children": [
+        41,
+        46,
+      ],
+      "id": 40,
       "input": null,
       "listeners": {
         "click": {
@@ -17198,18 +18191,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -17223,16 +18220,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "37": {
+    "41": {
       "children": [
-        38,
-        39,
-        41,
+        42,
+        43,
+        45,
       ],
-      "id": 37,
+      "id": 41,
       "input": null,
       "listeners": {},
-      "parent": 36,
+      "parent": 40,
       "props": {
         "style": {
           "color": {
@@ -17250,24 +18247,24 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "38": {
+    "42": {
       "children": [],
-      "id": 38,
+      "id": 42,
       "input": null,
       "listeners": {},
-      "parent": 37,
+      "parent": 41,
       "props": {},
       "text": "Effect 30001",
       "type": "text",
     },
-    "39": {
+    "43": {
       "children": [
-        40,
+        44,
       ],
-      "id": 39,
+      "id": 43,
       "input": null,
       "listeners": {},
-      "parent": 37,
+      "parent": 41,
       "props": {
         "style": {
           "fontWeight": {
@@ -17278,15 +18275,34 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "text",
     },
-    "4": {
-      "children": [
-        5,
-        6,
-      ],
-      "id": 4,
+    "44": {
+      "children": [],
+      "id": 44,
       "input": null,
       "listeners": {},
-      "parent": 1,
+      "parent": 43,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 41,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "46": {
+      "children": [
+        47,
+      ],
+      "id": 46,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
       "props": {
         "style": {
           "alignItems": "center",
@@ -17295,56 +18311,27 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "gap": {
             "token": "metrics.gap",
           },
-          "height": {
-            "token": "metrics.row",
-          },
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-          "paddingRight": {
-            "token": "metrics.inset",
-          },
         },
       },
       "text": "",
       "type": "div",
     },
-    "40": {
+    "47": {
       "children": [],
-      "id": 40,
+      "id": 47,
       "input": null,
       "listeners": {},
-      "parent": 39,
+      "parent": 46,
       "props": {},
       "text": "",
       "type": "text",
     },
-    "41": {
-      "children": [],
-      "id": 41,
-      "input": null,
-      "listeners": {},
-      "parent": 37,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "42": {
-      "children": [],
-      "id": 42,
-      "input": null,
-      "listeners": {},
-      "parent": 36,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "43": {
+    "48": {
       "children": [
-        44,
         49,
+        54,
       ],
-      "id": 43,
+      "id": 48,
       "input": null,
       "listeners": {
         "click": {
@@ -17403,18 +18390,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },
@@ -17428,16 +18419,16 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "div",
     },
-    "44": {
+    "49": {
       "children": [
-        45,
-        46,
-        48,
+        50,
+        51,
+        53,
       ],
-      "id": 44,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 48,
       "props": {
         "style": {
           "color": {
@@ -17452,64 +18443,6 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "title": "Effect 30002",
       },
-      "text": "",
-      "type": "text",
-    },
-    "45": {
-      "children": [],
-      "id": 45,
-      "input": null,
-      "listeners": {},
-      "parent": 44,
-      "props": {},
-      "text": "Effect 30002",
-      "type": "text",
-    },
-    "46": {
-      "children": [
-        47,
-      ],
-      "id": 46,
-      "input": null,
-      "listeners": {},
-      "parent": 44,
-      "props": {
-        "style": {
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "47": {
-      "children": [],
-      "id": 47,
-      "input": null,
-      "listeners": {},
-      "parent": 46,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "48": {
-      "children": [],
-      "id": 48,
-      "input": null,
-      "listeners": {},
-      "parent": 44,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
-    "49": {
-      "children": [],
-      "id": 49,
-      "input": null,
-      "listeners": {},
-      "parent": 43,
-      "props": {},
       "text": "",
       "type": "text",
     },
@@ -17593,6 +18526,85 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       "text": "",
       "type": "input",
     },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {},
+      "text": "Effect 30002",
+      "type": "text",
+    },
+    "51": {
+      "children": [
+        52,
+      ],
+      "id": 51,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {
+        "style": {
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "52": {
+      "children": [],
+      "id": 52,
+      "input": null,
+      "listeners": {},
+      "parent": 51,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "53": {
+      "children": [],
+      "id": 53,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "54": {
+      "children": [
+        55,
+      ],
+      "id": 54,
+      "input": null,
+      "listeners": {},
+      "parent": 48,
+      "props": {
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "55": {
+      "children": [],
+      "id": 55,
+      "input": null,
+      "listeners": {},
+      "parent": 54,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
     "6": {
       "children": [],
       "id": 6,
@@ -17664,11 +18676,11 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
     "7": {
       "children": [
         8,
-        15,
-        22,
-        29,
-        36,
-        43,
+        16,
+        24,
+        32,
+        40,
+        48,
       ],
       "id": 7,
       "input": null,
@@ -17805,18 +18817,22 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         },
         "role": "treeitem",
         "style": {
+          "alignItems": "center",
           "borderRadius": {
             "token": "metrics.control_radius",
           },
           "color": {
             "token": "colors.text",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
             "token": "typography.body",
           },
           "height": {
             "token": "metrics.row",
           },
+          "justifyContent": "space-between",
           "minHeight": {
             "token": "metrics.hit",
           },

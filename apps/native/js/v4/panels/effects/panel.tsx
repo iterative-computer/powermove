@@ -35,12 +35,9 @@ export function EffectsPanel({
   const active = model.scopes().find((scope) => scope.value === model.scope)!;
   const focus = (row: Row) =>
     model.focus === "list" && model.focused === row.key;
-  // DESIGN-TODO(opus): specify the preset kind's spoken label; effect wording is
-  // specified, but presets must not be announced as effects. Neutral label below.
+  // Design review 2026-11-01: presets speak their kind like effects do.
   const itemLabel = (row: Extract<Row, { type: "item" }>) =>
-    row.item.kind === "effect"
-      ? `${row.item.label}, effect, ${row.item.group}`
-      : row.item.label;
+    `${row.item.label}, ${row.item.kind === "effect" ? "effect" : "preset"}, ${row.item.group}`;
   return (
     <div
       id={ids.panel}
@@ -159,6 +156,7 @@ export function EffectsPanel({
           <EmptyState
             label="No Effects"
             explanation="Installed effects and presets appear here."
+            attr={{ symbol: "wand.and.rays" }}
             action={null}
           />
         ) : window.count === 0 && !model.searching ? (
@@ -247,7 +245,13 @@ export function EffectsPanel({
                   model.focused = row.key;
                   model.setFocus("list");
                 }}
-                style={style}
+                style={{
+                  ...style,
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
                 metadata={{
                   item: item.id,
                   kind: item.kind,
@@ -276,42 +280,60 @@ export function EffectsPanel({
                   </text>
                   {parts.after}
                 </text>
-                {model.query.trim() && (
-                  <text
-                    style={{
-                      fontSize: token("typography.minimum"),
-                      color: token("colors.muted"),
-                    }}
-                  >
-                    {item.group}
-                  </text>
-                )}
-                {showAdd && !item.failed && (
-                  <ToolbarItem
-                    id={ids.add(row.key)}
-                    label={`Add ${item.label}`}
-                    title={
-                      model.target
-                        ? `Add ${item.label}`
-                        : "Select a layer first"
-                    }
-                    disabled={!model.target}
-                    tabIndex={-1}
-                    style={{
-                      width: token("metrics.hit"),
-                      height: token("metrics.hit"),
-                      color: token(
-                        model.target ? "colors.secondary" : "colors.muted",
-                      ),
-                    }}
-                    onDoubleClick={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if ((event.clickCount ?? 1) <= 1)
-                        void model.apply(item.id);
-                    }}
-                  />
-                )}
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: token("metrics.gap"),
+                  }}
+                >
+                  {item.failed && (
+                    <text
+                      attr={{ symbol: "exclamationmark.triangle.fill" }}
+                      style={{
+                        color: token("colors.warning"),
+                        fontSize: token("typography.body"),
+                      }}
+                    />
+                  )}
+                  {model.query.trim() && (
+                    <text
+                      style={{
+                        fontSize: token("typography.minimum"),
+                        color: token("colors.muted"),
+                      }}
+                    >
+                      {item.group}
+                    </text>
+                  )}
+                  {showAdd && !item.failed && (
+                    <ToolbarItem
+                      id={ids.add(row.key)}
+                      label={`Add ${item.label}`}
+                      title={
+                        model.target
+                          ? `Add ${item.label}`
+                          : "Select a layer first"
+                      }
+                      disabled={!model.target}
+                      tabIndex={-1}
+                      style={{
+                        width: token("metrics.hit"),
+                        height: token("metrics.hit"),
+                        color: token(
+                          model.target ? "colors.secondary" : "colors.muted",
+                        ),
+                      }}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if ((event.clickCount ?? 1) <= 1)
+                          void model.apply(item.id);
+                      }}
+                    />
+                  )}
+                </div>
               </TreeItem>
             );
           })
