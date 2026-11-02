@@ -208,6 +208,17 @@ substitute literals — it blocks on the token.
 | `metrics.composer_max_lines` | 10 | Agent composer grows to this many lines, then scrolls |
 | `colors.media_badge` | `#000000` at 55 % alpha | Fill of badges drawn over media (duration, offline) — always dark, see language §4 *Over the image* |
 | `colors.viewer` (light **change**) | `#E4E4E4` (was `#E6E6EA`) | Viewer surround is pure neutral in light too, so footage reads true (language §4) |
+| `metrics.group_radius` | 10 (= `control_radius + inner_radius`) | Settings grouped-form card corner (reviews/na-cloud-p-settings.md) |
+| `metrics.form_row` | 40 (= `row + inset`) | Minimum Settings row height |
+| `metrics.section_gap` | 40 (= 2 × `sheet_inset`) | Space above each Settings section after the first |
+| `metrics.gizmo_handle` | 7 (= `keyframe − 2`) | Transform handle and path vertex square (viewer-chrome.md §2) |
+| `metrics.gizmo_keyline` | 1 | Gizmo stroke and keyline width over the image |
+| `metrics.rotation_stem` | 18 | Rotation handle stem length |
+| `metrics.anchor_mark` | 11 | Anchor point crosshair circle |
+| `metrics.tangent_end` | 6 | Bézier tangent end circle |
+| `metrics.checker` | 8 | Transparency checkerboard square |
+| `metrics.pasteboard_opacity` | 0.35 | Selected layers drawn outside the frame (opacity) |
+| `motion.overlay_idle` | 2.0 | Still time before the Focus overlay capsule fades (s) |
 
 ---
 

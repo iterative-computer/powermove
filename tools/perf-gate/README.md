@@ -150,3 +150,146 @@ identity must match before a seek, edit or open observation is accepted.
 presentation; latency/A-V/display distributions still require positive display
 stamps. The detailed service pipeline is diagnostic and does not establish total
 GPUI/main-thread frame work.
+
+## Thirty-pair P1 runner (2026-11-01)
+
+`run.sh`, `driver.py` and `native.py` remain consumers of the exploratory
+collectors. The new acceptance entry point is:
+
+```sh
+PM_PERF_GATE_CONFIG=/tmp/pm-p1-config.json tools/perf-gate/run-gate.sh p1
+```
+
+It writes a table (`report.md`), raw attempts, per-side logs, binary SHA-256s,
+conditions and distributions (`report.json`) into a new private `/tmp/pm-gate-*`
+directory. `--output` accepts only a new directory under the canonical temporary
+root. Existing reports and source projects are never overwritten. Each side has
+its own writable project copy and retained temporary profile. No application is
+built, installed, published, or deleted by this entry point. Node/Playwright are
+reference-test tools only; they do not enter the native application.
+
+Prepare public fixtures and build both binaries **before** the timing session.
+The frozen reference must be a clean v1.2.0 checkout, with Playwright installed.
+Keep media links absolute and use the same original media on both sides.
+The shape project must actually be 60 fps; the video project must use 4K
+long-GOP media; the audio project must have device-playable audio. Do not use
+personal projects or profiles. Manifest preparation runs no app:
+
+```sh
+python3 tools/perf-gate/configure.py \
+  --native /tmp/pm-build/powermove-native \
+  --electron /tmp/Powermove.app \
+  --reference /tmp/pm-ref-v1.2.0 \
+  --shape /tmp/public-shapes-60.json \
+  --video /tmp/public-long-gop.json --video-media /tmp/public-4k.mp4 \
+  --audio /tmp/public-audio.json --hz 120 --rig xdr-120 \
+  --output /tmp/pm-p1-config.json
+```
+
+The Electron path can be an app bundle or an executable. For an Electron runtime
+instead of a packaged Powermove app, add
+`--electron-arg /tmp/pm-ref-v1.2.0/apps/desktop`. Native startup must have the
+usual FFmpeg environment already configured. The runner hashes the actual
+executables and verifies the reference commit; the operator must supply the
+unmodified build from that reference, not infer its provenance from a filename.
+
+The helper defaults to **uncertified** conditions. `--certify-rig` and
+`--certify-quality --quality-note '…'` record independently verified hardware
+and matched brightness, display/HDR, resolution and quality. Pin refresh with
+the existing display tooling before timing; this runner only observes it.
+The `base-60` rig is the cohort's common base M-series machine. A build Mac at
+60 Hz is `stand-in`, explicitly ineligible for gate acceptance. A 120 Hz XDR
+Apple-silicon MacBook Pro can fill `xdr-120` per the recorded owner adjustment.
+Use `--allow-app <bundle-id>` only for deliberately reviewed system UI processes
+such as Finder; the allowed list is retained in the report. No other application
+is stopped. An existing instance of the configured Powermove executable remains
+foreign; only the measured executable in the runner-owned process group is exempt.
+
+All ten rows request **30 independent native/Electron pairs**, including 30 full
+60-second intervals for each playback, playback-cost and A/V row. Order alternates
+AB/BA. Both sides use the same scenario hash, edit values, cached seeks and seeded
+random-seek target. Each pair has the existing inode-owned GUI lock and nine-minute
+alarm; each adapter has a configurable bounded timeout (default 180 seconds).
+No timeout removes earlier observations. A broken adapter stops repetitions for
+that row, rather than launching 30 times into the same failure.
+
+Quiet checks run before, during (every 0.5 seconds) and after each side. Every
+1/5/15-minute load must be at most 0.5 per logical CPU; the threshold may be
+tightened. Thermal must be nominal, AC and the unlocked session must be known,
+disk must retain 8 GiB, no build may run, and the GUI-app inventory must contain
+only the measured app and explicit exemptions. The single display's mode,
+resolution, refresh, OS build and CPU count must stay fixed against the baseline.
+Unknown thermal/refresh/inventory is a rejection. The Swift condition probe is
+compiled once before the quiet window. It never changes a setting or requests
+elevation.
+
+Condition-invalid **whole pairs** are retained and excluded. Bounded replacements
+default to at most 45 attempts to obtain 30 quiet pairs per row. Timing outliers
+use a far Tukey fence (3 IQR, median halves), are flagged by zero-based observation
+index and **never removed** from nearest-rank p50/p95 or the gate verdict. A slow
+valid pair is never replaced because of its time. Paired comparisons intersect
+by pair ID and metric; independently available side distributions remain visible
+even when their paired reference is absent.
+
+The owner endpoint decision replaces the old cached/edit physical absolute
+bound: report `own_share_ms` (accepted input through GPU completion) and
+`on_screen_ms` (the same input through matching `presentedTime`). Own share must
+have p95 ≤9.333 ms; native on-screen p50 and p95 must each beat Electron at the
+same endpoint. This runner conservatively retains the explicit 9.333 ms own-share
+ceiling at both refresh rates. No compositor-floor subtraction is performed.
+The edit row also requires ≤4 ms maximum main-thread frame work and shell repaint.
+All other clauses remain in `budgets.py`; every required clause and endpoint
+must be available on all 30 pairs. FAIL takes precedence over INCOMPLETE for a
+known budget breach. Missing is displayed as `—`, never zero.
+
+### Adapter contract and remaining instrumentation
+
+`collect.py` is the bundled adapter. It launches the configured apps with private
+profiles and drives the existing PM/kernel commands. Native reports both latency
+endpoints when available, retaining GPU completion even if the physical callback
+is missing. Electron reports fence completion separately from rAF and explicitly
+leaves `on_screen_ms` missing. rAF cannot attest physical presentation. Frame
+time/revision/viewer identity checks remain in the existing collectors.
+
+The bundled collector cannot yet certify any row requiring unavailable streams:
+first interactive launch, matched open boundaries/main stalls, Electron physical
+presentation, verified Electron cache hits, random-seek preview, a complete
+physical playback census, total frame work, app-attributed GPU/energy, paired
+device A/V, shell repaint, extension wakeups and deduplicated CPU/GPU allocations.
+Full native service traces are retained as diagnostics. This tooling **does not
+implement or invent those app/OS instrument endpoints**. Mac instrumentation can
+replace the adapter via the manifest's `adapter: ["/absolute/executable", "arg"]`.
+The same adapter is invoked for both sides, one fresh process per side/row/pair.
+
+It receives one JSON object on stdin: `version:1`, `row`, `side`, `index`, `hz`,
+`project` (private writable copy), `scenario` (including prepared source SHA-256),
+`apps`, `reference`, `electron_args`, and `scratch`. It returns exactly one JSON
+object on stdout, with matching `version`, `row`, `side`, `index`,
+`scenario_sha256`, `metrics:{…}`, `evidence:{…}` and optional `diagnostics`.
+Diagnostics belong on stderr or under `scratch`. Spawn app children in the
+adapter's inherited process group so the runner can exempt/reap only its own
+children. A response with the wrong scenario/identity or nonfinite JSON is
+rejected. `evidence.py` lists the exact metric and endpoint/census attestations
+per row; an attestation must describe measured evidence, never an assumption.
+Random media is independently checked with ffprobe (codec/dimensions/keyframe
+intervals) before app startup. Unsupported/missing ffprobe blocks that workload;
+no codec fallback substitutes a different benchmark.
+
+### Linux verification
+
+Python 3.9+ and Node 22.18+; no app, native library or ffprobe build is needed:
+
+```sh
+python3 -m unittest discover -s tools/perf-gate -p 'test_*.py' -v
+node --check tools/perf-gate/electron.mjs
+sh -n tools/perf-gate/run-gate.sh
+tools/perf-gate/run-gate.sh p1 --replay tools/perf-gate/fixtures/recorded-p1.json
+```
+
+Replay intentionally exits **2** and labels the report `REPLAY ONLY`. The compact
+recording contains **synthetic protocol responses**, not Mac measurements; its
+row PASS values only exercise the policy. Three existing Darwin counter/clock
+tests skip with explicit reasons on Linux. The Node test uses the vendored
+Playwright/PM protocol double; the ffprobe tests inject recorded responses and
+do not depend on an installed codec build. Live collection on Linux prints an
+INCOMPLETE table and exits 2 before launching anything.
