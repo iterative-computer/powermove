@@ -13,8 +13,11 @@ p.add_argument('--legacy', action='store_true')
 p.add_argument('--text', action='store_true')
 p.add_argument('--rotated', action='store_true', help='Reproduce the rotated-video capability refusal with generated media.')
 p.add_argument('--offline', action='store_true', help='Reproduce the missing-original refusal without any real media.')
+p.add_argument('--effect', choices=('glow','shadow'), help='Reproduce a native effect requiring the unavailable GLSL fallback.')
 args = p.parse_args()
-if args.rotated or args.offline:
+if args.effect:
+    args.text = True
+if args.rotated or args.offline or args.effect:
     args.worker_only = True
 with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
     profile = Path(directory)
@@ -42,6 +45,8 @@ with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
                 raise SystemExit('FFmpeg did not attach a display rotation')
         project['assets']={'synthetic-media':{'id':'synthetic-media','name':'Synthetic media','kind':'video','w':320,'h':180,'dur':1,'persisted':True,**({'sourcePath':str(source)} if args.rotated else {})}}
         project['layers']=[{'id':'clip','type':'video','name':'Synthetic clip','from':0,'dur':1,'on':True,'d':{'asset':'synthetic-media','trim':0,'speed':1,'w':320,'h':180,'fit':'cover','embeddedAudio':False},'p':{'scale.x':{'v':100,'kf':[],'expr':None},'scale.y':{'v':100,'kf':[],'expr':None},'opacity':{'v':100,'kf':[],'expr':None}},'fx':[],'masks':[]}]
+    if args.effect:
+        project['layers'][0]['fx']=[{'id':'synthetic-effect','type':args.effect,'on':True,'p':{}}]
     (profile / 'store/project.synthetic.json').write_text(json.dumps(project))
     (profile / 'store/projects.json').write_text(json.dumps([{'id': 'synthetic', 'name': 'Synthetic'}]))
     if args.worker_only:
@@ -60,10 +65,10 @@ with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
         (work/'spec.json').write_text(json.dumps({'id':'0000000000000001','library':'synthetic'}))
         subprocess.run([str(args.binary),'project',str(root),str(work/'spec.json'),str(work)],check=True)
         result=json.loads((work/'result.json').read_text())
-        if args.rotated or args.offline:
-            expected='rotated video' if args.rotated else 'offline_originals'
-            log=work/'render.private.log'
-            if not log.exists() or expected not in log.read_text():
+        if args.rotated or args.offline or args.effect:
+            expected='GLSL fallback runner' if args.effect else 'rotated video' if args.rotated else 'offline_originals'
+            logs=[work/(stage+'.private.log') for stage in ('render','mp4','prores')]
+            if not any(log.exists() and expected in log.read_text() for log in logs):
                 raise SystemExit('Expected capability refusal was not reproduced')
             print('Expected synthetic refusal reproduced; no owner media used.')
             raise SystemExit(0)

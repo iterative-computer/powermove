@@ -58,11 +58,19 @@ def inventory(path):
             out[str(p.relative_to(path))] = (s.st_size, s.st_mtime_ns, digest(p))
     return out
 
+def source_stat(path):
+    result=path.stat()
+    # Darwin sys/stat.h: SF_DATALESS. Reading a placeholder may hydrate the
+    # original through a system daemon, outside our batch's disk controls.
+    if getattr(result,'st_flags',0) & 0x40000000:
+        raise RuntimeError('source_not_local')
+    return result
+
 def clone(src, dst):
     space()
     if src.is_symlink() or not src.is_file():
         raise RuntimeError('not_regular')
-    before = src.stat()
+    before = source_stat(src)
     if shutil.disk_usage('/tmp').free - before.st_size < FLOOR:
         raise DiskFloor('disk_floor_payload_reserve')
     dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -129,6 +137,7 @@ def classify(text):
     # Never copy arbitrary error strings into the public report.
     for needle, code in (
         ('AsCopy(ChangedOnDisk)', 'changed_file_association'), ('rotated video', 'rotated_video_capability'), ('no definition for effect', 'dynamic_effect_dependency'), ('no definition for transition', 'dynamic_transition_dependency'), ('roundtrip_mismatch', 'roundtrip_mismatch'), ('offline', 'offline_media'),
+        ('GLSL fallback runner', 'glsl_fallback_capability'),
         ('history', 'history'), ('font', 'font'), ('shader', 'shader'),
         ('frame_timeout', 'frame_timeout'), ('decode_failed', 'decode_failed'),
         ('playhead_did_not_advance', 'playhead_stalled'), ('MCP rejected', 'mcp_rejected'),
@@ -144,7 +153,45 @@ def gate_pass(summary):
             and summary.get('discovered') == summary.get('full_discovered')
             and not summary.get('mixed_provenance', False)
             and not summary.get('setup_failures') and bool(summary.get('projects'))
-            and all(all(v == 'pass' for v in p['stages'].values()) for p in summary['projects']))
+            and all(not p.get('capture_classes') and all(v == 'pass' for v in p['stages'].values()) for p in summary['projects']))
+
+def archive_logs(batch, destination):
+    # Rechecking an ID replaces its diagnostics; do not mix earlier tool runs.
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, mode=0o700)
+    for log in batch.glob('*.private.log'):
+        shutil.copyfile(log, destination / log.name)
+
+def interrupted_result(public, batch, used, capture_errors):
+    try:
+        state=json.loads((batch/'result.json').read_text())
+    except (OSError,ValueError):
+        state={}
+    public['stages']={s:state.get(s) if state.get(s) in ('pass','fail') else 'blocked' for s in STAGES}
+    for stage in STAGES:
+        log=batch/(stage+'.private.log')
+        if public['stages'][stage]=='fail' and log.exists():
+            code=classify(log.read_text(errors='replace'))
+            if code=='disk_floor':
+                public['stages'][stage]='blocked'
+            public['failures'].append({'stage':stage,'class':code,
+                'category':'perf' if code in ('disk_floor','timeout','frame_timeout') else 'export' if stage in ('mp4','prores') else 'render' if stage in ('play','scrub') else stage})
+    unfinished=[s for s in STAGES if public['stages'][s]=='blocked']
+    stage=state.get('running')
+    if stage not in unfinished:
+        stage=unfinished[0] if unfinished else None
+    if stage:
+        public['failures'].append({'stage':stage,'class':'disk_floor','category':'perf'})
+    if capture_errors:
+        public['capture_classes']=sorted(set(capture_errors))
+        for failure in public['failures']:
+            if failure['class']=='offline_media':
+                public['stages'][failure['stage']]='blocked'
+    if state.get('open_mode')=='as-copy':
+        public['open_mode']='as-copy'
+    public['batch_bytes']=used
+    return public
 
 class BatchLimit(RuntimeError):
     pass
@@ -297,7 +344,7 @@ def run(args):
                     try:
                         info = subprocess.run([sys.executable, __file__, '--stat-one', src], capture_output=True, text=True, timeout=5)
                         if info.returncode:
-                            raise BatchLimit('source_unavailable')
+                            raise BatchLimit('source_not_local' if 'source_not_local' in info.stderr else 'source_unavailable')
                         size = int(info.stdout)
                     except (subprocess.TimeoutExpired, ValueError):
                         raise BatchLimit('source_probe_timeout')
@@ -418,11 +465,16 @@ def run(args):
                 # Keep only private error logs for brief triage; batch media is deleted.
                 failures = ROOT / 'failures' / row['id']
                 if public['failures']:
-                    failures.mkdir(parents=True, mode=0o700)
-                    for log in batch.glob('*.private.log'):
-                        shutil.copyfile(log, failures / log.name)
+                    archive_logs(batch, failures)
                 report()
                 print(json.dumps({'completed': len(summary['projects']), 'p2': len(summary['p2']), 'discovered': len(rows), 'id': row['id'], 'stages': public['stages'], 'batch_bytes': used}), flush=True)
+            except DiskFloor:
+                # Keep completed stage evidence before deleting the stopped batch.
+                # A later resume can cover other projects instead of retrying the
+                # same resource-heavy project indefinitely.
+                summary['projects'].append(interrupted_result(public,batch,used,capture_errors))
+                report()
+                raise
             finally:
                 if PAUSE.exists() or isinstance(sys.exc_info()[1],LocalPause):
                     args.retain_for_debug=True
@@ -443,7 +495,7 @@ def run(args):
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == '--stat-one':
-        print(os.stat(sys.argv[2]).st_size)
+        print(source_stat(Path(sys.argv[2])).st_size)
         return
     if len(sys.argv) == 4 and sys.argv[1] == '--clone-one':
         clone(Path(sys.argv[2]), Path(sys.argv[3]))

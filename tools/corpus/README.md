@@ -46,6 +46,9 @@ A changed source, copy timeout, missing original or oversized project is recorde
 explicitly. Capture limitations block dependent stages; they are not proof of an
 engine defect. Exact captured IndexedDB identities are preferred over stale host paths; host
 records remain available when the snapshot has no matching record.
+macOS dataless placeholders are refused before payload reads, so the runner does
+not ask a system daemon to hydrate originals outside the batch's disk controls.
+Their dependency status remains unknown until a local source is available.
 
 Kernel safe-copy open decisions are accepted within the authorized private
 corpus. Pending recovery choices are still refused.
@@ -89,6 +92,9 @@ is active; the operator controls all screen-dependent checks.
 
 The default removes the remaining metadata/log root even on ordinary failure.
 Pause and disk-floor stops preserve it for a later resume.
+Disk stops retain completed stage checkpoints and mark unfinished work blocked;
+resuming recorded results continues to other entries. Use `--only-ids` for a
+later resource-blocked recheck. Pause stops preserve the unfinished batch itself.
 `--retain-for-debug` temporarily retains metadata and private error logs, **never
 completed batch media**; remove `/tmp/pm-corpus` when done. An existing root is
 refused unless `--resume-snapshot` explicitly selects this user's owned snapshot
@@ -122,6 +128,8 @@ python3 tools/corpus/synthetic.py
 python3 tools/corpus/synthetic.py --worker-only --legacy --text
 python3 tools/corpus/synthetic.py --rotated
 python3 tools/corpus/synthetic.py --offline
+python3 tools/corpus/synthetic.py --effect glow
+python3 tools/corpus/synthetic.py --effect shadow
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_runner.py
 # From apps/native, with engine/env.sh sourced and the shared target set:
 flock /tmp/pm-build.lock cargo test -p pm-native-migrate -p pm-first-launch -p pm-kernel --offline

@@ -49,6 +49,19 @@ class CorpusSafety(unittest.TestCase):
             copy.write_bytes(b'private edit')
             self.assertEqual(source.read_bytes(),b'synthetic cross-volume payload')
 
+    def test_dataless_source_is_refused_before_payload_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            source=root/'placeholder'
+            source.write_bytes(b'synthetic original')
+            original=source.stat()
+            metadata=SimpleNamespace(st_size=original.st_size,st_mode=original.st_mode,st_flags=0x40000000)
+            with patch.object(corpus,'space'),patch.object(Path,'stat',return_value=metadata),patch.object(corpus.ctypes,'CDLL',side_effect=AssertionError('payload copy attempted')):
+                with self.assertRaisesRegex(RuntimeError,'source_not_local'):
+                    corpus.clone(source,root/'copy')
+            self.assertFalse((root/'copy').exists())
+            self.assertEqual(source.read_bytes(),b'synthetic original')
+
     def test_source_and_temporary_root_cannot_overlap(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as directory:
@@ -66,6 +79,9 @@ class CorpusSafety(unittest.TestCase):
         self.assertFalse(corpus.gate_pass(summary))
         summary['full_discovered']=1
         self.assertTrue(corpus.gate_pass(summary))
+        summary['projects'][0]['capture_classes']=['source_not_local']
+        self.assertFalse(corpus.gate_pass(summary))
+        summary['projects'][0].pop('capture_classes')
         summary['mixed_provenance']=True
         self.assertFalse(corpus.gate_pass(summary))
         summary['mixed_provenance']=False
@@ -124,7 +140,34 @@ class CorpusSafety(unittest.TestCase):
         private = 'PRIVATE_SYNTHETIC_NAME /private/media/synthetic.mov'
         self.assertEqual(corpus.classify(private), 'unclassified')
         self.assertEqual(corpus.classify('offline ' + private), 'offline_media')
+        self.assertEqual(corpus.classify('shader needs the GLSL fallback runner'),'glsl_fallback_capability')
         self.assertNotIn(private, corpus.classify('export ' + private))
+
+    def test_recheck_replaces_prior_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            batch,archive=root/'batch',root/'archive'
+            batch.mkdir()
+            (batch/'render.private.log').write_text('synthetic first attempt')
+            corpus.archive_logs(batch,archive)
+            (archive/'stale.private.log').write_text('earlier tool version')
+            (batch/'render.private.log').write_text('synthetic recheck')
+            corpus.archive_logs(batch,archive)
+            self.assertEqual((archive/'render.private.log').read_text(),'synthetic recheck')
+            self.assertFalse((archive/'stale.private.log').exists())
+
+    def test_disk_stop_keeps_completed_stage_evidence(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            batch=Path(directory)
+            (batch/'result.json').write_text(json.dumps({'open':'pass','render':'fail','audio':'pass','running':'edit'}))
+            (batch/'render.private.log').write_text('synthetic glow needs the GLSL fallback runner')
+            result=corpus.interrupted_result({'id':'0000000000000001','failures':[]},batch,123,[])
+            self.assertEqual(result['stages']['open'],'pass')
+            self.assertEqual(result['stages']['audio'],'pass')
+            self.assertEqual(result['stages']['render'],'fail')
+            self.assertEqual(result['stages']['edit'],'blocked')
+            self.assertEqual([f['class'] for f in result['failures']],['glsl_fallback_capability','disk_floor'])
 
     def test_worker_timeout_is_bounded_and_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
