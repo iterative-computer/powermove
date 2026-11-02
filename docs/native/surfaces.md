@@ -103,29 +103,29 @@ Design references below are relative to `docs/native/design/`:
 | S018 P1 | New Project dialog, defaults and creation errors | `R/legacy/app.ts`; `R/legacy/ui/project-settings.ts` | No dedicated spec. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S018](design/surfaces/library.md). | `pm-kernel::{session,commands::library}` creates projects; dialog state/host missing. **spec+model** **Library lane 2026-11-01:** live form validation, inherited exact format/timecode, uniqued name, stale-owner and retry state wired to kernel creation; AppKit sheet/colour-popover host and missing design tokens pending. |
 | S019 P1 | Rename/duplicate project, project-card/context actions | `R/legacy/ui/projects.ts`; `R/legacy/core/projects.ts` | Services review has library vocabulary/data only. **Specified (Opus, 2026-11-01):** [surfaces/library.md §S019](design/surfaces/library.md). | `pm-services::library::LibraryAction`; `pm-kernel::session`. **spec+model** **Library lane 2026-11-01:** in-place rename/duplicate reducer and kernel open-session rename/duplicate tested; unopened-slot rename API and native editable cell/title-menu host pending. |
 | S020 P1 | Open/Save/Save As `.pmv` system picker; import/export file and directory pickers | `M/save.ts`; `M/render-encoder.ts`; `R/legacy/app.ts` | Export specifies export destination picker; no complete project open/save picker policy. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S020](design/surfaces/documents.md). | `pm-kernel::{session,project_io}`; `pm-services::entrypoints`; platform picker adapter required. **spec+model** |
-| S021 P1 | New Composition / Composition Settings dialog; size/FPS/duration/background | `R/legacy/ui/compositions.ts`; `R/legacy/ui/project-settings.ts`; `E/inspector/CompositionSection.svelte` | Inspector and Settings cover inline fields; no complete standalone dialog spec. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S021](design/surfaces/dialogs.md). | `pm-kernel::commands::comps`; `pm-panel-inspector` composition bindings. **spec+model** |
-| S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
+| S021 P1 | New Composition / Composition Settings dialog; size/FPS/duration/background | `R/legacy/ui/compositions.ts`; `R/legacy/ui/project-settings.ts`; `E/inspector/CompositionSection.svelte` | Inspector and Settings cover inline fields; no complete standalone dialog spec. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S021](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** exact-copy/validation/keyboard descriptors and guarded kernel settings/create adapters tested; AppKit form renderer awaits the missing sheet metric tokens and shell binding. | `pm-kernel::commands::comps`; `pm-panel-inspector` composition bindings. **spec+model** |
+| S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** pre-compose states and delete NSAlert adapter added; kernel `CompCommand::Precompose` still returns `NotImplemented` (including duration/open-after integration). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
 | S023 P1 | Viewer canvas/chrome: zoom/fit/custom zoom, quality, safe areas, controls, focus/fullscreen, return-to-composition and offscreen recovery | `E/viewer/viewer.ts`; `E/viewer/index.ts`; `R/legacy/core/preview-resolution.ts` | Viewer and Viewer review specify chrome, quality and recovery banners. | `pm-panel-viewerchrome::{Navigation,ViewModel,Controller}`; `pm-engine-service` presentation. Physical EDR/input/performance gates open. **spec+model** |
 | S024 P1 | Source-preview viewer: image/audio/video, scrub/play/time/range, close and drag source | `E/viewer/source-preview.ts`; `R/panels/AssetsPanel.svelte` | Viewer and Media specify source mode; decoder-error states were missing. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S024](design/surfaces/media.md). | `pm-panel-media::preview`; `pm-panel-viewerchrome::source`; engine independent source viewers. Host/media leases pending. **spec+model** (partial) **Media lane, 2026-11-01:** Rust source-failure states plus v4 `surfaces/media/SourceError`, exact copy/actions and wire projection; keep-last-frame/video flags. Engine/source lease and viewer-banner installation remain. |
 | S025 P1 | On-canvas selection, transform/anchor/rotation, shape/pen/mask editing, text caret/selection/paragraph box and gizmos | `E/viewer/viewer.ts`; `E/viewer/path-editing.ts`; `E/viewer/text-editor.ts`; `E/viewer/text-geometry.ts` | Viewer covers gizmo appearance; Inspector covers properties. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S025](design/surfaces/editing.md). | Viewer model supplies selection/overlay plans; `pm-kernel::commands::{transform,masks,text}` and engine geometry. Full pointer/text/path editing host remains. **spec+model** (partial) |
 | S026 P1 | Main tool strip / registered headless `toolbar` (Tools) panel and creation menu; selection/hand/zoom/rotate/anchor, drawing/text/shape tools | `E/toolbar/index.ts`; `R/shell/ToolbarMount.svelte` | Shell review and Viewer specify toolbar/tool behavior; Shared owns tokens. | `pm-shell` toolbar/command tables; viewer `input` and tool state. **spec+model** |
 | S027 P1 | Timeline panel: composition tabs, transport/time, layer switches/parenting, clips, work area, ruler, snapping, scroll/zoom, menus | `E/timeline/timeline.ts`; `E/timeline/comp-tabs.ts`; `E/timeline/track-view.ts`; `E/timeline/track-layout.ts` | Timeline supplies surface and states. | `pm-panel-timeline` snapshot/view/input/behavior models; `pm-kernel::commands::{track,timing,markers}`; engine transport. Native painter/input binding pending. **spec+model** |
 | S028 P1 | Graph/dope sheet/combined views, channel rows, key diamonds, curve handles, interpolation and graph menus | `E/timeline/graph-controls.ts`; `E/timeline/graph-presentation.ts`; `E/timeline/timeline.ts` | Timeline specifies graph and local selection/focus/drag behavior. | `pm-panel-timeline::{TimelineModel,GraphDisplay}` and keyframe commands. **spec+model** |
-| S029 P1 | Keyframe Value, Keyframe Velocity and Scale Selected Keyframes dialogs | `E/timeline/timeline.ts`; `E/timeline/graph-controls.ts` | Timeline names interactions but lacks complete dialog composition/copy. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S029](design/surfaces/dialogs.md). | `pm-panel-timeline::behaviour` planners; `pm-kernel::commands::keyframes`. **spec+model** |
+| S029 P1 | Keyframe Value, Keyframe Velocity and Scale Selected Keyframes dialogs | `E/timeline/timeline.ts`; `E/timeline/graph-controls.ts` | Timeline names interactions but lacks complete dialog composition/copy. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S029](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** exact-copy mixed-value/velocity/scale descriptors and kernel plans tested, including lock exclusion and refusal of silent scale clamping; native form binding pending. | `pm-panel-timeline::behaviour` planners; `pm-kernel::commands::keyframes`. **spec+model** |
 | S030 P1 | Timeline marker/work-area menus and add/remove marker affordance | `E/timeline/markers.ts`; `E/timeline/timeline.ts` | Timeline ruler/work-area/menu guidance. | `pm-panel-timeline`; `pm-kernel::commands::{markers,comps}`. **spec+model** |
 | S031 P1 | Properties/Inspector: composition/no selection, multi-selection/mixed values, content/transform/structured/mask/time/layer sections | `E/inspector/InspectorPanel.svelte`; `E/inspector/InspectorSurface.svelte`; `E/inspector/ContentSection.svelte`; `E/inspector/StructuredSection.svelte`; `E/inspector/MasksSection.svelte`; `E/inspector/RetimingSection.svelte`; `E/inspector/LayerOptions.svelte` | Inspector specifies section order, states, fields and local controls. | `pm-panel-inspector::{catalog,content,relations,edit,view}`; kernel property/mask/timing commands. **spec+model** |
 | S032 P1 | Effect Controls panel: add/select/reorder/enable/remove, clipboard, effect parameters, missing definitions | `E/inspector/EffectsPanel.svelte`; `E/inspector/EffectsSection.svelte`; `E/inspector/ParameterList.svelte`; `E/inspector/effect-clipboard.ts` | Effects specifies stack, parameters, states and menus. | `pm-panel-inspector::effects` and kernel effect commands; runtime registry must supply definitions. **spec+model** |
 | S033 P1 | Effects browser: search, categories, previews, drag/add effects and transitions | `R/panels/FxBrowserPanel.svelte`; `R/panels/fx-browser.svelte.ts`; `E/effects-basic/index.ts`; `E/transitions-basic/index.ts` | Browser specifies this surface, titled Effects per owner decision. | Kernel registered definitions and `pm-panel-inspector::effects` apply planner exist; dedicated search/category/preview browser model not found. **spec+model** (operation backing only; browser model remains) |
 | S034 P1 | Font family/face popover, font preview, variable axes, text alignment and text animators | `R/controls/FontField.svelte`; `E/inspector/TypeSettings.svelte`; `E/inspector/TypeAxis.svelte`; `E/inspector/TextAnimators.svelte`; `E/inspector/TextAlignment.svelte` | Inspector plus Services review specify fonts/face menu and type rows. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S034](design/surfaces/editing.md). | `pm-services::fonts::{FontCatalog,Face}`; `pm-panel-inspector::content`; kernel text commands. **spec+model** (partial) |
 | S035 P1 | Colour/fill popover: None/solid/linear/radial; sRGB/Display P3; OKLCH/HSL/RGB/OKLab/P3 notation and copy; hue mapping, previous/new swatches, gamut-clipping warning, alpha, gradient stops/midpoint and screen eyedropper | `R/controls/ColorField.svelte`; `R/controls/FillField.svelte`; `R/controls/RampField.svelte`; `R/controls/color-space.ts` | Inspector §7 and Kit review specify a simpler popover/ramp. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S035](design/surfaces/editing.md). | `pm-panel-inspector` typed binding/edit/input; `pm-surface::kit` colour-well recipe; engine colour math. No complete colour-picker/recent-colour or NSColorSampler adapter yet. **spec+model** (partial) |
-| S036 P1 | Property context menu and expression editor modal: presets/edit/remove/reset/reveal/keyframe | `E/inspector/ChannelRow.svelte`; `E/inspector/PropertyStopwatch.svelte`; `R/legacy/core/expression.ts` | Inspector describes context actions, not full expression-editor modal. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S036](design/surfaces/dialogs.md). | `pm-panel-inspector::edit` property actions; kernel channel/expression commands; engine expression evaluation. **spec+model** |
+| S036 P1 | Property context menu and expression editor modal: presets/edit/remove/reset/reveal/keyframe | `E/inspector/ChannelRow.svelte`; `E/inspector/PropertyStopwatch.svelte`; `R/legacy/core/expression.ts` | Inspector describes context actions, not full expression-editor modal. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S036](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** debounced worker jobs, real engine preview, UTF-16 insert, exact-copy/keyboard/AX contracts and guarded expression edits tested; native NSTextView host and unlocated diagnostic design pending. | `pm-panel-inspector::edit` property actions; kernel channel/expression commands; engine expression evaluation. **spec+model** |
 | S037 P1 | Project/Media panel: composition/media/bin lists, selection, rename, drag, new/import/context menus, missing media | `R/panels/AssetsPanel.svelte`; `R/panels/register-simple.ts` | Media specifies rows/grid, bins, selection, empty/loading/offline states. | `pm-panel-media::{catalog,model,input,edit}`. Tag enumeration/collation and actual host operations still need integration. **spec+model** |
 | S038 P1 | Import progress, conversions/proxies, drag/file/folder/paste imports, cancellation and failures | `R/legacy/core/import-progress.ts`; `R/legacy/core/folder-import.ts`; `R/legacy/core/media-work.ts`; `R/legacy/core/media-paste.ts`; `M/media-proxy.ts` | Media covers entry/row state; Pro-media review specifies Background Tasks. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S038](design/surfaces/media.md). | `pm-services::media::ImportQueue`; `pm-promedia::{media,tasks}`; engine probe/codec hooks. Full original-byte admission remains. **spec+model** (partial) **Media lane, 2026-11-01:** Rust per-action import rows, typed failures, failed-only retry and retained-original proxy failure; v4 task body and guarded one-step kernel batch admission. Production import worker/streamed admission grouping and Background Tasks installation remain. |
 | S039 P1 | Import Image Sequence dialog: ordered files, FPS/range/name and replacement workflow | `R/legacy/core/image-sequence.ts`; `M/media-proxy.ts`; `R/panels/AssetsPanel.svelte` | Media lists the action, not complete form. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S039](design/surfaces/media.md). | Media import/edit effects and engine sequence handling are partial; no complete sequence dialog model. **spec+model** **Media lane, 2026-11-01:** Rust sequence form/validation/keyboard/stale-target/progress model. Native sequence sheet rendering remains blocked by unresolved sheet tokens; sequence-worker dispatch remains. |
 | S040 P1 | Paste Figma selection: fallback warning/confirmation, image fallback and unsupported layers | `R/legacy/core/figma/paste.ts`; `R/legacy/core/figma/convert.ts`; `M/clipboard.ts` | No dedicated design. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S040](design/surfaces/media.md). | Native clipboard/engine geometry alone do not implement tagged Figma conversion/fallback flow. **spec+model** (fallback state only; converter absent) **Media lane, 2026-11-01:** Rust Figma fallback/acknowledgement/banner flow plus queued AppKit alert support; native clipboard Figma conversion and installation remain. |
 | S041 P1 | Export settings sheet: format/codec, dimensions/FPS/range/audio/alpha/colour/captions options and preview | `R/legacy/core/exporter.ts`; `R/legacy/core/export-preview.ts`; `R/legacy/ui/project-settings.ts` | Export specifies settings/validation. | `pm-engine-service::jobs`; `pm-export`; kernel delivery state. Full sheet reducer and all option bindings remain. **spec+model** (partial) |
 | S042 P1 | Export destination picker and progress/cancel/success/error, reveal output, resume editing | `R/legacy/core/exporter.ts`; `M/render-encoder.ts`; `M/save.ts`; `M/export-sidecar.ts` | Export §3 and Pro-media review specify destination/progress/completion. | Engine export jobs and `pm-promedia::tasks`; native encoder/destination/sidecar binding required. **spec+model** |
-| S043 P1 | Export preset save/select/manage and queued export action | `R/legacy/core/exporter.ts`; `R/legacy/core/render-queue.ts` | Export covers preset controls; detailed preset naming/management is incomplete. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S043](design/surfaces/dialogs.md). | Kernel preserves `renderPresets`/`exportOpts`; export jobs have options, but no preset-manager model found. **spec+model** (export operation backing) |
+| S043 P1 | Export preset save/select/manage and queued export action | `R/legacy/core/exporter.ts`; `R/legacy/core/render-queue.ts` | Export covers preset controls; detailed preset naming/management is incomplete. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S043](design/surfaces/dialogs.md). **Dialogs lane 2026-11-01:** nested NSAlert adapters and kernel `renderPresets` save/select/rename/delete planning added; complete entries must reach a durable archive adapter before removal/replacement. Production archive service and Export binding pending. | Kernel preserves `renderPresets`/`exportOpts`; export jobs have options, but no preset-manager model found. **spec+model** (export operation backing) |
 | S044 P1 | Shipped Code (web animation) export, validation/warnings and standalone archive/player delivery | `R/legacy/core/exporter.ts`; `R/player/export-web.ts`; `R/player/player.ts` | Export/Shared explicitly record the owner decision to remove this option; no new spec requested. Preserve existing authored projects/assets and exported files. | No native web-animation delivery replacement claimed. **nothing** (explicit owner removal; W072) |
 | S045 P1 | Render Queue modal: composition snapshots, pending/rendering/done/error, render pending, retry/remove | `R/legacy/core/render-queue.ts`; `R/legacy/core/exporter.ts` | Pro-media review explicitly replaces queue modal with Background Tasks and maps Retry/Remove. | `pm-promedia::tasks::BackgroundTasks`; migration preserves queue input. Adapter must retain queued composition/options/snapshot/output identity. **spec+model** (migration/queue adapter pending) |
 | S046 P1 | Background activity pill and task popover: import/export/media work, progress/cancel and completed/failed work | `R/shell/TaskPill.svelte`; `R/shell/tasks.svelte.ts`; `R/legacy/core/media-work.ts` | Pro-media review supplies native Background Tasks popover and utility window. Native Pause/Resume and richer task kinds are additions. | `pm-promedia::tasks` title/unit/state/error/event models. ETA, terminal-row retention and shell wiring remain per review. **spec+model** |
@@ -798,3 +798,136 @@ clipboard and relative time formatting; anchored popover behavior and status
 layout; accessibility setting changes; Opus visual review. A Linux cross-target
 check typechecks the actual AppKit presenter, but does not establish runtime or
 visual acceptance.
+
+
+## Dialogs lane implementation evidence — 2026-11-01
+
+Owned source: `apps/native/crates/app/src/surfaces/dialogs*.rs`, registered
+in the app's `main.rs`. Scope: S021, S022, S029, S036, S043 only. Coverage
+cells above retain the original design evidence and append this lane's limits.
+These are executable dialog/presentation contracts and real worker-side kernel
+adapters, **not a claim that the editor now opens the form sheets**. Existing
+surfaces/consumers and extension contracts are retained. All visual output is
+provisional until Opus review.
+
+Built and exercised:
+
+- S021 six rows, resolution choices, field validation, unique names, timecode
+  input, exact duration warning and Create/Apply. Kernel settings are one undo
+  step and preserve coordinates, unknown project data and keyframe identities.
+  Unchanged fields are omitted so a name-only edit keeps authored background
+  fills and work areas intact; fractional frame rates remain exact.
+- S022 Leave/Move descriptions, disabled explanation, duration/open checkboxes
+  and delete confirmation. Delete is a real asynchronous NSAlert recipe with
+  Cancel as default. Pre-compose operation is explicitly unavailable: existing
+  `CompCommand::Precompose` is `NotImplemented`, not an implemented native
+  operation despite the older backing-column summary.
+- S029 mixed/two-component values, incoming/outgoing groups and units,
+  influence validation, numeric-only value scale, collision copy, locked-layer
+  exclusion and one labelled undo step. Scaling preflights the existing graph
+  command and refuses clamping rather than changing authored intent silently.
+- S036 native text requirements, exact editor/result labels, keyboard routes,
+  shipped insertion names in tagged order, UTF-16 caret replacement, 250 ms
+  worker-job debounce, stale-result rejection and medium announcements. A
+  frozen scratch mirror runs the existing engine parser/evaluator without
+  changing the document; runtime errors allow Apply. Source spans absent from
+  engine diagnostics remain neutral placeholders, never a guessed line number.
+- S043 exact replacement/rename/delete alerts, Export-sheet ownership, explicit
+  accessory width, preset menu labels, preserved legacy options/unknown fields,
+  output-name exclusion, state revision fencing and archive-before-removal.
+  No in-memory archive is presented as a durable production implementation.
+
+Presentation boundaries: `DialogHost`/`AlertHost` have a Linux recording double;
+`AppKitAlertHost` builds standard NSAlert and NSTextField controls and calls
+`beginSheetModalForWindow` asynchronously. Window lookup requires the actual
+Export sheet for nested preset alerts and refuses a missing parent. The app
+icon, placement and alert accessibility stay system-owned; none of these
+reversible confirmations uses the critical style. No runModal, Node, Chromium,
+main-thread JS wait or second live document writer is introduced.
+
+Rule-selected decisions:
+
+| Decision | Selecting rule |
+| --- | --- |
+| Use the specified strings, native alert controls, explicit Cancel destructive default and token references. | N1/N2 and Opus design ownership; no lane-authored visuals or copy. |
+| Plan typed commands on a frozen worker scratch store, then submit the result through the actor's existing guarded Restore call. It checks document session and revision atomically and refuses an open edit. | N1/N3/N4: prevent a queued Apply from editing a closed/reopened project; the actor stays the only live writer. |
+| Refuse a scale that the graph kernel would silently clamp. | N3: the authored scale wins; collision is inline with Apply disabled. |
+| Preserve the v1–3 renderPresets array and unknown fields; archive complete old entries before removing/replacing them. | N4/N6: no data loss and no incompatible envelope/archived entries exposed to legacy consumers. |
+| Expose missing backing, metric tokens and source spans as typed gaps/neutral placeholders. | N1/N3 and design ownership: no success-shaped operation or invented line/metric/copy. |
+| Keep ID-addressed snapshots, input/completion queues and asynchronous kernel calls. | N7/N8: headless inspection/driving without UI-thread JS or kernel waits. |
+
+Integration required outside this lane's owned paths:
+
+1. `pm-design`: supply `metrics.sheet_inset`, `metrics.sheet_value_column`,
+   `metrics.sheet_width_wide`; this lane does not alias them to unrelated tokens.
+2. App session/shell: route M026/M028, Properties/Timeline/Project and Export
+   entry points to these public contracts; resolve editor/Export-sheet IDs,
+   construct AppKit form rows with the kit NumberField and P-TEXT NSTextView,
+   consume queued native input, refresh/revalidate publications, close stale
+   targets, show banners and restore trigger focus. Only module registration
+   is permitted in this lane; `session.rs`/shell renderers remain unmodified.
+3. Kernel/operation owner: implement actual pre-compose geometry, source mode,
+   duration adjustment and open-after handoff. Also remove the composition
+   settings one-frame duration floor where it conflicts with the specified
+   0.1–3600 s range; this adapter returns a typed backing gap instead of
+   silently changing a requested subframe duration. The dialog never fakes it.
+4. Services/storage: implement `PresetArchive` with durable app-storage receipts
+   before calling the guarded `renderPresets` state transaction. The test
+   archive is intentionally test-only. Map the service's existing error enum
+   into the boundary's matching codes, without showing diagnostic strings.
+5. Engine: supply source spans for diagnostics that lack them; Opus chooses
+   the neutral result placeholder until then.
+
+DESIGN-TODO(opus), mirrored in source: missing sheet tokens; multi-selection's
+unnamed-layer substitution for the disabled Leave option; export-preset
+empty/duplicate rename validation and preview pending/unavailable states;
+Time/Value percentage validation copy; source-line placeholders when the engine
+has no span. No visual/form dimensions, copy or interaction are invented to
+resolve these gaps.
+
+Linux reproduction (all fixtures are owned Rust source; Python is unnecessary):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+mkdir -p work
+rustc --edition 2024 apps/native/crates/app/src/surfaces/dialogs_check.rs -o work/check-dialogs
+work/check-dialogs test
+work/check-dialogs clippy
+work/check-dialogs fmt
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-kernel
+```
+
+The runner creates a disposable manifest in `work/dialogs-check`, pointing at
+actual app-owned source and existing kernel/design/model crates. It seeds the
+lock from `apps/native/Cargo.lock`; Cargo metadata prunes unused packages and
+adds the harness root. Test and Clippy commands use `--locked`; checked-in
+manifests/dependencies/locks do not change. The normal app command
+`cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-native-app`
+is blocked on Linux by the app's existing unconditional objc2/GPUI/Metal
+platform dependencies, before these modules compile. The separate harness
+avoids that platform dependency, not any test or document logic.
+
+Current validation (Rust 1.96.1): **52 dialog tests passed**, **273 kernel tests passed**,
+**1 existing kernel test ignored** (the opt-in real-profile test). Rustfmt and
+all-target Clippy with `-D warnings` pass for the owned source. The AppKit module
+also type-checks and passes all-target Clippy for `aarch64-apple-darwin` with
+Zig's Apple-target assembler, without linking/running a Mac app. This is compile
+evidence only. Both historical tags must be fetched for the existing kernel
+parity test (`v1.2.0`, `v1.3.0`); Node is used by that development oracle only.
+
+macOS still required: full app build, actual sheet/alert routing and parent
+lifetime, Return/Esc and focus return, NumberField arithmetic/scrub, NSTextView
+IME/native editing/selection and command routing, live validation, VoiceOver
+reading/actions/announcements, multiwindow stale/reopen races, archive restart
+and failure durability, light/dark/accessibility screenshots and Opus review.
+The AppKit unit probe requires the main thread and explicitly reports a skip
+when run on a normal Rust test worker; no native UI runtime pass is claimed.
+
+Reconciled with `origin/feat/native-engine` at
+`edc3c6e07164f6ac2bd71f1ef2405ff8d11520c3`, no conflicts. The commands
+above were re-run after the final fetch/merge. No new crate or dependency was added, so
+there is no checked-in lockfile delta to own. Full-app `cargo fmt -p
+pm-native-app --check` also reports pre-existing formatting in the unowned
+`app/src/smoke.rs` call to `media::for_session`; the touched registration and all
+owned modules pass formatting checks. The app owner can format that call.
