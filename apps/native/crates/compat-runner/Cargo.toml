@@ -14,7 +14,11 @@ pm-recorder = { path = "../recorder" }
 pm-kernel = { path = "../kernel" }
 pm-mcp = { path = "../mcp" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-store-host = { path = "../store-host" }
 serde_json = "=1.0.150"
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "pm-compat-runner"

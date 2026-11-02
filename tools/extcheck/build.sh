@@ -21,7 +21,7 @@ mode=sys.argv[1]
 package=sys.argv[2]
 example=sys.argv[3]
 assert mode in ('build','test','clippy','fmt'), 'choose build, test, clippy or fmt'
-assert package in ('pm-compat-runner','pm-compat-host','pm-store-host'), 'unknown adapter package'
+assert package in ('pm-compat-runner','pm-compat-host','pm-store-host','pm-runtime-v8'), 'unknown adapter package'
 assert not example or (mode=='build' and package=='pm-compat-host' and example=='remote-dom-smoke'), 'unknown example'
 import time
 from pathlib import Path
@@ -39,9 +39,15 @@ if example:args+=['--example',example]
 if mode=='fmt':args+=['--','--check']
 else:
  args+=['--locked']
- if package=='pm-compat-runner':args+=['--features','macos-sandbox']
+ if package in ('pm-compat-runner','pm-runtime-v8'):args+=['--features','macos-sandbox']
  if mode=='clippy':args+=['--all-targets','--no-deps','--','-D','warnings']
-while True:
+commands=[args]
+if mode=='test' and package=='pm-compat-runner':
+ # The integration test launches the real confined helper beside the test binary.
+ commands.insert(0,['nice','-n','20','flock','/tmp/pm-build.lock','cargo','+1.96.1','build',
+                  '--manifest-path','apps/native/Cargo.toml','-p','pm-runtime-v8','--bin','pm-store-helper',
+                  '--locked','--features','macos-sandbox'])
+while commands:
  while True:
   if pause_file.exists():
    print('Local execution paused by owner; checking again in five minutes',flush=True)
@@ -50,7 +56,7 @@ while True:
    print('Waiting for disk space at or above 6.5 GiB',flush=True)
    time.sleep(120)
   else:break
- child=subprocess.Popen(args,start_new_session=True)
+ child=subprocess.Popen(commands[0],start_new_session=True)
  paused=False
  try:
   while child.poll() is None:
@@ -68,5 +74,7 @@ while True:
    except subprocess.TimeoutExpired:pass
  finally:
   if child.poll() is None:stop_child(child)
- if not paused:raise SystemExit(child.returncode)
+ if not paused:
+  if child.returncode:raise SystemExit(child.returncode)
+  commands.pop(0)
 PY

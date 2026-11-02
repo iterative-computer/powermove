@@ -29,9 +29,10 @@ try {
     await readFile(path.join(out, "manifest.json"), "utf8"),
   );
   // Store source is compiled but never executed through a trusted facade. Its permissioned
-  // helper/Store API adapter must be installed before execution can certify Store behavior.
+  // signed native installation and resource dispatcher must be connected before
+  // public archive bytes may enter the confined helper.
   if (request.case.startsWith("store-")) {
-    status.reason = "native-store-facade-unavailable";
+    status.reason = "native-store-release-admission-unavailable";
   } else {
     status.reason = "native-runner-failed";
     const reply = JSON.parse(

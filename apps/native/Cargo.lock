@@ -4639,7 +4639,9 @@ dependencies = [
  "pm-model",
  "pm-recorder",
  "pm-runtime-v8",
+ "pm-store-host",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
