@@ -7,15 +7,16 @@ Reviewer: design lead · 2026-11-01 · Lane head `3eeb5e949` (diff vs
 [review-checklist.md](../review-checklist.md) and the golden trees in
 `panels/effect-controls/snapshots/*.json`. Code and snapshots only.
 
-**Verdict: APPROVE as an integration candidate once the goldens are
-regenerated. Merge `origin/feat/na-design-fix-p-effectcontrols` (`16a076327`)
-after a Sol lane runs `UPDATE_EFFECT_SNAPSHOTS=1 bun test
-panels/effect-controls/test/panel.test.tsx` on it and commits the result (F0).**
+**Verdict: APPROVE as an integration candidate. Merge
+`origin/feat/na-design-fix-p-effectcontrols` (`37bbcc9f2`), not the lane head.**
+(Updated 2026-11-01, second pass: F0 done by the reviewer. The goldens are
+regenerated, and all 39 Effect Controls tests pass on macOS. The test model
+wire blocked on the kernel from the main thread, which the kernel forbids on
+macOS; it now runs on a worker thread.)
 The fix branch is the lane plus the **Fixed** items, merged with
 `origin/feat/native-engine`. The `Cargo.toml` workspace-members conflict is
 resolved as a union (`packaging` + the harness). It passes TypeScript and
-Prettier. The goldens could not be regenerated on the reviewer's machine: the
-harness needs the full kernel build.
+Prettier.
 
 ## Item by item
 
@@ -72,7 +73,7 @@ harness needs the full kernel build.
 
 | # | Owner | Change |
 |---|---|---|
-| F0 | effect-controls lane | On `feat/na-design-fix-p-effectcontrols`: regenerate goldens (`UPDATE_EFFECT_SNAPSHOTS=1`), run `check.sh`, push. That branch then merges. |
+| F0 | — | **Done** (`37bbcc9f2`). |
 | F1 | kit | `PushButton` (shared request): trailing `Add Effect…` regular, centred, `m.inset` below the last effect. |
 | F2 | kit/host | Drag source opacity token `metrics.drag_opacity` (0.5, added to README §6), insertion line `m.border × 2` + `metrics.status_dot` circle, pointer-leave events. |
 | F3 | pm-design | `metrics.tree_indent` (requested), `metrics.drag_opacity`; per-kind virtual-list row sizes so the `m.gap` before headers is real geometry. |
@@ -83,4 +84,4 @@ harness needs the full kernel build.
 
 | Lane | Reviewer | Date | Result |
 |---|---|---|---|
-| na-cloud-p-effectcontrols | design lead (Opus) | 2026-11-01 | APPROVE via `feat/na-design-fix-p-effectcontrols` `16a076327` after F0; F1–F5 open |
+| na-cloud-p-effectcontrols | design lead (Opus) | 2026-11-01 | APPROVE via `feat/na-design-fix-p-effectcontrols` `37bbcc9f2`; F1–F5 open |

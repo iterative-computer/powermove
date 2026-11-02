@@ -6,13 +6,12 @@ Reviewer: design lead · 2026-11-01 · Lane head `e5d7bb0d1` (diff vs
 [review-checklist.md](../review-checklist.md) and
 `panels/inspector/test/__snapshots__/panel.test.tsx.snap`. Code and snapshots only.
 
-**Verdict: APPROVE as an integration candidate once the snapshot is
-regenerated. Merge `origin/feat/na-design-fix-p-inspector` (`b57b7e4ff`) after
-a Sol lane runs `bun test panels/inspector -u` on it and commits the result
-(F0).** The fix branch is the lane plus the **Fixed** items, merged cleanly
-with `origin/feat/native-engine`. It passes TypeScript and Prettier. The
-snapshot could not be regenerated on the reviewer's machine: the
-`inspector_wire` probe needs the kernel/model build.
+**Verdict: APPROVE as an integration candidate. Merge
+`origin/feat/na-design-fix-p-inspector` (`ef817d98d`), not the lane head.**
+(Updated 2026-11-01, second pass: F0 done by the reviewer. The snapshot is
+regenerated; 43/43 inspector Bun tests and the `pm-panel-inspector` Rust tests
+pass on macOS.) The fix branch is the lane plus the **Fixed** items, merged cleanly
+with `origin/feat/native-engine`. It passes TypeScript and Prettier.
 
 ## Item by item
 
@@ -61,7 +60,7 @@ snapshot could not be regenerated on the reviewer's machine: the
 
 | # | Owner | Change |
 |---|---|---|
-| F0 | inspector lane | On `feat/na-design-fix-p-inspector`: `bun test panels/inspector -u`, full `bun test`, `cargo test -p pm-panel-inspector`, push. That branch then merges. |
+| F0 | — | **Done** (`ef817d98d`). |
 | F1 | kit | Section heading recipe: trailing chevron (`chevron.down`/`chevron.right`, `m.symbol_inline` `c.muted`, visible on hover/focus/collapsed), optional trailing heading button before it (`Add Mask`, `Add Text Animator`), whole heading clickable; IC hairline above. |
 | F2 | kit | Multi-line `TextArea` (2–6 lines) and monospaced expression field (1–6 lines) with validity glyph slot. |
 | F3 | kit + pm-design | Symbol slot on `ToolbarItem`/text (diamond states, align glyphs, `link`/`link.slash`, `lock`); `metrics.drop_stroke`; token arithmetic for the header optical inset and the Scale link overlap. |
@@ -72,4 +71,4 @@ snapshot could not be regenerated on the reviewer's machine: the
 
 | Lane | Reviewer | Date | Result |
 |---|---|---|---|
-| na-cloud-p-inspector | design lead (Opus) | 2026-11-01 | APPROVE via `feat/na-design-fix-p-inspector` `b57b7e4ff` after F0; F1–F5 open |
+| na-cloud-p-inspector | design lead (Opus) | 2026-11-01 | APPROVE via `feat/na-design-fix-p-inspector` `ef817d98d`; F1–F5 open |
