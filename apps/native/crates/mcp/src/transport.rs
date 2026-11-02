@@ -12,9 +12,89 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 const MAX_LINE: usize = 2 * 1024 * 1024;
+
+fn descriptor_lock(directory: &Path) -> std::io::Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("connection.lock"))?;
+    // Serialize recovery and publication across processes. The OS releases this
+    // lock on a crash; leave the lock file in place so all starters lock one inode.
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn pid_is_dead(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // SAFETY: a positive pid and signal zero only probe existence. ESRCH is 3
+    // on both supported hosts (Darwin and Linux). EPERM/unknown errors are live.
+    unsafe { kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(3) }
+}
+
+fn descriptor_is_stale(bytes: &[u8]) -> bool {
+    let Ok(descriptor) = serde_json::from_slice::<Value>(bytes) else {
+        return true;
+    };
+    let pid = descriptor["pid"]
+        .as_u64()
+        .and_then(|n| i32::try_from(n).ok())
+        .filter(|pid| *pid > 0);
+    if pid.is_some_and(pid_is_dead) {
+        return true;
+    }
+    let port = descriptor["port"]
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+        .filter(|port| *port > 0);
+    if let Some(port) = port {
+        let address = (std::net::Ipv4Addr::LOCALHOST, port).into();
+        // N3/N7: only an explicit refusal proves a recorded endpoint is gone.
+        // Timeouts and other uncertain failures must not evict a possible owner.
+        return TcpStream::connect_timeout(&address, Duration::from_millis(250))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused);
+    }
+    // An unusable record with neither owner nor endpoint cannot serve clients.
+    // A recognizable live/unknown pid is preserved even if its port is corrupt.
+    pid.is_none()
+}
+
+fn recover_descriptor(file: &Path) -> Result<()> {
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if !descriptor_is_stale(&bytes) {
+        return Err(Error::invalid(
+            "MCP descriptor already exists; stop its owner before starting another host",
+        ));
+    }
+    let directory = file.parent().expect("descriptor directory");
+    let mut timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    loop {
+        let archive = directory.join(format!("connection.stale-{timestamp}.json"));
+        // N4: preserve the exact bytes, including corrupt records, and never
+        // overwrite a prior archive even if the clock repeats or moves backwards.
+        match std::fs::hard_link(file, archive) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => timestamp += 1,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    std::fs::File::open(directory)?.sync_all()?;
+    std::fs::remove_file(file)?;
+    Ok(())
+}
 
 pub trait ToolConnection {
     fn list(&mut self) -> Result<Value>;
@@ -245,8 +325,6 @@ impl LoopbackServer {
         factory: impl Fn() -> T + Send + Sync + 'static,
     ) -> Result<Self> {
         let factory = Arc::new(factory);
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        listener.set_nonblocking(true)?;
         let token = random_hex()?;
         let instance = pm_kernel::new_id("mcp-instance");
         let directory = profile.join("mcp");
@@ -255,11 +333,11 @@ impl LoopbackServer {
             .mode(0o700)
             .create(&directory)?;
         let file = directory.join("connection.json");
-        if file.exists() {
-            return Err(Error::invalid(
-                "MCP descriptor already exists; stop its owner before starting another host",
-            ));
-        }
+        let _publication = descriptor_lock(&directory)?;
+        recover_descriptor(&file)?;
+        // Probe the old endpoint before choosing ours: the OS may reuse its port.
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
         let descriptor = json!({"version":1,"instanceId":instance,"pid":std::process::id(),"port":listener.local_addr()?.port(),"token":token});
         let temp = directory.join(format!("connection-{instance}.tmp"));
         let mut fd = std::fs::OpenOptions::new()
@@ -338,10 +416,11 @@ impl LoopbackServer {
             let _ = worker.join();
         }
         self.clients.lock().unwrap().clear();
-        if std::fs::read(&self.file)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .is_some_and(|v| v["instanceId"] == self.instance)
+        if let Ok(_publication) = descriptor_lock(self.file.parent().expect("descriptor directory"))
+            && std::fs::read(&self.file)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .is_some_and(|v| v["instanceId"] == self.instance)
         {
             let _ = std::fs::remove_file(&self.file);
         }

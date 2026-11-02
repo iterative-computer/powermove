@@ -59,16 +59,20 @@ test('real JS mutation and page-feedback JSON roundtrip through the Rust admissi
   const batch = h.batches[0],
     feedback = h.messages.filter((message) => message.kind !== 'event');
   const child = Bun.spawnSync(
-    [
-      'cargo',
-      'run',
-      '--quiet',
-      '--locked',
-      '--manifest-path',
-      join(root, '../../crates/remote-dom/standalone/Cargo.toml'),
-      '--example',
-      'wire'
-    ],
+    process.env.PM_REMOTE_DOM_WIRE_BIN
+      ? [process.env.PM_REMOTE_DOM_WIRE_BIN]
+      : [
+          'flock',
+          '/tmp/pm-build.lock',
+          'cargo',
+          'run',
+          '--quiet',
+          '--locked',
+          '--manifest-path',
+          join(root, '../../crates/remote-dom/standalone/Cargo.toml'),
+          '--example',
+          'wire'
+        ],
     {
       stdin: Buffer.from(JSON.stringify({ batch, feedback })),
       cwd: root
