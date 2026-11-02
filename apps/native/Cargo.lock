@@ -5069,6 +5069,7 @@ dependencies = [
  "pm-agents",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
  "serde_json",
 ]
 
