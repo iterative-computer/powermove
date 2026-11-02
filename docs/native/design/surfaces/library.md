@@ -90,10 +90,10 @@ alert (README §4) on the same window, sheet stays open.
 
 | Action | Surface | Copy |
 |---|---|---|
-| Move to Trash | **No confirmation** (recoverable, macOS convention); the item leaves the view; Edit ▸ Undo Move to Trash (⌘Z) in the Library window puts it back. Inline notice (info, 4 s): `“{name}” was moved to the Trash.` action `Undo`. |
-| Put Back | No confirmation; returns to its previous place. |
-| Delete Immediately… | Alert, **critical**: message `Delete “{name}” immediately?` informative `The project is archived in Powermove’s storage and can’t be opened from the Library again.` buttons `Delete` (destructive) · `Cancel` (default). |
-| Open project moved to Trash elsewhere | its window stays open; subtitle `In Trash`; first save asks via alert `“{name}” is in the Trash.` buttons `Put Back and Save` (default) · `Save As…` · `Cancel`. |
+| Move to Trash | Alert (shipped confirmation kept — v1.2.0 wins on behaviour) | message `Move “{name}” to the Trash?` · informative `You can put it back from Recently Deleted.` · buttons `Move to Trash` (default) · `Cancel`. Afterwards Edit ▸ Undo Move to Trash (⌘Z) in the Library window also puts it back. |
+| Put Back | No confirmation | returns to its previous place. |
+| Delete Immediately… | Alert, **critical** | message `Delete “{name}” immediately?` informative `The project is archived in Powermove’s storage and can’t be opened from the Library again.` buttons `Delete` (destructive) · `Cancel` (default). |
+| Open project moved to Trash elsewhere | Subtitle + alert | its window stays open; subtitle `In Trash`; first save asks via alert `“{name}” is in the Trash.` buttons `Put Back and Save` (default) · `Save As…` · `Cancel`. |
 
 N4: `Delete Immediately` archives (`ArchiveReason`), never removes bytes; the
 copy says so. The shipped `Delete Forever` wording and "cannot be undone"

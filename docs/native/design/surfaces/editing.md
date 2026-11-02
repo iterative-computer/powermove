@@ -14,13 +14,13 @@ v1.2.0's; this fixes the look and the state set.
 | Element | Spec |
 |---|---|
 | Path stroke (editing) | 1 pt `c.accent` (mask paths: the mask's label colour at full strength, 1 pt), 2 pt under Increase Contrast |
-| Vertex | square, side `m.keyframe − 2` (7); unselected: `c.floating` fill + 1 pt `c.accent` stroke; selected: `c.accent` fill + 1 pt `c.selected_text` stroke; hover: side +2 |
+| Vertex | square, side `m.gizmo_handle` (7); unselected: `c.floating` fill + 1 pt `c.accent` stroke; selected: `c.accent` fill + 1 pt `c.selected_text` stroke; hover: side +2 |
 | First vertex while drawing | as vertex plus a `m.keyframe` ring when the pointer can close the path |
 | Bézier handle | 1 pt `c.secondary` line; end = circle `m.keyframe − 3` (6) `c.floating` fill + 1 pt `c.secondary` stroke; only for selected vertices and their neighbours |
 | Rubber band (pen preview) | 1 pt `c.accent` dashed (4 on, 3 off) from last vertex to pointer |
 | Cursors | system arrow for selection; pen cursors are template images from SF Symbols: `pencil.tip` (draw), `pencil.tip.crop.circle.badge.plus` (add point), `…badge.minus` (delete point), `…badge.arrow.forward` (close path), `arrow.triangle.branch` (convert point). Hotspot at the tip. |
 | Text: point vs paragraph | click with the Text tool = point text; drag = paragraph box (1 pt `c.secondary` dashed rectangle with the transform handles of viewer-chrome.md) |
-| Text: editing | system insertion point and selection (`NSTextInputClient`; system `selectedTextBackgroundColor`, which follows AccentColor); the layer's bounds show as 1 pt `c.secondary` dashed while editing |
+| Text: editing | system insertion point (orange via AccentColor); selection `c.accent` at 30 % as viewer-chrome.md §2 (it sits over arbitrary pixels, so not the system selection colour); the layer's bounds show as 1 pt `c.secondary` dashed while editing |
 | Text: overset (paragraph) | trailing-bottom handle replaced by a `m.keyframe` square with a `+` in `c.warning`; tooltip `More text than fits` |
 | Enter / exit | double-click a text layer or Text tool click enters; Esc or clicking outside commits and selects the layer; ⌘Return commits |
 
@@ -32,7 +32,7 @@ VoiceOver: during path editing each vertex is an `AXButton`
 editor is an `AXTextArea` with the layer name.
 
 Don't: draw handles for every vertex; colour vertices by type; draw a custom
-caret or selection.
+caret.
 
 ## S034 Text animators
 

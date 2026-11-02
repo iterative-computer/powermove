@@ -91,10 +91,12 @@ items (secrets are the one thing N4 archiving does not keep). An extension
 without saved values uninstalls with no alert.
 
 **Delete a saved workspace / layout** (`WorkspacesPanel`, Window ▸
-Workspace): no confirmation; `Edit ▸ Undo Delete Workspace` (⌘Z while the
-workspace UI is focused) restores it, and `LayoutStore` keeps the deleted
-JSON archived (N4).
+Workspace) — alert (shipped confirmation kept): message
+`Delete the workspace “{name}”?`, informative
+`Your panels stay as they are. You can undo this.`, buttons `Delete`
+(destructive) · `Cancel` (default). `Edit ▸ Undo Delete Workspace` restores
+it; `LayoutStore` keeps the deleted JSON archived (N4).
 
 **Delete a local (user-made) panel or extension project in the Library
-screen**: same as a project (library.md S005): Move to Trash, no
-confirmation; `Delete Immediately…` critical alert in Recently Deleted.
+screen**: same as a project (library.md S005): `Move to Trash` alert, then
+`Delete Immediately…` critical alert in Recently Deleted.
