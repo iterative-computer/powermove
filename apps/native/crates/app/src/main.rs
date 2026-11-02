@@ -1,3 +1,5 @@
+#[path = "surfaces/dialogs.rs"]
+pub mod dialogs;
 mod diag;
 mod lifecycle;
 mod mcp;
