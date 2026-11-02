@@ -92,9 +92,29 @@ alert (README §4) on the same window, sheet stays open.
 |---|---|---|
 | Move to Trash | Alert (shipped confirmation kept — v1.2.0 wins on behaviour) | message `Move “{name}” to the Trash?` · informative `You can put it back from Recently Deleted.` · buttons `Move to Trash` (default) · `Cancel`. Afterwards Edit ▸ Undo Move to Trash (⌘Z) in the Library window also puts it back. |
 | Put Back | No confirmation | returns to its previous place. |
-| Delete Immediately… | Alert, **critical** | message `Delete “{name}” immediately?` informative `The project is archived in Powermove’s storage and can’t be opened from the Library again.` buttons `Delete` (destructive) · `Cancel` (default). |
+| Delete Immediately… | Alert, **critical** | message `Delete “{name}” immediately?` informative `The project is archived in Powermove’s storage and can’t be opened from the Library again.` buttons `Cancel` (default) · `Delete` (destructive). |
 | Open project moved to Trash elsewhere | Subtitle + alert | its window stays open; subtitle `In Trash`; first save asks via alert `“{name}” is in the Trash.` buttons `Put Back and Save` (default) · `Save As…` · `Cancel`. |
 
 N4: `Delete Immediately` archives (`ArchiveReason`), never removes bytes; the
 copy says so. The shipped `Delete Forever` wording and "cannot be undone"
 claim are not ported. There is **no** automatic emptying of Recently Deleted.
+
+## Answers (design review 2026-11-01)
+
+- **Size link** — the inspector toggle (inspector.md row *Link*): `link` /
+  `link.slash`, AX `Lock aspect ratio` (on/off), tooltip `Lock Aspect Ratio` /
+  `Unlock Aspect Ratio`; starts **on**.
+- **Symbols** — `No Projects` `square.grid.2x2`; `No Results` `magnifyingglass`;
+  `No Deleted Projects` `trash`. Loading has no symbol; its AX label is
+  `Loading Projects`.
+- **Creating** — after `Create`: default button `Creating…` disabled, `Cancel`
+  disabled, Esc ignored; success closes the sheet, failure re-enables both.
+- **Timecode** — `;` (drop-frame) is accepted only when Frame Rate is 29.97 or
+  59.94; otherwise Error `Use colons for timecode at this frame rate.`
+- **List sorts** — first click: `Duration` longest first, `Size` largest pixel
+  area first (ties by width), `Frame Rate` highest first; second click reverses.
+  The Sort pop-up shows no checkmark while another column sorts.
+- **Missing facts** — omit unknown parts (and the `·`); VoiceOver reads the
+  known parts only. Never `0:00` or `0×0`.
+- **Duplicate outside the filter** — if the copy wouldn't match the search, clear
+  the search field first, then select it and start rename.

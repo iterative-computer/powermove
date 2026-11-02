@@ -15,7 +15,7 @@ has-audio differs from the recorded source) — alert, sheet on the window:
 | Part | Copy |
 |---|---|
 | Message | `“{chosen}” doesn’t match the missing media.` |
-| Informative | One sentence per difference, max three: `It’s 0:08 long; the original was 0:12.` · `It’s 1280×720; the original was 1920×1080.` · `It’s 25 fps; the original was 30 fps.` · `It has no audio; the original did.` |
+| Informative | One sentence per difference, max three: `It’s 0:08 long; the original was 0:12.` · `It’s 1280×720; the original was 1920×1080.` · `It’s 25 fps; the original was 30 fps.` · `It has no audio; the original did.` · `It has audio; the original didn’t.` |
 | Buttons | `Use Anyway` (default) · `Cancel` · `Choose Another…` |
 
 **Others found in the same folder** (after a successful relink, other offline
