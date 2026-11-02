@@ -696,8 +696,8 @@ impl MediaPanel {
             self.exclusive = None;
             self.all_except = Some(Default::default());
             self.selection_cache.take();
-            self.selection.clear();
-            self.selected.clear();
+            // Retain any explicit buffers until the next ordinary selection or
+            // worker refresh; entering All must not visit the previous batch.
             self.active = self.asset_order.last().cloned();
             self.anchor = self.asset_order.first().cloned();
             self.clear_preview(&mut out.effects);

@@ -429,6 +429,9 @@ fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
         fn media(&self, _: &Layer) -> paint::Media {
             paint::Media::Ready
         }
+        fn waveform(&self, _: &Layer) -> Option<Vec<f64>> {
+            Some(vec![0., 0.25, -0.5])
+        }
         fn interpolation(&self, _: &Key) -> paint::Interpolation {
             paint::Interpolation::Linear
         }
@@ -456,6 +459,7 @@ fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
     };
     assert_eq!(clip.from, -0.125);
     assert_eq!(clip.duration, 4.);
+    assert_eq!(clip.waveform, Some(vec![0., 0.25, -0.5]));
     assert_eq!(summary[0].seconds, 0.);
     c.model.mode = TimelineMode::Tracks;
     let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();

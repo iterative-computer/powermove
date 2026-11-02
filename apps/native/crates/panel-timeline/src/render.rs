@@ -276,6 +276,10 @@ pub trait ModelPresenter {
     fn layer_label(&self, layer: &crate::Layer) -> Label;
     fn media(&self, layer: &crate::Layer) -> Media;
     fn interpolation(&self, key: &crate::Key) -> Interpolation;
+    /// Measured/downsampled audio peaks supplied by native media services.
+    fn waveform(&self, _layer: &crate::Layer) -> Option<Vec<f64>> {
+        None
+    }
     /// Native schema supplies track names/AX copy; no renderer-invented labels.
     fn track_accessibility_label(
         &self,
@@ -340,7 +344,7 @@ impl Scene {
                                     selected: selected.contains(id.as_str()),
                                     locked: layer.effectively_locked,
                                     media: p.media(layer),
-                                    waveform: None,
+                                    waveform: p.waveform(layer),
                                     trim: None,
                                 }),
                                 summary,
@@ -389,7 +393,7 @@ impl Scene {
                     selected: selected.contains(item.id.as_str()),
                     locked: layer.effectively_locked,
                     media: p.media(layer),
-                    waveform: None,
+                    waveform: p.waveform(layer),
                     trim: None,
                 });
             }
