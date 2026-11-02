@@ -1,7 +1,7 @@
 # Properties (inspector)
 
-Panel id `inspector`, title **Properties**, top of the right dock (Effects &
-Presets below it). Shared rules: [README.md](README.md). Look:
+Panel id `inspector`, title **Properties**, top of the right dock (Effects
+below it). Shared rules: [README.md](README.md). Look:
 [language.md §9](../language.md#9-controls).
 
 Behaviour source: `v1.2.0:apps/desktop/src/extensions/inspector/`
@@ -45,7 +45,7 @@ Effects are **not** in this panel: they live in
 |---|---|
 | Header | README §2. Title `Properties`. Trailing buttons: **Add Effect** (`wand.and.rays`, tooltip `Add Effect`, opens the effect menu — same as Effect Controls' Add Effect; hidden for layers that take no effects) and **New Layer** (`plus`, tooltip `New Layer`, opens menu `Text`, `Shape`, `Solid`, `Adjustment Layer`, `Null`, separator, `Import Media…`). |
 | Identity line | height `m.row`, inset `m.inset`. Layer name `t.title` `t.semibold_weight` `c.text`, then ` · ` and the type (`Text`, `Shape`, `Video` …) in `t.title` regular `c.muted`. Multi-select: `{n} Layers` + ` · ` + `Mixed` or the shared type. Truncates the name first; tooltip full. |
-| Align strip | one row `m.row`; two GPUI segmented-look groups (README tab-group recipe but momentary — no selected segment): Left, Horizontal Centre, Right │ Top, Vertical Centre, Bottom. Glyphs `align.horizontal.left`, `align.horizontal.center`, `align.horizontal.right`, `align.vertical.top`, `align.vertical.center`, `align.vertical.bottom` at `m.symbol_inline`. Each segment ≥ `m.hit` wide. `m.gap` between groups. Hidden for audio layers and for no selection. Tooltips `Align Left`, `Align Horizontal Centres`, `Align Right`, `Align Top`, `Align Vertical Centres`, `Align Bottom` (with one layer: aligns to the composition; with several: to the selection — detail line `To composition` / `To selection`). |
+| Align strip | one row `m.row`; two GPUI segmented-look groups (README tab-group recipe but momentary — no selected segment): Left, Horizontal Centre, Right │ Top, Vertical Centre, Bottom. Glyphs `align.horizontal.left`, `align.horizontal.center`, `align.horizontal.right`, `align.vertical.top`, `align.vertical.center`, `align.vertical.bottom` at `m.symbol_inline`. Each segment ≥ `m.hit` wide. `m.gap` between groups. Hidden for audio layers and for no selection. Tooltips `Align Left`, `Align Horizontal Centres`, `Align Right`, `Align Top`, `Align Vertical Centres`, `Align Bottom` (v1.2.0 `AlignmentStrip.svelte`: one layer or several, the union box aligns to the **composition**, keeping relative offsets — detail line `To composition`). |
 | Section heading | `t.title` `t.semibold_weight` `c.text`; padding top `m.inset`, bottom `m.gap`; inset `m.inset`. Disclosure chevron (`chevron.down`, rotates to `chevron.right` collapsed) at the **trailing** inset, `m.symbol_inline` `c.muted`, shown on heading hover, on keyboard focus, and always while collapsed. Click anywhere on the heading toggles. Collapsed state persists per project per section id. Contributed sections use the same heading. Optional trailing heading button (Masks `+` `Add Mask`, Text animators `+` `Add Text Animator`) sits before the chevron. |
 | Row | README/language §9 inspector row: keyframe diamond column (`m.keyframe` glyph in an `m.hit` square starting at `m.inset − (m.hit − m.keyframe) ÷ 2`), label (flexible, `t.label` `c.secondary`, truncating, tooltip), value column `m.value_column` wide ending at `m.inset` from the panel edge. One value column for the whole panel. Row height `m.row`; fields `m.field`, centred. |
 | Number well | `c.field`, `m.control_radius`, padding `m.gap` each side, value `t.body` tabular `c.text` **left-aligned**, unit `c.muted` after a space, trailing in the well. Two axes: two equal wells, `m.gap − 2` (4 pt) between. |
@@ -108,7 +108,7 @@ more; two decimals for unitless).
 | **Not applicable to some selected layers** | row is shown if ≥ 1 selected layer has it (B391); edits skip the others. |
 | **Locked layer / locked ancestor** | wells `c.muted` text, no hover, not editable; identity line gets `lock` `m.symbol_inline` `c.muted` after the type; tooltip `Locked layers can’t be edited.` (B284). |
 | **Disabled row** (e.g. Track Matte with no layer above) | label and value `c.muted`, no hover. |
-| **Error** | typed value invalid → field shakes nothing; it stays open with a `t.minimum` `c.danger` line under the row (`Enter a number.` / `Enter a value from {min} to {max}.`) and the previous value restored on Esc. |
+| **Error** | edit rejected by the model: value reverts, `t.minimum` `c.danger` line under the row `Couldn’t change {Property}. Try again.` (clears on the row's next accepted edit). Updates lost: wells disabled, one Error line at the top of the content `Properties aren’t updating right now.` (`c.warning` triangle), cleared when publications resume. Native menu failure: no UI. Typed value invalid → field shakes nothing; it stays open with a `t.minimum` `c.danger` line under the row (`Enter a number.` / `Enter a value from {min} to {max}.`) and the previous value restored on Esc. |
 | **Drop** | dropping an effect onto the panel adds it to the first selected layer (drop target = whole content area). |
 | **Playing** | values of animated properties update on the readout clock (B351–B353), at most once per display frame, without re-laying out rows. |
 | **60 k rows** | N/A for rows; a selection of 60 000 layers renders the first layer's rows (B359) and computes mixed state lazily per visible row. |
