@@ -315,6 +315,10 @@ impl TimelineIndex {
         }
         result
     }
+    /// Original ordinal for the v4 index column; O(1), independent of viewport.
+    pub fn layer_ordinal(&self, id: &str) -> Option<usize> {
+        self.by_id.get(id).copied()
+    }
     pub fn layer(&self, id: &str) -> Option<&Layer> {
         self.by_id.get(id).map(|i| &self.layers[*i])
     }
