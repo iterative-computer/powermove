@@ -1,4 +1,6 @@
 mod diag;
+#[path = "surfaces/editing.rs"]
+pub mod editing;
 mod lifecycle;
 mod mcp;
 mod media;
