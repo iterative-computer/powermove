@@ -1,10 +1,11 @@
-//! Main-thread NSAlert adapter. Sheet forms deliberately remain delegated until
-//! the missing Opus metric tokens land. No runModal, JS or kernel wait here.
+//! Main-thread NSAlert adapter with explicit Return/default and Cancel/Escape.
+//! The app attaches sheet forms using the resolved sheet_layout tokens.
+//! No runModal, JS or kernel wait here.
 use super::*;
 use objc2::{MainThreadMarker, rc::Retained};
 use objc2_app_kit::{
-    NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSEventModifierFlags,
-    NSModalResponse, NSTextField, NSWindow,
+    NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSButtonCell,
+    NSEventModifierFlags, NSModalResponse, NSTextField, NSWindow,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::sync::mpsc::Sender;
@@ -52,21 +53,27 @@ impl PreparedAlert {
         if let Some(line) = &surface.line {
             alert.setInformativeText(&NSString::from_str(line));
         }
+        alert.window().setDefaultButtonCell(None);
         for action in &surface.buttons {
             let button = alert.addButtonWithTitle(&NSString::from_str(action.label));
             button.setEnabled(action.enabled);
             button.setHasDestructiveAction(action.destructive);
             button.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
-            button.setKeyEquivalent(&NSString::from_str(if action.default {
-                "\r"
-            } else if action.id == "cancel" {
+            if action.default {
+                let cell = button
+                    .cell()
+                    .and_then(|c| c.downcast::<NSButtonCell>().ok());
+                alert.window().setDefaultButtonCell(cell.as_deref());
+            }
+            // N3: the default cell owns Return; an explicit equivalent owns Esc.
+            button.setKeyEquivalent(&NSString::from_str(if action.label == "Cancel" {
                 "\u{1b}"
+            } else if action.default {
+                "\r"
             } else {
                 ""
             }));
         }
-        // Cancel must also respond to Esc when it owns Return. Cocoa's cancel
-        // button semantics use its title in addition to the key equivalent.
         let field = if let Some(spec) = surface.fields.first() {
             if surface.fields.len() != 1 || spec.piece != NativePiece::TextField {
                 return Err(NativeError::UnsupportedAccessory);
@@ -179,6 +186,10 @@ mod tests {
         let buttons = prepared.alert.buttons();
         assert_eq!(buttons.objectAtIndex(1).title().to_string(), "Delete");
         assert!(buttons.objectAtIndex(1).hasDestructiveAction());
-        assert_eq!(buttons.objectAtIndex(0).keyEquivalent().to_string(), "\r");
+        assert_eq!(
+            buttons.objectAtIndex(0).keyEquivalent().to_string(),
+            "\u{1b}"
+        );
+        assert!(prepared.alert.window().defaultButtonCell().is_some());
     }
 }
