@@ -180,12 +180,19 @@ pub fn restore_error(failures: &[RestoreFailure]) -> Option<Alert> {
         [one] => Some(open_error(&one.name, &one.service_code, one.path_exists)),
         [a, b, rest @ ..] => Some(Alert {
             message: "Some projects couldn’t be reopened.".into(),
-            informative: format!(
-                "“{}”, “{}” and {} more may have been moved or deleted.",
-                a.name,
-                b.name,
-                rest.len()
-            ),
+            informative: if rest.is_empty() {
+                format!(
+                    "“{}” and “{}” may have been moved or deleted.",
+                    a.name, b.name
+                )
+            } else {
+                format!(
+                    "“{}”, “{}” and {} more may have been moved or deleted.",
+                    a.name,
+                    b.name,
+                    rest.len()
+                )
+            },
             buttons: vec![
                 default(Action::Ok, "OK"),
                 Button::new(Action::ShowProjectLibrary, "Show Project Library", None),

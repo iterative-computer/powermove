@@ -687,6 +687,12 @@ fn restore_errors_aggregate_once_and_already_open_only_focuses() {
         a.informative,
         "“a”, “b” and 1 more may have been moved or deleted."
     );
+    assert_eq!(
+        restore_error(&[failed("a"), failed("b")])
+            .unwrap()
+            .informative,
+        "“a” and “b” may have been moved or deleted."
+    );
     assert_eq!(a.action_for_key(Key::Return), Some(Action::Ok));
     assert_eq!(a.buttons[1].label, "Show Project Library");
 }
