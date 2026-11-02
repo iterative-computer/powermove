@@ -7,10 +7,17 @@ yet drive WebKit, replay the interaction script, or capture native traces/PNGs.
 It reports `cant_run` until those adapters exist. Unit tests and successful
 activation are never extension matches.
 
+The continuation adds a disposable native kernel adapter, V8 contribution
+mounting, a production WebKit remote-DOM adapter, and profile-scoped Store
+admission/data-store components. The latter two are not yet integrated into the
+capture CLI. See `docs/native/extcheck-p2.md` for their limits and current counts.
+
 ## Prepare the frozen reference
 
 Use an owned, disposable checkout; never change the installed app or its profile.
-Keep at least 8 GiB free. The recorder must be enabled **during the build**.
+Keep at least 6.5 GiB free. This lane's revised resource policy pauses below
+6.5 GiB and resumes at or above 6.5 GiB. The recorder must be enabled
+**during the build**.
 
 ```sh
 mkdir -p /tmp/pm-extcheck
@@ -22,6 +29,8 @@ bun install --frozen-lockfile --cwd apps/native/js/compat
 # Remote DOM's lockfile v2 needs a supporting Bun; on Bun 1.3.14 use:
 (cd apps/native/js/remote-dom && npm install --ignore-scripts --no-package-lock)
 bash tools/extcheck/build.sh test
+bash tools/extcheck/build.sh test pm-compat-host
+bash tools/extcheck/build.sh test pm-store-host
 bash tools/extcheck/build.sh build
 bash tools/extcheck/run.sh \
   --reference-root /tmp/pm-extcheck/reference \
@@ -31,13 +40,30 @@ bash tools/extcheck/run.sh \
 
 `build.sh` sources `engine/env.sh`, uses Rust 1.96.1, the shared target, the
 build lock, the verified S1 archive **and bindings**, and monitors disk during
-builds. It uses debug=0 to avoid a second dependency build with line tables.
+builds. Cargo runs at `nice -n 20` with four build jobs and four test threads.
+It uses debug=0 to avoid a second dependency build with line tables.
 Set `PM_S1_ARTIFACT` to another verified copy if needed. No V8 source build.
 
-The native runner is a workspace package, `pm-compat-runner`. Its eight tests
+The native runner is a workspace package, `pm-compat-runner`. Its tests
 execute the production compat bundle inside `pm-runtime-v8`, including actual
 remote-DOM event closures and native recorder pixels. Bun is a build/test tool;
 the executable does not load Node, Electron or a JS test double.
+
+The standalone WebKit component probe uses the production page applier and a
+bounded routing worker. It opens and closes its own synthetic window, and must
+run only after the owner's pause ends, with the shared GUI lease:
+
+```sh
+bun build apps/native/js/remote-dom/src/browser-applier.ts --target browser \
+  --format iife --outfile /tmp/pm-extcheck/page.js
+bash tools/extcheck/build.sh build pm-compat-host remote-dom-smoke
+python3 tools/extcheck/gui_capture.py \
+  "$HOME/Developer/pm-target/debug/examples/remote-dom-smoke" \
+  /tmp/pm-extcheck/page.js
+```
+
+Its DOM acknowledgement is component evidence only. It does not capture an
+extension oracle or declare a P2 match.
 
 ## Inputs and privacy
 
@@ -114,8 +140,15 @@ captures must declare:
 This is adapter provenance, not independent security attestation. The bundled
 probe does not declare it. Blocked captures use reviewed fixed reason codes.
 Every role is attempted independently, even when the other role cannot run.
-Timeouts terminate the owned process group. Each reference launch acquires the
-shared POSIX GUI lock and rechecks the screen; a busy/locked screen is a blocker.
+Timeouts terminate the owned process group. Each capture role acquires the
+shared POSIX GUI lock and rechecks the screen. A busy GUI or locked screen waits
+and retries every 60 seconds, outside the capture execution deadline.
+Build/capture tools honor `/tmp/pm-shots/PAUSE_LOCAL`: they check every five
+minutes and stop their owned process group if a local pause begins. Interrupted
+capture attempts are retried, rather than classified as extension failures.
+`/tmp/pm-shots/USER_ACTIVE` permits low-priority headless work but blocks either
+capture role and the standalone GUI probe. GUI tools wait until it disappears,
+and stop their owned capture if it appears during a run.
 Electron uses a disposable profile, clears `ELECTRON_RUN_AS_NODE`, checks recorder
 instrumentation, and closes on every exit path. The installed app is untouched.
 
