@@ -177,7 +177,9 @@ test("document views replay through the real Rust six-op validator and accessibi
     </PoppedOutPanel>,
   );
   const result = Bun.spawnSync(
-    [`${repository}/apps/native/target/debug/examples/ui_kit_wire`],
+    [
+      `${process.env.CARGO_TARGET_DIR ?? `${repository}/apps/native/target`}/debug/examples/ui_kit_wire`,
+    ],
     {
       stdin: Buffer.from(
         commits.map((c) => JSON.stringify(c)).join("\n") + "\n",
