@@ -114,6 +114,15 @@ pub struct Query {
 impl Query {
     /// Worker only, including for >2,000 projects. No pagination.
     pub fn apply(&self, snapshot: &Snapshot) -> Vec<Row> {
+        self.apply_with_names(snapshot, |a, b| a.to_lowercase().cmp(&b.to_lowercase()))
+    }
+    /// The native worker supplies system locale collation. The deterministic
+    /// headless comparator above is never used as a macOS collation substitute.
+    pub fn apply_with_names(
+        &self,
+        snapshot: &Snapshot,
+        compare_names: impl Fn(&str, &str) -> std::cmp::Ordering,
+    ) -> Vec<Row> {
         let text = self.text.trim().to_lowercase();
         let mut rows: Vec<_> = snapshot
             .rows
@@ -132,11 +141,7 @@ impl Query {
                 .modified_ms
                 .cmp(&a.modified_ms)
                 .then_with(|| a.id.cmp(&b.id)),
-            Sort::Name => a
-                .name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-                .then_with(|| a.id.cmp(&b.id)),
+            Sort::Name => compare_names(&a.name, &b.name).then_with(|| a.id.cmp(&b.id)),
         });
         // Authored v1.2.0 recents behavior: 12 until a search is entered.
         // The native spec removes pagination, not this deliberate limit.

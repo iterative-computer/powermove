@@ -1,5 +1,7 @@
 mod diag;
 mod lifecycle;
+#[path = "surfaces/library.rs"]
+pub mod library_surface;
 mod mcp;
 mod media;
 mod panels;
