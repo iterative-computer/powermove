@@ -891,6 +891,34 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    fn can_present(&self) -> bool {
+        let size = self.content_size();
+        let width: f32 = size.width.into();
+        let height: f32 = size.height.into();
+        unsafe {
+            let visible: Bool = msg_send![self.native_window, isVisible];
+            let miniaturized: Bool = msg_send![self.native_window, isMiniaturized];
+            visible.as_bool()
+                && !miniaturized.as_bool()
+                && self
+                    .native_window
+                    .occlusionState()
+                    .contains(NSWindowOcclusionState::Visible)
+                && !self.native_window.screen().is_null()
+                && width.is_finite()
+                && height.is_finite()
+                && width > 0.
+                && height > 0.
+        }
+    }
+
+    fn uses_metal_display_link(&self) -> bool {
+        #[cfg(not(feature = "wgpu"))]
+        return self.renderer.uses_display_link();
+        #[cfg(feature = "wgpu")]
+        false
+    }
+
     fn next_frame_request(&mut self) -> RequestFrameOptions {
         RequestFrameOptions {
             force_render: mem::take(&mut self.force_render_pending),
@@ -1019,15 +1047,9 @@ impl MacWindowState {
     fn start_display_link(&mut self) {
         // Core Animation follows the layer/view's display and refresh timing.
         // Metal updates also provide a drawable and a CPU submission deadline.
-        unsafe {
-            if !self
-                .native_window
-                .occlusionState()
-                .contains(NSWindowOcclusionState::Visible)
-            {
-                self.stop_display_link();
-                return;
-            }
+        if !self.can_present() {
+            self.stop_display_link();
+            return;
         }
         let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
@@ -1043,6 +1065,7 @@ impl MacWindowState {
                     let link: Retained<Objc2Object>;
                     #[cfg(not(feature = "wgpu"))]
                     if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none() {
+                        self.renderer.bind_display_link();
                         let allocated: *mut Objc2Object =
                             msg_send![class!(CAMetalDisplayLink), alloc];
                         let raw: *mut Objc2Object = msg_send![allocated, initWithMetalLayer: self.renderer.layer_ptr() as ObjcId];
@@ -2231,6 +2254,11 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        #[cfg(not(feature = "wgpu"))]
+        if !this.renderer.drawable_ready() || !this.can_present() {
+            this.force_render_pending = true;
+            return;
+        }
         let transaction = crate::composition::present(this.native_view.as_ptr() as usize);
         // Powermove P-120: block on the transaction only when slot geometry moved
         // (or AppKit is painting synchronously), and reset it on every other frame.
@@ -3367,7 +3395,10 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
+            if lock.uses_metal_display_link() {
+                lock.force_render_pending = true;
+                lock.start_display_link();
+            } else if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.sync_present_requested = true;
                 lock.stop_display_link();
@@ -3493,6 +3524,18 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    #[cfg(not(feature = "wgpu"))]
+    if lock.renderer.uses_display_link() {
+        // AppKit may repaint during a CA commit, activation, resize or occlusion.
+        // Even a paused Metal link forbids nextDrawable. Keep demand for its next update.
+        lock.force_render_pending = true;
+        lock.start_display_link();
+        return;
+    }
+    if !lock.can_present() {
+        lock.force_render_pending = true;
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.sync_present_requested = true;
@@ -3518,6 +3561,10 @@ unsafe extern "C" fn metal_display_link_step(
     #[cfg(not(feature = "wgpu"))]
     unsafe {
         let state = get_window_state(view);
+        if !state.lock().can_present() {
+            state.lock().force_render_pending = true;
+            return;
+        }
         let deadline: f64 = msg_send![update, targetTimestamp];
         if !crate::composition::has_frame_budget(
             objc2_quartz_core::CACurrentMediaTime(),
@@ -3530,6 +3577,10 @@ unsafe extern "C" fn metal_display_link_step(
             return;
         }
         let drawable: *mut Objc2Object = msg_send![update, drawable];
+        if drawable.is_null() {
+            state.lock().force_render_pending = true;
+            return;
+        }
         let drawable = metal::MetalDrawableRef::from_ptr(drawable.cast()).to_owned();
         state
             .lock()

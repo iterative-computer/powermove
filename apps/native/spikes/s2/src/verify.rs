@@ -344,3 +344,32 @@ fn run_inner() -> Result<()> {
     println!("PASS retired/device-loss source rejection");
     Ok(())
 }
+
+/// Screen-free regression: a real paused CAMetalDisplayLink still owns acquisition.
+pub fn drawable_lifecycle() -> Result<()> {
+    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let mut renderer =
+            MetalRenderer::new(Arc::new(Mutex::new(InstanceBufferPool::default())), false);
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(64)));
+        renderer.bind_display_link();
+        let allocated: *mut AnyObject = msg_send![class!(CAMetalDisplayLink), alloc];
+        let raw: *mut AnyObject =
+            msg_send![allocated, initWithMetalLayer: renderer.layer_ptr() as *mut AnyObject];
+        let link = Retained::from_raw(raw).expect("Metal display link");
+        let _: () = msg_send![&*link, setPaused: true];
+        for _ in 0..100 {
+            ensure!(!renderer.drawable_ready());
+            renderer.draw(&Scene::default()); // formerly fell through to illegal nextDrawable
+            ensure!(renderer.render_to_image(&Scene::default()).is_err());
+            renderer.set_display_link_drawable(None);
+        }
+        renderer.update_drawable_size(size(DevicePixels(0), DevicePixels(0)));
+        renderer.draw(&Scene::default());
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(64)));
+        renderer.draw(&Scene::default());
+        let _: () = msg_send![&*link, invalidate];
+        println!("DRAWABLE_LIFECYCLE_PASS paused=100 zero_size=1 restored=1 capture_rejected=100");
+        Ok(())
+    })
+}

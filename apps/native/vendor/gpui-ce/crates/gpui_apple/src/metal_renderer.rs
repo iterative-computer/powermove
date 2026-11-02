@@ -1,5 +1,5 @@
 // Powermove modified: native S2 interop; see vendor/gpui-ce/POWERMOVE.md.
-use crate::metal_atlas::MetalAtlas;
+use crate::{drawable_source::DrawableSource, metal_atlas::MetalAtlas};
 use anyhow::Result;
 use block::ConcreteBlock;
 use core_graphics::geometry::CGSize;
@@ -237,7 +237,7 @@ pub struct MetalRenderer {
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
-    display_link_drawable: Option<metal::MetalDrawable>,
+    drawable_source: DrawableSource<metal::MetalDrawable>,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -505,7 +505,7 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
-            display_link_drawable: None,
+            drawable_source: DrawableSource::default(),
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -670,10 +670,24 @@ impl MetalRenderer {
         // nothing to do
     }
 
+    /// Must be called before initializing CAMetalDisplayLink with this layer.
+    /// Pausing the link does not restore permission to call nextDrawable.
+    pub fn bind_display_link(&mut self) {
+        self.drawable_source.bind_display_link();
+    }
+
+    pub fn uses_display_link(&self) -> bool {
+        self.drawable_source.is_display_link()
+    }
+
+    pub fn drawable_ready(&self) -> bool {
+        self.drawable_source.ready()
+    }
+
     /// A CAMetalDisplayLink update lends one available drawable for this callback.
     /// Clear it after the callback even if GPUI did not need to paint.
     pub fn set_display_link_drawable(&mut self, drawable: Option<metal::MetalDrawable>) {
-        self.display_link_drawable = drawable;
+        self.drawable_source.supply(drawable);
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -687,22 +701,21 @@ impl MetalRenderer {
             }
         };
         let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let supplied = self.display_link_drawable.take();
-        let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
-            supplied.as_deref().or_else(|| layer.next_drawable())
-        }) {
-            drawable
-        } else {
-            log::error!(
-                "failed to retrieve next drawable, drawable size: {:?}",
-                viewport_size
-            );
+        if !viewport_size.width.is_finite()
+            || !viewport_size.height.is_finite()
+            || viewport_size.width <= 0.
+            || viewport_size.height <= 0.
+        {
+            return;
+        }
+        let supplied = self.drawable_source.is_display_link();
+        let Some(drawable) = measure_native("GPUI drawable", || {
+            self.drawable_source
+                .take(|| layer.next_drawable().map(ToOwned::to_owned))
+        }) else {
             return;
         };
+        let drawable = &*drawable;
 
         // A display-link update can carry the previous size during live resize.
         // Encode against the supplied texture, not the layer's next requested size.
@@ -735,7 +748,7 @@ impl MetalRenderer {
             command_buffer.commit();
             measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
             drawable.present();
-        } else if supplied.is_some() {
+        } else if supplied {
             // CAMetalDisplayLink requires present() before targetTimestamp.
             // Queuing present on the buffer defers that call until scheduling,
             // which can miss the CPU deadline after timely encoding.
@@ -759,10 +772,18 @@ impl MetalRenderer {
             let layer = self.layer.clone().ok_or_else(|| {
                 anyhow::anyhow!("render_to_image requires a layer-backed renderer")
             })?;
+            anyhow::ensure!(
+                !self.uses_display_link(),
+                "render_to_image cannot acquire from a CAMetalDisplayLink layer; use render_scene_to_image"
+            );
             let viewport_size = layer.drawable_size();
             let viewport_size: Size<DevicePixels> = size(
                 (viewport_size.width.ceil() as i32).into(),
                 (viewport_size.height.ceil() as i32).into(),
+            );
+            anyhow::ensure!(
+                viewport_size.width.0 > 0 && viewport_size.height.0 > 0,
+                "render_to_image requires a positive drawable size"
             );
             let drawable = layer
                 .next_drawable()

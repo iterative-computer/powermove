@@ -167,6 +167,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().any(|a| a == "--verify-tab-bar") {
         return tab_bar::run();
     }
+    if std::env::args().any(|a| a == "--verify-drawable-lifecycle") {
+        return verify::drawable_lifecycle();
+    }
     if std::env::args().any(|a| a == "--verify") {
         return verify::run();
     }

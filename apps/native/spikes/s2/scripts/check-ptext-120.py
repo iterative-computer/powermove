@@ -11,6 +11,7 @@ import signal
 import subprocess
 import time
 from p120_metrics import metrics
+from gui_guard import GuiLock, check_user, wait_quiet, quiet_state
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--display', action='store_true')
@@ -43,7 +44,7 @@ def disk_ok():
 def guarded(command):
     disk_ok()
     if command[0] == 'cargo':
-        command = [str(Path.home() / '.local/bin/flock'), '/tmp/pm-build.lock', *command]
+        command = [str(Path.home() / '.local/bin/flock'), '/tmp/pm-build.lock', 'nice', '-n', '10', *command]
     p = subprocess.Popen([str(x) for x in command], start_new_session=True)
     try:
         while p.poll() is None:
@@ -137,6 +138,7 @@ incremental=false
 helper = target / 'ptext-screen-state'
 guarded(['swiftc', native / 'spikes/s2/scripts/ptext-screen-state.swift', '-o', helper])
 def screen():
+    check_user()
     state = json.loads(subprocess.check_output([helper], text=True))
     console_check = Path('/tmp/pm-shots/is_locked.sh')
     if console_check.exists():
@@ -147,32 +149,6 @@ def screen():
     if state['locked']:
         raise RuntimeError('UNVERIFIED: session locked; unlock and rerun explicitly')
     return state
-
-class GuiLock:
-    def __enter__(self):
-        screen()
-        self.path = gui_lock
-        while True:
-            try:
-                with self.path.open('x') as f:
-                    f.write(f'p120 pid={os.getpid()}\n')
-                break
-            except FileExistsError:
-                print('GUI lock held; retry in 30 seconds', flush=True)
-                time.sleep(30)
-                screen()
-        try:
-            screen()
-            # Avoid simultaneous timing apps; the lock cannot protect manually opened instances.
-            processes = subprocess.check_output(['ps', '-A', '-o', 'comm='], text=True)
-            if any(Path(s.strip()).name == 'pm-native-s2-spike' for s in processes.splitlines()):
-                raise RuntimeError('another S2 instance is running; close it before measuring')
-        except BaseException:
-            self.path.unlink()
-            raise
-        return self
-    def __exit__(self, *_):
-        self.path.unlink()
 
 if args.ime:
     ime = target / 'ptext-input-source'
@@ -219,7 +195,12 @@ for run in range(args.runs):
             if not workloads:
                 raise RuntimeError('no matching workload')
         for label, env in workloads:
+            wait_quiet()
             screen()
+            processes = subprocess.check_output(['ps', '-A', '-o', 'comm='], text=True)
+            if any(Path(s.strip()).name == 'pm-native-s2-spike' for s in processes.splitlines()):
+                raise RuntimeError('another S2 instance is running; no timing taken')
+            print(subprocess.check_output(['uptime'], text=True).strip(), flush=True)
             load_start = os.getloadavg()
             print(json.dumps({'workload': label, 'load_start': load_start}), flush=True)
             path = shots / ('ptext-' + label + '-' + str(run) + '.log')
@@ -239,7 +220,14 @@ for run in range(args.runs):
                 finally:
                     app.terminate()
                     app.wait()
-            row = {'run':run,'workload':label,'load_start':load_start,'load_end':os.getloadavg(),**metrics(path)}
+            row = {'date_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                   'run':run,'workload':label,'load_start':load_start,'load_end':os.getloadavg(),**metrics(path)}
+            quiet_end = quiet_state()
+            row['quiet_end'] = quiet_end['quiet']
+            if not quiet_end['quiet']:
+                row['pass'] = False
+                row['presentation_evidence_valid'] = False
+                row['unverified_reason'] = 'machine load or concurrent build; discard timing'
             print(json.dumps(row),flush=True)
             results.append(row)
             (shots / ('p120-results.json' if args.p120 else 'ptext-120-results.json')).write_text(
