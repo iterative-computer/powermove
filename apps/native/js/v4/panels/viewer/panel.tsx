@@ -78,7 +78,58 @@ export function ViewerPanel({
     ].map(([v, label]) => ({ v, label })),
   ];
   const effective = effectiveResolution(m);
-  const value = `${m.name}, ${percent(m.shownZoom)} percent, ${effective ? `${effective} resolution, ` : ""}${m.selectionCount} layers selected`;
+  const spoken = (text: string) => text.replace(/ %$/, " percent");
+  // D3: an unnamed composition is spoken as "Untitled Composition"; the authored
+  // empty name is never rewritten.
+  const value = `${m.name || "Untitled Composition"}, ${percent(m.shownZoom)} percent, ${effective ? `${spoken(effective)} resolution, ` : ""}${m.selectionCount} layers selected`;
+  // The same two pop-ups (same ids) live in the docked bar or, in Focus and
+  // full screen, in the ViewerOverlay capsule (viewer-chrome.md §2 Overlay),
+  // so keyboard focus follows them across presentations (design review D5).
+  const popups = (
+    <>
+      <PopUpButton
+        id="viewer.zoom"
+        binding="viewer.zoom"
+        label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
+        title="Zoom"
+        value={zoomValue}
+        options={zoomOptions}
+        style={popupStyle}
+        onChange={(event) => {
+          if (event.value === "fit") actions.drive("viewer.fit");
+          else if (event.value === "actual") actions.drive("viewer.zoom", 1);
+          else if (
+            typeof event.value === "number" &&
+            zoomPresets.includes(event.value as (typeof zoomPresets)[number])
+          )
+            actions.drive("viewer.zoom", event.value);
+          else if (
+            ["viewer.zoom.in", "viewer.zoom.out", "viewer.fit"].includes(
+              String(event.value),
+            )
+          )
+            actions.drive(String(event.value));
+        }}
+      >
+        {zoomTitle(m)}
+      </PopUpButton>
+      <PopUpButton
+        id="viewer.quality"
+        binding="viewer.quality"
+        label={`Preview resolution, ${m.quality === "auto" ? `Auto${effective ? `, currently ${spoken(effective)}` : ""}` : resolutionTitle(m)}`}
+        title="Preview Resolution"
+        value={m.quality}
+        options={resolutions}
+        style={popupStyle}
+        onChange={(event) => {
+          if (resolutions.some((o) => o.v === event.value))
+            actions.drive("viewer.quality", event.value);
+        }}
+      >
+        {resolutionTitle(m)}
+      </PopUpButton>
+    </>
+  );
   return (
     <div
       id="viewer"
@@ -99,6 +150,7 @@ export function ViewerPanel({
             height: token("metrics.header"),
             gap: token("metrics.gap"),
             paddingLeft: token("metrics.inset"),
+            paddingRight: token("metrics.gap"),
             justifyContent: source ? "space-between" : "end",
           }}
         >
@@ -132,7 +184,8 @@ export function ViewerPanel({
               </text>
               <ToolbarItem
                 id="viewer.source.close"
-                label="Back to composition"
+                label="Back to Composition"
+                metadata={{ symbol: "chevron.left" }}
                 style={{
                   color: token("colors.accent_text"),
                   fontSize: token("typography.body"),
@@ -151,50 +204,7 @@ export function ViewerPanel({
               gap: token("metrics.gap"),
             }}
           >
-            <PopUpButton
-              id="viewer.zoom"
-              binding="viewer.zoom"
-              label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
-              title="Zoom"
-              value={zoomValue}
-              options={zoomOptions}
-              style={popupStyle}
-              onChange={(event) => {
-                if (event.value === "fit") actions.drive("viewer.fit");
-                else if (event.value === "actual")
-                  actions.drive("viewer.zoom", 1);
-                else if (
-                  typeof event.value === "number" &&
-                  zoomPresets.includes(
-                    event.value as (typeof zoomPresets)[number],
-                  )
-                )
-                  actions.drive("viewer.zoom", event.value);
-                else if (
-                  ["viewer.zoom.in", "viewer.zoom.out", "viewer.fit"].includes(
-                    String(event.value),
-                  )
-                )
-                  actions.drive(String(event.value));
-              }}
-            >
-              {zoomTitle(m)}
-            </PopUpButton>
-            <PopUpButton
-              id="viewer.quality"
-              binding="viewer.quality"
-              label={`Preview resolution, ${m.quality === "auto" ? `Auto${effective ? `, currently ${effective}` : ""}` : resolutionTitle(m)}`}
-              title="Preview Resolution"
-              value={m.quality}
-              options={resolutions}
-              style={popupStyle}
-              onChange={(event) => {
-                if (resolutions.some((o) => o.v === event.value))
-                  actions.drive("viewer.quality", event.value);
-              }}
-            >
-              {resolutionTitle(m)}
-            </PopUpButton>
+            {popups}
           </div>
         </div>
       )}
@@ -219,6 +229,35 @@ export function ViewerPanel({
           pendingRecipe: "viewer-chrome.md §§2–3,6–7",
         }}
       />
+      {!source && m.canvasLost && (
+        <ToolbarItem
+          id="viewer.canvas.return"
+          label="Return to Composition"
+          metadata={{ symbol: "viewfinder", surface: "ViewerOverlay" }}
+          onClick={() => actions.drive("viewer.fit")}
+        >
+          Return to Composition
+        </ToolbarItem>
+      )}
+      {state.host.presentation !== "Docked" && (
+        <div
+          id="viewer.overlay"
+          role="group"
+          label="Viewer controls"
+          // DESIGN-TODO(kit): ViewerOverlay glass capsule recipe (bottom-centre,
+          // m.inset above the edge, dark scheme, idle fade). Structure only.
+          metadata={{ surface: "ViewerOverlay", appearance: "dark" }}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: token("metrics.gap"),
+          }}
+        >
+          {popups}
+        </div>
+      )}
     </div>
   );
 }

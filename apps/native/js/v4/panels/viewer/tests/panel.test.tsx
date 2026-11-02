@@ -193,16 +193,21 @@ for (const [name, change] of cases) {
     const focus = result.focusOrder.map(
       (id: number) => result.nodes[id].props.id,
     );
+    const lost =
+      state.model && !state.host.source && state.model.canvasLost
+        ? ["viewer.canvas.return"]
+        : [];
     expect(focus).toEqual(
       !state.model
         ? ["viewer.open"]
         : state.host.presentation !== "Docked"
-          ? ["viewer.canvas"]
+          ? ["viewer.canvas", ...lost, "viewer.zoom", "viewer.quality"]
           : [
               ...(state.host.source ? ["viewer.source.close"] : []),
               "viewer.zoom",
               "viewer.quality",
               "viewer.canvas",
+              ...lost,
             ],
     );
     for (const { accessibility: ax } of result.appearances) {
@@ -217,7 +222,8 @@ for (const [name, change] of cases) {
         expect(byId("viewer.canvas").value).toContain(
           `${state.model.selectionCount} layers selected`,
         );
-        if (state.host.presentation === "Docked") {
+        {
+          // Docked bar or Focus/full-screen overlay: same controls, same labels.
           expect(byId("viewer.zoom")).toMatchObject({
             role: "ComboBox",
             label:
@@ -231,7 +237,7 @@ for (const [name, change] of cases) {
         if (state.host.source && state.host.presentation === "Docked")
           expect(byId("viewer.source.close")).toMatchObject({
             role: "Button",
-            label: "Back to composition",
+            label: "Back to Composition",
           });
       } else
         expect(byId("viewer.open")).toMatchObject({
@@ -274,8 +280,9 @@ test("popup copy is exact; custom zoom has no invented menu item", async () => {
   expect(resolutionTitle(state.model!)).toBe("Auto");
   state.model!.effectiveQuality = 0.25;
   expect(resolutionTitle(state.model!)).toBe("Auto (Quarter)");
+  // Design review D2: intermediate adaptive scales show as a percentage.
   state.model!.effectiveQuality = 0.75;
-  expect(resolutionTitle(state.model!)).toBe("Auto");
+  expect(resolutionTitle(state.model!)).toBe("Auto (75 %)");
   await root.dispose();
 });
 test("every zoom and resolution change emits the matching model ID once", async () => {

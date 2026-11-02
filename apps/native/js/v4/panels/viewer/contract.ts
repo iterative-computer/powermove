@@ -121,15 +121,17 @@ export function zoomTitle(m: ViewerModel) {
     : `${percent(m.shownZoom)} %`;
 }
 /** Continuous adaptive scales are model facts, not invented menu choices. */
+/** Named steps keep their names; an intermediate adaptive scale (e.g. 0.75)
+ * shows as a percentage, `Auto (75 %)` (design review D2). */
 export function effectiveResolution(m: ViewerModel): string | null {
-  return (
-    (
-      { "1": "Full", "0.5": "Half", "0.25": "Quarter" } as Record<
-        string,
-        string
-      >
-    )[String(m.effectiveQuality)] ?? null
-  );
+  const named = (
+    { "1": "Full", "0.5": "Half", "0.25": "Quarter" } as Record<string, string>
+  )[String(m.effectiveQuality)];
+  if (named) return named;
+  const e = m.effectiveQuality;
+  return typeof e === "number" && Number.isFinite(e) && e > 0 && e < 1
+    ? `${percent(e)} %`
+    : null;
 }
 export function resolutionTitle(m: ViewerModel) {
   const label = resolutions.find((o) => o.v === m.quality)!.label;
