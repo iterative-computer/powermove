@@ -1,4 +1,5 @@
 /** Development/test only. Production bundles never import this module. */
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 let cached: { model: string; inspect: string } | undefined;
 export function binaries() {
@@ -6,7 +7,10 @@ export function binaries() {
   const manifest = fileURLToPath(
     new URL("../native/Cargo.toml", import.meta.url),
   );
-  const targetRoot = new URL("../../../../../target/", import.meta.url);
+  const targetRoot = resolve(
+    process.env.CARGO_TARGET_DIR ??
+      fileURLToPath(new URL("../../../../../target/", import.meta.url)),
+  );
   const result = Bun.spawnSync(
     [
       "cargo",
@@ -16,16 +20,16 @@ export function binaries() {
       manifest,
       "--bins",
       "--target-dir",
-      fileURLToPath(targetRoot),
+      targetRoot,
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
   if (result.exitCode) throw new Error(result.stderr.toString());
   const suffix = process.platform === "win32" ? ".exe" : "";
-  const target = new URL("debug/", targetRoot);
+  const target = join(targetRoot, "debug");
   return (cached = {
-    model: fileURLToPath(new URL(`project-model-host${suffix}`, target)),
-    inspect: fileURLToPath(new URL(`project-inspect-wire${suffix}`, target)),
+    model: join(target, `project-model-host${suffix}`),
+    inspect: join(target, `project-inspect-wire${suffix}`),
   });
 }
 if (import.meta.main) console.log(binaries());

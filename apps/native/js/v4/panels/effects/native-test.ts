@@ -1,11 +1,13 @@
 import type { Commit } from "../../src";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function buildProbe() {
   const manifest = fileURLToPath(
     new URL("./conformance/Cargo.toml", import.meta.url),
   );
-  const target = fileURLToPath(
-    new URL("./conformance/target", import.meta.url),
+  const target = resolve(
+    process.env.CARGO_TARGET_DIR ??
+      fileURLToPath(new URL("./conformance/target", import.meta.url)),
   );
   const build = Bun.spawnSync(
     [

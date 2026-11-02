@@ -1,4 +1,5 @@
-import { test, expect } from "bun:test";
+import { beforeAll, test, expect } from "bun:test";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HostClient, type HostAck } from "../../src/host-api";
 import { createRoot, type Commit, type Json } from "../../src";
@@ -13,8 +14,9 @@ function wire() {
     const manifest = fileURLToPath(
       new URL("../../../../Cargo.toml", import.meta.url),
     );
-    const target = fileURLToPath(
-      new URL("../../../../target/", import.meta.url),
+    const target = resolve(
+      process.env.CARGO_TARGET_DIR ??
+        fileURLToPath(new URL("../../../../target/", import.meta.url)),
     );
     const result = Bun.spawnSync([
       "cargo",
@@ -30,15 +32,15 @@ function wire() {
       "agent-panel-wire",
     ]);
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    executable = fileURLToPath(
-      new URL(
-        "../../../../target/debug/examples/agent-panel-wire",
-        import.meta.url,
-      ),
-    );
+    executable = join(target, "debug/examples/agent-panel-wire");
   }
   return executable;
 }
+// A cold model build is setup work, outside five-second UI interactions.
+beforeAll(() => {
+  wire();
+}, 120_000);
+
 async function nativeModel() {
   let publish = (p: Publication) => {};
   const history: Json[] = [{ native: fixture().native as unknown as Json }];

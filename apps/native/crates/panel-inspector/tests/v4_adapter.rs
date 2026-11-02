@@ -3,7 +3,9 @@ use pm_kernel::{
     SelectionCall,
 };
 use pm_model::{Value, json::parse};
-use pm_panel_inspector::{Binding, EffectClipboard, Inspector, InspectorError, PropertyId, v4_properties::*};
+use pm_panel_inspector::{
+    Binding, EffectClipboard, Inspector, InspectorError, PropertyId, v4_properties::*,
+};
 
 struct Fixture {
     actor: Option<KernelActor>,

@@ -31,7 +31,11 @@ fn block_on<F: Future>(future: F) -> F::Output {
         std::thread::park_timeout(Duration::from_secs(1));
     }
 }
+// Keep the kernel fixture and blocking executor off the macOS main thread.
 fn main() {
+    std::thread::spawn(run).join().expect("timeline model wire");
+}
+fn run() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
     let project = json!({"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[

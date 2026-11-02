@@ -1,4 +1,4 @@
-import { expect } from "bun:test";
+import { beforeAll, expect } from "bun:test";
 import { fileURLToPath } from "node:url";
 import {
   HostClient,
@@ -126,6 +126,10 @@ export function buildNative() {
   target = JSON.parse(metadata.stdout.toString()).target_directory as string;
   return target;
 }
+// Native compilation is setup, outside the UI interaction timeout.
+beforeAll(() => {
+  buildNative();
+}, 120_000);
 export function wire(commits: Commit[]) {
   const exe = `${buildNative()}/debug/effect-controls-wire`;
   const output = Bun.spawnSync([exe], {

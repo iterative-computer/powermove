@@ -1,4 +1,5 @@
 import { beforeAll } from "bun:test";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRoot, type Commit } from "../../../src";
 /** Local synthetic wire recorder; never an application host or model fallback. */
@@ -17,8 +18,9 @@ export function nativeValidators() {
   const manifest = fileURLToPath(
     new URL("../../../../../Cargo.toml", import.meta.url),
   );
-  const target = fileURLToPath(
-    new URL("../../../../../target", import.meta.url),
+  const target = resolve(
+    process.env.CARGO_TARGET_DIR ??
+      fileURLToPath(new URL("../../../../../target", import.meta.url)),
   );
   const result = Bun.spawnSync(
     [
@@ -37,15 +39,8 @@ export function nativeValidators() {
   );
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   binaries = {
-    model: fileURLToPath(
-      new URL("../../../../../target/debug/examples/v4_wire", import.meta.url),
-    ),
-    surface: fileURLToPath(
-      new URL(
-        "../../../../../target/debug/examples/v4_surface_wire",
-        import.meta.url,
-      ),
-    ),
+    model: join(target, "debug/examples/v4_timeline_wire"),
+    surface: join(target, "debug/examples/v4_timeline_surface_wire"),
   };
   return binaries;
 }

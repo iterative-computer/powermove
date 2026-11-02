@@ -1,5 +1,4 @@
-import "./setup";
-import { fileURLToPath } from "node:url";
+import { inspectorWire as binary } from "./setup";
 import {
   createRoot,
   type Commit,
@@ -8,12 +7,6 @@ import {
 } from "../../../src";
 import type { ComponentChild } from "preact";
 
-const binary = fileURLToPath(
-  new URL(
-    "../../../../../target/debug/examples/inspector_wire",
-    import.meta.url,
-  ),
-);
 export interface ProbeNode {
   id: number;
   type: string;
