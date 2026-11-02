@@ -453,9 +453,10 @@ isolated alert/picker source proves compilation only, with no AppKit runtime cla
 
 ### Media lane reconciliation and checks — 2026-11-01
 
-Fetched and merged `origin/feat/native-engine` at
-`7204fe91cde46019c2700e56c48f9301ad35d5f2` (already up to date; no conflicts).
-After reconciliation, the portable media harness passes **48 tests** and the
+Initially reconciled at `7204fe91cde46019c2700e56c48f9301ad35d5f2`, then
+fetched and merged the newly advanced `origin/feat/native-engine` at
+`9897e48dd6986574b1beddccb47bab986dfa7bf4` without conflicts. The incoming
+compatibility lane and its lockfile entries are retained. After that final merge, the portable media harness passes **48 tests** and the
 existing kernel/media/services/pro-media suites pass **493 tests**, with **one
 existing real-profile test ignored**. The v4 content suite passes **5 tests**.
 Exact checks (repository-root working directory unless stated):
@@ -491,6 +492,7 @@ One parallel kernel `slice2` run hit a library-lock assertion; its isolated
 rerun and the complete serialized suite both pass. No backing crate, hook or
 existing test was changed. Formatting is scoped to the touched sources; an
 unrelated pre-existing formatting difference in `app/src/smoke.rs` is unchanged.
-Production lockfiles are unchanged. Staged diff checks and both requested
+This lane adds no production lockfile entries beyond those inherited from the
+merged base. Staged diff checks and both requested
 Gitleaks forms pass before each commit; the repository pre-commit hook remains
 active.
