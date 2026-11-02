@@ -9,6 +9,7 @@ mod playback;
 mod rows;
 mod session;
 mod smoke;
+mod surfaces;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;
