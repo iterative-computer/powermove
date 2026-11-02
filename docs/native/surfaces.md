@@ -83,9 +83,9 @@ Design references below are relative to `docs/native/design/`:
 | S007 P0 | Cloud-media download consent, per-file progress/cancel/retry and automatic-download preference | `M/cloud-media.ts`; `R/legacy/core/cloud-media.ts`; `R/settings/SettingsScreen.svelte` | Settings specifies the preference; Media covers availability. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S007](design/surfaces/media.md). | `pm-panel-media` host effects; `pm-services::media::ImportQueue` is partial queue backing, not cloud hydration. Production cloud adapter absent. **spec+model** |
 | S008 P0 | Store Full Access trust alert and revoke/retrust entry points | `M/cloud/trust.ts`; `M/cloud/store-ipc.ts`; `R/store/StoreScreen.svelte` | Store-host review specifies alert, exact trust copy, Cancel default, identity fallback and stale handling. | `pm-store-host::permission::{PermissionRequest,Admission}` and stored decisions; host alert wiring pending. **spec+model** |
 | S009 P0 | Isolated extension permission disclosure/admission and revocation | `R/store/StoreScreen.svelte`; `M/cloud/permission-scan.ts`; `M/cloud/store-ipc.ts`; `R/legacy/ui/extension-settings.ts` | Store-host review specifies batched permission sheet, display identity and Settings permission switches. This is native replacement guidance; tag discloses permissions on Store detail rather than presenting the same new sheet. | `pm-store-host::permission` request/respond-all/revoke contracts. **spec+model** |
-| S010 P0 | Agent per-project computer-access and standing Full Access confirmations | `M/codex/consent.ts`; `R/panels/agent/AccessPicker.svelte`; `M/agent-approvals.ts` | Agent specifies access picker/inline approvals, not these full native consent dialogs. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S010](design/surfaces/authority.md). | `pm-agents::approvals`; `pm-panel-agentpanel` access commands/effects. OS consent host pending. **spec+model** |
-| S011 P0 | Extension variable setup, secret input/question, missing required values | `R/vars/SetupSheet.svelte`; `R/vars/setup.ts`; `M/env/ipc.ts` | Settings links to setup; Agent covers secret question cards only. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S011](design/surfaces/authority.md). | Migration retains env payloads; no complete native variable setup/service model found. **nothing** |
-| S012 P0 | Uninstall extension / also remove its entered values; local panel/workspace deletion confirmations | `M/env/ipc.ts`; `R/legacy/ui/extension-settings.ts`; `R/library/LibraryScreen.svelte`; `R/panels/WorkspacesPanel.svelte` | Store-host/Settings cover revoke/management, not complete removal choices. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S012](design/surfaces/authority.md). | `pm-store-host::install::{ArchivedRelease,ArchiveReason}`; `pm-shell::layout::LayoutStore` supports saved-workspace changes; variable archive flow incomplete. **spec+model** |
+| S010 P0 | Agent per-project computer-access and standing Full Access confirmations | `M/codex/consent.ts`; `R/panels/agent/AccessPicker.svelte`; `M/agent-approvals.ts` | Agent specifies access picker/inline approvals, not these full native consent dialogs. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S010](design/surfaces/authority.md). | `pm-agents::approvals`; `pm-panel-agentpanel` access commands/effects. `app::surfaces::authority` now supplies exact-copy alert state, safe defaults, request/generation guards, FIFO window queues, bounded worker publication, session-only standing-access state and an asynchronous AppKit alert adapter. **spec+model** (48 shared authority tests; macOS target checked; app dispatch and concrete agent-worker binding remain). |
+| S011 P0 | Extension variable setup, secret input/question, missing required values | `R/vars/SetupSheet.svelte`; `R/vars/setup.ts`; `M/env/ipc.ts` | Settings links to setup; Agent covers secret question cards only. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S011](design/surfaces/authority.md). | `app::surfaces::authority::values` now supplies native setup/secret row descriptors, live required-value validation, write/re-entry/error/cancel states, immediate Remove and explicit Reveal protocols, and `EmptyState` copy. **spec+model** (headless surface only). Persistent env/Keychain service, native setup rendering, v4 empty-state mounting and app dispatch remain. Missing `sheet_inset` / `sheet_value_column` tokens are `DESIGN-TODO(opus)`; no geometry was invented. |
+| S012 P0 | Uninstall extension / also remove its entered values; local panel/workspace deletion confirmations | `M/env/ipc.ts`; `R/legacy/ui/extension-settings.ts`; `R/library/LibraryScreen.svelte`; `R/panels/WorkspacesPanel.svelte` | Store-host/Settings cover revoke/management, not complete removal choices. **Specified (Opus, 2026-11-01):** [surfaces/authority.md §S012](design/surfaces/authority.md). | `pm-store-host::install::{ArchivedRelease,ArchiveReason}`; `pm-shell::layout::LayoutStore`. `app::surfaces::authority` now supplies exact-copy uninstall/workspace/local-project alerts, concealed-copy hosting, no-values bypass, and id/revision-scoped archive commands. **spec+model** (surface/adapter source). Concrete Store/value worker binding and durable LayoutStore archival + Undo Delete Workspace remain; `LayoutStore::delete_named` alone is insufficient. |
 | S013 P0 | Extension panel crashed/hung/unavailable: recovery, reload, disable | `R/kernel/sandbox-host.ts`; `R/kernel/sandbox-view.ts`; `R/legacy/ui/extension-settings.ts` | Shared error states and Store-host lifecycle review are not a full recovery design. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S013](design/surfaces/recovery.md). | `pm-store-host::view::{ViewStatus,RecoveryPolicy,Action}`; runtime/compat lifecycle models. Full application watchdog wiring pending. **spec+model** |
 | S014 P1 | Main editor windows, title/dirty indicator, project tabs, tab menu, move tab to another/new window, restore | `M/windows.ts`; `M/index.ts`; `R/shell/Titlebar.svelte`; `R/legacy/app.ts` | Shell review covers native window/tab/title behavior. **Specified (Opus, 2026-11-01):** [surfaces/documents.md §S014](design/surfaces/documents.md). | `pm-shell::{session,native}`; `pm-kernel::session`; native window/kernel ownership integration remains. **spec+model** (partial) |
 | S015 P1 | Docked panels, headers, collapse/hide, splitters, drag/drop previews, add/close/move panel menu | `R/layout/Dock.svelte`; `R/layout/DockLayout.svelte`; `R/layout/Splitter.svelte`; `R/legacy/ui/layout.ts` | Shared and Shell review specify native docking, context menus, previews and header state. | `pm-shell::layout::{Layout,DropTarget,DropPreview}`; app must connect arbitrary extension panel ids. **spec+model** |
@@ -346,3 +346,113 @@ already existed: 23 rows **model only → spec+model**; S011 and S040 stay
 native-only rows still need an Opus specification. A spec is not a visual
 approval: each lane's built surface still goes through
 [review-checklist.md](design/review-checklist.md).
+
+## Authority surface implementation — 2026-11-01
+
+Lane `feat/na-cloud-s-authority` adds only app-owned authority source and module
+registration. The S010–S012 coverage cells above distinguish implemented surface
+contracts / native alert adapter source from app integration. They do **not**
+claim that these surfaces are reachable in the running editor. S011 now has a
+headless surface model; its persistent value service is still absent. No other
+row or historical audit count is rewritten.
+
+Implemented: exact Opus copy; safe keyboard defaults and native alert semantics;
+per-window FIFO alerts; id/generation-scoped responses and stale-target closure;
+run and standing-consent command protocols; session-only Full access restoration;
+setup required/optional/secret/set/unreadable/saving/error/closed states; explicit
+Reveal and concealed pasteboard Copy; immediate single-value Remove; archival
+removal commands and the no-values uninstall bypass. The bounded worker bridge
+uses `try_send`; no UI-thread JS, service IO or kernel-future wait was added.
+`authority_check.rs` creates a disposable Cargo harness for these exact sources
+under `work/`, without depending on spikes or modifying workspace manifests.
+
+Decisions and selecting rules:
+
+- N1/N3 + shared alert grammar: preserve S012's listed Delete/Cancel order but
+  explicitly make Cancel the default and Esc action; destructive actions never
+  acquire Return implicitly from AppKit's first-button behavior.
+- N3: the newer S010 surface spec owns computer-access alerts even though the
+  older Agent panel spec generally puts approvals inline. Generic agent secret
+  questions continue to use the Agent inline card and cannot open this sheet.
+- N3/N6: Reveal displays the full explicitly requested value as authority.md
+  requires; tagged `env/ipc.ts`'s masked reveal detail is superseded. Keep the
+  tagged immediate Remove and non-empty-value semantics (whitespace survives
+  exactly); Cancel never resurrects an already removed value.
+- N1/N2/N4: Save protocol requests an atomic durable batch, retaining typed drafts
+  on errors instead of exposing tagged sequential partial-write success. Explicit
+  Cancel may close an in-flight sheet; it does not undo already admitted writes.
+- N4/N6: commands archive releases/workspaces/local projects; only an explicit
+  value removal selects credential deletion. The worker must archive a release
+  successfully before erasing its selected values, preserving tagged failure
+  behavior. Nothing in the Electron app or existing consumers was removed.
+- N7/N8: request ids and owner generations accompany all effects; secret-bearing
+  payloads redact Debug and never enter general inspection, project state or a
+  v4/remote-DOM tree. Worker completions must be checked against the live owner.
+- Design ownership: no replacement sheet metrics, new error wording, palette,
+  layout, spacing or visual default was chosen. All output awaits Opus review.
+
+`DESIGN-TODO(opus)` remaining: supply `metrics.sheet_inset` and
+`metrics.sheet_value_column`; specify failure copy for Reveal/Remove and a
+post-uninstall value-deletion failure. Until supplied, setup geometry remains
+unrendered and those operation failures return typed codes without invented copy.
+
+Changes needed outside this lane's ownership:
+
+1. App/session routing must instantiate the controller and AppKit host, register
+   windows, drain native responses, invalidate targets before close/replacement,
+   publish banner/notice AX announcements and restore trigger focus. Consume the
+   process-only `StandingAccess` once across windows and persist its previous
+   non-Full level only. Mount the missing-values `EmptyState` in the v4 panel host.
+2. Add app dependencies / worker binding to `pm-agents`, `pm-panel-agentpanel`,
+   `pm-store-host` and `pm-services` as needed (and update only their lock entries).
+   Dispatch `ComputerConsent` to the matching Panel effect acknowledgement;
+   dispatch `RunDecision` to the exact run's Approvals, mapping display
+   `Allow This Run` to protocol `Allow for this run`. Never reuse a grant across
+   run generations. Publish Awaiting answer / denied rows from real agent state.
+3. Implement the env/Keychain worker behind `ValuesService`: resolve migrated
+   provenance/env identity; validate owner generation and declared keys; commit
+   writes atomically, return code-only failures and refresh/reload the extension
+   in every window after value changes. Preserve C-MATRIX's frozen activation
+   `api.vars` snapshots until replacement activation. Route successful explicit
+   reveal completions to the matching native alert only.
+4. Wire uninstall to `pm-store-host::install::uninstall` with expected revision;
+   clear explicitly selected values only after successful release archival.
+   Extend LayoutStore's durable archive and Undo Delete Workspace path; its
+   current `delete_named` simply removes the saved entry. The surface must never
+   call that alone while claiming archival/undo. Local project commands use the
+   Library's Trash/archive service and preserve bytes.
+5. Implement the native setup host with `NSTextField` / `NSSecureTextField`,
+   borderless declared actions and native focus/Tab/Return/Esc once Opus supplies
+   the missing metrics. The current `SetupHost` is a contract and Linux double,
+   not a rendered sheet.
+
+Validation (Linux): **48 tests passed, 0 ignored** using exact app-owned sources.
+Locked Linux and macOS-target all-target clippy pass with `-D warnings`; the
+AppKit adapter type-checks for `aarch64-apple-darwin`. No production dependency,
+manifest or lockfile change is needed for this module. The transient harness
+pins the app's objc2 versions and locks before testing. Reproduce from repo root:
+
+```sh
+source /workspace/.tools/activate.sh
+mkdir -p work
+rustc --edition=2024 apps/native/crates/app/src/surfaces/authority_check.rs -o work/authority-check-runner
+work/authority-check-runner --macos
+```
+
+The runner executes `cargo test --locked --manifest-path
+work/authority-check/Cargo.toml` (48), `cargo fmt --check`, and Linux/macOS-target
+`cargo clippy --locked --all-targets -- -D warnings`, plus macOS-target
+`cargo check --locked --all-targets`. Install the Rust `aarch64-apple-darwin`
+standard-library target before `--macos`. The runner does not execute Mac UI.
+The requested `cargo test --locked -p pm-native-app` stops at objc2's Apple-only
+compile guard on Linux. Package-wide fmt currently also reports an existing,
+unmodified `app/src/smoke.rs` formatting difference; authority sources and module
+registration are formatted without editing that unowned source.
+
+Still required on macOS: full locked app build/tests; native sheet ownership and
+cross-surface queueing; Return/Esc and default-button-cell behavior (especially
+Delete-first/Cancel-default); system VoiceOver and focus return; three *visual*
+summary lines with ellipsis and the full activity row; secure fields/Keychain
+ACL/re-entry; concealed pasteboard type; multiwindow/quit grant expiration;
+actual durable archive/Undo and failure injection. Verify light/dark, Increase
+Contrast, Reduce Transparency/Reduce Motion and obtain Opus visual approval.
