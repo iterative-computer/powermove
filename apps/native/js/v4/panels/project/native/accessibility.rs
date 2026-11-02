@@ -71,7 +71,7 @@ fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
                         result.push(("Show in Finder", invoke(MenuCommand::Reveal(a.id.clone()))));
                     }
                 }
-                Availability::Offline | Availability::Failed(_) => {
+                Availability::Offline | Availability::Changed { .. } | Availability::Failed(_) => {
                     result.push(("Locate", invoke(MenuCommand::Replace(a.id.clone()))))
                 }
                 Availability::Cloud { download, .. }
@@ -157,7 +157,17 @@ impl ProjectAccessibility {
             if row.focused {
                 active = Some(*node_id);
             }
-            let choices = commands(row, view.composition_count);
+            let disabled = source
+                .props
+                .get("aria-disabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let choices = if disabled {
+                node.set_disabled();
+                vec![]
+            } else {
+                commands(row, view.composition_count)
+            };
             node.set_custom_actions(
                 choices
                     .iter()

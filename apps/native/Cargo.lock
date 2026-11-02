@@ -5121,6 +5121,7 @@ dependencies = [
 name = "pm-panel-media"
 version = "0.1.0"
 dependencies = [
+ "pm-design",
  "pm-kernel",
  "pm-model",
  "serde",

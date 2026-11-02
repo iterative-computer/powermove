@@ -203,3 +203,55 @@ not certify this panel's app mounting or macOS UI acceptance. Existing spec
 coverage, both design questions and all remaining host/model/rendering gates
 above remain explicit. The requests above are additive API requests, not a
 reason to change the frozen surface contract (N3/N7/N8; design ownership).
+
+## Design review follow-ups — 2026-11-01
+
+Both Opus TODO answers are implemented. Unknown readiness keeps a neutral
+poster well, known metadata only, no status word/capsule and Delete only; it
+cannot drag or activate. After two seconds of observed Unknown, presentation
+uses Loading without changing model readiness. The monotonic clock resets by
+document and clears when known readiness resumes. Transport failure retains
+the last view, disables card actions and Add, shows the exact warning Error
+line and enqueues one native announcement per failure episode. Repeated errors
+do not reannounce; an accepted publication clears the error. Details stay in
+the diagnostic callback. The host wires the optional `announce` callback to a
+native AX queue; it never synchronously enters the UI.
+
+The media model now searches descendant bins with result paths, observes
+`Changed{source}` and determinate cloud progress, projects composition
+background/poster facts, uses Title Case undo names, and accepts native grid
+columns. Vertical arrows move one grid row, wrap by row and clamp to a valid
+cell in an incomplete final row. All displayed kinds participate in navigation.
+Select All stores "all except"; count/page/AX requests do not enumerate all
+selected assets. The existing `selected_assets()` slice remains compatible
+and lazily materializes only when a caller explicitly needs the full batch.
+
+`pm-panel-media::render` supplies the reviewed 16:9 media-card geometry,
+black/55% capsules, round actions, selection/focus/contrast rings, name padding
+and native-measured middle truncation preserving the extension. The native
+adapter `native/render.rs` joins model facts and native font/capsule metrics;
+`project-inspect-wire` includes the recipe in every card-state snapshot using
+an explicitly synthetic font double. Real text shaping and resource leases
+remain native-host work, with no guessed production font widths.
+
+Decisions and selecting rules:
+
+- N3: readiness/progress/posters are observed facts; elapsed Unknown never
+  promotes an original to Ready. Replacement keeps asset identity and authored
+  layer timing; folder searches never move or rewrite source data.
+- N2: descendant search, row navigation and sparse Select All implement the
+  reviewed native behavior rather than reproducing the tagged asset-only keys.
+- N7: stamped actions, result paths, disabled AX actions and inspectable card
+  recipes remain drivable by ID. Captured input cannot retarget a new document.
+- N8: model work, searches and font measurement stay on workers; the UI consumes
+  bounded pages and never blocks on JS or the kernel.
+- N1/design ownership: all values come from the shared panel spec §6 or the
+  existing tokens. No new visual values or error copy were chosen.
+- N4/N6/prune: no source media, project bytes, compat APIs or consumers removed.
+
+No new unresolved Project design question remains. Existing kit SearchField
+and native Delete alert/drag image/marquee-autoscroll integration are still
+external host work (review F1/F7). Verify AppKit text shaping, poster leases,
+composition letterboxing/background, determinate rings, focus/selection under
+Increase Contrast, two-second readiness and VoiceOver announcements on macOS.
+All visual output remains provisional until Opus review.

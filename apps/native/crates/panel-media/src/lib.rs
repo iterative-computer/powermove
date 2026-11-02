@@ -8,6 +8,7 @@ mod edit;
 mod input;
 mod model;
 mod preview;
+pub mod render;
 
 pub use catalog::*;
 pub use edit::*;
