@@ -111,13 +111,18 @@ impl Context {
         if let Some(error) = draft.errors().values().next() {
             return Err(DialogError::Invalid(error));
         }
+        // N3/N4: unchanged controls must not rewrite an authored backgroundFill,
+        // work area or opaque data merely because the user changed the name.
+        let before = self.composition_draft(true)?;
+        let creating = new_id.is_some();
         let settings = NewComp {
-            name: Some(draft.name.clone()),
-            width: Some(draft.width),
-            height: Some(draft.height),
-            fps: Some(draft.fps),
-            duration: Some(draft.duration),
-            background: Some(draft.background.clone()),
+            name: (creating || draft.name != before.name).then(|| draft.name.clone()),
+            width: (creating || draft.width != before.width).then_some(draft.width),
+            height: (creating || draft.height != before.height).then_some(draft.height),
+            fps: (creating || draft.fps != before.fps).then_some(draft.fps),
+            duration: (creating || draft.duration != before.duration).then_some(draft.duration),
+            background: (creating || draft.background != before.background)
+                .then(|| draft.background.clone()),
         };
         let cmd = match new_id {
             Some(id) => CompCommand::Create {
@@ -129,14 +134,25 @@ impl Context {
                 settings,
             },
         };
-        self.prepare(
+        let edit = self.prepare(
             if new_id.is_some() {
                 "New Composition"
             } else {
                 "Composition Settings"
             },
             vec![Command::Comp(cmd)],
-        )
+        )?;
+        let comp = edit
+            .after
+            .get("comps")
+            .and_then(|c| c.get(new_id.unwrap_or(&self.composition)))
+            .ok_or(DialogError::Stale)?;
+        if number(comp, "dur", f64::NAN) != draft.duration {
+            return Err(DialogError::MissingBacking(
+                "kernel composition duration floor would change the requested duration; preserve the specified 0.1–3600 s range",
+            ));
+        }
+        Ok(edit)
     }
     pub fn delete_composition(&self, id: &str) -> Result<PreparedEdit, DialogError> {
         self.prepare(
@@ -175,6 +191,9 @@ impl Context {
         }
         keys.retain(|k| ids.contains(&k.id));
         Ok(keys)
+    }
+    pub fn keyframe_menu(&self, ids: &[String]) -> Result<Vec<KeyframeMenuItem>, DialogError> {
+        Ok(super::keyframe_menu(self.keys(ids)?.len()))
     }
     pub fn values(&self, ids: &[String], value: &MixedNumber) -> Result<PreparedEdit, DialogError> {
         let keys = self.keys(ids)?;
@@ -218,6 +237,44 @@ impl Context {
         }
         self.prepare("Keyframe Value", commands)
     }
+    /// The existing value-edit planner adopts temporal handles. Reapply each
+    /// unchanged value on a frozen scratch tree to read exact legacy/native
+    /// ease without changing times, values or the live document.
+    pub fn velocity_keys(&self, ids: &[String]) -> Result<Vec<Key>, DialogError> {
+        let keys = self.keys(ids)?;
+        if keys.is_empty() {
+            return Ok(keys);
+        }
+        let normalized = self.prepare(
+            "Keyframe Velocity",
+            keys.iter()
+                .map(|key| {
+                    Command::Keyframe(KeyframeCommand::Edit {
+                        key_id: key.id.clone(),
+                        time: None,
+                        value: Some(key.value.clone()),
+                    })
+                })
+                .collect(),
+        )?;
+        let comp = normalized
+            .after
+            .get("comps")
+            .and_then(|c| c.get(&self.composition))
+            .ok_or(DialogError::Stale)?;
+        let mut result = Vec::new();
+        for layer in array(comp, "layers") {
+            collect_keys(
+                layer,
+                text(layer, "id"),
+                number(layer, "from", 0.),
+                number(layer, "dur", 0.),
+                &mut result,
+            );
+        }
+        result.retain(|k| keys.iter().any(|target| target.id == k.id));
+        Ok(result)
+    }
     pub fn velocity(
         &self,
         ids: &[String],
@@ -226,7 +283,7 @@ impl Context {
         if !draft.valid() {
             return Err(DialogError::Invalid(VELOCITY_ERROR));
         }
-        let keys = self.keys(ids)?;
+        let keys = self.velocity_keys(ids)?;
         if keys.is_empty() {
             return Err(DialogError::Stale);
         }
@@ -362,7 +419,7 @@ impl Context {
             vec![Command::Property(PropertyCommand::SetExpression {
                 layer_id: layer.into(),
                 channel: channel.into(),
-                expression: source,
+                expression: source.filter(|source| !source.trim().is_empty()),
             })],
         )
     }
@@ -385,6 +442,93 @@ impl Context {
             label: label.into(),
             after,
         })
+    }
+    /// Engine-only worker preview. This never changes a publication, history or
+    /// the source text. Units are supplied by the existing inspector metadata.
+    pub fn evaluate_expression(
+        &self,
+        job: &EvaluationJob,
+        layer: &str,
+        channel: &str,
+        time: f64,
+        unit: &str,
+    ) -> Preview {
+        let mut scratch = match self.root() {
+            Ok(root) => DocumentStore::new_untitled(root),
+            Err(_) => return Preview::Unavailable,
+        };
+        if !job.source.trim().is_empty() {
+            let diagnostic = object([
+                ("op", Value::from("expressionDiagnostic")),
+                ("source", Value::from(job.source.as_str())),
+            ]);
+            match scratch.queries().query(&diagnostic) {
+                Ok(Value::String(message)) => {
+                    let message = message.to_string_lossy();
+                    let Some(offset) = message
+                        .rsplit_once(" at ")
+                        .and_then(|(_, n)| n.parse::<usize>().ok())
+                    else {
+                        return Preview::SyntaxUnlocated { message };
+                    };
+                    let line = 1 + job
+                        .source
+                        .encode_utf16()
+                        .take(offset)
+                        .filter(|u| *u == 10)
+                        .count();
+                    return Preview::Syntax { line, message };
+                }
+                Ok(Value::Null) => {}
+                _ => return Preview::Unavailable,
+            }
+        }
+        let command = Command::Property(PropertyCommand::SetExpression {
+            layer_id: layer.into(),
+            channel: channel.into(),
+            expression: if job.source.trim().is_empty() {
+                None
+            } else {
+                Some(job.source.clone())
+            },
+        });
+        if scratch.execute(command, Origin::Interface).is_err() {
+            return Preview::Unavailable;
+        }
+        let value = match scratch
+            .queries()
+            .evaluate(Some(&self.composition), layer, channel, time)
+        {
+            Ok(value) => value,
+            Err(_) => return Preview::Unavailable,
+        };
+        let error = object([
+            ("op", Value::from("expressionError")),
+            ("comp", Value::from(self.composition.as_str())),
+            ("layerId", Value::from(layer)),
+            ("key", Value::from(channel)),
+        ]);
+        match scratch.queries().query(&error) {
+            Ok(Value::String(message)) => {
+                if job.source.contains('\n') {
+                    Preview::RuntimeUnlocated {
+                        message: message.to_string_lossy(),
+                    }
+                } else {
+                    Preview::Runtime {
+                        line: 1,
+                        message: message.to_string_lossy(),
+                    }
+                }
+            }
+            Ok(Value::Null) => Preview::Value(format!(
+                "{}{}{}",
+                pm_model::json::to_canonical_string(&value),
+                if unit.is_empty() { "" } else { " " },
+                unit
+            )),
+            _ => Preview::Unavailable,
+        }
     }
     /// Frozen v1.2.0 EXPRESSION_NAMES order; no native-only names are inserted.
     pub fn expression_names(&self) -> &'static [&'static str] {
@@ -442,10 +586,7 @@ fn collect_keys(layer: &Value, layer_id: &str, from: f64, duration: f64, out: &m
                             continue;
                         }
                         let ease = |name: &str| {
-                            let e = k
-                                .get(name)
-                                .and_then(Value::as_array)
-                                .and_then(|a| a.first());
+                            let e = k.get(name);
                             TemporalEase {
                                 speed: e.map_or(0., |e| number(e, "speed", 0.)),
                                 influence: e
@@ -561,7 +702,7 @@ impl ServiceCode {
 }
 #[derive(Clone, Debug)]
 pub struct Presets {
-    pub entries: Vec<Value>,
+    entries: Vec<Value>,
     revision: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,6 +722,9 @@ impl PresetError {
     }
 }
 impl Presets {
+    pub fn entries(&self) -> &[Value] {
+        &self.entries
+    }
     pub fn capture(handle: &KernelHandle) -> Result<Self, PresetError> {
         let state = handle.state();
         let entries = match state.settings.get("renderPresets") {

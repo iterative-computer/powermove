@@ -7,6 +7,9 @@
 //! Missing design tokens are unresolved references, never guessed dimensions.
 //! All native output remains provisional until Opus review.
 
+#[cfg(target_os = "macos")]
+#[path = "dialogs_appkit.rs"]
+pub mod appkit;
 #[path = "dialogs_kernel.rs"]
 pub mod kernel;
 #[cfg(test)]
@@ -21,6 +24,7 @@ pub const DESIGN_TODOS: &[&str] = &[
     "DESIGN-TODO(opus): specify the unnamed layer substitution in the disabled Leave Attributes option for multi-selection.",
     "DESIGN-TODO(opus): specify export-preset empty/duplicate rename validation and expression preview pending/unavailable states.",
     "DESIGN-TODO(opus): specify keyframe Time/Value percentage validation copy (only collision copy is supplied).",
+    "DESIGN-TODO(opus): engine diagnostics without a source span need a neutral line placeholder; do not fabricate a line number.",
 ];
 
 pub const NAME_ERROR: &str = "Enter a name.";
@@ -124,6 +128,11 @@ impl Button {
     }
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct FieldGroup {
+    pub title: &'static str,
+    pub fields: Vec<&'static str>,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct Surface {
     pub id: DialogId,
     pub owner: WindowId,
@@ -133,6 +142,7 @@ pub struct Surface {
     pub title: String,
     pub line: Option<String>,
     pub fields: Vec<Field>,
+    pub groups: Vec<FieldGroup>,
     /// Display order as specified. Default is explicit, independent of order.
     pub buttons: Vec<Button>,
     pub warning: Option<String>,
@@ -141,6 +151,8 @@ pub struct Surface {
     pub value_column_token: &'static str,
     pub first_selected: Option<String>,
     pub expression_editor: bool,
+    pub result_line: Option<String>,
+    pub result_error: bool,
 }
 impl Surface {
     pub fn sheet(
@@ -159,6 +171,7 @@ impl Surface {
             title: title.into(),
             line: None,
             fields,
+            groups: vec![],
             buttons: vec![Button::cancel(false), Button::action(action)],
             warning: None,
             width_token: "metrics.sheet_width",
@@ -166,6 +179,8 @@ impl Surface {
             value_column_token: "metrics.sheet_value_column",
             first_selected,
             expression_editor: false,
+            result_line: None,
+            result_error: false,
         }
     }
     pub fn valid(&mut self) {
@@ -484,7 +499,11 @@ impl MixedNumber {
     }
     pub fn parsed(&self) -> Result<Option<f64>, &'static str> {
         if self.draft.trim().is_empty() {
-            return Ok(None);
+            return if self.value.is_none() {
+                Ok(None)
+            } else {
+                Err(NUMBER_ERROR)
+            };
         }
         self.draft
             .trim()
@@ -504,6 +523,23 @@ impl MixedNumber {
     }
 }
 pub const KEYFRAME_MENU: &[&str] = &["Edit Value…", "Keyframe Velocity…", "Scale Keyframes…"];
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyframeMenuItem {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub enabled: bool,
+}
+pub fn keyframe_menu(editable_keys: usize) -> Vec<KeyframeMenuItem> {
+    ["edit-value", "keyframe-velocity", "scale-keyframes"]
+        .into_iter()
+        .zip(KEYFRAME_MENU.iter().copied())
+        .map(|(id, label)| KeyframeMenuItem {
+            id,
+            label,
+            enabled: editable_keys > 0,
+        })
+        .collect()
+}
 pub fn keyframe_value(
     id: DialogId,
     owner: WindowId,
@@ -568,7 +604,16 @@ impl VelocityDraft {
             ],
             "Apply",
         );
-        // Group headings and labels stay separate: the host uses Incoming/Outgoing.
+        s.groups = vec![
+            FieldGroup {
+                title: "Incoming",
+                fields: vec!["in.speed", "in.influence"],
+            },
+            FieldGroup {
+                title: "Outgoing",
+                fields: vec!["out.speed", "out.influence"],
+            },
+        ];
         s.line = Some(format!("{count} keyframes"));
         if !self.valid() {
             s.fields[0].error = Some(VELOCITY_ERROR);
@@ -625,6 +670,8 @@ pub enum Preview {
     Value(String),
     Syntax { line: usize, message: String },
     Runtime { line: usize, message: String },
+    SyntaxUnlocated { message: String },
+    RuntimeUnlocated { message: String },
     Unavailable,
 }
 impl Preview {
@@ -662,7 +709,7 @@ impl ExpressionDraft {
             property,
             preview: Preview::Pending,
             generation: 0,
-            due: None,
+            due: Some(Instant::now() + Duration::from_millis(250)),
         }
     }
     pub fn edit(&mut self, source: String, now: Instant) {
@@ -691,6 +738,25 @@ impl ExpressionDraft {
         let changed = self.preview != preview;
         self.preview = preview;
         changed
+    }
+    pub fn complete_with_host(
+        &mut self,
+        job: &EvaluationJob,
+        preview: Preview,
+        owner: WindowId,
+        host: &mut impl DialogHost,
+    ) -> bool {
+        if !self.complete(job, preview) {
+            return false;
+        }
+        if let Some(text) = self.preview.line() {
+            host.enqueue(HostEvent::Announce {
+                owner,
+                text,
+                priority: Announcement::Medium,
+            });
+        }
+        true
     }
     /// Cocoa selections use UTF-16 offsets. Invalid/split-surrogate ranges refuse.
     pub fn insert(&mut self, range: std::ops::Range<usize>, text: &str, now: Instant) -> bool {
@@ -729,9 +795,20 @@ impl ExpressionDraft {
         s.width_token = "metrics.sheet_width_wide";
         s.line = Some(format!("{} · {}", self.layer, self.property));
         s.expression_editor = true;
+        s.result_line = self.preview.line();
+        s.result_error = matches!(
+            self.preview,
+            Preview::Syntax { .. }
+                | Preview::Runtime { .. }
+                | Preview::SyntaxUnlocated { .. }
+                | Preview::RuntimeUnlocated { .. }
+        );
         s.buttons[1].enabled = !matches!(
             self.preview,
-            Preview::Syntax { .. } | Preview::Pending | Preview::Unavailable
+            Preview::Syntax { .. }
+                | Preview::SyntaxUnlocated { .. }
+                | Preview::Pending
+                | Preview::Unavailable
         );
         if self.existed {
             s.buttons.insert(
@@ -916,5 +993,22 @@ impl DialogQueue {
             announcement: Announcement::Medium,
         });
         true
+    }
+}
+
+/// Platform presentation boundary shared by the real AppKit alerts and Linux
+/// double. Form rendering remains blocked on the named Opus token additions.
+pub trait AlertHost {
+    type Error;
+    fn show_alert(&mut self, surface: &Surface) -> Result<(), Self::Error>;
+}
+impl AlertHost for HeadlessHost {
+    type Error = &'static str;
+    fn show_alert(&mut self, surface: &Surface) -> Result<(), Self::Error> {
+        if surface.piece != NativePiece::Alert {
+            return Err("not an alert");
+        }
+        self.enqueue(HostEvent::Present(surface.clone()));
+        Ok(())
     }
 }
