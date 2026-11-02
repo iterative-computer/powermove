@@ -283,6 +283,13 @@ No event is captured while the rest/modifier gate is closed.
 
 ### Design-token dependency and neutral placeholders
 
+**Update (design lead, 2026-11-01, `feat/na-design-fix-kit2`):** pm-design now
+carries every panels/README §6 token (metrics, `motion.wheel_rest`,
+`motion.overlay_idle`, `colors.media_badge` + `metrics.media_badge_opacity`,
+light `colors.viewer` `#E4E4E4`), so `DesignTokenTable::from_design` resolves
+them and the missing-token path is exercised with an older host table. The
+paragraphs below describe the lane's state before that.
+
 At this lane's base, the pm-design struct/table does **not** yet contain the
 README §6 additions. That crate and its token snapshot are outside this lane's
 owned paths. No production token values were duplicated into the kit.

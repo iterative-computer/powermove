@@ -153,11 +153,31 @@ fn secure_field_never_projects_values_or_text_actions() {
             .any(|d| d.code == "secureValueOnSurface")
     );
 }
+/// A host table from an older pm-design that lacks `name` (`group.field`).
+fn table_without(t: &Tokens, name: &str) -> DesignTokenTable {
+    let mut v = serde_json::to_value(t).unwrap();
+    let (group, field) = name.split_once('.').unwrap();
+    v[group].as_object_mut().unwrap().remove(field);
+    DesignTokenTable::from_host(v)
+}
 #[test]
-fn missing_tokens_are_explicit_and_never_replaced_with_literals() {
+fn current_design_tokens_resolve_without_a_host_table() {
     let p = Panel::prepare(
         Arc::new(surface(Component::FormGroup, json!({}))),
         &tokens(),
+        &Layout::new(),
+        None,
+        false,
+    );
+    assert!(!p.diagnostics.iter().any(|d| d.code == "missingDesignToken"));
+}
+#[test]
+fn missing_tokens_are_explicit_and_never_replaced_with_literals() {
+    let t = tokens();
+    let p = Panel::prepare_with_token_table(
+        Arc::new(surface(Component::FormGroup, json!({}))),
+        &t,
+        &table_without(&t, "metrics.group_radius"),
         &Layout::new(),
         None,
         false,
@@ -675,7 +695,7 @@ fn wheel_clamps_rejects_overflow_and_missing_token() {
             &s,
             1,
             &tokens(),
-            &DesignTokenTable::from_design(&tokens()),
+            &table_without(&tokens(), "motion.wheel_rest"),
             Duration::ZERO,
             (0., 0.)
         )

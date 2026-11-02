@@ -65,6 +65,10 @@ const ROLES: &[(&str, &str)] = &[
     ("colors.warning", "Warnings, missing-but-recoverable states"),
     ("colors.success", "Completed, online, rendered"),
     (
+        "colors.media_badge",
+        "Badge fill over media (duration, offline); always dark",
+    ),
+    (
         "colors.labels.blue",
         "Label: default for text and shape layers",
     ),
@@ -148,6 +152,70 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.popover_width", "Default popover width"),
     ("metrics.sheet_width", "Default sheet width"),
     ("metrics.agent_width", "Default agent panel width"),
+    ("metrics.tree_indent", "Indent per outline level"),
+    (
+        "metrics.kind_badge",
+        "Layer-kind badge square in the timeline and Project list",
+    ),
+    (
+        "metrics.thumbnail_min",
+        "Minimum Project grid thumbnail width",
+    ),
+    (
+        "metrics.sheet_inset",
+        "Content inset inside sheets and Settings panes",
+    ),
+    (
+        "metrics.sheet_value_column",
+        "Shared value column in sheets",
+    ),
+    (
+        "metrics.sheet_width_wide",
+        "Width of wide sheets: Export, Expression",
+    ),
+    (
+        "metrics.composer_max_lines",
+        "Agent composer grows to this many lines, then scrolls",
+    ),
+    ("metrics.group_radius", "Settings grouped-form card corner"),
+    ("metrics.form_row", "Minimum Settings row height"),
+    (
+        "metrics.section_gap",
+        "Space above each Settings section after the first",
+    ),
+    (
+        "metrics.gizmo_handle",
+        "Transform handle and path vertex square",
+    ),
+    (
+        "metrics.gizmo_keyline",
+        "Gizmo stroke and keyline width over the image",
+    ),
+    ("metrics.rotation_stem", "Rotation handle stem length"),
+    ("metrics.anchor_mark", "Anchor point crosshair circle"),
+    ("metrics.tangent_end", "Bézier tangent end circle"),
+    ("metrics.checker", "Transparency checkerboard square"),
+    (
+        "metrics.pasteboard_opacity",
+        "Opacity of selected layers drawn outside the frame",
+    ),
+    (
+        "metrics.status_dot",
+        "Attention dot and drop insertion-line end circle",
+    ),
+    (
+        "metrics.text_padding",
+        "Vertical text padding in bubbles, the composer and code blocks",
+    ),
+    ("metrics.drop_stroke", "Drop-target inner stroke"),
+    (
+        "metrics.drag_opacity",
+        "Opacity of a drag source left in place",
+    ),
+    (
+        "metrics.media_badge_opacity",
+        "Opacity of the media badge fill",
+    ),
     (
         "typography.minimum",
         "Smallest text anywhere: captions, ruler, status bar",
@@ -207,6 +275,14 @@ const ROLES: &[(&str, &str)] = &[
     (
         "motion.interaction",
         "Hover, press and selection feedback (s)",
+    ),
+    (
+        "motion.wheel_rest",
+        "Pointer rest before the scroll wheel edits a hovered value (s)",
+    ),
+    (
+        "motion.overlay_idle",
+        "Still time before the Focus overlay capsule fades (s)",
     ),
 ];
 
