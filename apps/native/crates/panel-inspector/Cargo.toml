@@ -10,3 +10,9 @@ publish = false
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
+
+[dev-dependencies]
+pm-surface = { path = "../surface" }
+pm-design = { path = "../design" }
+serde_json = "1"
+accesskit = "=0.24.1"

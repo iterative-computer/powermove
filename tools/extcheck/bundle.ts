@@ -2,7 +2,9 @@
 import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { initial } from "./initial";
 const [reference, input, output] = process.argv.slice(2);
+await writeFile(path.join(output!, "initial.json"), JSON.stringify(initial()));
 const rawManifest = JSON.parse(
   await readFile(path.join(input!, "manifest.json"), "utf8"),
 );
@@ -54,18 +56,16 @@ await writeFile(
 // Loading unused browser modules can itself require unavailable window capabilities
 // (e.g. motion's eager media query). Include the extension's actual import closure.
 const compiledSource = await readFile(compiled.bundlePath, "utf8");
-const requested = new Set(
-  Array.from(
+const requested = new Set<string>([
+  "svelte",
+  "svelte/reactivity",
+  ...Array.from(
     compiledSource.matchAll(
       /__powermove_runtime\[["'](svelte(?:\/[^"']*)?)["']\]/g,
     ),
     (match) => match[1]!,
   ),
-);
-if (requested.size) {
-  requested.add("svelte");
-  requested.add("svelte/reactivity");
-}
+]);
 const modules = [...requested];
 const compat = path.resolve(
   import.meta.dir,
@@ -122,3 +122,15 @@ await writeFile(
   path.join(output!, "compat.js"),
   await bundle.outputs[0]!.text(),
 );
+const page = await Bun.build({
+  entrypoints: [
+    path.resolve(
+      import.meta.dir,
+      "../../apps/native/js/remote-dom/src/browser-applier.ts",
+    ),
+  ],
+  target: "browser",
+  format: "iife",
+});
+if (!page.success) throw Error("Page applier build failed");
+await writeFile(path.join(output!, "page.js"), await page.outputs[0]!.text());

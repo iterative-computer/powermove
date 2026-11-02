@@ -53,9 +53,9 @@ B339, B367–B380).
 | State | Visual |
 |---|---|
 | **Empty (no project)** | README empty state: symbol `wand.and.rays`, `No Composition`, `Open a project to start editing.` |
-| **No selection** | Empty state: `No Selection`, `Select a layer to see its effects.` (v1.2.0 copy). No button. |
-| **Layer has no effects** | Empty state inside the content (below the identity line): symbol `wand.and.rays`, `No Effects`, `Drag an effect here from Effects & Presets, or add one.`, button `Add Effect…`. |
-| **Unsupported layer** (audio, camera) | Empty state: `No Effects`, `This kind of layer can’t have effects.` |
+| **No selection** | Empty state: symbol `wand.and.rays`, `No Selection`, `Select a layer to see its effects.` (v1.2.0 copy). No button. |
+| **Layer has no effects** | Empty state inside the content (below the identity line): symbol `wand.and.rays`, `No Effects`, `Drag an effect here from Effects, or add one.`, button `Add Effect…`. |
+| **Unsupported layer** (audio, camera) | Empty state: symbol `wand.and.rays`, `No Effects`, `This kind of layer can’t have effects.` |
 | **Loading** | N/A (synchronous). |
 | **Hover** | effect header `c.hover`; trailing Reset/Remove appear. |
 | **Focus** | effect list is one Tab stop; focused header row gets the README list focus ring; parameter controls are separate stops in order. |
@@ -63,9 +63,9 @@ B339, B367–B380).
 | **Disabled effect** | checkbox off, name `c.muted`; parameter rows remain editable (v1.2.0) with labels `c.muted`. |
 | **Collapsed** | only the header row; disclosure `chevron.right`. Expanded state persists per effect. Selecting a row never changes disclosure; disclosure only via the chevron (B379). |
 | **Locked layer** | everything `c.muted`, non-interactive; identity line shows `lock`. |
-| **Error** | missing definition (above). Paste with an empty clipboard: the menu item is disabled with the title `Paste Effect` and tooltip `Copy an effect first`. |
+| **Error** | missing definition (above). Rejected edit / registry unavailable: one Error line under the identity line (`c.warning` triangle, `t.body` `c.warning`): `Couldn’t change the effects. Try again.` / `Effect controls aren’t available right now.`; last accepted content stays; clears on the next accepted publication. Values with no registry control: read-only text (`c.secondary`, `On`/`Off` for booleans) or `Custom value` (`c.muted`), AX `{label}, {value}, read only`. Paste with an empty clipboard: the menu item is disabled with the title `Paste Effect` and tooltip `Copy an effect first`. |
 | **Drag reorder** | dragged headers at 50 %; insertion line; Esc cancels; drop = one undo `Reorder Effect`. |
-| **Drop new effect** (from Effects & Presets or the effect menu drag) | insertion line at the pointer; drop over a header inserts before it; drop below the last effect appends. |
+| **Drop new effect** (from Effects or the effect menu drag) | insertion line at the pointer; drop over a header inserts before it; drop below the last effect appends. |
 | **Multi-select** | headers selected; ⌘C/⌘V/⌫ act on all (B371). |
 | **60 k rows** | N/A in practice; the list is still virtualised by header + expanded params (README §4). |
 
@@ -85,7 +85,7 @@ B339, B367–B380).
 
 ## 5. Keyboard and focus
 
-Tab order: tab group → Add Effect (`+`) → effect list (one stop) → for each
+Tab order (entering the list with no focused effect puts the focus ring on the first header without selecting it; the first ↑/↓ selects the focused row; with a selection, focus lands on the anchor): tab group → Add Effect (`+`) → effect list (one stop) → for each
 expanded effect, its parameter controls in row order → trailing `Add
 Effect…` button.
 
@@ -104,8 +104,10 @@ focused effect. Esc clears effect selection and returns focus to the list.
 | Reset / Remove | buttons | `Reset Glow`, `Remove Glow` |
 | Parameters | as inspector, label prefixed by nothing (the effect is the containing group `Glow`) | |
 
-Announcements: `Added {effect}`, `Removed {effect}`, `Moved {effect} up`,
-`Pasted {n} effects`.
+Announcements: `Added {effect}`, `Removed {effect}`, `Removed {n} effects`,
+`Moved {effect} up`, `Moved {effect} down`, `Moved {n} effects up`,
+`Moved {n} effects down`, `Pasted {effect}`, `Pasted {n} effects`.
+Disclosure button: `Expand {effect}` / `Collapse {effect}`.
 
 ## 7. Appearance
 
@@ -116,7 +118,7 @@ each effect header after the first. Reduce Motion: no expand animation.
 
 | Where | String |
 |---|---|
-| Empty states | `No Selection` / `Select a layer to see its effects.` · `No Effects` / `Drag an effect here from Effects & Presets, or add one.` / `Add Effect…` · `No Effects` / `This kind of layer can’t have effects.` |
+| Empty states | `No Selection` / `Select a layer to see its effects.` · `No Effects` / `Drag an effect here from Effects, or add one.` / `Add Effect…` · `No Effects` / `This kind of layer can’t have effects.` |
 | Buttons and tooltips | `Add Effect`, `Add Effect…`, `Reset Effect`, `Remove Effect`, `Copy an effect first` |
 | Missing definition | `Not installed` |
 | Undo names | `Add {Effect}`, `Enable Effect`, `Disable Effect`, `Reset Effect`, `Remove Effect`, `Remove Effects`, `Paste Effect`, `Paste Effects`, `Reorder Effect` |

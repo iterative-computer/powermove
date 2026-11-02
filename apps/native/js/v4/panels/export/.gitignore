@@ -1,0 +1,2 @@
+# Obsolete standalone local build output; wire is now a native workspace member.
+/wire/target/

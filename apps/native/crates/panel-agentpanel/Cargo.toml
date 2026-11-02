@@ -11,3 +11,10 @@ pm-kernel = { path = "../kernel" }
 pm-agents = { path = "../agents" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 serde_json = "1"
+
+[dev-dependencies]
+pm-surface = { path = "../surface" }
+
+[[example]]
+name = "agent-panel-wire"
+path = "../../js/v4/panels/agent/model-wire.rs"
