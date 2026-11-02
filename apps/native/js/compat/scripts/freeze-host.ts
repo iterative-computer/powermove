@@ -6,6 +6,7 @@ const root = join(import.meta.dir, "../../../../..");
 const reference = "07ed5fa17ee640659cb075f9cad1af2095011d60";
 const base = "apps/desktop/src/renderer/src/kernel/";
 const sources: Record<string, string> = {
+  icons: "apps/desktop/src/renderer/src/legacy/core/util.ts",
   "pm-facades": "apps/desktop/src/renderer/src/kernel/install.ts",
   "layout-model": "apps/desktop/src/renderer/src/layout/model.ts",
   "side-scroll": "apps/desktop/src/renderer/src/layout/side-scroll.ts",
@@ -20,6 +21,28 @@ export async function frozen(name: string): Promise<string> {
   const source = await new Response(process.stdout).text();
   if (await process.exited) throw new Error(`Cannot read frozen ${name}`);
   let input = source;
+  if (name === "icons") {
+    const tree = ts.createSourceFile(
+      "util.ts",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const install = tree.statements.find(
+      (node): node is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(node) && node.name?.text === "install",
+    );
+    const statements = install?.body?.statements.filter(
+      (node) =>
+        ts.isExpressionStatement(node) &&
+        ts.isBinaryExpression(node.expression) &&
+        ["PM.svg", "PM.icon", "PM.ICONS"].includes(
+          node.expression.left.getText(tree),
+        ),
+    );
+    if (statements?.length !== 3) throw Error("Unsupported frozen icon source");
+    input = `/* Phosphor Icons 2.1.1, regular weight. MIT licensed. */\nexport function installIcons(PM:any,window:any){${statements.map((node) => node.getText(tree)).join("\n")}}`;
+  }
   if (name === "pm-facades") {
     const selected = new Set([
       "makeAnim",
@@ -131,6 +154,7 @@ if (import.meta.main)
     "drop",
     "binding",
     "pm-facades",
+    "icons",
   ]) {
     await Bun.write(
       join(import.meta.dir, `../src/frozen/host/${name}.js`),

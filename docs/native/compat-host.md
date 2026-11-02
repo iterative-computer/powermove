@@ -150,18 +150,40 @@ is reported to the shell; automatic crash policy remains an app responsibility.
 
 ## Remote-DOM lane handoff
 
-No dependency on `pm-remote-dom` or its branch is introduced. The cloud lane must:
+`MacDomHost::new_remote_dom` now accepts the production `PageApplier` browser
+bundle and installs `REMOTE_DOM_SHELL` in a dedicated realm document. It permits
+one native panel, containing that realm's contribution roots. The fixture
+constructor and protocol below remain available for the earlier host probes.
+
+Own `RemoteDomPanel` on the routing worker. Its `enqueue` validates a production
+batch through `pm-remote-dom::Router` before admitting an `AdmittedDomBatch` to a
+bounded UI queue. AppKit calls `present` on the admitted value and retains it at
+the queue front on `Backpressure`. The router does not run on AppKit. Implement
+`SyncHandler::remote_dom` as a bounded nonblocking mailbox send; the default
+handler refuses feedback. The routing worker calls `receive` to validate page
+feedback and admit it to the realm-owner queue. Queue admission is not a paint
+acknowledgement. A stopped generation requires a new router and document.
+
+`new_store_remote_dom` derives trust metadata from an admitted `StoreSession`
+and keys the retained nonpersistent data store by its full profile-scoped key.
+Store method authority still belongs to the live kernel permission check, and
+the confined Store helper/facade remains a separate required integration. A
+revision or grant change must retire the rendering host and re-admit its
+session, so passive-resource CSP never outlives the grant snapshot.
+
+The complete application integration must:
 
 - Drive the main-thread `DomPanelHost` interface and tag mutations with the current
   generation. Queue backpressure must pause/retry upstream without losing order.
-- Supply the complete trusted renderer adapter through `new_with_applier` and
-  translate its mutation protocol into the host envelope. `PM_HOST_CONFIG`
-  supplies `base` and `generation`; `applier.js` is an executable fixture, not a
+- Use `new_remote_dom` with the host-built production applier, or supply another
+  trusted renderer through `new_with_applier`. `PM_HOST_CONFIG` supplies `base`
+  and `generation`; `applier.js` is an executable fixture, not a
   claim of arbitrary DOM/Svelte/Canvas/CSS or frozen-reference compatibility.
 - Use `call?q=<encoded JSON>` for `{generation,panel,kind,method?,payload}` and
   `events?q=<last applied seq>` for the asynchronous poll. Call replies are
   `{ok,value}` or `{ok:false,error}`. Kinds are `ready`, `call`, `dom`, `key`,
-  `overlays`, `failure`; ready includes `{origin:location.origin}`.
+  `overlays`, `failure`, and production `remote_dom` feedback; ready includes
+  `{origin:location.origin}`.
 - Consume `create`, `slot` (null means detached), `destroy`, `batch`, `event` and
   `focus` messages. Report overlay rectangles in window coordinates, DOM input,
   focus, default-prevention/key order, errors and real paint acknowledgements.
