@@ -52,9 +52,9 @@ function Button({
   // API GAP: kit exposes ToolbarItem but no regular system PushButton.
   // Neutral, labelled action placeholder; no invented shape or button recipe.
   return (
-    <UI.ToolbarItem label={label} disabled={disabled} onClick={onClick}>
+    <UI.PushButton label={label} disabled={disabled} onClick={onClick}>
       {label}
-    </UI.ToolbarItem>
+    </UI.PushButton>
   );
 }
 function RowControl({
@@ -80,7 +80,9 @@ function RowControl({
   // DESIGN-TODO(opus): unresolved kit Switch/SecureTextField/NSColorWell recipes.
   // Keep the labelled row and help, without substituting a checkbox, plaintext
   // secret input, or inspector colour popover. No secret value reaches the tree.
-  if (["switch", "secure", "colour"].includes(row.control)) return null;
+  if (row.control === "switch" && typeof row.value === "boolean")
+    return <UI.Switch {...common} value={row.value} />;
+  if (["secure", "colour"].includes(row.control)) return null;
   if (row.control === "action")
     return (
       <Button
@@ -130,7 +132,11 @@ function SettingRow({
       id={`settings.row.${row.id}`}
       role="group"
       label={row.label}
-      style={column}
+      style={{
+        ...column,
+        minHeight: t("metrics.form_row"),
+        padding: t("metrics.inset"),
+      }}
     >
       <div
         style={{
@@ -393,7 +399,12 @@ function SectionContent({
   );
   const groups = [...new Set(rows.map((row) => row.group))];
   return (
-    <div id={`settings.section.${section}`} role="group" label={copy.title}>
+    <div
+      id={`settings.section.${section}`}
+      role="group"
+      label={copy.title}
+      style={{ padding: t("metrics.sheet_inset"), gap: t("metrics.inset") }}
+    >
       <text
         role="heading"
         style={{ fontSize: t("typography.heading"), color: t("colors.text") }}
@@ -413,13 +424,13 @@ function SectionContent({
       {/* API GAP: SettingsGroup recipe and sheet_inset token are not available.
         Keep semantic AXGroup placeholders instead of an invented card recipe. */}
       {groups.map((group) => (
-        <div key={group} role="group" label={group}>
+        <UI.FormGroup key={group} label={group}>
           {rows
             .filter((row) => row.group === group)
             .map((row) => (
               <SettingRow key={row.id} row={row} model={model} />
             ))}
-        </div>
+        </UI.FormGroup>
       ))}
       {section === "transcription" &&
         model.publication.speech

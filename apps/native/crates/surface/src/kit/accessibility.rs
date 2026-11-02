@@ -28,6 +28,9 @@ fn role(node: &Node) -> Role {
         Some(Segment) => Role::RadioButton,
         Some(Checkbox) => Role::CheckBox,
         Some(Toggle) => Role::CheckBox,
+        Some(Switch) => Role::Switch,
+        Some(PushButton) => Role::Button,
+        Some(FormGroup | FormRow) => Role::Group,
         Some(ColourWell) => Role::ColorWell,
         Some(DisclosureButton) => Role::DisclosureTriangle,
         Some(List) => Role::List,
@@ -152,7 +155,7 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
     }
     if matches!(
         Component::of(source),
-        Some(Component::Checkbox | Component::Toggle | Component::Segment)
+        Some(Component::Checkbox | Component::Toggle | Component::Switch | Component::Segment)
     ) {
         node.set_toggled(
             if source.props.get("mixed").and_then(Value::as_bool) == Some(true) {

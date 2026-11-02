@@ -542,3 +542,110 @@ export {
 // specified in panels/inspector.md §7 (host-provided popover); Toggle and Checkbox
 // sit at the leading edge of the value column; tree indentation follows the
 // system outline default until pm-design adds metrics.tree_indent (follow-up F2).
+
+/** AppKit-backed controls and grouped forms approved for native host windows. */
+export function Switch(props: Bound<boolean>) {
+  return field(
+    "switch",
+    "toggle",
+    "button",
+    { ...props, role: "switch", "aria-checked": props.value },
+    { ...text, ...target },
+  );
+}
+export function PushButton(props: Common & { primary?: boolean }) {
+  const { primary, ...rest } = props;
+  return kit(
+    "push-button",
+    "button",
+    {
+      ...rest,
+      role: "button",
+      attr: { ...rest.attr, "default-button": !!primary },
+    },
+    { ...text, ...target, height: token("metrics.control") },
+  );
+}
+export function FormGroup(props: Common) {
+  const { label, children, ...rest } = props;
+  return h(
+    "div",
+    {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: token("metrics.gap"),
+      },
+    },
+    h(
+      "text",
+      {
+        role: "heading",
+        style: { ...text, fontSize: token("typography.title") },
+      },
+      label,
+    ),
+    kit(
+      "form-group",
+      "div",
+      { ...rest, role: "group", label, children },
+      {
+        display: "flex",
+        flexDirection: "column",
+        borderRadius: token("metrics.group_radius"),
+      },
+    ),
+  );
+}
+export function FormRow(props: Common & { help?: string }) {
+  const { label, help, children, ...rest } = props;
+  return kit(
+    "form-row",
+    "div",
+    {
+      ...rest,
+      role: "group",
+      label,
+      children: [
+        h(
+          "div",
+          { style: { display: "flex", flexDirection: "column" } },
+          h("text", { style: text }, label),
+          help &&
+            h(
+              "text",
+              {
+                style: {
+                  color: token("colors.muted"),
+                  fontSize: token("typography.minimum"),
+                },
+              },
+              help,
+            ),
+        ),
+        h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "end",
+              width: token("metrics.sheet_value_column"),
+            },
+          },
+          children,
+        ),
+      ],
+    },
+    {
+      display: "flex",
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      minHeight: token("metrics.form_row"),
+      padding: token("metrics.inset"),
+      gap: token("metrics.inset"),
+    },
+  );
+}

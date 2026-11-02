@@ -160,12 +160,12 @@ pub fn publish_accessibility(view: &NSView, order: Vec<AccessibilityItem>) {
 }
 pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
     let order = HOSTS.with(|hosts| hosts.borrow().get(&view).map(|h| h.accessibility.clone()));
-    if order.is_none() && !crate::native_text::has_slots(view) {
+    if order.is_none() && !crate::native_text::has_slots(view) && !crate::native_control::has_slots(view) {
         return None;
     }
     let mut order = order.unwrap_or_default();
     // Explicit native anchors win; otherwise append managed text slots once.
-    for entry in crate::native_text::accessibility(view) {
+    for entry in crate::native_text::accessibility(view).into_iter().chain(crate::native_control::accessibility(view)) {
         if !order.iter().any(|old|matches!((old,&entry),(AccessibilityItem::Native(a),AccessibilityItem::Native(b)) if std::ptr::eq(&**a,&**b))) {order.push(entry);}
     }
     Some(order)
@@ -179,7 +179,7 @@ pub(crate) fn present(view: usize) -> Option<Transaction> {
             .get_mut(&view)
             .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
     });
-    if hook.is_none() && !crate::native_text::has_slots(view) {
+    if hook.is_none() && !crate::native_text::has_slots(view) && !crate::native_control::has_slots(view) {
         return None;
     }
     unsafe {
@@ -194,7 +194,7 @@ pub(crate) fn present(view: usize) -> Option<Transaction> {
         transaction.change = change.or(fresh.into());
     }
     let text = crate::native_text::present(view);
-    transaction.change = transaction.change.or(text);
+    transaction.change = transaction.change.or(text).or(crate::native_control::present(view));
     Some(transaction)
 }
 /// A frame drawn within this long after the previous one is "continuous".

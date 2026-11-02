@@ -4601,6 +4601,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-builtins"
+version = "0.1.0"
+dependencies = [
+ "futures-lite",
+ "pm-agents",
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-panel-agentpanel",
+ "pm-panel-inspector",
+ "pm-panel-media",
+ "pm-panel-timeline",
+ "pm-panel-viewerchrome",
+ "pm-promedia",
+ "pm-runtime-v8",
+ "pm-services",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-color"
 version = "0.1.0"
 dependencies = [
@@ -4939,11 +4960,13 @@ dependencies = [
  "block2 0.6.2",
  "foreign-types",
  "gpui-ce",
+ "gpui_ce_macos",
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "pm-builtins",
  "pm-design",
  "pm-engine-service",
  "pm-gpu",
@@ -4951,9 +4974,15 @@ dependencies = [
  "pm-mcp",
  "pm-model",
  "pm-node",
+ "pm-panel-media",
+ "pm-panel-viewerchrome",
+ "pm-promedia",
  "pm-protocol",
+ "pm-runtime-v8",
  "pm-shell",
+ "pm-surface",
  "pm-time",
+ "raw-window-handle",
  "serde_json",
  "tempfile",
 ]

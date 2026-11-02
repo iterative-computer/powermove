@@ -14,6 +14,7 @@ use pm_shell::{Command as ShellCommand, Host};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 pub struct Controller {
+    pub builtins: crate::builtins::Host,
     pub kernel: KernelHandle,
     pub engine: Arc<EngineService>,
     pub host: Rc<RefCell<Host>>,
@@ -48,7 +49,6 @@ pub struct Controller {
     pub background: Option<u32>,
     /// Keyframes in the open composition, for the status bar.
     pub keyframes: usize,
-    pub drag: Option<panels::NumericDrag>,
     pub recovery_pending: bool,
     pub mcp: Arc<crate::mcp::Host>,
     pub close_pending: bool,
@@ -94,8 +94,9 @@ impl pm_shell::integration::Integration for Bridge {
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        self.0
-            .update(cx, |v, cx| panels::render(v, id, bounds, w, cx))
+        self.0.update(cx, |v, cx| {
+            panels::library(v, id, bounds, cx).or_else(|| v.builtin_panel(id, bounds, w, cx))
+        })
     }
     fn header(
         &self,
@@ -105,7 +106,7 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0
-            .update(cx, |v, cx| panels::header(v, id, bounds, w, cx))
+            .update(cx, |v, cx| v.builtin_header(id, bounds, w, cx))
     }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
@@ -212,6 +213,7 @@ impl Controller {
         .expect("viewer layer");
         host.borrow().set_viewer_label("Composition viewer");
         Self {
+            builtins: Default::default(),
             kernel,
             engine,
             profile,
@@ -243,7 +245,6 @@ impl Controller {
             zoom: None,
             background: None,
             keyframes: 0,
-            drag: None,
             recovery_pending: false,
             mcp,
             close_pending: false,
@@ -295,6 +296,9 @@ impl Controller {
         }
         self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
+        if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
+            self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
+        }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
             _ => None,
@@ -324,6 +328,7 @@ impl Controller {
                 .filter(|_| p.history.can_redo),
         );
         self.published = Some(p);
+        self.update_builtins(cx);
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {
@@ -494,7 +499,6 @@ impl Controller {
             || self.recovery_pending
             || self.close_pending
             || self.save_pending
-            || self.drag.is_some()
         {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -809,8 +813,15 @@ impl Controller {
         })
         .detach();
     }
-    pub fn command(&mut self, cmd: &ShellCommand, _: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn command(
+        &mut self,
+        cmd: &ShellCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match cmd.name.as_str() {
+            "v4.platform" => self.builtin_platform(window, cx),
+            "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
             "open" => {
@@ -828,7 +839,7 @@ impl Controller {
             }
             "save" => self.save(None, cx),
             "saveAs" => self.save_dialog(cx),
-            "export" => self.export(cx),
+            "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
             "fit" | "fitComp" | "viewer.fit" => {
@@ -950,86 +961,6 @@ impl Drop for Controller {
         }
     }
 }
-impl Controller {
-    fn export(&mut self, cx: &mut Context<Self>) {
-        let Some(p) = &self.published else { return };
-        if self.recovery_pending {
-            self.message = "Choose a recovery option before exporting".into();
-            return;
-        }
-        let snapshot = p.snapshot.clone();
-        let media = self.media.clone();
-        let duration = self.duration;
-        let rate = self.rate;
-        let dimensions = self.dimensions;
-        let activity = self.engine.export_activity();
-        let rx = platform::paths_named(&self.host.borrow().window, true, "Frames");
-        self.message = "Export: choose a new PNG sequence folder".into();
-        cx.spawn(async move |this, cx| {
-            let Ok(Some(destination)) = rx.recv().await else {
-                return;
-            };
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    use pm_protocol::{
-                        color::{OutputColor, Precision},
-                        common::{FrameRate, SessionId, Size, TickRange},
-                        priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec},
-                    };
-                    let request = pm_engine_service::jobs::ExportRequest::new(
-                        pm_kernel::new_id("app").as_str().into(),
-                        &snapshot,
-                        JobSpec::Export {
-                            session: SessionId::new(snapshot.doc_id).unwrap(),
-                            composition: snapshot.open_comp().unwrap_or_default().as_str().into(),
-                            settings: ExportSettings {
-                                format: ExportFormat::PngSequence { sixteen_bit: false },
-                                alpha: AlphaOutput::Straight,
-                                quality: pm_protocol::priority::QualityTier::High,
-                                size: Size::new(dimensions[0] as u32, dimensions[1] as u32),
-                                frame_rate: FrameRate::new(rate.num() as u32, rate.den() as u32),
-                                range: TickRange {
-                                    start: Ticks::ZERO,
-                                    end: Ticks::new((duration * TICKS_PER_SECOND as f64) as i64)?,
-                                },
-                                audio: false,
-                                audio_index_playhead: None,
-                                motion_blur: false,
-                                color: OutputColor::SrgbImage,
-                                precision: Precision::Float16,
-                                dither: true,
-                                draft_from_proxies: false,
-                                delivery: Default::default(),
-                            },
-                        },
-                        media,
-                        destination,
-                    )?;
-                    pm_engine_service::jobs::ExportHandle::start_scheduled(
-                        &std::env::current_exe()?,
-                        request,
-                        activity,
-                    )?
-                    .wait()
-                })
-                .await;
-            let _ = this.update(cx, |v, cx| {
-                v.message = match result {
-                    Ok(status) => format!(
-                        "PNG sequence export: {:?}{}",
-                        status.state,
-                        status.error.map_or(String::new(), |e| format!(" · {e:?}"))
-                    ),
-                    Err(e) => format!("Export failed: {e}"),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-}
-
 #[cfg(test)]
 mod save_note_tests {
     use super::*;

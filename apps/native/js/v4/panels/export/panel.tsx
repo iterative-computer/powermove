@@ -49,49 +49,18 @@ function FormRow(props: {
 }) {
   const [label, help] = rows[props.name];
   return (
-    <div
-      role="group"
+    <UI.FormRow
       label={label}
+      help={props.help ?? help}
       id={`export.row.${props.name}`}
-      metadata={{
-        export: {
-          recipe: "sheet-form-row",
-          valueColumn: "metrics.sheet_value_column",
-          minHeight: ["metrics.row", "metrics.inset"],
-          checkboxAlignment: "trailing",
-        },
-      }}
     >
-      <div style={line}>
-        <div style={stack}>
-          <text style={text}>{label}</text>
-          <text style={detail}>{props.help ?? help}</text>
-        </div>
-        <div style={cluster}>{props.children}</div>
-      </div>
-    </div>
+      {props.children}
+    </UI.FormRow>
   );
 }
 function Group(props: { label: string; children: ComponentChildren }) {
   // API-GAP: settings-card recipe owns light/dark fill and summed radius.
-  return (
-    <div
-      role="group"
-      label={props.label}
-      metadata={{ export: { recipe: "settings-group" } }}
-    >
-      <text
-        role="heading"
-        style={{
-          color: token("colors.text"),
-          fontSize: token("typography.title"),
-        }}
-      >
-        {props.label}
-      </text>
-      {props.children}
-    </div>
-  );
+  return <UI.FormGroup label={props.label}>{props.children}</UI.FormGroup>;
 }
 /** The kit has no push-button yet. ToolbarItem is an explicitly provisional,
  * neutral action placeholder; the native adapter must use NSButton here. */
@@ -103,12 +72,7 @@ function Action(props: {
   onClick: () => void;
 }) {
   const { primary, ...rest } = props;
-  return (
-    <UI.ToolbarItem
-      {...rest}
-      metadata={{ export: { nativeControl: "NSButton", default: !!primary } }}
-    />
-  );
+  return <UI.PushButton {...rest} primary={primary} />;
 }
 export interface ExportSheetProps {
   model: ExportModel;
@@ -202,6 +166,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       label="Export"
       anchor={anchor}
       open
+      style={{
+        padding: token("metrics.sheet_inset"),
+        width: token("metrics.sheet_width_wide"),
+        gap: token("metrics.inset"),
+      }}
       // No substitute for missing wide-sheet/inset tokens. Metadata is a request,
       // not a claim the current kit interprets these properties.
       metadata={{

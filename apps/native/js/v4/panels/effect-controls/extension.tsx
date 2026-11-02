@@ -1,4 +1,4 @@
-import { createRoot, type Transport, type HostClient } from "../../src";
+import { createRoot, type Transport, type HostClient, type RootOptions } from "../../src";
 import { EffectsController } from "./controller";
 import { EffectControls, type PanelProps } from "./panel";
 import { PANEL_ID, PANEL_TITLE, type Platform } from "./contract";
@@ -12,6 +12,7 @@ export const effectControlsExtension = Object.freeze({
 export async function mountEffectControls(
   options: Omit<PanelProps, "controller"> & {
     transport: Transport;
+    rootOptions?: RootOptions;
     host: HostClient;
     platform: Platform;
     /** Unique for this mount in the host generation; subscription ids never recycle. */
@@ -24,7 +25,7 @@ export async function mountEffectControls(
     options.subscriptionId,
   );
   const root = createRoot(options.transport, (error) =>
-    options.platform.report(error),
+    options.platform.report(error), options.rootOptions,
   );
   try {
     await controller.start();

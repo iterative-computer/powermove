@@ -29,6 +29,7 @@ pub mod composition;
 mod composition_accessibility;
 mod composition_accessibility_order;
 pub mod native_text;
+pub mod native_control;
 mod platform;
 mod window;
 mod window_appearance;

@@ -74,10 +74,14 @@ impl StateSnapshot {
                 Arc::make_mut(&mut s.settings).insert(key.into(), v);
             }
         }
-        // Per-provider model preference is a settings key too.
+        // Per-provider model preferences and opaque per-extension storage use
+        // their existing dynamic library keys. Never flatten or discard them.
         for k in store.keys()? {
             if let crate::library::StoreKey::Dynamic { prefix, id } = k
-                && prefix == "agentModel"
+                && matches!(
+                    prefix.as_str(),
+                    "agentModel" | "agentThreads" | "agentAttachment" | "ext"
+                )
             {
                 let key = format!("{prefix}.{id}");
                 if let Some(v) = store.read(&key)? {
@@ -242,7 +246,7 @@ impl StateSnapshot {
 pub fn is_setting(key: &str) -> bool {
     (STATIC_KEYS.contains(&key)
         && !["projects", "projectTrash", "autosave", "takes"].contains(&key))
-        || matches!(crate::library::parse_key(key), Some(crate::library::StoreKey::Dynamic { prefix, .. }) if prefix == "agentModel")
+        || matches!(crate::library::parse_key(key), Some(crate::library::StoreKey::Dynamic { prefix, .. }) if matches!(prefix.as_str(), "agentModel" | "agentThreads" | "agentAttachment" | "ext"))
 }
 #[derive(Clone, Debug, Default)]
 pub struct StateTransaction {

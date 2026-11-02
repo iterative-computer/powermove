@@ -139,6 +139,15 @@ impl Inspector {
             self.effects.retain(&ids);
         }
     }
+    /// Immutable native-host identity; no document mirror crosses the v4 boundary.
+    pub fn document_id(&self) -> u64 {
+        self.published.snapshot.doc_id
+    }
+    pub fn effect_definitions(
+        &self,
+    ) -> &std::collections::HashMap<String, crate::EffectDefinition> {
+        &self.definitions
+    }
     pub fn revision(&self) -> u64 {
         self.published.revision()
     }

@@ -30,3 +30,13 @@ block2 = "0.6"
 async-channel = "2"
 serde_json = "1"
 tempfile = "3"
+
+pm-builtins = { path = "../builtins" }
+pm-surface = { path = "../surface" }
+pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
+raw-window-handle = "0.6"
+pm-promedia = { path = "../promedia" }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+
+pm-panel-media = { path = "../panel-media" }
+pm-panel-viewerchrome = { path = "../panel-viewerchrome" }

@@ -1,6 +1,7 @@
 //! Native primary/multiline editors and a dense GPUI field with an AppKit edit slot.
 use gpui::{prelude::*, *};
-use gpui_macos::native_text::{NativeTextSlot, TextEvent, TextKind};
+use gpui_macos::native_text::NativeTextSlot;
+pub use gpui_macos::native_text::{TextEvent, TextKind};
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -68,6 +69,14 @@ impl TextField {
     pub fn value(&self) -> &str {
         &self.value
     }
+    pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
+        self.slot.begin_editing();
+        cx.notify();
+    }
+    pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
+        self.slot.set_font_size(tokens.typography.body as f64);
+        self.tokens = tokens;
+    }
     pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
         self.slot.set_value(value);
         if !self.slot.is_editing() {
@@ -86,10 +95,11 @@ impl Render for TextField {
             .relative()
             .w_full()
             .h(px(if self.kind == TextKind::Multiline {
-                88.
+                self.tokens.metrics.row * 4.
             } else {
-                26.
+                self.tokens.metrics.field
             }))
+            .px(px(self.tokens.metrics.gap))
             .border_1()
             .border_color(rgb(self.tokens.colors.separator))
             .rounded(px(self.tokens.metrics.control_radius))

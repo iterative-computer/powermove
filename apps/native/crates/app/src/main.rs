@@ -1,4 +1,8 @@
+mod builtins;
+#[cfg(test)]
+mod builtins_tests;
 mod diag;
+mod export_coordinator;
 mod lifecycle;
 mod mcp;
 mod media;
@@ -9,6 +13,9 @@ mod playback;
 mod rows;
 mod session;
 mod smoke;
+mod v4_native;
+mod v4_control;
+mod v4_view;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

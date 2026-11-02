@@ -128,6 +128,11 @@ impl Interaction {
         )?;
         if let Some(value) = &detail.value
             && surface.node(plan.target).is_some_and(|n| n.input.is_some())
+            && !(event == "change"
+                && value.is_number()
+                && surface.node(plan.target).is_some_and(|n| {
+                    n.props.get("control").and_then(Value::as_str) == Some("number")
+                }))
         {
             let value = value.as_str().ok_or("input observation must be string")?;
             let len = value.encode_utf16().count();

@@ -1105,6 +1105,9 @@ impl Render for Editor {
                     }),
                 );
             let multi = tabs.len() > 1;
+            if custom.is_some() && !multi {
+                header = header.px(px(0.));
+            }
             if multi || custom.is_none() {
                 // Approved mockup: a sunken segmented strip for tab groups, a
                 // semibold title for single panels. The whole tab is the drag handle.

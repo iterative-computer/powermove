@@ -73,6 +73,29 @@ pub fn validate_panel(surface: &Surface, tokens: &Tokens, layout: &Layout) -> Ve
             })
         };
         let component = Component::of(node);
+        if component == Some(Component::Switch) {
+            let mut parent = Some(node.id);
+            let mut settings = false;
+            while let Some(id) = parent {
+                let Some(owner) = surface.node(id) else {
+                    break;
+                };
+                if owner
+                    .props
+                    .get("metadata")
+                    .and_then(|m| m.get("hostWindow"))
+                    .and_then(Value::as_str)
+                    == Some("settings")
+                {
+                    settings = true;
+                    break;
+                }
+                parent = owner.parent;
+            }
+            if !settings {
+                flag("data-pm-component", "switchRequiresSettings");
+            }
+        }
         if node.props.contains_key("data-pm-component") && component.is_none() {
             flag("data-pm-component", "unknownComponent");
         }
