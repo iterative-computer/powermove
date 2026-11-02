@@ -83,6 +83,68 @@ globalThis.__extcheck = {
         this.realm.kernel.panels,
         this.dom.document,
       );
+    // Transient playback belongs to the native worker, separately from the
+    // kernel's document/history writer. Publications are read through getters.
+    const transport = (method, extra = {}) =>
+      call("transport.command", { method, now: performance.now(), ...extra });
+    const updateTransport = (reply, force = false) => {
+      if (reply.timeChanged || force)
+        this.realm.PM.bus.emit("time", reply.time);
+      if (reply.playingChanged) this.realm.PM.bus.emit("transport");
+      if (reply.timeChanged || reply.playingChanged || force)
+        this.realm.PM.invalidate();
+    };
+    let playback = 0;
+    Object.defineProperties(this.realm.PM, {
+      time: {
+        enumerable: true,
+        get: () => transport("state").time,
+        set: (time) => {
+          if (Number.isFinite(time))
+            updateTransport(transport("seek", { time, raw: true }));
+        },
+      },
+      playing: { enumerable: true, get: () => transport("state").playing },
+      loop: {
+        enumerable: true,
+        get: () => transport("state").loop,
+        set: (value) => {
+          transport("loop", { value: !!value });
+        },
+      },
+    });
+    this.realm.PM.setTime = (time, options = {}) => {
+      if (Number.isFinite(time))
+        updateTransport(
+          transport("seek", { time, raw: !!options.raw }),
+          !!options.force,
+        );
+    };
+    this.realm.PM.step = (frames) =>
+      this.realm.PM.setTime(
+        this.realm.PM.time + frames / this.realm.PM.proj.fps,
+      );
+    this.realm.PM.play = () => {
+      if (this.realm.PM.playing) return;
+      updateTransport(transport("play"));
+      const generation = ++playback;
+      const frame = () => {
+        if (generation !== playback || !this.realm.PM.playing) return;
+        this.realm.task(() => updateTransport(transport("tick")));
+        if (this.realm.PM.playing) schedule(frame);
+      };
+      const schedule = (fn) =>
+        typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame(fn)
+          : setTimeout(fn, 16);
+      schedule(frame);
+    };
+    this.realm.PM.pause = () => {
+      ++playback;
+      updateTransport(transport("pause"));
+    };
+    this.realm.PM.toggle = () =>
+      this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     this.realm.installGlobals(globalThis);
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(

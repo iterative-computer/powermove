@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from resources import disk_ready
 
 REFERENCE = "07ed5fa17ee640659cb075f9cad1af2095011d60"
 FAMILIES = ("PM facade", "sync services", "raster override", "recorder canvas", "DOM panel", "lifecycle")
@@ -53,8 +54,8 @@ def digest(data):
 def disk_check():
     while True:
         wait_for_local_execution()
-        if shutil.disk_usage(WORK).free >= 6.5 * 1024**3:return
-        print("Waiting for disk space at or above 6.5 GiB", flush=True)
+        if disk_ready():return
+        print("Waiting for APFS container free space at or above 5 GB", flush=True)
         time.sleep(120)
 
 
@@ -304,7 +305,7 @@ def capture_unlocked(command, request, output, timeout):
     if not command:
         raise Blocked("native-integrated-runner-unavailable")
     output.mkdir()
-    if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+    if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or not disk_ready():
         raise LocalPause()
     env = dict(os.environ)
     env.pop("ELECTRON_RUN_AS_NODE", None)
@@ -317,7 +318,7 @@ def capture_unlocked(command, request, output, timeout):
             deadline=time.monotonic()+timeout
             data=json.dumps({**request, "output": str(output)}).encode()
             while True:
-                if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+                if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or not disk_ready():
                     stop_capture(child)
                     raise LocalPause()
                 remaining=deadline-time.monotonic()

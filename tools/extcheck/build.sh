@@ -16,7 +16,9 @@ export RUSTY_V8_SRC_BINDING_PATH="${PM_S1_ARTIFACT:-/private/tmp/pm-s1-v8-artifa
 unset V8_FROM_SOURCE RUSTY_V8_SKIP_DOWNLOAD DOCS_RS
 (cd "$(dirname "$RUSTY_V8_ARCHIVE")" && shasum -a 256 -c SHA256SUMS)
 python3 - "${1:-test}" "${2:-pm-compat-runner}" "${3:-}" <<'PY'
-import os, shutil, signal, subprocess, sys
+import os, signal, subprocess, sys
+sys.path.insert(0,"tools/extcheck")
+from resources import disk_ready
 mode=sys.argv[1]
 package=sys.argv[2]
 example=sys.argv[3]
@@ -52,8 +54,8 @@ while commands:
   if pause_file.exists():
    print('Local execution paused by owner; checking again in five minutes',flush=True)
    time.sleep(300)
-  elif shutil.disk_usage('/').free < 6.5*1024**3:
-   print('Waiting for disk space at or above 6.5 GiB',flush=True)
+  elif not disk_ready():
+   print('Waiting for APFS container free space at or above 5 GB',flush=True)
    time.sleep(120)
   else:break
  child=subprocess.Popen(commands[0],start_new_session=True)
@@ -65,9 +67,9 @@ while commands:
     print('Build paused by owner',flush=True)
     paused=True
     break
-   if shutil.disk_usage('/').free < 6.5*1024**3:
+   if not disk_ready():
     stop_child(child)
-    print('Build paused below 6.5 GiB; will retry at or above 6.5 GiB',flush=True)
+    print('Build paused below 5 GB; will retry at or above 5 GB',flush=True)
     paused=True
     break
    try:child.wait(timeout=.25)

@@ -15,8 +15,9 @@ capture CLI. See `docs/native/extcheck-p2.md` for their limits and current count
 ## Prepare the frozen reference
 
 Use an owned, disposable checkout; never change the installed app or its profile.
-Keep at least 6.5 GiB free. This lane's revised resource policy pauses below
-6.5 GiB and resumes at or above 6.5 GiB. The recorder must be enabled
+Keep at least 5 GB free in the APFS container, measured with
+`diskutil info / | grep 'Container Free Space'`. The round-3 guard reads the
+exact byte count and pauses below 5,000,000,000 bytes. The recorder must be enabled
 **during the build**.
 
 ```sh

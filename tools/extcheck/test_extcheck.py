@@ -20,6 +20,9 @@ class HarnessTests(unittest.TestCase):
         active=patch.object(run,'USER_ACTIVE',Mock(exists=Mock(return_value=False)))
         active.start()
         self.addCleanup(active.stop)
+        disk=patch("gui_capture.disk_ready",return_value=True)
+        disk.start()
+        self.addCleanup(disk.stop)
 
     def test_owner_pause_waits_five_minutes_without_starting_work(self):
         pause=Mock()
@@ -34,7 +37,7 @@ class HarnessTests(unittest.TestCase):
         pause=Mock()
         pause.exists.side_effect=[False,True]
         from types import SimpleNamespace
-        with tempfile.TemporaryDirectory() as temporary,patch('run.shutil.disk_usage',return_value=SimpleNamespace(free=8*1024**3)), \
+        with tempfile.TemporaryDirectory() as temporary,patch('run.disk_ready',return_value=True), \
              patch('run.subprocess.Popen',return_value=child),patch.object(run,'PAUSE_LOCAL',pause), \
              patch('run.os.killpg') as kill:
             with self.assertRaises(run.LocalPause):
@@ -45,9 +48,9 @@ class HarnessTests(unittest.TestCase):
 
     def test_disk_pressure_waits_and_resumes_at_the_revised_floor(self):
         from types import SimpleNamespace
-        below=SimpleNamespace(free=6.4*1024**3)
-        ready=SimpleNamespace(free=6.5*1024**3)
-        with patch('run.wait_for_local_execution'),patch('run.shutil.disk_usage',side_effect=[below,ready]), \
+        below=False
+        ready=True
+        with patch('run.wait_for_local_execution'),patch('run.disk_ready',side_effect=[below,ready]), \
              patch('run.time.sleep') as sleep, patch('builtins.print'):
             run.disk_check()
         sleep.assert_called_once_with(120)

@@ -11,6 +11,73 @@ The S1 sandbox archive and bindings passed all five checksum checks. Builds use
 Rust 1.96.1, `engine/env.sh`, the shared target and the build lock. No release,
 app update, tag or deployment was created.
 
+## 2026-11-01 — round-3 WIP handoff
+
+The branch fast-forwarded to `origin/feat/native-engine` at `3c4fbc4e5`.
+The results below remain the last completed all-source run; **no new accepted
+reference or paired native recordings were produced this round**. The queued
+three-recording probe never acquired the shared GUI lease and has been stopped.
+No app was launched by this round's probe; the other lane's lease was untouched.
+All pending lane-owned build/probe controllers were stopped for handoff.
+
+Run from the checkout root. Reuse the prepared frozen reference; do not blindly
+reinstall its trimmed dependencies. Inputs/profile remain read-only. The current
+floor is **5 GB decimal**, measured by `diskutil`, superseding the earlier floor.
+The wrappers source the engine environment, use the build/GUI leases and monitor
+pause/active flags. Never remove another lane's lock or either flag.
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
+export PM_S1_ARTIFACT=/private/tmp/pm-s1-v8-artifact-final
+export ELECTRON_OVERRIDE_DIST_PATH=/private/tmp/pm-anchor/node_modules/.bun/electron@44.0.0+759ce506b1ed1a42/node_modules/electron/dist
+export TZ=UTC
+diskutil info / | grep 'Container Free Space'
+# Headless checks/builds: nice -n 20 and flock /tmp/pm-build.lock are inside build.sh.
+bash tools/extcheck/build.sh test
+bash tools/extcheck/build.sh clippy
+bash tools/extcheck/build.sh fmt
+bash tools/extcheck/build.sh build
+nice -n 20 node tools/extcheck/test_clock_fixture.mjs
+nice -n 20 python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
+# GUI commands acquire gui.lock themselves. Run only with both flags absent.
+test ! -e /tmp/pm-shots/PAUSE_LOCAL && test ! -e /tmp/pm-shots/USER_ACTIVE
+nice -n 20 python3 tools/extcheck/repeat.py --reference-root /tmp/pm-extcheck/reference --store --repeats 3 --output /tmp/pm-extcheck/round3-reference-stability.json
+nice -n 20 bash tools/extcheck/run.sh --reference-root /tmp/pm-extcheck/reference --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" --store --repeat 3 --summary /tmp/pm-extcheck/round3-summary.json
+```
+
+Findings/normalization: the earlier investigated pair varied in a generated
+workspace ID, the timeline's clock-driven spring trail and the live frame-ms
+readout. The existing workspace-ID alias makes that pair's traces equal without
+changing fixture state. Its pixels still vary. The new `clock-fixture.mjs`
+provides explicit frame/time progression and seeded entropy; **it is tested in
+isolation but is not installed in either capture driver yet**. No new trace
+field or pixel is ignored. No per-extension volatility allowlist exists yet.
+Window/device scale, fonts, asynchronous activation and clock integration still
+need repeated measurements and justified policies. `repeat.py` now collects at
+least three captures per case; `stability.py` records differing paths and pixel
+bounds in private output only. These new CLI paths have not had a GUI run.
+
+Completed this round: clock-fixture unit probe and 24 Python tests pass; shell
+syntax and Rust formatting were checked. The native transport regression first
+reproduced `PM.setTime` missing (20 other runner tests passed). A WIP native
+worker transport and JS facade were then added, including seek/frame rounding,
+play/pause/loop and explicit refusal of unattached media playback. **Post-fix
+Rust tests, build and Clippy remain pending**: the last check was paused below
+5 GB and cancelled for handoff. The transport is not evidence of completed
+native capture or production media transport.
+
+Remaining: install/verify the same deterministic fixture in both hosts; inspect
+three or more recordings for every case and maintain a reasoned per-extension
+allowlist only where genuinely needed; complete the native script/trace/PNG
+endpoint and recorder-to-DOM presentation; finish Store release admission and
+resource/view/callback dispatch without fabricating signatures/grants or running
+public Store code trusted; use the supplied projects to author/review full
+per-extension scenarios; then rerun all 58, rank measured mismatch families,
+fix small repros and update the table. The bundled native driver still stops at
+activation/disposal, so the final command above currently reports P2 OPEN.
+
 ## Population and current evidence
 
 | Source | Total | Match | Mismatch | Can't run | Logic executed in real V8 | Activated |
