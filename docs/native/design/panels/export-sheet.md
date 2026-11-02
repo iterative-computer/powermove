@@ -88,7 +88,7 @@ Rows (label · detail), shown per `FieldSupport`:
 |---|---|---|
 | Output | `Format` | `Container and codec of the exported file.` |
 | | `Resolution` | `Rendered size relative to the composition, or any pixel size.` |
-| | `Size` (custom) | `Exact pixel size to render; keeps the composition aspect.` |
+| | `Size` (custom) | `Exact pixel size to render; keeps the composition aspect.` — the two wells are named `Width` and `Height` (AX `Width, 1920 pixels`) |
 | | `Frame Rate` | `Frames written per second of exported video.` |
 | | `Range` | `Export the work area or the whole composition.` |
 | | `Quality` | `Video bitrate used for video exports.` |
@@ -137,7 +137,12 @@ Rows (label · detail), shown per `FieldSupport`:
 4. **Failed** → the progress sheet stays, bar hidden, `exclamationmark.triangle.fill`
    `c.danger` + message `t.body` (`Export failed: {reason}` — reasons from the
    engine in sentence case with the fix), buttons `Close` and `Try Again`
-   (default). **Cancelled** → sheet closes, no banner.
+   (default). `Try Again` re-runs the same frozen job to the same
+   destination; when the reason concerns the destination (not writable,
+   disk full, folder missing) it reopens the save/choose-folder panel on the
+   progress sheet, pre-filled. A lost job (no acknowledgement, then reported
+   lost) fails with `Powermove lost contact with the export engine. Try again.`
+   **Cancelled** → sheet closes, no banner.
 
 ## 4. States
 
@@ -146,7 +151,7 @@ Rows (label · detail), shown per `FieldSupport`:
 | **Empty** | N/A (Export is disabled in the menu/toolbar without a project). |
 | **Loading** | N/A; capabilities are known before the sheet opens. A format the Mac can't encode is listed disabled with its reason as the menu item subtitle (`H.264 MP4 export is unavailable on this Mac`). |
 | **Hover/Focus/Disabled** | system controls. |
-| **Error** | inline under the offending row (`Enter a size from 16 to 8192 px.`); default button disabled while invalid. |
+| **Error** | inline under the offending row (`Enter a size from 16 to 8192 px.`); default button disabled while invalid. Planning failed: the summary becomes `c.warning` triangle + `Can’t export with these settings: {reason}`, default disabled until a setting changes. Preset save failed: `Couldn’t save the preset. Try again.` (`t.minimum` `c.danger`) under `Save as Preset`, name kept. Preset list failed: `Saved Preset` disabled, detail `Couldn’t load your saved presets.` |
 | **Already running** | the Export command while an export runs brings the progress sheet's window forward; the toolbar Export button is disabled with tooltip `Export already running`. |
 | **Drag/drop, multi-select, 60 k** | N/A. |
 

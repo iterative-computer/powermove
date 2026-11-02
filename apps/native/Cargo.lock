@@ -4622,6 +4622,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-web-kit",
+ "pm-remote-dom",
+ "pm-store-host",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -4632,6 +4634,9 @@ dependencies = [
 name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
+ "pm-kernel",
+ "pm-mcp",
+ "pm-model",
  "pm-recorder",
  "pm-runtime-v8",
  "serde_json",
@@ -4671,6 +4676,18 @@ dependencies = [
  "pm-model",
  "pm-text",
  "pm-time",
+]
+
+[[package]]
+name = "pm-effect-controls-wire"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-panel-inspector",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
@@ -4763,6 +4780,15 @@ dependencies = [
  "png",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "pm-export-panel-wire"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
@@ -5064,6 +5090,17 @@ dependencies = [
  "pm-agents",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
+name = "pm-panel-effects-conformance"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "pm-design",
+ "pm-surface",
  "serde_json",
 ]
 
@@ -5071,9 +5108,13 @@ dependencies = [
 name = "pm-panel-inspector"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "pm-design",
  "pm-eval",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
@@ -5090,16 +5131,22 @@ dependencies = [
 name = "pm-panel-timeline"
 version = "0.1.0"
 dependencies = [
+ "pm-design",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
 name = "pm-panel-viewerchrome"
 version = "0.1.0"
 dependencies = [
+ "pm-design",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
@@ -5107,10 +5154,25 @@ name = "pm-perf"
 version = "0.1.0"
 
 [[package]]
+name = "pm-project-panel-check"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-panel-media",
+ "pm-surface",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-promedia"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pm-protocol",
  "pm-time",
  "serde",
  "serde_json",

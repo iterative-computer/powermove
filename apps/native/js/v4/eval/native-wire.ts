@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 
 let built = false;
 /** Development/test utility only. Both examples use the real Rust validators. */
@@ -6,8 +7,11 @@ export function nativeWire() {
   const manifest = fileURLToPath(
     new URL("../../../crates/surface/standalone/Cargo.toml", import.meta.url),
   );
-  const target = fileURLToPath(
-    new URL("../../../crates/surface/standalone/target", import.meta.url),
+  const target = resolve(
+    process.env.CARGO_TARGET_DIR ??
+      fileURLToPath(
+        new URL("../../../crates/surface/standalone/target", import.meta.url),
+      ),
   );
   if (!built) {
     const result = Bun.spawnSync(
@@ -27,13 +31,10 @@ export function nativeWire() {
       throw new Error(new TextDecoder().decode(result.stderr));
     built = true;
   }
-  const base = new URL(
-    "../../../crates/surface/standalone/target/debug/examples/",
-    import.meta.url,
-  );
+  const base = join(target, "debug/examples");
   return {
-    surface: fileURLToPath(new URL("wire", base)),
-    kit: fileURLToPath(new URL("ui_kit_wire", base)),
-    host: fileURLToPath(new URL("host_wire", base)),
+    surface: join(base, "wire"),
+    kit: join(base, "ui_kit_wire"),
+    host: join(base, "host_wire"),
   };
 }
