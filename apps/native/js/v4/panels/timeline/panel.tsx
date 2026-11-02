@@ -162,6 +162,17 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             </text>
             {f.tabs.length > 0 && (
               <div
+                id="timeline:header-separator"
+                role="presentation"
+                style={{
+                  width: t("metrics.border"),
+                  height: t("metrics.symbol_panel"),
+                  background: t("colors.separator"),
+                }}
+              />
+            )}
+            {f.tabs.length > 0 && (
+              <div
                 id="timeline:tabs"
                 label="Open compositions"
                 role="tablist"
@@ -275,6 +286,30 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
     </div>
   );
 }
+/** Exact timeline §2 glyph table; unknown kinds remain neutral until schema
+ * presentation supplies a symbol. */
+export function kindSymbol(kind: string): string | null {
+  return (
+    (
+      {
+        text: "textformat",
+        shape: "square.on.circle",
+        video: "film",
+        image: "photo",
+        audio: "waveform",
+        adjustment: "slider.horizontal.3",
+        null: "circle.dashed",
+        camera: "camera",
+        group: "square.stack",
+        precomp: "rectangle.stack",
+        captions: "captions.bubble",
+        solid: "square.fill",
+        shader: "wand.and.rays",
+        extension: "wand.and.rays",
+      } as Record<string, string>
+    )[kind] ?? null
+  );
+}
 function Layer({ row, send }: { row: LayerRow; send: Send }) {
   const show = row.hovered || row.focused;
   return (
@@ -301,6 +336,26 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
           />
         )}
+        <div
+          role="presentation"
+          attr={{ symbol: row.layerKind ? kindSymbol(row.layerKind) : null }}
+          metadata={{
+            recipe: "kind-badge",
+            designTodo: row.layerKind ? null : "native-schema-kind",
+          }}
+          style={{
+            width: t("metrics.kind_badge"),
+            height: t("metrics.kind_badge"),
+            borderRadius: t("metrics.inner_radius"),
+            background: t(
+              row.labelColor
+                ? `colors.labels.${row.labelColor}`
+                : "colors.field",
+            ),
+            color: t("colors.text"),
+            symbolSize: t("metrics.symbol_inline"),
+          }}
+        />
         {row.nameEditor ? (
           <UI.TextField
             label={row.label}
