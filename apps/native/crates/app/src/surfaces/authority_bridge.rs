@@ -90,7 +90,8 @@ impl ValuesService for Services {
     }
 }
 impl Services {
-    /// Use Setup::reveal_key's validated output. The worker must revalidate
+    /// Call Setup::begin_reveal first, then use reveal_key's validated output.
+    /// The worker must revalidate
     /// generation/declaration before reading Keychain, and return only through
     /// Completion::Revealed -> explicit Prompt::Reveal. Never log the result.
     pub fn reveal(
@@ -113,9 +114,9 @@ impl Services {
     }
 }
 
-/// Native setup adapter contract. Concrete rendering is blocked by the missing
-/// Opus sheet metrics recorded in values::DESIGN_TODOS. The host must instantiate
-/// NSTextField/NSSecureTextField, never render secrets through a v4/DOM tree.
+/// Native setup adapter contract. macos::setup_sheet builds the token-resolved
+/// NSTextField/NSSecureTextField controls; the app attaches their native target
+/// and field delegate, never rendering secrets through a v4/DOM tree.
 /// `SheetView` is safe to inspect; field contents are fetched separately through
 /// Setup::field_value and the platform secure text driver. Esc/Return and Tab
 /// follow SheetView's grammar; no JS callbacks run on the main thread.

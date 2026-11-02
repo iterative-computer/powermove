@@ -5,6 +5,11 @@
 //! N6 values retain their extension/env identity; N7 every action has an id and
 //! generation; N8 publication is nonblocking, with no JS or service IO here.
 //! The app's shell must dispatch this module; registration alone is not wiring.
+// Each surface also builds as an independent portable verification target.
+#[allow(clippy::duplicate_mod)]
+#[path = "sheet_layout.rs"]
+pub mod sheet_layout;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
@@ -142,6 +147,10 @@ pub enum Prompt {
         project: String,
         name: String,
     },
+    ValuesDeletionFailed {
+        extension: String,
+        code: ServiceCode,
+    },
     DeleteLocal {
         project: String,
         name: String,
@@ -172,6 +181,11 @@ impl Alert {
         let cancel = || button(Action::Cancel, "Cancel", true, false);
         let delete = || button(Action::Delete, "Delete", false, true);
         let (message, informative, style, buttons) = match &self.prompt {
+            Prompt::ValuesDeletionFailed { extension, code } => (
+                format!("{extension} was removed, but its values couldn’t be deleted."),
+                code.informative().into(), AlertStyle::Informational,
+                vec![button(Action::Done, "OK", true, false)],
+            ),
             Prompt::FullAccess { .. } => (
                 "Give Powermove agents full access to your Mac?".into(),
                 "Agents will run commands and change files anywhere on this Mac without asking, until you choose another access level or quit Powermove.".into(),
