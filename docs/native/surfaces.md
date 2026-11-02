@@ -98,7 +98,7 @@ Design references below are relative to `docs/native/design/`:
 | S022 P1 | Pre-compose dialog and composition-delete confirmation | `R/legacy/ui/compositions.ts`; `R/panels/AssetsPanel.svelte` | Timeline/Media expose actions, not complete dialogs. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S022](design/surfaces/dialogs.md). | `pm-kernel::commands::{comps,groups}`; `pm-panel-media::edit`. **spec+model** |
 | S023 P1 | Viewer canvas/chrome: zoom/fit/custom zoom, quality, safe areas, controls, focus/fullscreen, return-to-composition and offscreen recovery | `E/viewer/viewer.ts`; `E/viewer/index.ts`; `R/legacy/core/preview-resolution.ts` | Viewer and Viewer review specify chrome, quality and recovery banners. | `pm-panel-viewerchrome::{Navigation,ViewModel,Controller}`; `pm-engine-service` presentation. Physical EDR/input/performance gates open. **spec+model** |
 | S024 P1 | Source-preview viewer: image/audio/video, scrub/play/time/range, close and drag source | `E/viewer/source-preview.ts`; `R/panels/AssetsPanel.svelte` | Viewer and Media specify source mode; decoder-error states were missing. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S024](design/surfaces/media.md). | `pm-panel-media::preview`; `pm-panel-viewerchrome::source`; engine independent source viewers. Host/media leases pending. **spec+model** (partial) |
-| S025 P1 | On-canvas selection, transform/anchor/rotation, shape/pen/mask editing, text caret/selection/paragraph box and gizmos | `E/viewer/viewer.ts`; `E/viewer/path-editing.ts`; `E/viewer/text-editor.ts`; `E/viewer/text-geometry.ts` | Viewer covers gizmo appearance; Inspector covers properties. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S025](design/surfaces/editing.md). | Viewer model supplies selection/overlay plans; `pm-kernel::commands::{transform,masks,text}` and engine geometry. Full pointer/text/path editing host remains. **spec+model** (partial) |
+| S025 P1 | On-canvas selection, transform/anchor/rotation, shape/pen/mask editing, text caret/selection/paragraph box and gizmos | `E/viewer/viewer.ts`; `E/viewer/path-editing.ts`; `E/viewer/text-editor.ts`; `E/viewer/text-geometry.ts` | Viewer covers gizmo appearance; Inspector covers properties. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S025](design/surfaces/editing.md). **Editing lane (2026-11-01):** token/AX path and text-overlay plans, modifier reducer and kernel path/text adapter in `app/src/surfaces/editing*.rs`; headless-tested; renderer/input attachment pending. | Viewer model supplies selection/overlay plans; `pm-kernel::commands::{transform,masks,text}` and engine geometry. Full pointer/text/path editing host remains. **spec+model** (partial) |
 | S026 P1 | Main tool strip / registered headless `toolbar` (Tools) panel and creation menu; selection/hand/zoom/rotate/anchor, drawing/text/shape tools | `E/toolbar/index.ts`; `R/shell/ToolbarMount.svelte` | Shell review and Viewer specify toolbar/tool behavior; Shared owns tokens. | `pm-shell` toolbar/command tables; viewer `input` and tool state. **spec+model** |
 | S027 P1 | Timeline panel: composition tabs, transport/time, layer switches/parenting, clips, work area, ruler, snapping, scroll/zoom, menus | `E/timeline/timeline.ts`; `E/timeline/comp-tabs.ts`; `E/timeline/track-view.ts`; `E/timeline/track-layout.ts` | Timeline supplies surface and states. | `pm-panel-timeline` snapshot/view/input/behavior models; `pm-kernel::commands::{track,timing,markers}`; engine transport. Native painter/input binding pending. **spec+model** |
 | S028 P1 | Graph/dope sheet/combined views, channel rows, key diamonds, curve handles, interpolation and graph menus | `E/timeline/graph-controls.ts`; `E/timeline/graph-presentation.ts`; `E/timeline/timeline.ts` | Timeline specifies graph and local selection/focus/drag behavior. | `pm-panel-timeline::{TimelineModel,GraphDisplay}` and keyframe commands. **spec+model** |
@@ -107,8 +107,8 @@ Design references below are relative to `docs/native/design/`:
 | S031 P1 | Properties/Inspector: composition/no selection, multi-selection/mixed values, content/transform/structured/mask/time/layer sections | `E/inspector/InspectorPanel.svelte`; `E/inspector/InspectorSurface.svelte`; `E/inspector/ContentSection.svelte`; `E/inspector/StructuredSection.svelte`; `E/inspector/MasksSection.svelte`; `E/inspector/RetimingSection.svelte`; `E/inspector/LayerOptions.svelte` | Inspector specifies section order, states, fields and local controls. | `pm-panel-inspector::{catalog,content,relations,edit,view}`; kernel property/mask/timing commands. **spec+model** |
 | S032 P1 | Effect Controls panel: add/select/reorder/enable/remove, clipboard, effect parameters, missing definitions | `E/inspector/EffectsPanel.svelte`; `E/inspector/EffectsSection.svelte`; `E/inspector/ParameterList.svelte`; `E/inspector/effect-clipboard.ts` | Effects specifies stack, parameters, states and menus. | `pm-panel-inspector::effects` and kernel effect commands; runtime registry must supply definitions. **spec+model** |
 | S033 P1 | Effects browser: search, categories, previews, drag/add effects and transitions | `R/panels/FxBrowserPanel.svelte`; `R/panels/fx-browser.svelte.ts`; `E/effects-basic/index.ts`; `E/transitions-basic/index.ts` | Browser specifies this surface, titled Effects per owner decision. | Kernel registered definitions and `pm-panel-inspector::effects` apply planner exist; dedicated search/category/preview browser model not found. **spec+model** (operation backing only; browser model remains) |
-| S034 P1 | Font family/face popover, font preview, variable axes, text alignment and text animators | `R/controls/FontField.svelte`; `E/inspector/TypeSettings.svelte`; `E/inspector/TypeAxis.svelte`; `E/inspector/TextAnimators.svelte`; `E/inspector/TextAlignment.svelte` | Inspector plus Services review specify fonts/face menu and type rows. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S034](design/surfaces/editing.md). | `pm-services::fonts::{FontCatalog,Face}`; `pm-panel-inspector::content`; kernel text commands. **spec+model** (partial) |
-| S035 P1 | Colour/fill popover: None/solid/linear/radial; sRGB/Display P3; OKLCH/HSL/RGB/OKLab/P3 notation and copy; hue mapping, previous/new swatches, gamut-clipping warning, alpha, gradient stops/midpoint and screen eyedropper | `R/controls/ColorField.svelte`; `R/controls/FillField.svelte`; `R/controls/RampField.svelte`; `R/controls/color-space.ts` | Inspector §7 and Kit review specify a simpler popover/ramp. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S035](design/surfaces/editing.md). | `pm-panel-inspector` typed binding/edit/input; `pm-surface::kit` colour-well recipe; engine colour math. No complete colour-picker/recent-colour or NSColorSampler adapter yet. **spec+model** (partial) |
+| S034 P1 | Font family/face popover, font preview, variable axes, text alignment and text animators | `R/controls/FontField.svelte`; `E/inspector/TypeSettings.svelte`; `E/inspector/TypeAxis.svelte`; `E/inspector/TextAnimators.svelte`; `E/inspector/TextAlignment.svelte` | Inspector plus Services review specify fonts/face menu and type rows. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S034](design/surfaces/editing.md). **Editing lane (2026-11-01):** v4 UI-kit animator section, native-menu/action queue and kernel snapshot projection; headless/wire-tested; unimplemented kernel animator commands and app registration remain. | `pm-services::fonts::{FontCatalog,Face}`; `pm-panel-inspector::content`; kernel text commands. **spec+model** (partial) |
+| S035 P1 | Colour/fill popover: None/solid/linear/radial; sRGB/Display P3; OKLCH/HSL/RGB/OKLab/P3 notation and copy; hue mapping, previous/new swatches, gamut-clipping warning, alpha, gradient stops/midpoint and screen eyedropper | `R/controls/ColorField.svelte`; `R/controls/FillField.svelte`; `R/controls/RampField.svelte`; `R/controls/color-space.ts` | Inspector §7 and Kit review specify a simpler popover/ramp. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S035](design/surfaces/editing.md). **Editing lane (2026-11-01):** complete settings/copy/notation plan, ramp reducer, v4 colour worker and AppKit popover/sampler boundary; headless-tested; picker content/host binding and Mac review remain. | `pm-panel-inspector` typed binding/edit/input; `pm-surface::kit` colour-well recipe; engine colour math. No complete colour-picker/recent-colour or NSColorSampler adapter yet. **spec+model** (partial) |
 | S036 P1 | Property context menu and expression editor modal: presets/edit/remove/reset/reveal/keyframe | `E/inspector/ChannelRow.svelte`; `E/inspector/PropertyStopwatch.svelte`; `R/legacy/core/expression.ts` | Inspector describes context actions, not full expression-editor modal. **Specified (Opus, 2026-11-01):** [surfaces/dialogs.md §S036](design/surfaces/dialogs.md). | `pm-panel-inspector::edit` property actions; kernel channel/expression commands; engine expression evaluation. **spec+model** |
 | S037 P1 | Project/Media panel: composition/media/bin lists, selection, rename, drag, new/import/context menus, missing media | `R/panels/AssetsPanel.svelte`; `R/panels/register-simple.ts` | Media specifies rows/grid, bins, selection, empty/loading/offline states. | `pm-panel-media::{catalog,model,input,edit}`. Tag enumeration/collation and actual host operations still need integration. **spec+model** |
 | S038 P1 | Import progress, conversions/proxies, drag/file/folder/paste imports, cancellation and failures | `R/legacy/core/import-progress.ts`; `R/legacy/core/folder-import.ts`; `R/legacy/core/media-work.ts`; `R/legacy/core/media-paste.ts`; `M/media-proxy.ts` | Media covers entry/row state; Pro-media review specifies Background Tasks. **Specified (Opus, 2026-11-01):** [surfaces/media.md §S038](design/surfaces/media.md). | `pm-services::media::ImportQueue`; `pm-promedia::{media,tasks}`; engine probe/codec hooks. Full original-byte admission remains. **spec+model** (partial) |
@@ -124,7 +124,7 @@ Design references below are relative to `docs/native/design/`:
 | S048 P1 | Choice/dropdown/popover menus: searchable field choices, checks/disabled/header/separators, anchoring/dismissal | `R/controls/popover-menu.ts`; `R/overlays/Menu.svelte`; `R/overlays/native-menu.ts`; `R/controls/SelectField.svelte` | Shared, Kit review, Shell review and field specs cover shared behavior. Preserve tag follow-up menus; structured submenu API is later. | `pm-shell::{transient,native}`; `pm-surface::kit`; `pm-compat-host` menu protocol. **spec+model** |
 | S049 P1 | Native application menus: Powermove, File, Edit, Composition, View, Window; OS Services, hide/minimize/fullscreen | `M/menu.ts`; `M/updates.ts` | Shell review covers native menus; Shared/Settings/Export supply owned actions. Tag has no top-level Layer or Help menu. | `pm-shell::{menu,keyboard,native}` frozen commands/equivalents; kernel command eligibility/acknowledgement integration remains. **spec+model** |
 | S050 P1 | Context menus: viewer/layer, timeline/keyframe/property, asset/bin/composition and panel header | `R/legacy/ui/layer-menu.ts`; `E/timeline/timeline.ts`; `E/inspector/ChannelRow.svelte`; `R/panels/AssetsPanel.svelte`; `M/context-menu.ts` | Viewer/Timeline/Inspector/Media/Shared specify local menus, not a blanket license to copy later-main entries. | Native shell/menu and panel semantic action models; runtime extension contributions pending. **spec+model** |
-| S051 P1 | Text context menu, spelling/edit commands, native text services and IME candidate UI | `M/text-context-menu.ts`; `M/native-edit.ts`; `R/controls/TextField.svelte`; `R/panels/agent/Composer.svelte` | Shared/Kit review and panel keyboard rules defer native text services to system. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S051](design/surfaces/editing.md). | `pm-shell::{text,keyboard,native}`; agent composer local text model. Real NSTextInput/WebKit/IME/AX integration requires Mac. **spec+model** (partial) |
+| S051 P1 | Text context menu, spelling/edit commands, native text services and IME candidate UI | `M/text-context-menu.ts`; `M/native-edit.ts`; `R/controls/TextField.svelte`; `R/panels/agent/Composer.svelte` | Shared/Kit review and panel keyboard rules defer native text services to system. **Specified (Opus, 2026-11-01):** [surfaces/editing.md §S051](design/surfaces/editing.md). **Editing lane (2026-11-01):** all field policies, focus/IME reducer and AppKit NSTextView policy adapter; headless-tested; first-responder/NSTextInputClient attachment and Mac service checks remain. | `pm-shell::{text,keyboard,native}`; agent composer local text model. Real NSTextInput/WebKit/IME/AX integration requires Mac. **spec+model** (partial) |
 | S052 P1 | Shared modal/sheet/confirm host: focus trap/return, Enter/Escape, scrim/outside dismissal | `R/overlays/Modal.svelte`; `R/overlays/modal.ts`; `R/overlays/confirm.ts`; `M/native-confirm.ts` | Shared and Shell/Kit reviews specify native sheets/system placement; surface-specific copy must come from its own spec. | `pm-shell::native::Sheet`; `pm-surface::kit` SheetAnchor contracts; compat modal handles. **spec+model** |
 | S053 P1 | Toast/error notices, expandable diagnostic details/copy, retry/fix actions | `R/overlays/Toasts.svelte`; `R/errors/ToastError.svelte`; `R/errors/ErrorNotice.svelte`; `R/errors/ErrorLog.svelte`; `R/errors/ErrorFix.svelte` | Shared inline-error policy + Services review typed copy; not every notice/repair state is covered. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S053](design/surfaces/recovery.md). | `pm-services::{error,diagnostics}` and agent error facts; no full native notice/log UI model. **spec+model** |
 | S054 P1 | Status bar: playback/performance/status contributions and “What is slowing the editor down” details modal | `R/shell/StatusBar.svelte`; `R/runtime/performance-monitor.ts` | Shell review covers status-bar vocabulary; no slowdown-details design. **Specified (Opus, 2026-11-01):** [surfaces/recovery.md §S054](design/surfaces/recovery.md). | Shell status state and engine telemetry are partial. **spec+model** |
@@ -346,3 +346,140 @@ already existed: 23 rows **model only → spec+model**; S011 and S040 stay
 native-only rows still need an Opus specification. A spec is not a visual
 approval: each lane's built surface still goes through
 [review-checklist.md](design/review-checklist.md).
+
+## Editing implementation — 2026-11-01 (cloud editing lane)
+
+S025/S034/S035/S051 now have source in
+`apps/native/crates/app/src/surfaces/editing*.rs` (registered as the public
+`editing` module) and `apps/native/js/v4/surfaces/editing/`. This is **tested
+presentation/state/adapter coverage, not end-to-end app or visual acceptance**.
+No existing panel/extension, document data or consumer was removed. The shared
+inventory changes above append only to the four owned coverage cells.
+
+- S025 plans dark-scheme path vertices, selected/neighbour tangents, hover,
+  close ring, rubber band, locked/hidden controls, native text caret/marked text,
+  paragraph overset and exact AX names. Combined engine transforms move geometry
+  without scaling display-sized handles or changing the authored-pixel AX values.
+  Tagged close/delete precedence and Option tangent mirroring are tested.
+- S034 projects immutable kernel animator objects without discarding unknown
+  fields; the v4 section uses the existing UI kit and six atomic operations.
+  Disabled animators keep their content editable. Collapse, animated header,
+  native menu requests, rename Return/Escape, style-selection guards, property
+  menus/removal and stamped edit actions are tested. No optimistic document writes.
+- S035 plans the specified `NSPopover`, four Fill types, previous/new swatch,
+  spaces, six notations, checkmarked hue settings, gamut warning, gradient
+  stop/midpoint keys and document recent colours. The worker reuses existing
+  colour math and adds the missing OKLab notation parser. Copy is the current
+  notation field verbatim. Live edits use real kernel gesture leases, so Escape
+  uses selective cancellation rather than restoring a stale saved value.
+- S051 supplies policy for every field kind and preserves captured AppKit
+  defaults when a text slot is reused. It never replaces the system context
+  menu. Focus remembers the originating panel, suppresses editor shortcuts while
+  editing, and leaves marked-text Escape to the input manager. The AppKit host
+  uses real `NSPopover`, `NSColorSampler` and pasteboard APIs behind `EditingHost`;
+  `InspectHost` is the Linux double. Writing Tools selectors are availability
+  guarded for macOS 14.
+
+Decisions: N3 selects the spec's dark tokens/system insertion point over the
+old hardcoded blue path/custom caret; N4/N6 retain unknown animator payloads and
+all existing consumers; N7 selects object ids plus project/document/revision
+stamps; N8 keeps native calls asynchronous and all v4 callbacks on their worker.
+N1/N3 keep unsupported kernel commands as explicit failures, not apparent success.
+`accepted(Ack)` checks `Reply::Throw`; a transport acknowledgment alone does not
+mean a command was applied. No workspace dependency or lockfile change is needed.
+
+**DESIGN-TODO(opus):** `m.gizmo_handle` named in S025 is absent from pm-design.
+The provisional plan uses the spec-equivalent `m.keyframe - 2` (7 pt), with no
+new token or geometry. All visual output remains provisional until Opus review.
+The v4 SF Symbols and half-diamond have named neutral host placeholders; the
+UI-kit/native renderer owner must render their specified glyphs, not text stand-ins.
+
+Outside-owned-path integration still required:
+
+1. App/viewer/inspector owners must instantiate these adapters, register actual
+   native text editors and colour content/anchors, publish evaluated geometry,
+   apply input/AX plans, route focus/IME/clipboard events and register the v4
+   section. The existing temporary app panels are untouched beyond module
+   registration. `EditingServices` is a queue contract, not an installed service.
+2. Kernel text commands `AddAnimator`, `RemoveAnimator`, `SetStyleRange` remain
+   `NotImplemented`; rename/duplicate/reorder/enable/property structural commands
+   are also needed. The current property resolver lacks `ta.*`, `ts.*`, `g.*`
+   and `mp.*` channels. Path create/add/close/delete and text/box edits are backed;
+   the drag reducer alone is not an admitted vertex/tangent mutation.
+3. The actor needs an atomic document-session guard for `Transact` and gestures.
+   The adapter checks document id before enqueue and the actor checks revision,
+   but close/reopen between those checks still requires a kernel-owned guard.
+4. Bind native popover close/key callbacks to `Dismiss` (Escape cancel,
+   outside-click commit, notation Return commit), reconcile acknowledgment notices,
+   finish IME before canvas commit, and supply engine-derived text geometry and
+   gradient interpolation. Render the picker body through the native UI-kit host.
+   Full canvas editing (including empty/fresh text cleanup and tool restoration)
+   is not supplied by the policy reducer alone. Font picker/type rows remain
+   with the existing inspector/services owner, not replaced by the animator section.
+
+Reproduce the Linux harness from the repository root (Rust 1.96.1, Bun 1.4.4):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+mkdir -p work
+rustc +1.96.1 --edition 2024 apps/native/crates/app/src/surfaces/editing_check.rs -D warnings -o work/editing-check-setup
+work/editing-check-setup
+CARGO_TARGET_DIR="$PWD/apps/native/target" cargo +1.96.1 test --locked --manifest-path work/editing-check/Cargo.toml
+CARGO_TARGET_DIR="$PWD/apps/native/target" cargo +1.96.1 clippy --locked --manifest-path work/editing-check/Cargo.toml --all-targets -- -D warnings
+cargo +1.96.1 fmt --manifest-path work/editing-check/Cargo.toml --check
+rustfmt +1.96.1 --edition 2024 --check apps/native/crates/app/src/surfaces/editing_check.rs
+# Optional AppKit API/Clippy check without the kernel's SDK-dependent assembly:
+work/editing-check-setup --native
+rustup target add --toolchain 1.96.1 aarch64-apple-darwin
+cargo +1.96.1 clippy --locked --manifest-path work/editing-native-check/Cargo.toml --target aarch64-apple-darwin -- -D warnings
+cd apps/native/js/v4
+bun install --frozen-lockfile
+bun test surfaces/editing
+bun x tsc --noEmit -p surfaces/editing/tsconfig.json
+bun x prettier --check surfaces/editing
+bun build surfaces/editing/index.tsx surfaces/editing/colour.ts --target browser --outdir ../../../../work/editing-bundle
+```
+
+The setup tool writes only disposable manifests/lockfiles under `work/`, seeds
+resolution from `apps/native/Cargo.lock` and runs metadata for its own harness.
+It compiles the actual editing sources and tests without copying/stubbing kernel
+behavior. No new production crate or dependency is introduced. On macOS, run
+`cd apps/native && cargo test --locked -p pm-native-app` and strict app Clippy;
+Linux cannot compile the app's existing Apple-only dependencies. Cross-target
+checking the isolated adapter is not an app build or a runtime/macOS test.
+
+Mac verification remains: real canvas pointer transforms and modifiers, system
+caret/IME candidate placement and marked text, context menu/Services/Writing
+Tools per field, VoiceOver roles/labels/actions, focus return and shortcut
+suppression, native menu/popup/sampler/pasteboard behavior, colour/gradient live
+preview and cancellation (including foreign edits), and every light/dark,
+contrast/transparency/motion combination. Opus reviews actual glyphs/layout and
+all provisional output before visual acceptance.
+
+**DESIGN-TODO(opus):** S034 names Shuffle but specifies no glyph. Its button
+remains a named neutral placeholder; the lane does not select an SF Symbol.
+N3 also selects a no-op hue edit that preserves an authored P3 colour exactly;
+switching the picker space recomputes its plane without rewriting the colour.
+
+Final reconciliation: merged `origin/feat/native-engine` at
+`edc3c6e07164f6ac2bd71f1ef2405ff8d11520c3` without conflicts, then reran the
+checks. **38 editing Rust tests passed; 277 v4 tests passed (19 editing);
+283 kernel/design tests passed with one existing ignored kill-soak test**.
+Kernel/design command:
+`cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-kernel -p pm-design -- --test-threads=1`.
+All other exact commands are above. Strict editing Clippy on Linux, isolated
+AppKit Clippy for `aarch64-apple-darwin`, editing rustfmt/TypeScript/Prettier and
+browser builds pass. Both staged gitleaks modes pass before each implementation
+commit; the branch's implementation history is also scanned.
+
+Pre-existing validation limits are retained: a parallel kernel run exposed the
+`slice3::selection_is_atomic_ephemeral_deduplicated_and_published_before_event`
+event-order race; the isolated test and complete serial rerun passed, including
+after the merge. Whole-app `cargo fmt -p pm-native-app --check` reports existing
+formatting in `app/src/smoke.rs:87`; it is outside this lane's ownership and is
+unchanged. All new editing files and the module-registration edit are clean.
+The requested Linux `cargo test --locked -p pm-native-app --no-run` stops in the
+existing Apple-only `objc2` dependency; the Linux harness is the actual-source
+substitute, not a claim that the app runs here. No Mac runtime/visual gate is
+closed by these checks.

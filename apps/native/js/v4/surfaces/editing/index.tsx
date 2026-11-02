@@ -39,7 +39,7 @@ function SymbolButton({
 }: {
   id: string;
   label: string;
-  symbol: string;
+  symbol?: string;
   disabled?: boolean;
   action: () => void;
 }) {
@@ -51,7 +51,7 @@ function SymbolButton({
       label={label}
       title={label}
       disabled={disabled}
-      attr={{ "data-pm-symbol": symbol }}
+      attr={symbol ? { "data-pm-symbol": symbol } : {}}
       onClick={() => {
         if (!disabled) action();
       }}
@@ -231,7 +231,8 @@ function AnimatorGroup({
                 <SymbolButton
                   id={`${base}/shuffle`}
                   label="Shuffle"
-                  symbol="arrow.clockwise"
+                  // DESIGN-TODO(opus): Shuffle's glyph is unspecified; this is
+                  // a named neutral placeholder, with no lane-chosen symbol.
                   disabled={p.locked}
                   action={() => {
                     send({ type: "shuffle", animator: a.id });
