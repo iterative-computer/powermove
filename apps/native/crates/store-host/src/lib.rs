@@ -1,5 +1,6 @@
 //! Store policy and worker-side lifecycle. No JS, WebKit, UI, or kernel writer.
 //! Platform adapters enqueue commands; none of these I/O methods belong on main.
+pub mod adapter;
 pub mod artifact;
 pub mod channel;
 pub mod identity;

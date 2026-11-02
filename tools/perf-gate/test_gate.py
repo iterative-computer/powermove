@@ -95,6 +95,42 @@ class GateTests(unittest.TestCase):
         self.assertEqual(check('memory_small', {'footprint_mb':[200]*30}, {'footprint_mb':[300]*30})['status'], 'FAIL')
         self.assertEqual(check('memory_small', {'footprint_mb':[200]*30}, {'footprint_mb':[350]*30})['status'], 'PASS')
 
+    def test_owner_latency_decision_needs_both_endpoints(self):
+        native = {'own_share_ms':[9.333]*30, 'on_screen_ms':[24]*30, 'main_max_ms':[4]*30}
+        electron = {'own_share_ms':[20]*30, 'on_screen_ms':[25]*30, 'main_max_ms':[8]*30}
+        for row in ('scrub_cached', 'edit_repaint'):
+            for hz in (60, 120):
+                self.assertEqual(check(row, native, electron, hz=hz)['status'], 'PASS')
+            self.assertEqual(check(row, dict(native, own_share_ms=[9.334]*30), electron)['status'], 'FAIL')
+            self.assertEqual(check(row, native, dict(electron, on_screen_ms=[24]*30))['status'], 'FAIL')
+            self.assertEqual(check(row, {'latency_ms':[1]*30}, {'latency_ms':[100]*30})['status'], 'INCOMPLETE')
+
+    def test_native_reports_gpu_ready_and_physical_latency_independently(self):
+        app = driver.App.__new__(driver.App)
+        app.kind = 'native'
+        frame = dict(gpu_ok=True, display_host_s=10.024, completion_host_s=10.003,
+                     input_host_s=10., ticks=driver.TICKS, cache_hit=True)
+        answers = iter([{}, {'accepted_host_s':10.},
+                        dict(frame=frame, opened=True, opening=False, metal_allocated_bytes=1)])
+        app.request = Mock(side_effect=lambda *a, **k: next(answers))
+        result = app.action('seek', seconds=1)
+        self.assertAlmostEqual(result['own_share_ms'], 3.)
+        self.assertAlmostEqual(result['on_screen_ms'], 24.)
+
+    def test_missing_physical_callback_can_retain_gpu_time_without_substitution(self):
+        app = driver.App.__new__(driver.App)
+        app.kind = 'native'
+        app.allow_missing_display = True
+        frame = dict(gpu_ok=True, display_host_s=None, completion_host_s=10.003,
+                     input_host_s=10., ticks=driver.TICKS, cache_hit=True)
+        app.request = Mock(side_effect=[{}, {'accepted_host_s':10.},
+                           dict(frame=frame, opened=True, opening=False, metal_allocated_bytes=1)])
+        with patch.object(driver.time, 'monotonic', side_effect=[0, 1, 16]), patch.object(driver.time, 'sleep'):
+            result = app.action('seek', seconds=1)
+        self.assertAlmostEqual(result['own_share_ms'], 3)
+        self.assertIsNone(result['on_screen_ms'])
+        self.assertFalse(result['physical_present'])
+
     def test_churned_process_family_is_rejected(self):
         with self.assertRaises(RuntimeError): delta({1:{}},{2:{}},1)
 
