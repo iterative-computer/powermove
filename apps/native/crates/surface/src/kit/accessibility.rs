@@ -23,6 +23,12 @@ fn role(node: &Node) -> Role {
     match Component::of(node) {
         Some(NumberField) => Role::NumberInput,
         Some(TextField) => Role::TextInput,
+        Some(SecureField) => Role::PasswordInput,
+        Some(Switch) => Role::Switch,
+        Some(PushButton | ViewerGizmo) => Role::Button,
+        Some(FormGroup | FormRow | ViewerOverlay) => Role::Group,
+        Some(ColourPopover) => Role::Dialog,
+        Some(Banner) => Role::Status,
         Some(PopUpButton) => Role::ComboBox,
         Some(SegmentedControl) => Role::RadioGroup,
         Some(Segment) => Role::RadioButton,
@@ -62,6 +68,9 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
             .map(NodeId)
             .collect::<Vec<_>>(),
     );
+    if super::additions::bool_option(source, "decorative") {
+        node.set_hidden();
+    }
     let label = accessible_label(surface, source);
     if !label.is_empty() {
         node.set_label(label);
@@ -80,7 +89,9 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
     if let Some(bounds) = layout.get(&source.id) {
         node.set_bounds(*bounds);
     }
-    if let Some(value) = source.props.get("value") {
+    if Component::of(source) == Some(Component::SecureField) {
+        // Secret text stays in NSSecureTextField/Keychain, never the surface or AX tree.
+    } else if let Some(value) = source.props.get("value") {
         let text = source
             .input
             .as_ref()
@@ -152,7 +163,7 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
     }
     if matches!(
         Component::of(source),
-        Some(Component::Checkbox | Component::Toggle | Component::Segment)
+        Some(Component::Checkbox | Component::Toggle | Component::Switch | Component::Segment)
     ) {
         node.set_toggled(
             if source.props.get("mixed").and_then(Value::as_bool) == Some(true) {
@@ -169,6 +180,15 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
             },
         );
     }
+    if Component::of(source) == Some(Component::Banner) {
+        node.set_live(
+            if super::additions::str_option(source, "severity") == Some("error") {
+                accesskit::Live::Assertive
+            } else {
+                accesskit::Live::Polite
+            },
+        );
+    }
     if source.props.get("disabled").and_then(Value::as_bool) == Some(true) {
         node.set_disabled();
     } else if interactive(source) {
@@ -179,6 +199,7 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
                 node.add_action(Action::Decrement);
                 node.add_action(Action::SetValue);
             }
+            Some(Component::SecureField) => {} // Native secure editor owns text actions.
             Some(Component::TextField) => node.add_action(Action::SetValue),
             Some(Component::DisclosureButton) => {
                 node.add_action(Action::Click);
