@@ -44,7 +44,7 @@ test.describe('@overlays Svelte overlays', () => {
 });
 
 for (const theme of ['light', 'dark'])
-  test(`opens an opaque content-sized ${theme} sheet above the viewer`, async ({ session }) => {
+  test(`opens a content-sized ${theme} sheet that settles opaque above the viewer`, async ({ session }) => {
     const { page } = session;
     const opening = await page.evaluate((theme) => {
       const P = (window as any).PM;
@@ -60,9 +60,8 @@ for (const theme of ['light', 'dark'])
         actions: [{ label: 'Done', pri: true }],
       });
       const m = document.querySelector('.modal')!;
-      return { opacity: getComputedStyle(m).opacity, background: getComputedStyle(m).backgroundColor };
+      return { background: getComputedStyle(m).backgroundColor };
     }, theme);
-    expect(opening.opacity).toBe('1');
     expect(opening.background).toMatch(/^rgb\(/);
     await page.evaluate(async () => {
       await Promise.all(
@@ -84,9 +83,11 @@ for (const theme of ['light', 'dark'])
         height: m.getBoundingClientRect().height,
         gap: footer.getBoundingClientRect().top - range.getBoundingClientRect().bottom,
         aboveViewer: !!top?.closest('.modal'),
+        opacity: getComputedStyle(m).opacity,
       };
     });
     expect(geometry.aboveViewer).toBe(true);
+    expect(geometry.opacity).toBe('1');
     expect(geometry.height).toBeLessThan(170);
     expect(geometry.gap).toBeLessThanOrEqual(24);
     await page.getByRole('button', { name: 'Done', exact: true }).click();

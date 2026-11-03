@@ -733,13 +733,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    the change eases; the body stops scrolling for the duration so a
    scrollbar never flashes mid-motion. */
 .modal.is-measured{transition:height var(--dur-3) var(--ease)}
-/* Sheets arrive with a slight scale and a few pixels of drop, from their
-   top centre. `scale` and `translate` compose
+/* Sheets arrive the way menus do (pm-menu-in): a fade, a slight scale and a
+   few pixels of drop, from their top centre. `scale` and `translate` compose
    with the inline centring transform instead of replacing it. */
 .modal{transform-origin:0 0;animation:modal-in .18s cubic-bezier(.23,1,.32,1) both}
 #scrim.on{animation:scrim-in .18s cubic-bezier(.23,1,.32,1) both}
-/* Keep the sheet opaque throughout opening; only the workspace scrim fades. */
-@keyframes modal-in{from{scale:.96;translate:0 -4px}}
+@keyframes modal-in{from{opacity:0;scale:.96;translate:0 -4px}}
 @keyframes scrim-in{from{opacity:0}}
 .modal.is-resizing .mb{overflow:hidden}
 /* A sheet scrolls without showing a bar; nothing rides over the cards. */
