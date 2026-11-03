@@ -251,10 +251,20 @@ for (const event of ['extensions:changed', 'theme:changed']) PM.Kernel?.events?.
   GL.cancelPreviewPreparation(); cancelInputPreview(); sourceGeneration++;
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
+/* Every scrub or drag step changes the animation version, so the cache is
+   invalidated once per frame while a value is being edited. Hand those
+   canvas-sized targets back to the working pool: deleting them meant the next
+   frame allocated a fresh full-resolution FBO, and checkFramebufferStatus on
+   that allocation stalled the main thread until the GPU drained every frame. */
+function invalidatePreviewFrames() {
+  recyclePreviewEvictions = true;
+  try { previewFrames.clear(); }
+  finally { recyclePreviewEvictions = false; }
+}
 function refreshPreviewState() {
   const signature = previewStateKey();
   if (previewProject !== PM.proj || previewLayers !== PM.proj.layers || previewSignature !== signature) {
-    previewFrames.clear(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
+    invalidatePreviewFrames(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
     previewHasMotionBlur = (PM.ProjectIndex?.allLayers?.() || PM.proj.layers).some((layer: any) => layer.mblur || layer.type === 'comp');
     scenePreviewPlan = previewPlan(PM.proj, (effect: any) => {
       const definition = PM.effectDef?.(effect) ?? (!PM.effectDef ? PM.FX[effect.type] : undefined);
