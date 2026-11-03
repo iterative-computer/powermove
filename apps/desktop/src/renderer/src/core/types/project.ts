@@ -293,6 +293,8 @@ export interface LockedIntentEntry {
 }
 
 interface LayerBase<T extends LayerType, D extends object> {
+  /** Optional, additive v1 Figma provenance; older projects need no migration. */
+  figmaSource?: import('../../../../shared/figma/convert').FigmaSource;
   id: string;
   type: T;
   name: string;

@@ -1375,8 +1375,18 @@ const Edit: any = {
     const selection: any = clone(PM.sel);
     const guarded = ['agent', 'import'].includes(meta.origin);
     const keysBefore = guarded ? snapshotKeyframes(PM) : null;
+    // Durable media import prepares image records asynchronously. Only fresh,
+    // explicitly declared records may join a trusted import's layer transaction.
+    const importedAssets = meta.origin === 'import' && meta.importedAssets && typeof meta.importedAssets === 'object'
+      ? meta.importedAssets : {};
+    const importedAssetIds = Object.keys(importedAssets);
+    if (importedAssetIds.some(id => ['__proto__', 'constructor', 'prototype'].includes(id)
+      || Object.hasOwn(PM.proj.assets, id) || importedAssets[id]?.id !== id || importedAssets[id]?.kind !== 'image')) {
+      return fail('An import may only add new image assets');
+    }
     const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
+      Object.assign(PM.proj.assets, importedAssets);
       const result: any = action();
       validateInputGraphs();
       PM.ProjectIndex?.invalidate();
@@ -1388,6 +1398,7 @@ const Edit: any = {
       const withoutTree: any = (project: any) => {
         const source: any = clone(project);
         delete source.layers; delete source.comps; delete source.revision; delete source.edits;
+        for (const id of importedAssetIds) delete source.assets[id];
         return source;
       };
       if (JSON.stringify(withoutTree(previous)) !== JSON.stringify(withoutTree(PM.proj))) {
@@ -1400,6 +1411,7 @@ const Edit: any = {
         summary: ['replace project layer tree'],
         structural: {
           format: 'powermove-layer-tree-v1',
+          ...(importedAssetIds.length ? { importedAssets: clone(importedAssets) } : {}),
           layers: clone(PM.proj.layers || []),
           comps: clone(PM.proj.comps || {}),
         },

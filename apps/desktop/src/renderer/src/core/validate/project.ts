@@ -500,6 +500,21 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     : 'normal';
   const layer = {
     id,
+    ...(isRecord(source.figmaSource)
+      && typeof source.figmaSource.fileKey === 'string'
+      && typeof source.figmaSource.nodeId === 'string'
+      && typeof source.figmaSource.role === 'string'
+      && typeof source.figmaSource.name === 'string' ? {
+        figmaSource: {
+          fileKey: source.figmaSource.fileKey.slice(0, 300),
+          nodeId: source.figmaSource.nodeId.slice(0, 300),
+          role: source.figmaSource.role.slice(0, 300),
+          name: source.figmaSource.name.slice(0, 1000),
+          importedMatteId: typeof source.figmaSource.importedMatteId === 'string' ? source.figmaSource.importedMatteId : null,
+          importedEffectIds: Array.isArray(source.figmaSource.importedEffectIds)
+            ? source.figmaSource.importedEffectIds.filter((v): v is string => typeof v === 'string').slice(0, 100) : [],
+        },
+      } : {}),
     type,
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
     from: finite(source.from),
