@@ -62,6 +62,12 @@ function cloudEvent<T>(channel: string) {
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
+  figmaLink: {
+    start: () => ipcRenderer.invoke(IPC.figmaStart),
+    stop: () => ipcRenderer.invoke(IPC.figmaStop),
+    onReceive: cloudEvent(IPC.figmaReceive),
+    result: (id, result) => ipcRenderer.send(IPC.figmaResult, { id, result }),
+  },
   onInputKey: (cb) => {
     const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
     ipcRenderer.on(IPC.inputKey, listener);

@@ -132,6 +132,14 @@
         "ws": "^8.18.0",
       },
     },
+    "packages/figma-plugin": {
+      "name": "@powermove/figma-plugin",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@figma/plugin-typings": "1.126.0",
+        "typescript": "5.9.3",
+      },
+    },
     "packages/macos-haptics": {
       "name": "@powermove/macos-haptics",
       "version": "1.0.0",
@@ -367,6 +375,8 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.25.12", "", { "os": "win32", "cpu": "x64" }, "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA=="],
 
+    "@figma/plugin-typings": ["@figma/plugin-typings@1.126.0", "", {}, "sha512-7Y8HPIHWgMUoT1L7InyUe5X6S+gPUSlVLi7TQvwnRev6PjDwwNkM/oSio2t69EvsJ+TRPSJSvO7xph+KHIcWeQ=="],
+
     "@hono/node-server": ["@hono/node-server@2.1.1", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg=="],
 
     "@hono/zod-validator": ["@hono/zod-validator@0.9.1", "", { "peerDependencies": { "hono": ">=4.11.2", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-iiv6w0qrIc0arfvCtUqBWsvl4fXjzaTcQcCJTTtCnkawF9HHGE+KjEl0ox3gQJ6rKZEgE3mLExlQCF72M+mNuw=="],
@@ -538,6 +548,8 @@
     "@powermove/cloud": ["@powermove/cloud@workspace:apps/cloud"],
 
     "@powermove/desktop": ["@powermove/desktop@workspace:apps/desktop"],
+
+    "@powermove/figma-plugin": ["@powermove/figma-plugin@workspace:packages/figma-plugin"],
 
     "@powermove/macos-haptics": ["@powermove/macos-haptics@workspace:packages/macos-haptics"],
 

@@ -1,3 +1,4 @@
+import { FigmaLink } from './figma-link';
 import { createEditorClosePreparation } from './editor-close';
 import { watchMemoryPressure } from './memory-pressure';
 import { registerFontsIpc } from './fonts';
@@ -628,7 +629,49 @@ function readProjectId(payload: unknown, channel: string): string | null {
   return value;
 }
 
+const figmaLink = new FigmaLink(async (doc) => {
+  const target = currentEditor();
+  if (!target || target.isDestroyed() || !openReadyEditors.has(target.webContents))
+    throw new Error('Open a composition in Powermove first');
+  const id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      ipcMain.off(IPC.figmaResult, listener);
+      target.off('closed', closed);
+    };
+    const closed = () => {
+      finish();
+      reject(new Error('The editor was closed'));
+    };
+    const listener = (event: Electron.IpcMainEvent, value: any) => {
+      if (event.sender !== target.webContents || !isTrustedSender(event) || value?.id !== id) return;
+      finish();
+      if (value.result?.error) reject(new Error(String(value.result.error)));
+      else resolve(value.result);
+    };
+    const timer = setTimeout(() => {
+      finish();
+      reject(new Error('Figma import timed out'));
+    }, 120000);
+    ipcMain.on(IPC.figmaResult, listener);
+    target.once('closed', closed);
+    target.webContents.send(IPC.figmaReceive, { id, doc });
+  });
+});
+app.on('before-quit', () => {
+  void figmaLink.close();
+});
+
 function registerWindowIpc(): void {
+  ipcMain.handle(IPC.figmaStart, event => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return figmaLink.start();
+  });
+  ipcMain.handle(IPC.figmaStop, event => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return figmaLink.close();
+  });
   const senderWindow = (event: { sender: WebContents }): BrowserWindow | null => {
     const window = BrowserWindow.fromWebContents(event.sender);
     return window && editors.has(window) ? window : null;

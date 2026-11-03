@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          12px/1.5 Inter,
+          system-ui,
+          sans-serif;
+        background: var(--figma-color-bg, #fff);
+        color: var(--figma-color-text, #222);
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+      }
+      form {
+        display: flex;
+        gap: 8px;
+      }
+      input {
+        min-width: 0;
+        width: 100%;
+        padding: 7px 8px;
+        border: 1px solid var(--figma-color-border, #ccc);
+        border-radius: 4px;
+        background: var(--figma-color-bg, #fff);
+        color: inherit;
+      }
+      button {
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 4px;
+        background: var(--figma-color-bg-brand, #0d99ff);
+        color: var(--figma-color-text-onbrand, #fff);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid var(--figma-color-border-brand, #0d99ff);
+        outline-offset: 2px;
+      }
+      #send {
+        margin-top: 16px;
+        width: 100%;
+      }
+      #status {
+        margin: 10px 0 0;
+        color: var(--figma-color-text-secondary, #777);
+      }
+      #copy {
+        background: transparent;
+        color: var(--figma-color-text-brand, #0d99ff);
+        padding: 4px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <label for="code">Pairing code</label>
+    <form id="pair">
+      <input
+        id="code"
+        inputmode="numeric"
+        maxlength="6"
+        placeholder="From File → Connect Figma"
+        aria-label="Pairing code"
+      /><button>Pair</button>
+    </form>
+    <button id="send" disabled>Send Selection</button>
+    <p id="status" role="status">Connect Figma in Powermove to pair.</p>
+    <button id="copy" hidden>Copy for Powermove</button>
+    <script>
+      const endpoint = 'http://localhost:47832';
+      let token = '',
+        lastDoc = null,
+        busy = false,
+        copyRequested = false;
+      const $ = (id) => document.getElementById(id),
+        post = (value) => parent.postMessage({ pluginMessage: value }, '*');
+      const status = (text) => ($('status').textContent = text);
+      async function request(path, data, auth = false) {
+        const controller = new AbortController(),
+          timer = setTimeout(() => controller.abort(), 125000);
+        try {
+          const r = await fetch(endpoint + path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: 'Bearer ' + token } : {}) },
+            body: JSON.stringify(data),
+            signal: controller.signal,
+          });
+          const v = await r.json();
+          if (!r.ok) throw new Error(v.error || 'Connection failed');
+          return v;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      $('pair').onsubmit = async (e) => {
+        e.preventDefault();
+        if (busy) return;
+        busy = true;
+        try {
+          const v = await request('/pair', { code: $('code').value.trim() });
+          token = v.token;
+          post({ type: 'token', token });
+          $('code').value = '';
+          $('send').disabled = false;
+          status('Paired with Powermove.');
+        } catch (e) {
+          status(e.message);
+          $('copy').hidden = false;
+        } finally {
+          busy = false;
+        }
+      };
+      $('send').onclick = () => {
+        if (busy) return;
+        busy = true;
+        $('send').disabled = true;
+        status('Preparing selection…');
+        post({ type: 'send' });
+      };
+      window.onmessage = async ({ data, source }) => {
+        if (source !== parent) return;
+        const m = data.pluginMessage;
+        if (!m) return;
+        if (m.type === 'token') {
+          token = m.token || '';
+          $('send').disabled = !token;
+          if (token) status('Paired with Powermove.');
+        }
+        if (m.type === 'error') {
+          status(m.text);
+          busy = false;
+          $('send').disabled = !token;
+        }
+        if (m.type === 'selection') {
+          lastDoc = m.doc;
+          if (copyRequested) {
+            copyRequested = false;
+            busy = false;
+            $('copy').click();
+            return;
+          }
+          try {
+            const v = await request('/send', m.doc, true);
+            status(`Sent ${v.layers} layers · ${v.flattened} flattened`);
+            $('copy').hidden = true;
+          } catch (e) {
+            status(e.message);
+            $('copy').hidden = false;
+          } finally {
+            busy = false;
+            $('send').disabled = !token;
+          }
+        }
+      };
+      $('copy').onclick = async () => {
+        if (!lastDoc) {
+          busy = true;
+          copyRequested = true;
+          post({ type: 'send' });
+          status('Preparing a clipboard copy…');
+          return;
+        }
+        const text = 'POWERMOVE_FIGMA_V1\n' + JSON.stringify(lastDoc);
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          const field = document.createElement('textarea');
+          field.value = text;
+          document.body.append(field);
+          field.select();
+          document.execCommand('copy');
+          field.remove();
+        }
+        status('Copied. Paste in Powermove.');
+      };
+    </script>
+  </body>
+</html>

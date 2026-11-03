@@ -9,10 +9,17 @@ import {
   selectionBounds,
   unsupportedReasons,
 } from '../../../../../shared/figma/convert';
-import { bounds, MAX_PAYLOAD, validateFigmaDoc, type FigmaDoc, type FigmaNode } from '../../../../../shared/figma/doc';
+import {
+  bounds,
+  FIGMA_CLIPBOARD_PREFIX,
+  MAX_PAYLOAD,
+  validateFigmaDoc,
+  type FigmaDoc,
+  type FigmaNode,
+} from '../../../../../shared/figma/doc';
 const pending = new WeakMap<PMRegistry, Promise<any>>();
 type PasteSource = { html: string; image?: File; project: any; generation: number; compId: string; at: number };
-export const FIGMA_CLIPBOARD_PREFIX = 'POWERMOVE_FIGMA_V1\n';
+export { FIGMA_CLIPBOARD_PREFIX } from '../../../../../shared/figma/doc';
 export function pasteFigma(PM: PMRegistry, event: ClipboardEvent): boolean {
   if (
     event.defaultPrevented ||

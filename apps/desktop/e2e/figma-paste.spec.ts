@@ -163,3 +163,32 @@ test('unsupported clipboard layers flatten independently without a confirmation 
   expect(await page.evaluate(() => Object.keys((window as any).PM.proj.assets).length)).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+test('clipboard GUIDs update existing animated layers', async ({ session }) => {
+  const { app, page } = session;
+  const paste = async (color: { r: number; g: number; b: number; a: number }) => {
+    const html = await figmaHtml([figmaNode(1, 'RECTANGLE', { fillPaints: [{ type: 'SOLID', color }] })]);
+    await app.evaluate(async ({ clipboard, ClipboardItem }, html) => {
+      await clipboard.write([new ClipboardItem({ 'text/html': html })]);
+    }, html);
+    await page.keyboard.press('Meta+V');
+  };
+  await paste({ r: 1, g: 0, b: 0, a: 1 });
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
+  const id = await page.evaluate(() => {
+    const P = (window as any).PM,
+      l = P.proj.layers[0];
+    P.setKey(l, 'rotation', 2, 0);
+    P.setKey(l, 'rotation', 3, 90);
+    return l.id;
+  });
+  await paste({ r: 0, g: 0, b: 1, a: 1 });
+  await expect(page.getByText('Update from Figma', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Update Existing Layers', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers[0].d.color)).toBe('#0000FFFF');
+  expect(
+    await page.evaluate(() => {
+      const l = (window as any).PM.proj.layers[0];
+      return { id: l.id, keys: l.p.rotation.kf.length, count: (window as any).PM.proj.layers.length };
+    }),
+  ).toEqual({ id, keys: 2, count: 1 });
+});

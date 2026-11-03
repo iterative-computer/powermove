@@ -1,3 +1,4 @@
+import { receiveFigma } from '../core/figma/paste';
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
@@ -13,8 +14,34 @@ export function install(PM: PMRegistry): void {
 
   const bridge = (hostBridge() as any);
   const encoder = new window.TextEncoder();
+  bridge.figmaLink?.onReceive(async ({ id, doc }: any) => {
+    try {
+      bridge.figmaLink.result(id, await receiveFigma(PM, doc));
+    } catch (e) {
+      bridge.figmaLink.result(id, { error: e instanceof Error ? e.message : 'Could not import Figma layers' });
+    }
+  });
   // File commands cannot wait for local-font enumeration or its permission prompt.
   bridge.onMenuCommand((command: any) => {
+    if (command === 'connectFigma') {
+      void bridge.figmaLink
+        ?.start()
+        .then(({ code }: any) =>
+          PM.modal({
+            title: 'Connect Figma',
+            body: `Enter ${code} in Send to Powermove in Figma. This code expires in 5 minutes.`,
+            width: 420,
+            actions: [{ label: 'Done', pri: true, run: () => {} }],
+          }),
+        )
+        .catch((e: Error) => PM.toast(e.message, 6000, { error: true }));
+      return;
+    }
+    if (command === 'disconnectFigma') {
+      void bridge.figmaLink?.stop();
+      PM.toast('Figma disconnected');
+      return;
+    }
     const editorCommand = command === 'copy' ? 'copyLayers' : command === 'paste' ? 'pasteLayers' : command;
     PM.cmd?.(editorCommand);
   });

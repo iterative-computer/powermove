@@ -121,6 +121,7 @@ export const docSchema = z
 export type FigmaDoc = z.infer<typeof docSchema>;
 export type Paint = z.infer<typeof paintSchema>;
 export type Rect = z.infer<typeof rectSchema>;
+export const FIGMA_CLIPBOARD_PREFIX = 'POWERMOVE_FIGMA_V1\n';
 export const MAX_PAYLOAD = 32 * 1024 * 1024;
 /** Bound depth and count BEFORE recursive schema parsing, also reject prototype keys. */
 export function validateFigmaDoc(value: unknown): FigmaDoc {
