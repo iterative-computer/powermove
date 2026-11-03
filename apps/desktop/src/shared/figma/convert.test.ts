@@ -239,3 +239,46 @@ it('flattens a clip nested under a sibling mask, preserving the outer matte', ()
   expect(p.commands[0]).toMatchObject({ layerType: 'image', matte: 'mask:node' });
   expect(p.issues[0]!.reason).toContain('nested clipping');
 });
+
+it.each([
+  ['WIDTH_AND_HEIGHT', 0, 0],
+  ['HEIGHT', 80, 0],
+  ['NONE', 80, 60],
+  ['TRUNCATE', 80, 60],
+] as const)('keeps the %s text sizing mode and typography', (autoResize, boxWidth, boxHeight) => {
+  const p = convertFigma(
+    doc([
+      node({
+        type: 'TEXT',
+        w: 80,
+        h: 60,
+        text: {
+          characters: 'Hello Figma',
+          autoResize,
+          leading: 30,
+          tracking: 1.5,
+          runs: [
+            {
+              start: 0,
+              end: 11,
+              font: 'Unavailable synthetic font',
+              style: 'Regular',
+              size: 24,
+              fills: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }],
+            },
+          ],
+        },
+      }),
+    ]),
+    { w: 640, h: 360 },
+  );
+  expect(p.issues).toEqual([]);
+  expect(p.commands[0]!.content).toMatchObject({
+    boxWidth,
+    boxHeight,
+    font: 'Unavailable synthetic font',
+    size: 24,
+    leading: 1.25,
+    tracking: 1.5,
+  });
+});

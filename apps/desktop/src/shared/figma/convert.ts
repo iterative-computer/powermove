@@ -490,7 +490,8 @@ export function convertFigma(doc: FigmaDoc, composition: { w: number; h: number 
         color: color(run.fills[0]),
         align,
         boxWidth: text.autoResize === 'WIDTH_AND_HEIGHT' ? 0 : node.w,
-        boxHeight: text.autoResize === 'NONE' ? node.h : 0,
+        // Only auto-width/auto-height text may grow beyond its source box.
+        boxHeight: ['WIDTH_AND_HEIGHT', 'HEIGHT'].includes(text.autoResize ?? '') ? 0 : node.h,
         tracking: text.tracking ?? 0,
         leading: (text.leading ?? size * 1.2) / size,
         styles: text.runs

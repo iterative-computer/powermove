@@ -192,3 +192,68 @@ test('clipboard GUIDs update existing animated layers', async ({ session }) => {
     }),
   ).toEqual({ id, keys: 2, count: 1 });
 });
+
+for (const font of ['Arial', 'Missing Figma Font For Layout Test'])
+  test(`auto-width text stays on one rendered line with ${font}`, async ({ session }) => {
+    const { app, page } = session;
+    const html = await figmaHtml([
+      figmaNode(1, 'TEXT', {
+        name: 'Auto-width title',
+        size: { x: 80, y: 30 },
+        fontName: { family: font, style: 'Regular', postscript: 'SyntheticRegular' },
+        fontSize: 24,
+        lineHeight: { units: 'PIXELS', value: 30 },
+        letterSpacing: { units: 'PIXELS', value: 1.5 },
+        textAutoResize: 'WIDTH_AND_HEIGHT',
+        textData: { characters: 'Hello Figma' },
+      }),
+    ]);
+    await app.evaluate(async ({ clipboard, ClipboardItem }, html) => {
+      await clipboard.write([new ClipboardItem({ 'text/html': html })]);
+    }, html);
+    await page.keyboard.press('Meta+V');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
+    const proof = await page.evaluate(async () => {
+      const P = (window as any).PM,
+        l = P.proj.layers[0];
+      await document.fonts.ready;
+      const g = P.textRasterGeometry(l, 1, 2),
+        r = P.raster(l, 1, 2),
+        data = r.cv.getContext('2d').getImageData(0, 0, r.cv.width, r.cv.height).data;
+      let top = Infinity,
+        bottom = -Infinity;
+      for (let y = 0; y < r.cv.height; y++)
+        for (let x = 0; x < r.cv.width; x++)
+          if (data[(y * r.cv.width + x) * 4 + 3] > 20) {
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
+      return {
+        boxWidth: l.d.boxWidth,
+        boxHeight: l.d.boxHeight,
+        size: l.d.size,
+        leading: l.d.leading,
+        tracking: l.d.tracking,
+        font: l.d.font,
+        lines: g.lines.length,
+        lineHeight: g.lh,
+        renderHeight: g.h - 2 * g.pad,
+        inkHeight: bottom - top + 1,
+        width: g.w - 2 * g.pad,
+      };
+    });
+    expect(proof).toMatchObject({
+      boxWidth: 0,
+      boxHeight: 0,
+      size: 24,
+      leading: 1.25,
+      tracking: 1.5,
+      font,
+      lines: 1,
+      lineHeight: 30,
+      renderHeight: 30,
+    });
+    expect(proof.width).toBeGreaterThan(80);
+    expect(proof.inkHeight).toBeGreaterThan(12);
+    expect(proof.inkHeight).toBeLessThanOrEqual(proof.lineHeight);
+  });

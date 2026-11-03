@@ -181,3 +181,35 @@ it('maps clipboard gradient stop records into the shared ramp command', () => {
     p: { startColor: { v: '#FF0000' }, endColor: { v: '#0000FF' } },
   });
 });
+
+it.each([
+  ['PIXELS', 30, 1.5],
+  ['PERCENT', 125, 2.4],
+] as const)('preserves clipboard font size, %s line height and letter spacing', (units, value, tracking) => {
+  const PM = editor(),
+    plan = planFigmaImport(
+      PM,
+      {
+        nodes: [
+          figmaNode(1, 'TEXT', {
+            textData: { characters: 'Hello Figma' },
+            fontName: { family: 'Arial', style: 'Regular' },
+            fontSize: 24,
+            lineHeight: { units, value },
+            letterSpacing: { units, value: units === 'PIXELS' ? 1.5 : 10 },
+            textAutoResize: 'WIDTH_AND_HEIGHT',
+          }),
+        ],
+        blobs: [],
+      },
+      0,
+    );
+  expect(plan.layers[0].d).toMatchObject({
+    font: 'Arial',
+    size: 24,
+    leading: 1.25,
+    tracking,
+    boxWidth: 0,
+    boxHeight: 0,
+  });
+});
