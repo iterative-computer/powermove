@@ -1,6 +1,8 @@
 import { expect, test } from './helpers/app';
 
-test.beforeEach(async ({ session }) => { await session.openEditor(); });
+test.beforeEach(async ({ session }) => {
+  await session.openEditor();
+});
 
 test.describe('@overlays Svelte overlays', () => {
   test('runs a palette command and manages modal focus and toast lifetime', async ({ session }) => {
@@ -15,7 +17,9 @@ test.describe('@overlays Svelte overlays', () => {
     await page.keyboard.press('Enter');
     await expect(palette).toHaveCount(0);
     await page.waitForFunction((count) => (window as any).PM.proj.layers.length === count + 1, before);
-    expect(await page.evaluate(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'solid'))).toBe(true);
+    expect(await page.evaluate(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'solid'))).toBe(
+      true,
+    );
 
     await page.evaluate(() => {
       const trigger = document.createElement('button');
@@ -38,3 +42,52 @@ test.describe('@overlays Svelte overlays', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 });
+
+for (const theme of ['light', 'dark'])
+  test(`opens an opaque content-sized ${theme} sheet above the viewer`, async ({ session }) => {
+    const { page } = session;
+    const opening = await page.evaluate((theme) => {
+      const P = (window as any).PM;
+      document.documentElement.dataset.theme = theme;
+      const layer = P.mkLayer('shape', { d: { w: 180, h: 100, color: '#FF4000' } });
+      P.proj.layers.push(layer);
+      P.selectLayers(layer.id);
+      P.bus.emit('layers');
+      P.invalidate();
+      P.modal({
+        title: 'Ordinary sheet',
+        body: 'This is ordinary body text.',
+        actions: [{ label: 'Done', pri: true }],
+      });
+      const m = document.querySelector('.modal')!;
+      return { opacity: getComputedStyle(m).opacity, background: getComputedStyle(m).backgroundColor };
+    }, theme);
+    expect(opening.opacity).toBe('1');
+    expect(opening.background).toMatch(/^rgb\(/);
+    await page.evaluate(async () => {
+      await Promise.all(
+        document
+          .querySelector('.modal')!
+          .getAnimations()
+          .map((a) => a.finished),
+      );
+    });
+    const geometry = await page.evaluate(() => {
+      const m = document.querySelector('.modal')!,
+        body = m.querySelector('.mb')!,
+        footer = m.querySelector('.mf')!;
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      const b = body.getBoundingClientRect();
+      const top = document.elementsFromPoint(b.x + 20, b.y + 10)[0];
+      return {
+        height: m.getBoundingClientRect().height,
+        gap: footer.getBoundingClientRect().top - range.getBoundingClientRect().bottom,
+        aboveViewer: !!top?.closest('.modal'),
+      };
+    });
+    expect(geometry.aboveViewer).toBe(true);
+    expect(geometry.height).toBeLessThan(170);
+    expect(geometry.gap).toBeLessThanOrEqual(24);
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+  });

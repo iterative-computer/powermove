@@ -17,6 +17,7 @@ import {
   type FigmaDoc,
   type FigmaNode,
 } from '../../../../../shared/figma/doc';
+const FIGMA_NOTICE = 'figma-import';
 const pending = new WeakMap<PMRegistry, Promise<any>>();
 type PasteSource = { html: string; image?: File; project: any; generation: number; compId: string; at: number };
 export { FIGMA_CLIPBOARD_PREFIX } from '../../../../../shared/figma/doc';
@@ -71,6 +72,7 @@ export async function runFigmaPaste(
   read?: (html: string) => Promise<FigmaSelection>,
 ): Promise<void> {
   try {
+    PM.dismissToast?.(FIGMA_NOTICE);
     let doc = read ? clipboardDoc(await read(source.html)) : await (await import('./decode')).readFigmaDoc(source.html);
     if (!current(PM, source)) return;
     const prepared = clipboardFallbacks(doc);
@@ -149,6 +151,7 @@ export async function receiveFigma(
   },
 ): Promise<{ layers: number; flattened: number; missing: string[] }> {
   if (!current(PM, source) || PM.ProjectsScreen?.isOpen) throw new Error('Open a composition in Powermove first');
+  PM.dismissToast?.(FIGMA_NOTICE);
   const neutral = convertFigma(doc, PM.proj),
     plan = materializeFigma(PM, neutral, source.at);
   let update = false;
@@ -213,6 +216,7 @@ export async function receiveFigma(
   PM.toast(
     `${update ? 'Updated' : 'Imported'} ${plan.layers.length} ${plan.layers.length === 1 ? 'layer' : 'layers'}${details}${missing.length ? ` · Kept missing layers: ${missing.join(', ')}` : ''}`,
     8000,
+    { key: FIGMA_NOTICE, kind: 'status' },
   );
   return { layers: plan.layers.length, flattened, missing };
 }

@@ -73,6 +73,7 @@ test('resend changes content while keyframes, effects, names and timing survive;
   const { send, info } = await connect(session);
   const { token } = (await (await send('/pair', { code: info.code })).json()) as any;
   expect((await send('/send', doc(), token)).status).toBe(200);
+  await expect(session.page.getByText('Imported 1 layer', { exact: true })).toBeVisible();
   const before = await session.page.evaluate(() => {
     const P = (window as any).PM,
       l = P.proj.layers[0];
@@ -90,8 +91,11 @@ test('resend changes content while keyframes, effects, names and timing survive;
   changed.w = 220;
   const sent = send('/send', doc([changed, node('new')]), token);
   await expect(session.page.getByText('Update from Figma', { exact: true })).toBeVisible();
+  await expect(session.page.locator('#toasts .toast').filter({ hasText: /Imported|Updated/ })).toHaveCount(0);
+  expect(await session.page.evaluate(() => (window as any).PM.proj.layers[0].d.color)).toBe('#FF4000FF');
   await session.page.getByRole('button', { name: 'Update Existing Layers', exact: true }).click();
   expect((await sent).status).toBe(200);
+  await expect(session.page.getByText('Updated 2 layers', { exact: true })).toBeVisible();
   const after = await session.page.evaluate((id) => {
     const P = (window as any).PM,
       l = P.proj.layers.find((l: any) => l.id === id);

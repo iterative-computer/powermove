@@ -108,3 +108,9 @@ it('leaves Return alone in a sheet without a primary action', async () => {
   body.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
   expect(modal.el.isConnected).toBe(true);
 });
+
+it('gives plain message text its own natural box without measuring the stretched body',async()=>{
+ const modal=controller.open({title:'Update from Figma',body:'These layers already exist.',actions:[{label:'Update Existing Layers',pri:true}]});
+ await Promise.resolve();flushSync();
+ expect(modal.body.children).toHaveLength(1);expect(modal.body.firstElementChild?.textContent).toBe('These layers already exist.');
+});

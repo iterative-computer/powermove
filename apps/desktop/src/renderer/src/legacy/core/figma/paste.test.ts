@@ -4,7 +4,7 @@ import { makePM } from '../../__tests__/make-pm';
 import { figmaNode } from './__fixtures__/clipboard';
 import { pasteMedia } from '../media-paste';
 import { clipboardDoc } from './adapter';
-import { runFigmaPaste } from './paste';
+import { receiveFigma, runFigmaPaste } from './paste';
 
 const read = vi.hoisted(() => vi.fn());
 vi.mock('./decode', () => ({ readFigmaDoc: async (html: string) => clipboardDoc(await read(html)) }));
@@ -96,4 +96,24 @@ describe('native Figma paste', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(read).not.toHaveBeenCalled();
   });
+});
+
+it('clears the previous import notice before a re-sync decision and only announces committed changes', async () => {
+  const { PM } = editor();
+  PM.dismissToast = vi.fn();
+  const doc = clipboardDoc({ nodes: [figmaNode(1)], blobs: [] });
+  await receiveFigma(PM, doc);
+  expect(PM.toast).toHaveBeenLastCalledWith('Imported 1 layer', 8000, { key: 'figma-import', kind: 'status' });
+  PM.modal = vi.fn();
+  const cancelled = receiveFigma(PM, doc);
+  expect(PM.dismissToast).toHaveBeenLastCalledWith('figma-import');
+  expect(PM.toast).toHaveBeenCalledTimes(1);
+  PM.modal.mock.calls[0][0].onClose();
+  await expect(cancelled).rejects.toThrow('cancelled');
+  expect(PM.toast).toHaveBeenCalledTimes(1);
+  const updated = receiveFigma(PM, doc);
+  expect(PM.toast).toHaveBeenCalledTimes(1);
+  PM.modal.mock.calls[1][0].actions[1].run();
+  await updated;
+  expect(PM.toast).toHaveBeenLastCalledWith('Updated 1 layer', 8000, { key: 'figma-import', kind: 'status' });
 });
