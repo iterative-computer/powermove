@@ -1263,3 +1263,57 @@ The requested Linux `cargo test --locked -p pm-native-app --no-run` stops in the
 existing Apple-only `objc2` dependency; the Linux harness is the actual-source
 substitute, not a claim that the app runs here. No Mac runtime/visual gate is
 closed by these checks.
+
+## Cloud surface backing, part A — 2026-11-04
+
+`pm-services::surfaces` adds non-visual Rust models for the five assigned
+families. These are opt-in public APIs, not attached application views and not
+macOS/Opus acceptance. The original inventory rows remain unchanged; this dated
+addendum supplies the narrower implementation status without rewriting tables.
+
+| Surface family | Backing added in `apps/native/crates/services/src/surfaces/` | Remaining production integration |
+| --- | --- | --- |
+| Agent/auth (S070–S072, S083–S086) | `agent_auth`: browser pending-state/PKCE exchange, exact registry binding/expiry/one-shot callback, email-code/handle steps and stale-result fence, account identity, compatible endpoint/key isolation, Codex browser-host validation. | Keychain/session and provider-account workers, runtime install/status integration, external MCP registration/undo, account deletion and registry confirmation hosts. Existing agent/provider consumers remain. |
+| Store/publishing (S075–S082) | `store`: stale-safe search/pagination with real `StoreClient` worker adapter, retryable later-page failure, local library precedence, ownership, API-version and permission facts. `publishing`: tagged UTF-16 field/version/waiver validation, first-publish-only wire fields, icon preflight, frozen-snapshot/account/origin-bound confirmation and measured file progress. | Complete browse/detail/remembered library hosts, fork/rebase, project/search/crop pickers, scanner/compiler/sandbox coordinator, fully decoded icon validation, native confirmation, immutable upload and durable provenance/yank adapters. None is advertised as working through a model-only success. |
+| Captions/transcription (S087–S093) | `captions`: cue/layer/search/follow/selection projection, retained cue draft and revision-guarded update/delete/split wire plans, actual `pm-captions` SRT/VTT import/export with retained original text and range rebasing. `transcription`: language-safe word-model selection/chooser, explicit availability, request/progress/cancel/result lifetime state and worker capability seam. | App/kernel command dispatch, full captions Inspector/style wiring, source-span/time-map/segmentation generation coordinator, decoding/download execution, verified model catalog/storage/archival and native file pickers. A trait alone is not an installed transcription engine. |
+| Easing (S094–S095) | `easing`: tagged curve/library bounds, global ID validation, exact raw/unknown-field retention, rejected-input retention, group/preset rename/move/remove/merge plans, mirror and macOS section-target policy; durable archive/CAS capability required before publication. | Application/library durable store adapter, full keyframe-application tools, `.kease`/folder import and export pickers. No replaced consumer or authored library is deleted. |
+| Shader Lab (S096) | `shader`: tagged layer fallback, UTF-16 editing, Escape/Tab state, 420 ms undo-burst write plans, focused/failed draft retention, applied-ACK/revision fence, compile worker adapter and full diagnostics/uniform result retention. | Kernel write dispatch and source/preset/uniform binding, actual GLSL/engine cache invalidation/compiler adapter, app lifecycle routing and native editor/IME. No successful compile is fabricated. |
+
+Source evidence is frozen `v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`):
+`main/cloud/auth.ts`, `main/codex/app-server-account.ts`,
+`shared/{cloud-ipc,compatible-provider,publish,transcription,transcription-pick}.ts`,
+`renderer/src/cloud/{account.ts,SignInSheet.svelte}`,
+`store/{data.ts,publish-form.ts,StoreScreen.svelte}`, `main/cloud/publish.ts`,
+`captions/{CaptionsPanel.svelte,install.ts,generate.ts}`, `transcription/format.ts`,
+`panels/easing/{library,curve,operations}.ts`, `panels/ShaderPanel.svelte` and
+`panels/shader/ShaderEditor.svelte`. Paths are under `apps/desktop/src/` unless
+qualified otherwise. All fixtures are synthetic inline Rust; tests do not need
+spikes, a user profile, live accounts or a particular ffmpeg build.
+
+Decisions and selecting rules:
+
+- **N3:** preserve raw-byte PKCE hashing, same-origin key reuse, numeric version
+  grammar (including leading zeroes), UTF-16 field limits, caption source versus
+  composition time and Shader Lab's 420 ms burst intent from the actual tag.
+- **N1/N3:** fully retain compiler diagnostics rather than copy the tag's 90-code-
+  unit truncation; reject zero-size/non-IHDR icon preflight false positives.
+  Icon preflight is explicitly not a PNG decoding/scanner/admission receipt.
+- **N4:** rejected/unknown Easing input is retained instead of the tag's silent
+  default-library replacement; unknown authored fields remain exact. Deletion
+  requires an archive-and-CAS host transaction. Caption source text and rejected
+  shader/cue drafts stay recoverable. No profile data or consumer is pruned.
+- **N7:** process-unique tickets fence stale/replayed work; document session and
+  revision stamp every edit/compile/generation target. Tickets are ephemeral,
+  not persisted authentication/session credentials.
+- **N8:** reducers perform no IO/JS; Store/compiler work runs through the existing
+  bounded Rust `ServiceWorker`, with nonblocking submit/poll. Required native
+  capabilities remain explicit, unavailable until installed. **N4/N6/prune:**
+  existing v1–3 runtime contracts and synchronous clusters are untouched.
+- **N1/N2 and Opus ownership:** add no views, copy, dimensions, colours, layout or
+  animation. **DESIGN-TODO(opus):** all uncovered presentation/interaction/copy
+  states for these rows remain typed neutral facts pending their visual specs.
+
+One production dependency is added: existing pure-Rust `pm-captions` by path.
+`cargo update -p pm-services` updates only its new dependency closure in
+`apps/native/Cargo.lock` and the already-existing services isolated lockfile;
+no workspace crate or engine lockfile change is needed.

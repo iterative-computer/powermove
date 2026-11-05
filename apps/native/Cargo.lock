@@ -4601,6 +4601,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-captions"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-color"
 version = "0.1.0"
 dependencies = [
@@ -5280,6 +5290,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fs2",
+ "pm-captions",
  "semver",
  "serde",
  "serde_json",
