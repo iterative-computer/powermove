@@ -1,7 +1,7 @@
 //! A02/S070 external MCP client backing from main c7f46a0564, agent-clients.ts.
 //! Owner 2026-11-04: ask first, including Claude Desktop; never register at launch.
-//! DESIGN-TODO(opus): the nine-client setup surface is spec pending. Return facts
-//! and manual setup payloads only; no invented account/settings UI or copy.
+//! The nine-client rows and once-only consent follow S070 at 78294c4c9.
+//! Return facts and setup payloads only; native hosts own presentation and IO.
 use super::{Flight, Ticket};
 use crate::{Result, ServiceError, ServiceErrorCode};
 use serde::{Deserialize, Serialize};
@@ -174,6 +174,57 @@ fn current_hash(client: Client, text: &str) -> std::result::Result<Option<String
             .map(|value| digest(&value.to_string())))
     }
 }
+pub fn classify_claude(
+    text: &str,
+    original: Option<&Path>,
+    native: &Path,
+    legacy_added: bool,
+) -> super::client_consent::Found {
+    use super::client_consent::Found;
+    let Ok(doc) = json_document(text) else {
+        return Found::Unreadable;
+    };
+    if doc.get("mcpServers").is_some_and(|s| !s.is_object()) {
+        return Found::Unreadable;
+    }
+    let Some(current) = doc.get("mcpServers").and_then(|s| s.get("powermove")) else {
+        return if legacy_added {
+            Found::ReceiptButRemoved
+        } else {
+            Found::Absent
+        };
+    };
+    if entry(Client::ClaudeDesktop, native).is_ok_and(|e| &e == current) {
+        return Found::ThisApp;
+    }
+    if original.is_some_and(|path| entry(Client::ClaudeDesktop, path).is_ok_and(|e| &e == current))
+    {
+        return Found::OriginalApp;
+    }
+    Found::Customized
+}
+/// Read-only adoption of the exact original-app entry, requiring the actual
+/// persisted/native or explicit Settings consent before any replacement plan.
+pub fn original_switch_receipt(
+    text: &str,
+    original: &Path,
+    consent: &Consent,
+) -> std::result::Result<Receipt, Problem> {
+    if consent.client != Client::ClaudeDesktop {
+        return Err(Problem::WrongConsent);
+    }
+    let doc = json_document(text)?;
+    if doc.get("mcpServers").and_then(|s| s.get("powermove"))
+        != Some(&entry(Client::ClaudeDesktop, original)?)
+    {
+        return Err(Problem::Handwritten);
+    }
+    Ok(Receipt {
+        client: Client::ClaudeDesktop,
+        managed_entry_hash: current_hash(Client::ClaudeDesktop, text)?,
+        deliberately_disabled: false,
+    })
+}
 pub fn inspect(client: Client, installed: bool, text: &str, receipt: Option<&Receipt>) -> State {
     if !installed {
         return State::NotInstalled;
@@ -215,6 +266,9 @@ pub struct Change {
     pub expected: String,
     pub mutation: Mutation,
     pub receipt: Receipt,
+    /// S070 Settings button intent. Persist this native-profile answer before
+    /// changing Claude's file; removal must prevent the launch alert returning.
+    pub consent_answer: Option<super::client_consent::Answer>,
 }
 impl std::fmt::Debug for Mutation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -265,6 +319,7 @@ pub fn plan(
                     managed_entry_hash: None,
                     deliberately_disabled: false,
                 }),
+                consent_answer: None,
             });
         }
         return Err(Problem::Handwritten);
@@ -307,6 +362,7 @@ pub fn plan(
                 expected_entry,
             },
             receipt: next_receipt,
+            consent_answer: None,
         });
     }
     let next = if client == Client::Codex {
@@ -348,10 +404,17 @@ pub fn plan(
         expected: text.into(),
         mutation: Mutation::File { next },
         receipt: next_receipt,
+        consent_answer: (client == Client::ClaudeDesktop).then_some(if connect {
+            super::client_consent::Answer::Added
+        } else {
+            super::client_consent::Answer::Declined
+        }),
     })
 }
 
 pub trait ClientHost: Send + 'static {
+    /// Durable native-profile answer before any Claude settings write.
+    fn record_claude_consent(&mut self, answer: super::client_consent::Answer) -> Result<()>;
     /// Worker capability: bound no-follow regular-file reads (16 MiB), explicit
     /// user-selected home/config root. Accept canonical root-owned system links
     /// on macOS; refuse app-owned config-path links. Never discover other homes.
@@ -376,6 +439,9 @@ impl Work {
         let client = self.change.client;
         let result = host.read(client).and_then(|text| {
             if text == self.change.expected {
+                if let Some(answer) = self.change.consent_answer {
+                    host.record_claude_consent(answer)?;
+                }
                 host.apply(self.change)
             } else {
                 Err(ServiceError::message(
@@ -399,6 +465,9 @@ pub struct Controller {
     pub error: Option<ServiceErrorCode>,
 }
 impl Controller {
+    pub fn is_busy(&self) -> bool {
+        self.flight.current().is_some()
+    }
     pub fn start(&mut self, change: Change) -> Option<Work> {
         if self.flight.current().is_some() {
             return None;
@@ -590,6 +659,12 @@ mod tests {
             fail: bool,
         }
         impl ClientHost for Host {
+            fn record_claude_consent(
+                &mut self,
+                _: super::super::client_consent::Answer,
+            ) -> Result<()> {
+                Ok(())
+            }
             fn read(&mut self, _: Client) -> Result<String> {
                 Ok(self.text.clone())
             }
@@ -626,5 +701,99 @@ mod tests {
         assert_eq!(host.text, "{}");
         assert!(controller.receipt.is_none());
         assert_eq!(controller.error, Some(ServiceErrorCode::DiskFull));
+    }
+    #[test]
+    fn original_app_switch_requires_exact_entry_and_consumes_explicit_consent() {
+        use super::super::client_consent::{Answer, Found};
+        let original = Path::new("/Applications/Powermove Original.app/Contents/MacOS/Powermove");
+        let text = copy_setup(Client::ClaudeDesktop, original).unwrap();
+        assert_eq!(
+            classify_claude(&text, Some(original), executable(), false),
+            Found::OriginalApp
+        );
+        assert_eq!(
+            classify_claude("{}", Some(original), executable(), true),
+            Found::ReceiptButRemoved
+        );
+        let permit = Consent::from_native_response(Client::ClaudeDesktop, true).unwrap();
+        let receipt = original_switch_receipt(&text, original, &permit).unwrap();
+        let change = plan(
+            Client::ClaudeDesktop,
+            &text,
+            Some(&receipt),
+            Action::Connect(permit),
+            executable(),
+        )
+        .unwrap();
+        assert_eq!(change.consent_answer, Some(Answer::Added));
+        assert_eq!(
+            classify_claude(file(&change), Some(original), executable(), false),
+            Found::ThisApp
+        );
+        let removed = plan(
+            Client::ClaudeDesktop,
+            file(&change),
+            Some(&change.receipt),
+            Action::Disconnect,
+            executable(),
+        )
+        .unwrap();
+        assert_eq!(removed.consent_answer, Some(Answer::Declined));
+        let mut custom: Value = serde_json::from_str(&text).unwrap();
+        custom["mcpServers"]["powermove"]["env"] = json!({"custom":"kept"});
+        assert_eq!(
+            classify_claude(&custom.to_string(), Some(original), executable(), false),
+            Found::Customized
+        );
+    }
+    #[test]
+    fn worker_cannot_modify_claude_before_durable_consent() {
+        struct Host {
+            calls: Vec<&'static str>,
+            fail: bool,
+        }
+        impl ClientHost for Host {
+            fn read(&mut self, _: Client) -> Result<String> {
+                Ok("{}".into())
+            }
+            fn record_claude_consent(
+                &mut self,
+                _: super::super::client_consent::Answer,
+            ) -> Result<()> {
+                self.calls.push("consent");
+                if self.fail {
+                    Err(ServiceError::message(
+                        ServiceErrorCode::DiskFull,
+                        "fixture consent save failed",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            fn apply(&mut self, change: Change) -> Result<Receipt> {
+                self.calls.push("settings");
+                Ok(change.receipt)
+            }
+        }
+        for fail in [true, false] {
+            let mut controller = Controller::default();
+            let work = controller
+                .start(connect(Client::ClaudeDesktop, "{}", None))
+                .unwrap();
+            let mut host = Host {
+                calls: vec![],
+                fail,
+            };
+            controller.receive(work.run(&mut host));
+            assert_eq!(
+                host.calls,
+                if fail {
+                    vec!["consent"]
+                } else {
+                    vec!["consent", "settings"]
+                }
+            );
+            assert_eq!(controller.receipt.is_some(), !fail);
+        }
     }
 }

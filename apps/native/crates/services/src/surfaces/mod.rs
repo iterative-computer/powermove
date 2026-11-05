@@ -1,7 +1,7 @@
 //! Non-visual secondary-surface backing. No IO is performed by reducers.
 //! Worker adapters use `ServiceWorker::submit`/`Pending::try_take`; the kernel
 //! remains the sole document/settings writer. No v1–3 consumer is replaced.
-//! Presentation follows Opus's design/surfaces specs at ce36cb6fc; `copy` projects
+//! Presentation follows Opus's design/surfaces specs through 78294c4c9; `copy` projects
 //! their supplied strings. No geometry, material, colour or new UX is defined.
 //! S066 is deliberately not built. Existing agent panels retain their consumers.
 pub const BEHAVIOR_REFERENCE: &str = "c7f46a05641b23944d3692c9d80f9677c7e1ef1d";
@@ -10,6 +10,7 @@ pub mod agent_auth;
 pub mod agent_clients;
 pub mod agent_reply;
 pub mod captions;
+pub mod client_consent;
 pub mod copy;
 pub mod easing;
 pub mod providers;

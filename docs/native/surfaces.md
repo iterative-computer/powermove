@@ -1431,3 +1431,34 @@ and the nine-client setup surface **spec pending**. The new APIs expose neutral
 model facts and manual payloads only. Their views/copy are not built. The earlier
 statement of no new placeholders applies to the pre-delta spec pass, not these
 new rows. These two items remain for Opus; no substitute design is chosen.
+
+### Part A final consent/spec reconciliation — 2026-11-04
+
+Final integration fetch brought Opus's delta specs at
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`; merged without conflicts. The
+S070/S071 additions in `design/surfaces/agent-auth.md` now resolve both design
+placeholders in the preceding section. **No new part A DESIGN-TODO remains.**
+No view, visual literal, restore/archive browser, S066, Store sort control,
+remembered-install list or thread rename is introduced.
+
+`client_consent` adds the specified once-per-native-profile controller and
+`externalClients.claudeDesktop` answer contract (`added`, `declined`, `skipped`).
+It waits for installed Claude, the key editor window, completed first launch and
+onboarding, no transient, stopped playback and no text edit; hidden MCP never
+asks. Missing installation/unreadable configuration/quitting with the alert open
+consume no answer. Already-native, hand-customized and deliberately removed
+entries skip and record the outcome. A durable compare-and-set answer is required
+before the worker can return a registration permit, and a competing window's
+answer grants no duplicate mutation. Settings-button Add/Remove records the new
+answer before changing Claude's file. Exact original-app entry classification
+supports the approved Switch Original variant while preserving customized fields.
+The default buttons and both alert variants are Opus's exact copy. External-client
+row/error text and the provider's measured Ollama context warning now use the
+supplied spec as well. No raw configuration or credentials enter Debug output.
+
+Final owned-path boundary remains: services source/manifests/isolated lock,
+`apps/native/Cargo.lock`, and dated additions to this document. Upstream spec and
+owner-decision changes enter only through merge commits. No new workspace crate,
+engine lockfile change or external fixture is introduced. App/Keychain/HTTP,
+client-file/CLI/consent-store, kernel/engine/panel and provider-worker integration
+listed above remain actual host work; pure models do not pass those gates.

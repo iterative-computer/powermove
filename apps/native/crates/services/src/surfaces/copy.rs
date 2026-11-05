@@ -1,4 +1,4 @@
-//! Non-visual copy projections from Opus's surface specs at ce36cb6fc.
+//! Non-visual copy projections from Opus's surface specs at ce36cb6fc/78294c4c9.
 //! These are strings/facts only; native hosts own controls, tokens and focus.
 use super::{
     agent_auth::SignInStep,
@@ -347,6 +347,91 @@ pub fn registry_switch(origin: &str, to_default: bool) -> Confirmation {
     }
 }
 
+pub fn claude_consent(kind: super::client_consent::PromptKind) -> Confirmation {
+    match kind{
+        super::client_consent::PromptKind::Add=>Confirmation{message:"Add Powermove to the Claude app?".into(),informative:"Claude could then use Powermove’s tools on this Mac, including working in your open projects. You can change this anytime in Settings ▸ Accounts.".into(),buttons:vec!["Don’t Add".into(),"Add to Claude".into()],default:0,destructive:None},
+        super::client_consent::PromptKind::SwitchOriginal=>Confirmation{message:"Use Powermove Native with the Claude app?".into(),informative:"Claude is set up to use the original Powermove app. Switching changes that one entry in Claude’s settings, and you can change it anytime in Settings ▸ Accounts.".into(),buttons:vec!["Keep Original".into(),"Switch to Powermove Native".into()],default:0,destructive:None},
+    }
+}
+pub fn external_client(client: super::agent_clients::Client) -> (&'static str, &'static str) {
+    use super::agent_clients::Client;
+    match client {
+        Client::ClaudeCode => (
+            "Claude Code",
+            "Your Claude plan, in the terminal or your editor.",
+        ),
+        Client::Codex => ("Codex", "Your ChatGPT plan, in the Codex app or CLI."),
+        Client::ClaudeDesktop => ("Claude", "Your Claude plan, in the Claude app."),
+        Client::GeminiCli => ("Gemini CLI", "Your Google account or Gemini plan."),
+        Client::Cursor => ("Cursor", "Your Cursor plan."),
+        Client::Vscode => ("VS Code", "GitHub Copilot’s agent mode."),
+        Client::Windsurf => ("Windsurf", "Your Windsurf plan."),
+        Client::LmStudio => ("LM Studio", "Models on this Mac, in LM Studio’s chat."),
+        Client::Opencode => ("OpenCode", "Any provider you use in OpenCode."),
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalClientState {
+    NotAdded,
+    Adding,
+    Removing,
+    Added,
+    ClaudeOpen,
+    Original,
+    Handwritten,
+    Unreadable,
+    Failed { removing: bool },
+}
+pub fn external_client_row(
+    client: super::agent_clients::Client,
+    state: ExternalClientState,
+) -> Message {
+    let (name, detail) = external_client(client);
+    match state {
+        ExternalClientState::NotAdded => message(name, detail, Some("Add Powermove")),
+        ExternalClientState::Adding => message(name, detail, Some("Adding…")),
+        ExternalClientState::Removing => message(name, detail, Some("Removing…")),
+        ExternalClientState::Added => message(name, detail, Some("Remove")),
+        ExternalClientState::ClaudeOpen => {
+            message(name, "Quit and reopen Claude to finish.", Some("Remove"))
+        }
+        ExternalClientState::Original => message(
+            name,
+            "Claude is using the original Powermove app.",
+            Some("Add Powermove"),
+        ),
+        ExternalClientState::Handwritten => message(name, "Powermove is set up in this app.", None),
+        ExternalClientState::Unreadable => message(
+            name,
+            "Its settings can’t be edited automatically. Use Copy Setup below.",
+            None,
+        ),
+        ExternalClientState::Failed { removing } => message(
+            name,
+            if client == super::agent_clients::Client::ClaudeDesktop {
+                "Couldn’t update Claude’s settings. Check that Claude is installed, then try again."
+            } else {
+                "Couldn’t change this app’s settings. Try again."
+            },
+            Some(if removing { "Remove" } else { "Add Powermove" }),
+        ),
+    }
+}
+pub fn provider_context(warning: &super::providers::ContextWarning) -> String {
+    let digits = warning.tokens.to_string();
+    let mut count = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            count.push(',');
+        }
+        count.push(c);
+    }
+    format!(
+        "Ollama is running {} with only {count} tokens of context, so it will lose track of Powermove’s instructions. In Ollama’s settings, set Context length to 32k or more (or set OLLAMA_CONTEXT_LENGTH=32768), then test again.",
+        warning.model
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +525,29 @@ mod tests {
         assert_eq!(custom.message, "Use the registry at https://example.com?");
         let back = registry_switch("", true);
         assert_eq!(back.buttons[back.default], "Use Powermove Cloud");
+    }
+    #[test]
+    fn new_s070_consent_defaults_and_failed_remove_copy_match_spec() {
+        let prompt = claude_consent(super::super::client_consent::PromptKind::Add);
+        assert_eq!(prompt.message, "Add Powermove to the Claude app?");
+        assert_eq!(prompt.buttons[prompt.default], "Don’t Add");
+        let prompt = claude_consent(super::super::client_consent::PromptKind::SwitchOriginal);
+        assert_eq!(prompt.buttons[prompt.default], "Keep Original");
+        let row = external_client_row(
+            super::super::agent_clients::Client::ClaudeDesktop,
+            ExternalClientState::Failed { removing: true },
+        );
+        assert_eq!(row.action.as_deref(), Some("Remove"));
+        assert_eq!(
+            row.line,
+            "Couldn’t update Claude’s settings. Check that Claude is installed, then try again."
+        );
+        let warning = super::super::providers::ContextWarning {
+            model: "m".into(),
+            tokens: 4096,
+            minimum: 16384,
+            recommended: 32768,
+        };
+        assert!(provider_context(&warning).contains("only 4,096 tokens of context"));
     }
 }

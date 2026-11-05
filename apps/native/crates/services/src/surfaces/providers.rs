@@ -1,7 +1,7 @@
 //! A01 backing at c7f46a05641b23944d3692c9d80f9677c7e1ef1d:
 //! shared/compatible-provider.ts and main/compatible-provider.ts.
-//! DESIGN-TODO(opus): discovery/context-warning states are spec pending in
-//! main-delta.md. Expose neutral facts; no new UI, copy, glyph or metric.
+//! Discovery/context-warning presentation follows S071 at 78294c4c9.
+//! This module exposes facts; native hosts render existing kit/tokens.
 use super::{
     Flight, Ticket,
     agent_auth::{Secret, provider_url},
