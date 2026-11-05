@@ -190,3 +190,8 @@ refusal/recovery. These witnesses do not replace the frozen corpus or qualify
 source temporal/brush expansion, general group/matte/backdrop policy, source text,
 all historical families, or physical HDR/presentation gates. Gate E remains open
 until its named requirements pass; no numeric bound changes for source processing.
+
+Source admission must account for intermediate passes, pyramids, cell atlases,
+asset targets and every retained consumer replay. Cached planning does not prove
+a shared GPU allocation. The source budget tests require an error before the
+large targets allocate; neither the budget nor a pixel tolerance is increased.

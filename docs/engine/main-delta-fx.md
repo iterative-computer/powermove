@@ -218,7 +218,7 @@ still required for their gates; synthetic local witnesses do not replace them.
 
 ### Implementation checkpoint and remaining row requirements
 
-Implementation: `23ea75d89`. `advanced_effects` provides focused Metal witnesses;
+Implementation: `23ea75d89`, with retained-allocation accounting in `8a11a8f45`. `advanced_effects` provides focused Metal witnesses;
 `effect_versions` retains the tagged saved-version pixel checks. These are
 synthetic/headless proofs with explicit required media, not substitutes for the
 unavailable original frozen reference set. No E01–E18 row is fully closed by this
@@ -248,3 +248,17 @@ checkpoint and Gate E's verification flags remain conservative.
 The original corpus, missing external references and physical presentation gates
 remain blocked by their actual prerequisites. Implementation gaps above remain
 implementation work; they are not relabelled as display or reference blockers.
+
+Source admission includes retained pass outputs, full pyramid bounds, cell atlases,
+typed asset targets and repeated consumer replays of cached plans. Opaque source
+hosts must supply an allocation estimate. The default budget is unchanged.
+`metal_source_atlas_passes_are_charged_before_allocating_them` and
+`metal_source_shared_plan_replays_each_count_toward_admission` require named
+refusals before those over-budget targets are allocated.
+
+Focused qualification: `advanced_effects` **40 passed / 0 failed**,
+`effect_versions` **20 / 0**, `effects` **32 / 0 / 1 existing ignored**,
+`headless` **28 / 0 / 1 existing ignored**, `motion` **24 / 0**;
+all-target `pm-render` Clippy passes with `-D warnings`. These totals include
+shared support tests in separate binaries; they are not a count of independent
+pixel oracles. Full workspace, strict and performance gates remain separate.
