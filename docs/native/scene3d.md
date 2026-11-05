@@ -184,3 +184,39 @@ worker, compare Metal preview/export and camera/parent transforms against
 source intent, physical trackpad/modifier/pick gestures and one-gesture Undo,
 v1–3 API calls, saved real-world legacy assets, and Opus visual acceptance.
 Linux passes are not evidence for AppKit/GPUI/WebKit/Metal behavior.
+
+
+## 2026-11-05 — final merge verification
+
+Merged integration base `d7a0b01d430d7ec9977f52d784f047c027801b14` without
+conflicts; a final fetch/merge confirmed it remained current. Only package
+entries for pm-scene3d/kernel/MCP changed in the lane's lockfile diff; there
+were no dependency upgrades. The member glob already includes the new crate.
+
+Commands below ran at the repository root after sourcing
+`/workspace/.tools/activate.sh`. The CAD tools were built with native OCCT 7.9.3:
+
+```sh
+/workspace/.tools/cad/bin/cmake -S apps/native/crates/scene3d/native -B work/cad-build -G Ninja -DCMAKE_PREFIX_PATH=/workspace/.tools/cad -DCMAKE_MAKE_PROGRAM=/workspace/.tools/cad/bin/ninja
+/workspace/.tools/cad/bin/cmake --build work/cad-build
+PM_SCENE3D_CAD_HELPER=/workspace/powermove/work/cad-build/pm-scene3d-cad PM_SCENE3D_CAD_FIXTURES=/workspace/powermove/work/cad-build/pm-scene3d-cad-fixtures cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-scene3d -p pm-kernel -p pm-mcp --all-features --no-fail-fast
+cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-scene3d -p pm-kernel -p pm-mcp --all-targets --all-features -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml -p pm-scene3d -p pm-kernel -p pm-mcp -- --check
+```
+
+Final all-features result: **442 passed, 0 failed, 1 existing ignored**:
+297 kernel, 78 MCP, 67 scene3d. This includes four native CAD decoder tests
+and three native CAD import/Undo/save/reopen tests. Default-feature full suite
+also passed: 435 passed, 0 failed, the same one ignored. That ignored test is
+`smoke_real_store_copy_counts_only`, which requires a separately supplied real
+profile; no user profile or private data was used here. Clippy and fmt pass.
+
+Two earlier existing-test failures remain part of the evidence:
+`dont_save_library_preserves_bytes_archive_and_quit` once reported an unattached
+writable library; its six-test suite then passed unchanged, as did subsequent
+full runs. `background_fsync_completes_within_200ms_even_with_an_oversized_request`
+once missed its 200 ms deadline; the isolated test and final full run then
+passed unchanged without concurrent build jobs. Neither test, assertion,
+time budget nor case was edited or skipped. These observations warrant
+attention if they recur in integration; they are not evidence of macOS
+power-loss durability. All Mac and host boundaries listed above still apply.
