@@ -329,3 +329,25 @@ project memory, updated session/publication fences and main's provider approval
 semantics need their own current-source replay and real host support. No
 optimistic Auto/provider capability is added by this lane. The scope of the
 portable services and the integration blockers remain explicit in `agents.md`.
+
+## 2026-11-05 — retained strict gate and actual delivery path
+
+The cloud-agents4 service integration adds checked action acceptance, durable
+process-to-panel delivery through the existing kernel writer, explicit interrupted
+reopen and current-main native Claude launch evidence. It does not change any
+legacy reference transcript, lifecycle ledger, callback assertion or raw strict
+identity requirement. The original raw gate must continue reporting lifecycle
+additions and the independently pinned current-main/Studio catalog delta.
+MCP error strings already match on this integration base; no substitution or
+normalization is added here. See [agents-cloud4.md](agents-cloud4.md) for exact
+process/actor evidence and the application/provider/Mac boundaries still open.
+
+### 2026-11-05 — final raw replay result
+
+Against merged base `5bcd425ddc158cbd891ee4b515cf9993fad29a66`, the separate
+`PM_REPLAY_REQUIRE_IDENTICAL=1` assertion still fails: **359 exact leaf
+differences**, comprising 28 native lifecycle additions and 331 independently
+pinned main/Studio catalog deltas. `mcp-tool-errors` is identical. The run reports
+**1 failed / 9 filtered**, excluded from the 401 passing portable tests. Reference
+bytes, expected causal positions and strict mode are unchanged. The original raw
+gate remains open; provider-callback identity is a separately named assertion.

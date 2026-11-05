@@ -79,14 +79,28 @@ impl Machine {
             Self::CodexExec { client, .. } => client.stopped(reason),
         }
     }
-    fn action(&mut self, a: Action, now: u64) -> Effects {
-        let warning = |s: String| Effects {
-            events: vec![Event::Warning(s)],
-            ..Effects::default()
+    fn action(&mut self, a: Action, now: u64) -> (Effects, bool) {
+        let warning = |s: String| {
+            (
+                Effects {
+                    events: vec![Event::Warning(s)],
+                    ..Effects::default()
+                },
+                false,
+            )
+        };
+        let optional = |value: Option<Effects>| match value {
+            Some(effects) => (effects, true),
+            None => (Effects::default(), false),
+        };
+        let cancel = |effects: Effects| {
+            let accepted =
+                !effects.events.is_empty() || !effects.outgoing.is_empty() || effects.close_stdin;
+            (effects, accepted)
         };
         match a {
             Action::Run(r) => match self {
-                Self::Codex(c) => c.run(*r, now).unwrap_or_else(warning),
+                Self::Codex(c) => c.run(*r, now).map(|e| (e, true)).unwrap_or_else(warning),
                 _ => warning("This process already owns a run".into()),
             },
             Action::Steer {
@@ -94,23 +108,24 @@ impl Machine {
                 prompt,
                 images,
             } => match self {
-                Self::Codex(c) => c.steer(&run, &prompt, &images, now).unwrap_or_else(warning),
+                Self::Codex(c) => c
+                    .steer(&run, &prompt, &images, now)
+                    .map(|e| (e, true))
+                    .unwrap_or_else(warning),
                 _ => warning("Live steering requires App Server".into()),
             },
             Action::Answer { run, item, answers } => match self {
-                Self::Codex(c) => c.answer(&run, &item, &answers).unwrap_or_default(),
-                Self::Claude(c) if c.run_id() == run => {
-                    c.answer(&item, &answers).unwrap_or_default()
-                }
+                Self::Codex(c) => optional(c.answer(&run, &item, &answers)),
+                Self::Claude(c) if c.run_id() == run => optional(c.answer(&item, &answers)),
                 _ => warning("No held question for this run".into()),
             },
             Action::Cancel(run) => match self {
-                Self::Codex(c) => c.cancel(&run, now).unwrap_or_default(),
-                Self::Claude(c) if c.run_id() == run => c.cancel(),
-                Self::CodexExec { client, .. } if client.run_id() == run => client.cancel(),
+                Self::Codex(c) => optional(c.cancel(&run, now)),
+                Self::Claude(c) if c.run_id() == run => cancel(c.cancel()),
+                Self::CodexExec { client, .. } if client.run_id() == run => cancel(client.cancel()),
                 _ => warning("No active run with this id".into()),
             },
-            Action::Shutdown => Effects::default(),
+            Action::Shutdown => (Effects::default(), true),
         }
     }
 }
@@ -129,14 +144,42 @@ pub enum Action {
     Cancel(String),
     Shutdown,
 }
+struct QueuedAction {
+    action: Action,
+    reply: Option<SyncSender<bool>>,
+}
 pub struct Handle {
-    tx: SyncSender<Action>,
+    tx: SyncSender<QueuedAction>,
     events: Receiver<Event>,
+    surface: Surface,
 }
 impl Handle {
+    pub fn supports_steering(&self) -> bool {
+        self.surface == Surface::Codex
+    }
     /// On saturation, returns the original action for a later retry.
     pub fn send(&self, a: Action) -> Result<(), TrySendError<Action>> {
-        self.tx.try_send(a)
+        self.enqueue(a, None)
+    }
+    /// Resolves after the protocol machine accepts/rejects the action and its
+    /// effects are enqueued. This is stronger than mailbox admission, but not
+    /// a provider RPC acknowledgement (interrupt completion remains an event).
+    pub fn send_checked(&self, action: Action) -> Result<Receiver<bool>, TrySendError<Action>> {
+        let (reply, pending) = mpsc::sync_channel(1);
+        self.enqueue(action, Some(reply))?;
+        Ok(pending)
+    }
+    fn enqueue(
+        &self,
+        action: Action,
+        reply: Option<SyncSender<bool>>,
+    ) -> Result<(), TrySendError<Action>> {
+        self.tx
+            .try_send(QueuedAction { action, reply })
+            .map_err(|error| match error {
+                TrySendError::Full(queued) => TrySendError::Full(queued.action),
+                TrySendError::Disconnected(queued) => TrySendError::Disconnected(queued.action),
+            })
     }
     pub fn try_event(&self) -> Result<Event, mpsc::TryRecvError> {
         self.events.try_recv()
@@ -144,7 +187,7 @@ impl Handle {
 }
 impl Drop for Handle {
     fn drop(&mut self) {
-        let _ = self.tx.try_send(Action::Shutdown);
+        let _ = self.send(Action::Shutdown);
     }
 }
 enum Input {
@@ -155,7 +198,8 @@ enum Input {
 }
 /// Process startup, signing checks, all IO and shutdown occur off the caller.
 pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Handle {
-    let (tx, rx) = mpsc::sync_channel(128);
+    let surface = machine.surface();
+    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(128);
     let (etx, events) = mpsc::sync_channel(256);
     thread::spawn(move || {
         let mut child = match spec.spawn() {
@@ -208,12 +252,19 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                         break;
                     }
                 };
-                if matches!(action, Action::Shutdown) {
+                if matches!(action.action, Action::Shutdown) {
+                    if let Some(reply) = action.reply {
+                        let _ = reply.try_send(true);
+                    }
                     stop = true;
                     break;
                 }
-                let e = machine.action(action, now());
-                if let Err(err) = apply(surface, e, &wtx, &etx, &mut closing) {
+                let (effects, accepted) = machine.action(action.action, now());
+                let applied = apply(surface, effects, &wtx, &etx, &mut closing);
+                if let Some(reply) = action.reply {
+                    let _ = reply.try_send(accepted && applied.is_ok());
+                }
+                if let Err(err) = applied {
                     reason = err.to_string();
                     stop = true;
                     break;
@@ -291,7 +342,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
             }
         }
     });
-    Handle { tx, events }
+    Handle {
+        tx,
+        events,
+        surface,
+    }
 }
 fn read_output(path: &Path) -> io::Result<String> {
     let mut o = OpenOptions::new();

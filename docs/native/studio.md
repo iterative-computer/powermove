@@ -231,3 +231,78 @@ A new real-GPU regression renders an authored 8-bit grey screen and the same
 scene with its independently calculated linear emission. It failed before the
 repair and now requires **identical RGBA bytes for every pixel in every layer**.
 No tolerance was introduced. The qualification counts above include this test.
+
+## 2026-11-05 — Mac production hook (partial)
+
+`Renderer::set_studio_source` now installs a typed immutable scene provider and
+settings. `Render3d::Studio` carries composition, pinned revision, exact ticks,
+output dimensions, Final/preview intent and the actual outer shutter count.
+The native service attaches `DocumentSource` on its render worker and reconstructs
+it in the windowless export child from the same document and media paths.
+`pm-kernel::commands::scene3d::resolve_scene` supplies evaluated transforms,
+materials, camera and lights. Procedural/explicit mesh geometry retains immutable
+identity across provider replacement; the extractor and GPU BLAS cache survive.
+
+Layer outputs enter the normal compositor as premultiplied encoded SDR textures,
+with the FBO row convention applied during presentation. Masks, opacity, blends
+and supported effects use the existing compositor. Final selects the authored
+sample budget, rounded up per shutter with the source's four-sample minimum,
+eight bounces and a deterministic seed/time salt. It cannot silently select Fast.
+The export child composites and encodes these outputs through `pm-export`.
+
+Headless Mac regressions cover the native kernel/service/compositor boundary,
+an emissive card behind the camera reflected in a metal sphere, layer opacity,
+repeated Final pixels, and two matching decoded shutter-enabled PNG exports.
+These are offscreen Metal tests, not app-window captures or visual acceptance.
+Work counters are emitted by the synthetic integration test; no performance
+baseline or acceptance threshold changes here.
+
+This is **not full Studio closure**. Imported model parts/materials, material
+maps/slots/live screens and rounded-box geometry still require adapters and fail
+explicitly rather than drawing placeholders. Fast, depth/id, view overrides,
+full depth-set/barrier/background/catcher presentation, cancellation between GPU
+slices and float/HDR Studio output remain unqualified. No panels, Blender,
+release, packaging or physical-display acceptance is added by this hook.
+
+## Imported resource adapter — 2026-11-05
+
+`DocumentSource` now loads worker-owned model bytes through `pm-scene3d::render::Resource`.
+OBJ and glTF/GLB use the core decoder and normalization; GLB assemblies retain
+part transforms, shared meshes, source physical materials, and embedded maps.
+The native CAD importer's converted GLB uses this same resource path. Geometry
+identity hashes complete mesh data, so replacing a document source does not
+invalidate an unchanged mesh's BLAS. Material extraction is linear in part count.
+Owned content-addressed/`.bin` cache paths select their decoder from the saved
+asset format (historical name as fallback), not the renamed display label. Only
+the approved media path supplies bytes; saved names never grant file access.
+
+Gaussian PLY/.splat resources take a separate native EWA raster pass: projected
+covariance, stable depth sorting, source Gaussian cutoff and premultiplied layer
+compositing. They never become substitute surface meshes or enter reflections.
+
+Headless Metal tests in engine-service `tests/studio.rs`:
+
+- `metal_imported_multi_object_reflection_preview_final_and_export` verifies two
+  imported parts sharing geometry, source metal material, an off-camera card's
+  reflection, exact fixed-seed repeat, preview, service output and two matching
+  decoded shutter-enabled PNG exports from the windowless child.
+- `metal_imported_splats_keep_gaussian_pixels_layer_order_and_export` verifies
+  Gaussian center/falloff, exact repeat, preview, service parity, two matching
+  decoded child PNG exports and zero surface traces for a splat-only composition.
+- `metal_imported_step_keeps_xde_parts_preview_final_and_child_export`, enabled
+  by `pm-engine-service/native-cad-tests`, generates actual STEP with the native
+  OCCT writer, converts it through XDE, and verifies part/face materials,
+  nonempty Metal pixels, preview, fixed-seed Final repeat, service parity and
+  two matching decoded child PNG exports. It requires the real helper and
+  fixture generator; absent tools fail the test.
+
+**The imported model/CAD/splat headless preview/export gate is closed by these
+passing tests.** All six Studio tests pass on Metal, including `.bin` cache
+resources. Native OCCT 7.9.3 additionally passes all four decoder tests and the
+three kernel STEP/IGES/BREP import/Undo/save/reopen tests. The helper and fixture
+generator were built and development-signed on Mac; distribution packaging and
+release signing remain separate gates.
+
+This does not close full Studio acceptance. Authored material-map slots and live
+screens, complete depth/barrier/catcher handling, Fast, cancellation between GPU
+slices, float/HDR presentation and physical/visual acceptance remain open.

@@ -44,6 +44,8 @@ pub(crate) struct Backend {
     panel: EffectsPanel,
     extension: String,
     bindings: BTreeMap<String, Vec<String>>,
+    binding_owners: BTreeMap<String, (u64, Arc<[String]>)>,
+    binding_selection: Option<(u64, Arc<[String]>)>,
     pending: Vec<Inflight>,
     states: Vec<StateInflight>,
     retired: bool,
@@ -106,6 +108,8 @@ impl Backend {
             service_revision: 0,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
+            binding_owners: BTreeMap::new(),
+            binding_selection: None,
             pending: vec![],
             states: vec![],
             retired: false,
@@ -131,9 +135,10 @@ impl Backend {
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{:?}",
             published.snapshot.doc_id,
             published.revision(),
+            published.metadata_revision,
             self.kernel.state().revision,
             published.selection.primary()
         );
@@ -170,6 +175,7 @@ impl Backend {
                 .ok_or("No open project")?
                 .remove_definition(&id);
         }
+        self.panel.presentation.parameters.clear();
         for (id, d) in latest {
             let mut params = vec![];
             for p in d["params"].as_array().into_iter().flatten() {
@@ -274,6 +280,59 @@ impl Backend {
             .collect::<Vec<_>>();
         Ok(json!({"id":id,"effects":fx}))
     }
+    pub(crate) fn validate_binding_owner(&self, handle: &str) -> Result<(), String> {
+        let (document, selection) = self
+            .binding_owners
+            .get(handle)
+            .ok_or("Unregistered binding")?;
+        let inspector = self.model.as_ref().ok_or("No open project")?;
+        if *document != inspector.document_id() || selection.as_ref() != inspector.selected_layers()
+        {
+            return Err("Binding selection changed".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn parameter_write(
+        &mut self,
+        handle: &str,
+        value: pm_model::Value,
+        time: f64,
+    ) -> Result<Request, String> {
+        self.validate_binding_owner(handle)?;
+        let channels = self
+            .bindings
+            .get(handle)
+            .ok_or("Disposed effect binding")?
+            .clone();
+        let projection = self.projection()?;
+        let row = projection["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| {
+                r["kind"] == "parameter"
+                    && r["parameter"]["binding"] == handle
+                    && r["parameter"]["readonly"] == false
+                    && channels == [r["parameter"]["id"].as_str().unwrap_or("").to_owned()]
+            })
+            .ok_or("Effect binding no longer editable")?;
+        let address = model(&row["parameter"]["id"])?;
+        let property = pm_panel_inspector::PropertyId::from_value(
+            &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .set(
+                self.caller,
+                pm_panel_inspector::Binding::Property(property),
+                value,
+                time,
+            )
+            .map_err(|e| e.to_string())
+    }
     pub fn local_fields(&mut self) {
         self.bindings.insert("effects.search".into(), vec![]);
         self.bindings.insert("effects.scope".into(), vec![]);
@@ -326,6 +385,11 @@ impl Backend {
             let result = result.map_err(|e| format!("{e:?}")).and_then(|ack| {
                 if let Reply::Throw(error) = &ack.reply {
                     return Err(format!("{error:?}"));
+                }
+                if matches!(&ack.reply, Reply::Memory { .. })
+                    && let Some(pm_kernel::Notice::NotDurable { message }) = &ack.notice
+                {
+                    return Err(format!("Notes remain applied but could not be saved: {message}. Read the latest notes before retrying."));
                 }
                 if let Some(plan) = item.plan {
                     self.panel
@@ -438,10 +502,29 @@ impl KernelData for Data {
                     if !valid {
                         return Err("unknown model binding".into());
                     }
+                    let inspector = b.model.as_ref().ok_or("No open project")?;
+                    if !b
+                        .binding_selection
+                        .as_ref()
+                        .is_some_and(|(doc, selection)| {
+                            *doc == inspector.document_id()
+                                && selection.as_ref() == inspector.selected_layers()
+                        })
+                    {
+                        b.binding_selection =
+                            Some((inspector.document_id(), inspector.selected_layers().into()));
+                    }
+                    let owner = b
+                        .binding_selection
+                        .as_ref()
+                        .ok_or("No binding selection")?
+                        .clone();
+                    b.binding_owners.insert(handle.clone(), owner);
                     b.bindings.insert(handle.clone(), channels.clone());
                 }
                 HostOperation::DisposeBinding { handle } => {
                     b.bindings.remove(handle);
+                    b.binding_owners.remove(handle);
                 }
                 HostOperation::GetSetting { key } => {
                     let state = b.kernel.state();
@@ -519,6 +602,7 @@ impl KernelData for Data {
                 }
                 HostOperation::Command { command, args } if command == "panel.effect-controls" => {
                     let caller = b.caller;
+                    let time = b.time();
                     let Backend {
                         panel, model: m, ..
                     } = &mut *b;
@@ -527,7 +611,7 @@ impl KernelData for Data {
                             m.as_mut().ok_or("No open project")?,
                             caller,
                             &model(args)?,
-                            0.,
+                            time,
                         )
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
@@ -590,6 +674,8 @@ impl KernelData for Data {
                     .call(&identity.project, Request::new(b.caller, Call::RealmFailed)),
             );
             b.bindings.clear();
+            b.binding_owners.clear();
+            b.binding_selection = None;
             b.retired = true;
         }
         Ok(())

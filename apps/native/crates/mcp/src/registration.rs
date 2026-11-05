@@ -335,6 +335,18 @@ impl Registration {
                     FLAG.into(),
                 ])?;
             }
+            let observed = object(read(&plan.review.path)?.as_deref())?;
+            let entry = &observed["mcpServers"]["powermove"];
+            let matches = if plan.review.action == Action::Disconnect {
+                observed["mcpServers"].get("powermove").is_none()
+            } else {
+                own(spec.format, entry) && entry["command"].as_str() == self.executable.to_str()
+            };
+            if !matches {
+                return Err(conflict(
+                    "Claude Code did not publish the requested Powermove connection.",
+                ));
+            }
             return Ok(Applied {
                 changed: true,
                 archive,

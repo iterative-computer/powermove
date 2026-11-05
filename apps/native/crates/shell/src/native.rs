@@ -51,6 +51,7 @@ pub struct MenuEntry {
     /// Shows a checkmark (current state, e.g. the panel's dock).
     pub checked: bool,
     pub enabled: bool,
+    pub children: Vec<MenuEntry>,
 }
 impl MenuEntry {
     pub fn item(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -59,6 +60,14 @@ impl MenuEntry {
             command: command.into(),
             checked: false,
             enabled: true,
+            children: vec![],
+        }
+    }
+    pub fn submenu(label: impl Into<String>, children: Vec<MenuEntry>) -> Self {
+        Self {
+            enabled: !children.is_empty(),
+            children,
+            ..Self::item(label, "")
         }
     }
     pub fn separator() -> Self {
@@ -1678,21 +1687,7 @@ impl Host {
         menu.setAutoenablesItems(false);
         // Match the window (a forced scheme, or the system's).
         menu.setAppearance(Some(&self.window.effectiveAppearance()));
-        for entry in items {
-            if entry.label.is_empty() {
-                menu.addItem(&NSMenuItem::separatorItem(mtm));
-                continue;
-            }
-            let item = named_item(mtm, &entry.label, &entry.command);
-            unsafe { item.setTarget(Some(&self._target)) };
-            item.setState(if entry.checked {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
-            item.setEnabled(entry.enabled);
-            menu.addItem(&item);
-        }
+        append_menu(&menu, items, &self._target, mtm);
         let h = self.gpui.bounds().size.height;
         let at = if self.gpui.isFlipped() {
             NSPoint::new(x as f64, y as f64)
@@ -2799,4 +2794,28 @@ pub fn system_accent(scheme: Scheme) -> Option<u32> {
     });
     appearance.performAsCurrentDrawingAppearance(&block);
     out.get()
+}
+
+fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: MainThreadMarker) {
+    for entry in items {
+        if entry.label.is_empty() {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            continue;
+        }
+        let item = named_item(mtm, &entry.label, &entry.command);
+        unsafe { item.setTarget(Some(target)) };
+        item.setState(if entry.checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        item.setEnabled(entry.enabled);
+        if !entry.children.is_empty() {
+            let submenu = NSMenu::new(mtm);
+            submenu.setAutoenablesItems(false);
+            append_menu(&submenu, &entry.children, target, mtm);
+            item.setSubmenu(Some(&submenu));
+        }
+        menu.addItem(&item);
+    }
 }

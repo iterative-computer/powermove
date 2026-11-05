@@ -492,6 +492,29 @@ impl Kernel {
         }
         Ok(())
     }
+    /// Freeze an independent packed export. It neither adopts a destination
+    /// nor changes the live save/dirty/history state.
+    pub fn prepare_session_export(
+        &self,
+        session: SessionHandle,
+        document: u64,
+        path: PathBuf,
+    ) -> Result<crate::SavePlan, KernelFailure> {
+        self.check_session(&session)?;
+        let project = self
+            .project(&session.project)
+            .ok_or_else(|| failure("Project closed"))?;
+        if project.store().doc_id() != document {
+            return Err(failure("Project changed before export"));
+        }
+        let mut plan = project
+            .store()
+            .prepare_portable_export(path)
+            .map_err(failure)?;
+        plan.workspace = Some(project.workspace().clone());
+        Ok(plan)
+    }
+
     /// Freeze a file save on the actor; the worker owns disk IO only.
     pub fn prepare_session_save(
         &mut self,
@@ -583,7 +606,10 @@ impl Kernel {
         // Newer edits remain dirty, journalled against the older base. Recovery
         // offers a copy if the file and journal bases differ.
         let store = self.project(&session.project).unwrap().store();
-        if store.revision() == pending.revision && !store.is_dirty() {
+        if store.revision() == pending.revision
+            && !store.is_dirty()
+            && !store.has_pending_metadata()
+        {
             self.rebase_journal(&session.project)?;
         }
         self.flush_project(&session.project)?;

@@ -67,6 +67,7 @@ struct Shared {
     popouts: RefCell<Vec<(Retained<NSWindow>, Retained<WKWebView>)>>,
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
+    canvases: RefCell<crate::canvas::CanvasResources>,
 }
 impl Shared {
     fn send(&self, event: Value) -> Result<()> {
@@ -132,6 +133,11 @@ impl Shared {
         };
         let payload = m["payload"].clone();
         match kind {
+            "canvas_applied" => {
+                let resource = payload["resource"].as_u64().ok_or(Error::InvalidRequest)?;
+                self.canvases.borrow_mut().remove(resource)?;
+                Ok(Value::Null)
+            }
             "remote_dom" => {
                 // Hidden pages still acknowledge DOM/layout; only input needs a slot.
                 if payload["kind"] == "event" && self.panels.borrow().items[&id].slot.is_none() {
@@ -197,6 +203,10 @@ define_class!(
             let raw=unsafe{task.request()}.URL().and_then(|u|u.absoluteString()).map(|s|s.to_string()).unwrap_or_default();
             let route=s.channel.borrow().route(&raw);
             match route {
+                Ok((route,Some(q))) if route=="canvas"=>{
+                    let resource = q.parse::<u64>().ok().and_then(|id|s.canvases.borrow().get(id).ok());
+                    match resource {Some(bytes)=>reply_bytes(task,&bytes,"image/png"),None=>fail_task(task)}
+                },
                 Ok((route,Some(q))) if route=="call"=>{
                     let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||s.handle(&q))).unwrap_or(Err(Error::InvalidRequest));
                     let value=match result {Ok(v)=>json!({"ok":true,"value":v}),Err(e)=>json!({"ok":false,"error":e.to_string()})};reply(task,&value);
@@ -318,13 +328,16 @@ impl Bridge {
 
 fn reply(task: &ProtocolObject<dyn WKURLSchemeTask>, value: &Value) {
     let bytes = serde_json::to_vec(value).expect("JSON value");
+    reply_bytes(task, &bytes, "application/json");
+}
+fn reply_bytes(task: &ProtocolObject<dyn WKURLSchemeTask>, bytes: &[u8], mime: &str) {
     let keys = [
         NSString::from_str("Content-Type"),
         NSString::from_str("Access-Control-Allow-Origin"),
         NSString::from_str("Cache-Control"),
     ];
     let values = [
-        NSString::from_str("application/json"),
+        NSString::from_str(mime),
         NSString::from_str("*"),
         NSString::from_str("no-store"),
     ];
@@ -342,7 +355,7 @@ fn reply(task: &ProtocolObject<dyn WKURLSchemeTask>, value: &Value) {
         )
         .unwrap();
         task.didReceiveResponse(&response);
-        task.didReceiveData(&NSData::with_bytes(&bytes));
+        task.didReceiveData(&NSData::with_bytes(bytes));
         task.didFinish();
     }
 }
@@ -519,6 +532,7 @@ impl MacDomHost {
             popouts: RefCell::new(vec![]),
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
+            canvases: RefCell::new(crate::canvas::CanvasResources::default()),
         });
         let bridge: Retained<Bridge> =
             unsafe { msg_send![super(Bridge::alloc(mtm).set_ivars(shared.clone())), init] };
@@ -576,6 +590,115 @@ impl MacDomHost {
     }
     pub fn web_view(&self) -> &WKWebView {
         &self.web
+    }
+    /// Read exactly one rendered page node; no expression supplied by extension
+    /// or caller executes in WebKit. Invoke on AppKit and poll on the worker.
+    pub fn inspect_capture(
+        &self,
+        generation: Generation,
+        selector: &str,
+        value: bool,
+    ) -> Result<CaptureTicket<Value>> {
+        if generation != self.generation() {
+            return Err(Error::StaleGeneration);
+        }
+        if !self.dedicated_document || !self.shared.ready.get() {
+            return Err(Error::Backpressure);
+        }
+        if selector.len() > 4096 {
+            return Err(Error::InvalidRequest);
+        }
+        let selector = serde_json::to_string(selector).map_err(|_| Error::InvalidRequest)?;
+        let property = if value { "value" } else { "textContent" };
+        let source = format!(
+            "(()=>{{const nodes=document.querySelectorAll({selector});if(nodes.length!==1)throw Error('capture requires exactly one node');return JSON.stringify(nodes[0].{property})}})()"
+        );
+        let (sender, ticket) = crate::capture::ticket();
+        let shared = self.shared.clone();
+        let callback = block2::RcBlock::new(
+            move |object: *mut objc2::runtime::AnyObject, error: *mut NSError| {
+                let result =
+                    if shared.closed.get() || shared.channel.borrow().generation != generation {
+                        Err(Error::StaleGeneration)
+                    } else if !error.is_null() {
+                        Err(Error::InvalidRequest)
+                    } else {
+                        // SAFETY: WebKit owns the callback arguments for this invocation.
+                        unsafe { object.as_ref() }
+                            .and_then(|object| object.downcast_ref::<NSString>())
+                            .ok_or(Error::InvalidRequest)
+                            .and_then(|text| {
+                                serde_json::from_str(&text.to_string())
+                                    .map_err(|_| Error::InvalidRequest)
+                            })
+                    };
+                let _ = sender.try_send(result);
+            },
+        );
+        unsafe {
+            self.web.evaluateJavaScript_completionHandler(
+                &NSString::from_str(&source),
+                Some(&callback),
+            );
+        }
+        Ok(ticket)
+    }
+    /// Actual WebKit snapshot completion, independent of DOM batch admission.
+    /// This captures this rendering document; the app owns full-window captures.
+    pub fn capture_png(&self, generation: Generation) -> Result<CaptureTicket<Vec<u8>>> {
+        if generation != self.generation() {
+            return Err(Error::StaleGeneration);
+        }
+        if !self.dedicated_document || !self.shared.ready.get() {
+            return Err(Error::Backpressure);
+        }
+        let (sender, ticket) = crate::capture::ticket();
+        let shared = self.shared.clone();
+        let callback = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let result = if shared.closed.get() || shared.channel.borrow().generation != generation
+            {
+                Err(Error::StaleGeneration)
+            } else if !error.is_null() {
+                Err(Error::Unsupported("WebKit snapshot failed"))
+            } else {
+                // SAFETY: WebKit owns the image for this callback. The returned
+                // immutable NSData is copied before returning to WebKit.
+                unsafe { image.as_ref() }
+                    .and_then(|image| image.TIFFRepresentation())
+                    .and_then(|data| NSBitmapImageRep::imageRepWithData(&data))
+                    .and_then(|rep| unsafe {
+                        rep.representationUsingType_properties(
+                            NSBitmapImageFileType::PNG,
+                            &NSDictionary::new(),
+                        )
+                    })
+                    .map(|data| unsafe { data.as_bytes_unchecked() }.to_vec())
+                    .ok_or(Error::Unsupported("WebKit PNG encoding failed"))
+            };
+            let _ = sender.try_send(result);
+        });
+        unsafe {
+            self.web
+                .takeSnapshotWithConfiguration_completionHandler(None, &callback);
+        }
+        Ok(ticket)
+    }
+    /// Nonblocking main-thread admission. Pixels were encoded on the realm worker.
+    /// Keep the caller's frame on Backpressure; the page releases resources only
+    /// after decoding and replacing its bitmap. No V8 call occurs here.
+    pub fn present_canvas(&mut self, panel: PanelId, frame: &CanvasFrame) -> Result<()> {
+        self.check(frame.generation, panel)?;
+        if !self.dedicated_document || !self.shared.ready.get() {
+            return Err(Error::Backpressure);
+        }
+        let resource = self.shared.canvases.borrow_mut().insert(frame)?;
+        let result = self.shared.send(json!({"kind":"canvas","panel":panel,
+            "node":frame.node,"dom_sequence":frame.dom_sequence,"resource":resource,
+            "width":frame.width,"height":frame.height}));
+        if result.is_err() {
+            self.shared.canvases.borrow_mut().remove(resource)?;
+        }
+        result
     }
     /// P-A11Y: pass this retained root once in the committed reading order,
     /// interleaved with GPUI root anchors. Preserve the real remote WebKit tree.
@@ -771,6 +894,7 @@ impl MacDomHost {
         self.shared.ready.set(false);
         let generation = self.generation() + 1;
         *self.shared.channel.borrow_mut() = Channel::new(token, generation);
+        *self.shared.canvases.borrow_mut() = crate::canvas::CanvasResources::default();
         for p in self.shared.panels.borrow_mut().items.values_mut() {
             p.overlays.clear()
         }
@@ -1044,6 +1168,7 @@ mod admission_tests {
                     ("write".into(), "project:write".into()),
                 ]),
                 channel: RefCell::new(Channel::new("synthetic-capability".into(), 3)),
+                canvases: RefCell::new(crate::canvas::CanvasResources::default()),
                 panels: RefCell::new(panels),
                 pending: RefCell::new(None),
                 ready: Cell::new(true),

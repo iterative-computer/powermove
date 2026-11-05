@@ -910,3 +910,38 @@ visible refusals, not the 34 missing tool bodies, memory publication, A01–A10
 application/provider dependencies, S070 answer persistence/presentation or Mac
 acceptance. The branch finish signal must therefore be `BLOCKED`, never a false
 `MERGE-READY` completion signal.
+
+## 2026-11-05 — actual native Claude Code registration worker
+
+`registration_cli::NativeClaudeCli` implements the existing `ClaudeCli` hook with
+an actual subprocess. The Settings worker supplies the discovered native binary,
+working directory and explicit user configuration environment, then assigns it
+to `Registration::claude_cli`. It runs `claude mcp` through literal argv, with no
+shell, no Node launcher and no auth copying. Stdout/stderr drain without blocking
+each other, each is capped at 1 MiB, and the deadline cannot exceed main's 60 s.
+Timeout/overflow terminates the owned process group and reaps the direct child;
+cleanup cannot replace the original diagnostic. The final diagnostic line uses
+main's trim policy and a 240-UTF-16-unit bound without splitting a Unicode scalar
+(N3/quirk policy: do not reproduce an unpaired surrogate).
+
+`Registration::apply` now reads the actual Claude Code config after the CLI
+returns success. Connect requires the owned entry with this exact native
+executable; disconnect requires its absence. An exit-zero CLI that published
+nothing is an error, never `changed: true` (N2/N3/N7). Original config bytes are
+archived before remove/add; a failed add leaves the displaced connection's
+archive intact (N4). Existing caller review, stale-file checks and handwritten
+entry preservation remain. Claude Desktop still requires explicit
+`RegistrationConsent::ask`; this adapter performs no desktop auto-registration.
+
+Four new tests use an executable synthetic subprocess: real connect/readback/
+disconnect with literal space/semicolon paths and retained foreign config;
+no-write success refusal; simultaneous full pipes with original-error retention;
+and bounded stalled/flooding peers. The existing 11 registration tests still
+compare the nine-client source contract and consent/config/archive behavior.
+These do not establish installed Claude Code or Settings Accounts UI behavior.
+
+The Settings host must bind the native adapter and existing review/apply APIs to
+its command registry and consent UI. That registry/native shell is outside this
+lane's owned files. Actual installed-client restart, both signed architectures,
+configuration environment selection and descendant drainage remain Mac checks.
+No A02 or other main-delta row is marked fully closed by this component alone.

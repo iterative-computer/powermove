@@ -1,3 +1,4 @@
+import type { NativeAction } from "./actions";
 import type { EventDetail, Json } from "../../src/protocol";
 
 /** Presentation boundary for pm-panel-timeline, not a second document model.
@@ -140,6 +141,7 @@ export type Target =
   | { kind: "splitter" }
   | { kind: "graph" };
 export type Intent =
+  | NativeAction
   | { type: "play" }
   | { type: "open" }
   | { type: "import" }

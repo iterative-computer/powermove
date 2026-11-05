@@ -692,3 +692,563 @@ no remaining authored-curve failure. Complete-controller/window evidence stays
 blocked. See [int2-fixes.md](int2-fixes.md) for source proof, required-feature
 counter changes and final suite results; the older dated tables above retain
 their original context.
+
+## Blocker census and connected portable probes — 2026-11-05
+
+Lane: `feat/na-cloud-accept3`, starting integration base
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66`. Current behavior stays pinned to
+main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; the original v1.2.0 file and
+extension requirements remain separate. No shared W1/table/CSV was rewritten.
+
+The immutable [starting census](../../apps/native/crates/acceptance/data/blocked-baseline-2026-11-05.csv)
+retains **all 2,662 main + 3,136 legacy blocked rows**, with original IDs,
+requirements and backings. The reviewed [reason registry](../../apps/native/crates/acceptance/data/blocker-reasons-2026-11-05.json)
+assigns exactly one primary reason to each backing; the anonymized
+[row-by-row table](../../apps/native/crates/acceptance/data/census-2026-11-05.csv)
+contains all **5,798** rows, reference, ID, original backing, single reason,
+dependency, current verdict and evidence. Nothing is retired or removed from
+the denominator when it passes or fails. The table below groups those exact rows
+by backing, without names, private extensions, profiles or user projects.
+
+A primary reason is the next unsatisfied dependency, not a claim that every later
+prerequisite is ready. `macos-screen` requires actual native input/window/focus,
+IME/AX or panel presentation; `macos-platform` requires GPU/device/signed OS or
+paired physical evidence. `unfinished-lane` identifies an incomplete production
+adapter/controller/service and retains its exact source requirement. A registry,
+trait, model or stub cannot close it. `retained-owner-scope` keeps superseded
+historical/browser-host/removal requirements visible under recorded owner scope.
+`portable-probe` is a reviewed runnable candidate: it must execute and report its
+actual result. No row is currently **credential-only**: the auth-dependent full
+provider/Store rows still lack complete application/service integration, which
+is their earlier primary blocker. No credential was requested or read.
+
+| Original primary reason | Main rows | Legacy rows | Total |
+|---|---:|---:|---:|
+| macos-screen | 2,116 | 2,522 | 4,638 |
+| macos-platform | 48 | 24 | 72 |
+| unfinished-lane | 478 | 578 | 1,056 |
+| retained-owner-scope | 1 | 11 | 12 |
+| portable-probe | 19 | 1 | 20 |
+| **All starting blockers** | **2,662** | **3,136** | **5,798** |
+
+### Real execution and measured defects
+
+Eighteen main tool-body rows now pass through production `McpSession`/`Automation`
+and the real native kernel or file-backed source service: project list/create/
+open/manage, start/finish/rollback sessions, timeline/selection, command/strip/
+video edits, caption sidecars, media management, saved panel-layout
+inspection, source-backed 3D scene inspection, effect validation
+and built-in source forking. Exact current catalog identity, actual session/
+planning/app/closed-connection refusal precedence, stable source identity,
+revision refresh, atomic refusal and existing authored-state/history assertions
+are exercised. The fork body uses the separately locked worker's existing real
+`BuiltinSources` adapter; without that worker it stays blocked. No fake renderer,
+network transport or success-shaped service was added. Full app workflows and
+all 719 main e2e declarations remain blocked; these tool-body passes do not
+certify their windows, gestures or pixels.
+
+The two other runnable starting rows (`MAIN.MCP.save_project.behavior`, legacy
+`A506`) are now **failures**, exposing one product defect: opening a packed file,
+editing it and calling `save_project` saves the working file in place. Pinned
+main promises a separate uniquely named file in the host export folder. The
+probe first verifies exact referenced **and unreachable** embedded bytes,
+media IDs/types/revisions, authored state and reopened Undo/Redo; it then fails
+the unchanged export-destination/uniqueness contract. This needs the MCP/kernel
+owner's implementation outside this lane, not a changed acceptance expectation.
+
+A further actual file-ingress probe exposes a second product defect in both
+reports: the kernel accepts a valid PMV4 with an authored lone UTF-16 code unit,
+but `Automation::open_file` panics in `pm-mcp::json_value` converting the model
+through serde JSON. The unchanged synthetic source bytes survive the refusal.
+`MAIN.file.utf16-ingress` and `W007.mcp-utf16-ingress` remain **fail**, never a skip
+or blocker. The owned fixtures are public/synthetic and vendored; no external
+corpus or codec build is needed. Fixture generation is deterministic on Python
+3.9+. No tolerance, expected pixel, authored handle or capability was relaxed.
+
+Configured current results: **1,700 pass / 2 fail / 2,643 blocked** (4,345 rows).
+Configured retained compatibility: **1,467 pass / 2 fail / 3,135 blocked**
+(4,604 rows). There are two product defects, represented separately in the two
+reference scopes. Relative to the requested starting population, **18 real main
+passes + 2 explicit failed assertions** replace 20 blockers. The additional
+UTF-16 case adds one failure per reference, not another closed starting row.
+No workflow, screen, signed confinement or physical gate is promoted.
+
+One command executes the locked prerequisites/probes and prints all
+pass/fail/blocked counts per reason:
+
+```sh
+source /workspace/.tools/activate.sh; cd /workspace/powermove
+apps/native/crates/acceptance/scripts/verify.sh --strict
+```
+
+Its expected acceptance exit is **1** for the two real defects. The suites test
+that failures stay failures; a green harness suite does not mean green product
+acceptance. To inspect an existing configured report without rebuilding:
+
+```sh
+python3 apps/native/crates/acceptance/scripts/census.py work/native-acceptance/report.json --strict
+```
+
+The reporter rejects missing/duplicate baseline IDs, filtered or mixed-reference
+reports, unknown verdicts, inconsistent status/backing and absent evidence. It
+prints extra unconfigured-worker rows explicitly and preserves fail over blocked
+in strict exits. The reason table is immutable as a starting census; current
+verdicts are reconciled by ID from each fresh real execution. Active main CSVs
+are refreshed only inside the owned acceptance subtree; the original census
+and legacy source/declaration ledgers remain available.
+
+### Decisions and remaining dependencies
+
+| Decision | Selecting rule |
+|---|---|
+| Keep every starting ID, exact original requirement and separate reference; assign one primary blocker and preserve subsequent prerequisites | N3/N4/N6/N7: authored intent, old inputs and inspectable evidence cannot disappear |
+| Execute only connected MCP/kernel/source-service bodies; leave unavailable full controllers, providers, byte admission, runtime query arms and engine bindings blocked | N1/N3/N7/N8: real services, no stub passes or main-thread JS waits |
+| Preserve unique-export and UTF-16 ingress as measured failures; request the production fixes from their owners | N1/N3/N4 and lane ownership: correct packing and no lost authored data take priority over a green count |
+| Keep all full native workflows/e2e declarations and physical/signed gates open | N1/N2/N3: Linux tool success cannot prove Mac application behavior |
+| Add no visual/UX implementation, tokens, wording or interaction | Opus ownership: no new `DESIGN-TODO(opus)` |
+
+Outside this lane: fix unique packed export plus lossless MCP model/UTF-16
+transport; connect the remaining real media import/replace/registry/transcription,
+Store HTTP/install/publish, provider/thread/agent coordinator, extension
+promotion and compat query/selection/mutation/UI-state/workspace adapters.
+For example, compat `history.selection` and structural-mutation arms are absent
+from the real `KernelAdapter`; factory `KF` needs the unattached ease query;
+`UtilAPI` still needs round/timecode/color adapters. Passing adjacent facade tests
+cannot promote these compound member contracts. Main project-memory writes
+still return unavailable for non-Undo durable admission; full get_project_state
+still needs live media/font-layout resources, not its current null/unavailable
+projections. No implementation outside the two owned paths was changed.
+
+Mac verification must exercise actual keyboard/menu/Tab-flowchart delivery,
+GPUI/AppKit/IME/AX/WebKit controls and lifecycle, engine frames/source identity,
+codec/export/audio and real presentation, signed Store/Keychain/updater boundaries,
+and both paired physical-performance rigs. Opus must review actual visual
+output. Linux evidence certifies none of these. No Mac-only prerequisite was
+silently skipped to manufacture a passing row.
+
+### Complete starting-row classification by backing
+
+Prefixes remain intact to distinguish original source/owner routing. Each table
+entry links through the row table above to every individual ID and its verdict.
+The two count columns partition exactly the requested 2,662/3,136 rows.
+
+| Exact original backing | Main | Legacy | Single primary reason | Dependency |
+|---|---:|---:|---|---|
+| `agent-approval-question-stream-host` | 0 | 7 | unfinished-lane | agent host |
+| `agent-project-tool-integration` | 0 | 13 | unfinished-lane | agent host |
+| `agent-provider-auth-stream-host` | 0 | 32 | unfinished-lane | agent host |
+| `agent-run-thread-coordinator` | 0 | 16 | unfinished-lane | agent host |
+| `agent-visual-reply-publication` | 0 | 10 | unfinished-lane | agent host |
+| `cloud-media-download-coordinator` | 0 | 4 | unfinished-lane | media/engine |
+| `compat-live-kernel-render-page-binding` | 0 | 7 | unfinished-lane | compat runtime |
+| `compat:animation-evaluator` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:asset-byte-import` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:complete-canvas-engine-resources` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:ease-query-backend` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:extension-lifecycle` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:group-query-edit` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:history-selection-adapter` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:legacy-util-backend` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:media-registry` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:model-constructors` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:native-drag-drop` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:native-host-actions` | 0 | 3 | unfinished-lane | compat runtime |
+| `compat:palette-host` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:panel-render-mount` | 0 | 3 | unfinished-lane | compat runtime |
+| `compat:project-kernel` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:remote-dom-controls` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:scene3d-backend` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:selection-kernel` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:space3d-backend` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:store-namespaced-events` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:structural-mutation-lease-adapter` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:transport-engine` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:ui-state-kernel` | 0 | 1 | unfinished-lane | compat runtime |
+| `compat:workspace-kernel` | 0 | 1 | unfinished-lane | compat runtime |
+| `decoded-source-retiming-integration` | 0 | 3 | unfinished-lane | media/engine |
+| `decoded-source-slip-integration` | 0 | 1 | unfinished-lane | media/engine |
+| `delta-data:archived-web-export-preferences` | 1 | 0 | unfinished-lane | media/engine |
+| `delta-data:durable-media-import-coordinator` | 21 | 0 | unfinished-lane | media/engine |
+| `delta-data:durable-media-relink-replacement` | 8 | 0 | unfinished-lane | media/engine |
+| `delta-data:image-sequence-import-coordinator` | 3 | 0 | unfinished-lane | application/services |
+| `delta-data:native-async-project-open` | 11 | 0 | unfinished-lane | application/services |
+| `delta-data:native-portable-document-flow` | 26 | 0 | unfinished-lane | application/services |
+| `delta-data:project-memory-index-and-tool` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `delta-fx:metal-authored-frame-oracles` | 3 | 0 | macos-platform | macOS engine/platform |
+| `delta-fx:native-audio-mixer-device-meters` | 3 | 0 | unfinished-lane | media/engine |
+| `delta-fx:native-effects-matte-controls` | 82 | 0 | unfinished-lane | media/engine |
+| `delta-fx:native-embedded-audio-routing` | 3 | 0 | unfinished-lane | media/engine |
+| `delta-fx:native-export-child-codec-integration` | 48 | 0 | unfinished-lane | media/engine |
+| `delta-fx:native-scene3d-editor` | 12 | 0 | unfinished-lane | media/engine |
+| `delta-fx:native-shader-compiler-editor` | 1 | 0 | unfinished-lane | media/engine |
+| `durable-media-import-coordinator` | 0 | 25 | unfinished-lane | media/engine |
+| `durable-media-relink-replacement` | 0 | 13 | unfinished-lane | media/engine |
+| `encoded-fractional-rate-oracle` | 0 | 1 | unfinished-lane | application/services |
+| `engine-media-registry-integration` | 0 | 7 | unfinished-lane | media/engine |
+| `extension-settings-storage-host` | 0 | 3 | unfinished-lane | application/services |
+| `extension-source-promotion-activation` | 0 | 23 | unfinished-lane | media/engine |
+| `external-mcp-application-integration` | 0 | 7 | unfinished-lane | agent host |
+| `image-sequence-import-coordinator` | 0 | 9 | unfinished-lane | application/services |
+| `main:agent-approval-question-stream-host` | 1 | 0 | unfinished-lane | agent host |
+| `main:agent-client-config-registration` | 1 | 0 | unfinished-lane | agent host |
+| `main:agent-project-tool-integration` | 1 | 0 | unfinished-lane | agent host |
+| `main:agent-provider-auth-stream-host` | 1 | 0 | unfinished-lane | agent host |
+| `main:agent-run-thread-coordinator` | 1 | 0 | unfinished-lane | agent host |
+| `main:agent-visual-reply-publication` | 1 | 0 | unfinished-lane | agent host |
+| `main:claude-auto-permission-classifier` | 1 | 0 | unfinished-lane | agent host |
+| `main:cloud-media-download-coordinator` | 1 | 0 | unfinished-lane | media/engine |
+| `main:compat-live-kernel-render-page-binding` | 1 | 0 | unfinished-lane | compat runtime |
+| `main:decoded-source-retiming-integration` | 1 | 0 | unfinished-lane | media/engine |
+| `main:decoded-source-slip-integration` | 1 | 0 | unfinished-lane | media/engine |
+| `main:durable-media-import-coordinator` | 1 | 0 | unfinished-lane | media/engine |
+| `main:durable-media-relink-replacement` | 1 | 0 | unfinished-lane | media/engine |
+| `main:encoded-fractional-rate-oracle` | 1 | 0 | unfinished-lane | application/services |
+| `main:engine-media-registry-integration` | 1 | 0 | unfinished-lane | media/engine |
+| `main:extension-rebase-appearance` | 1 | 0 | unfinished-lane | application/services |
+| `main:extension-settings-storage-host` | 1 | 0 | unfinished-lane | application/services |
+| `main:extension-source-promotion-activation` | 1 | 0 | unfinished-lane | media/engine |
+| `main:external-mcp-application-integration` | 1 | 0 | unfinished-lane | agent host |
+| `main:image-sequence-import-coordinator` | 1 | 0 | unfinished-lane | application/services |
+| `main:main-mcp-host-integration` | 1 | 0 | unfinished-lane | agent host |
+| `main:markdown-local-media-grants` | 1 | 0 | unfinished-lane | media/engine |
+| `main:mcp:apply_commands` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:capture_panel` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:check_project` | 1 | 0 | unfinished-lane | media/engine |
+| `main:mcp:computer_use_panel` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:create_project` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:delegate_task` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:edit_3d` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:edit_layer_strips` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:edit_video` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:export_captions` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:export_video` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:finish_session` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:fork_builtin_extension` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:generate_captions` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:get_3d_scene` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:get_panel_layout` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:get_panel_state` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:get_project_state` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:get_timeline` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:get_workspace_state` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:import_media` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:import_media_to_timeline` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:inspect_creative_extension` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:inspect_creative_workspace` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:interact_panel` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:list_media` | 1 | 0 | unfinished-lane | media/engine |
+| `main:mcp:list_projects` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:manage_media` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:manage_project` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:media_contact_sheet` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:media_waveform` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:open_panel` | 1 | 0 | macos-screen | macOS application |
+| `main:mcp:open_project` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:orchestrator_capabilities` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:probe_media` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:publish_extensions` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:publish_visual_reply` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:render_frames` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:replace_media` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:rollback_changes` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:sample_media_frames` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:save_project` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:select_layers` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:set_panel_layout` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:stage_fork_rebase` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:start_session` | 1 | 0 | portable-probe | acceptance |
+| `main:mcp:store_extension` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_install` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_library` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_publish` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_publish_prepare` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_search` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_source` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_uninstall` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:store_update` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:task_cancel` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:task_send` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:task_status` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_cancel` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_launch` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_list` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_read` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_send` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_unwatch` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:thread_watch` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:transcribe_media` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:mcp:validate_effect` | 1 | 0 | portable-probe | acceptance |
+| `main:metal-authored-frame-oracles` | 1 | 0 | macos-platform | macOS engine/platform |
+| `main:native-agent-composer-attachments` | 1 | 0 | macos-screen | macOS application |
+| `main:native-agent-conversation-surface` | 1 | 0 | macos-screen | macOS application |
+| `main:native-async-project-open` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-audio-mixer-device-meters` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-caption-editor-and-inference` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-clip-trim-split-controls` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-close-quit-coordinator` | 1 | 0 | macos-screen | macOS application |
+| `main:native-colour-control-sampler` | 1 | 0 | macos-screen | macOS application |
+| `main:native-composition-settings-controls` | 1 | 0 | macos-screen | macOS application |
+| `main:native-control-input-bindings` | 1 | 0 | macos-screen | macOS application |
+| `main:native-crash-recovery-coordinator` | 1 | 0 | macos-screen | macOS application |
+| `main:native-cross-surface-history-clipboard` | 1 | 0 | macos-screen | macOS application |
+| `main:native-easing-preset-library` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-effects-matte-controls` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-embedded-audio-routing` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-export-child-codec-integration` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-export-queue-snapshots` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-first-run-about` | 1 | 0 | macos-screen | macOS application |
+| `main:native-font-text-animation-controls` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-graph-editor-and-curve-oracle` | 1 | 0 | macos-screen | macOS application |
+| `main:native-group-parent-precompose-pixels` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-input-ime-accessibility` | 1 | 0 | macos-screen | macOS application |
+| `main:native-inspector-property-bindings` | 1 | 0 | macos-screen | macOS application |
+| `main:native-key-command-dispatch` | 1 | 0 | macos-screen | macOS application |
+| `main:native-keyboard-dispatch` | 1782 | 0 | macos-screen | macOS application |
+| `main:native-keyframe-editor` | 1 | 0 | macos-screen | macOS application |
+| `main:native-launch-open-routing` | 1 | 0 | macos-screen | macOS application |
+| `main:native-library-live-previews` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-linked-av-editor-integration` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-marker-controls` | 1 | 0 | macos-screen | macOS application |
+| `main:native-media-browser-controller` | 1 | 0 | macos-screen | macOS application |
+| `main:native-menu-command-dispatch` | 1 | 0 | macos-screen | macOS application |
+| `main:native-notification-haptic-adapters` | 1 | 0 | macos-platform | macOS engine/platform |
+| `main:native-palette-dialog-notices` | 1 | 0 | macos-screen | macOS application |
+| `main:native-panel-popout-lifecycle` | 1 | 0 | macos-screen | macOS application |
+| `main:native-panel-semantic-surface-host` | 1 | 0 | macos-screen | macOS application |
+| `main:native-path-mask-editor` | 1 | 0 | macos-screen | macOS application |
+| `main:native-playback-engine-transport` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-portable-document-flow` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-project-library-controls` | 1 | 0 | macos-screen | macOS application |
+| `main:native-ripple-gesture-integration` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-roll-slide-gesture-integration` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-scene3d-editor` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-settings-service-bindings` | 1 | 0 | macos-screen | macOS application |
+| `main:native-shader-compiler-editor` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-shuttle-command-engine-routing` | 1 | 0 | unfinished-lane | application/services |
+| `main:native-signed-updater` | 1 | 0 | macos-platform | macOS engine/platform |
+| `main:native-source-monitor-three-point` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-source-preview-controller` | 1 | 0 | unfinished-lane | media/engine |
+| `main:native-text-editor-layout` | 1 | 0 | macos-screen | macOS application |
+| `main:native-theme-host-bindings` | 1 | 0 | macos-screen | macOS application |
+| `main:native-timeline-layer-controls` | 1 | 0 | macos-screen | macOS application |
+| `main:native-timeline-snapping` | 1 | 0 | macos-screen | macOS application |
+| `main:native-viewer-navigation` | 1 | 0 | macos-screen | macOS application |
+| `main:native-viewer-selection-movement` | 1 | 0 | macos-screen | macOS application |
+| `main:native-viewer-transform-gestures` | 1 | 0 | macos-screen | macOS application |
+| `main:native-window-tab-routing` | 1 | 0 | macos-screen | macOS application |
+| `main:native-work-area-controls` | 1 | 0 | macos-screen | macOS application |
+| `main:native-workspace-layout-controller` | 1 | 0 | macos-screen | macOS application |
+| `main:owner-browser-host-scope` | 1 | 0 | retained-owner-scope | owner scope |
+| `main:physical-paired-performance-oracles` | 1 | 0 | macos-platform | macOS engine/platform |
+| `main:project-memory-index-and-tool` | 1 | 0 | unfinished-lane | kernel/MCP |
+| `main:provider-presets-model-discovery` | 1 | 0 | unfinished-lane | agent host |
+| `main:provider-review-consent-error-identity` | 1 | 0 | unfinished-lane | agent host |
+| `main:publication-panel-generation-fences` | 1 | 0 | unfinished-lane | application/services |
+| `main:signed-store-helper-admission` | 1 | 0 | macos-platform | macOS engine/platform |
+| `main:store-account-library-service` | 1 | 0 | unfinished-lane | application/services |
+| `main:store-remote-install-publish-service` | 1 | 0 | unfinished-lane | application/services |
+| `main:transcription-model-inference-service` | 1 | 0 | unfinished-lane | media/engine |
+| `main:visual-reply-thread-persistence` | 1 | 0 | unfinished-lane | agent host |
+| `mcp:capture_panel` | 0 | 1 | macos-screen | macOS application |
+| `mcp:computer_use_panel` | 0 | 1 | macos-screen | macOS application |
+| `mcp:edit_3d` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:export_video` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:generate_captions` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:get_panel_state` | 0 | 1 | macos-screen | macOS application |
+| `mcp:get_workspace_state` | 0 | 1 | macos-screen | macOS application |
+| `mcp:import_media` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:import_media_to_timeline` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:inspect_creative_extension` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:inspect_creative_workspace` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:interact_panel` | 0 | 1 | macos-screen | macOS application |
+| `mcp:media_contact_sheet` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:media_waveform` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:open_panel` | 0 | 1 | macos-screen | macOS application |
+| `mcp:probe_media` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:publish_extensions` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:publish_visual_reply` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:render_frames` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:replace_media` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:sample_media_frames` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:save_project` | 0 | 1 | portable-probe | acceptance |
+| `mcp:set_panel_layout` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:stage_fork_rebase` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_extension` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_install` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_library` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_publish` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_publish_prepare` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_search` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_source` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_uninstall` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:store_update` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:task_send` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_cancel` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_launch` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_list` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_read` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_send` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_unwatch` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:thread_watch` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `mcp:transcribe_media` | 0 | 1 | unfinished-lane | kernel/MCP |
+| `memory-post-tag-requirement` | 0 | 2 | retained-owner-scope | owner scope |
+| `metal-authored-frame-oracles` | 0 | 1 | macos-platform | macOS engine/platform |
+| `native-agent-composer-attachments` | 0 | 12 | macos-screen | macOS application |
+| `native-agent-conversation-surface` | 0 | 16 | macos-screen | macOS application |
+| `native-app:agent-approval-question-stream-host` | 2 | 0 | unfinished-lane | agent host |
+| `native-app:agent-project-tool-integration` | 14 | 0 | unfinished-lane | agent host |
+| `native-app:agent-provider-auth-stream-host` | 9 | 0 | unfinished-lane | agent host |
+| `native-app:agent-run-thread-coordinator` | 12 | 0 | unfinished-lane | agent host |
+| `native-app:agent-visual-reply-publication` | 7 | 0 | unfinished-lane | agent host |
+| `native-app:cloud-media-download-coordinator` | 2 | 0 | unfinished-lane | media/engine |
+| `native-app:compat-live-kernel-render-page-binding` | 3 | 0 | unfinished-lane | compat runtime |
+| `native-app:decoded-source-retiming-integration` | 1 | 0 | unfinished-lane | media/engine |
+| `native-app:engine-media-registry-integration` | 5 | 0 | unfinished-lane | media/engine |
+| `native-app:extension-source-promotion-activation` | 19 | 0 | unfinished-lane | media/engine |
+| `native-app:external-mcp-application-integration` | 2 | 0 | unfinished-lane | agent host |
+| `native-app:native-agent-composer-attachments` | 9 | 0 | macos-screen | macOS application |
+| `native-app:native-agent-conversation-surface` | 21 | 0 | macos-screen | macOS application |
+| `native-app:native-caption-editor-and-inference` | 10 | 0 | unfinished-lane | media/engine |
+| `native-app:native-close-quit-coordinator` | 10 | 0 | macos-screen | macOS application |
+| `native-app:native-colour-control-sampler` | 7 | 0 | macos-screen | macOS application |
+| `native-app:native-composition-settings-controls` | 5 | 0 | macos-screen | macOS application |
+| `native-app:native-control-input-bindings` | 4 | 0 | macos-screen | macOS application |
+| `native-app:native-crash-recovery-coordinator` | 3 | 0 | macos-screen | macOS application |
+| `native-app:native-cross-surface-history-clipboard` | 5 | 0 | macos-screen | macOS application |
+| `native-app:native-easing-preset-library` | 3 | 0 | unfinished-lane | application/services |
+| `native-app:native-first-run-about` | 1 | 0 | macos-screen | macOS application |
+| `native-app:native-font-text-animation-controls` | 10 | 0 | unfinished-lane | application/services |
+| `native-app:native-graph-editor-and-curve-oracle` | 10 | 0 | macos-screen | macOS application |
+| `native-app:native-group-parent-precompose-pixels` | 23 | 0 | unfinished-lane | application/services |
+| `native-app:native-input-ime-accessibility` | 11 | 0 | macos-screen | macOS application |
+| `native-app:native-inspector-property-bindings` | 13 | 0 | macos-screen | macOS application |
+| `native-app:native-key-command-dispatch` | 5 | 0 | macos-screen | macOS application |
+| `native-app:native-keyframe-editor` | 30 | 0 | macos-screen | macOS application |
+| `native-app:native-launch-open-routing` | 7 | 0 | macos-screen | macOS application |
+| `native-app:native-library-live-previews` | 8 | 0 | unfinished-lane | application/services |
+| `native-app:native-marker-controls` | 1 | 0 | macos-screen | macOS application |
+| `native-app:native-media-browser-controller` | 6 | 0 | macos-screen | macOS application |
+| `native-app:native-notification-haptic-adapters` | 1 | 0 | macos-platform | macOS engine/platform |
+| `native-app:native-palette-dialog-notices` | 8 | 0 | macos-screen | macOS application |
+| `native-app:native-panel-popout-lifecycle` | 2 | 0 | macos-screen | macOS application |
+| `native-app:native-panel-semantic-surface-host` | 9 | 0 | macos-screen | macOS application |
+| `native-app:native-path-mask-editor` | 15 | 0 | macos-screen | macOS application |
+| `native-app:native-playback-engine-transport` | 25 | 0 | unfinished-lane | application/services |
+| `native-app:native-project-library-controls` | 3 | 0 | macos-screen | macOS application |
+| `native-app:native-settings-service-bindings` | 6 | 0 | macos-screen | macOS application |
+| `native-app:native-source-preview-controller` | 2 | 0 | unfinished-lane | media/engine |
+| `native-app:native-text-editor-layout` | 11 | 0 | macos-screen | macOS application |
+| `native-app:native-theme-host-bindings` | 3 | 0 | macos-screen | macOS application |
+| `native-app:native-timeline-layer-controls` | 37 | 0 | macos-screen | macOS application |
+| `native-app:native-timeline-snapping` | 4 | 0 | macos-screen | macOS application |
+| `native-app:native-viewer-navigation` | 19 | 0 | macos-screen | macOS application |
+| `native-app:native-viewer-selection-movement` | 4 | 0 | macos-screen | macOS application |
+| `native-app:native-viewer-transform-gestures` | 7 | 0 | macos-screen | macOS application |
+| `native-app:native-window-tab-routing` | 11 | 0 | macos-screen | macOS application |
+| `native-app:native-workspace-layout-controller` | 7 | 0 | macos-screen | macOS application |
+| `native-app:physical-paired-performance-oracles` | 29 | 0 | macos-platform | macOS engine/platform |
+| `native-app:signed-store-helper-admission` | 10 | 0 | macos-platform | macOS engine/platform |
+| `native-app:store-remote-install-publish-service` | 2 | 0 | unfinished-lane | application/services |
+| `native-app:transcription-model-inference-service` | 5 | 0 | unfinished-lane | media/engine |
+| `native-async-project-open` | 0 | 9 | unfinished-lane | application/services |
+| `native-audio-mixer-device-meters` | 0 | 8 | unfinished-lane | media/engine |
+| `native-caption-editor-and-inference` | 0 | 76 | unfinished-lane | media/engine |
+| `native-clip-trim-split-controls` | 0 | 14 | unfinished-lane | application/services |
+| `native-close-quit-coordinator` | 0 | 9 | macos-screen | macOS application |
+| `native-colour-control-sampler` | 0 | 38 | macos-screen | macOS application |
+| `native-composition-settings-controls` | 0 | 8 | macos-screen | macOS application |
+| `native-control-input-bindings` | 0 | 50 | macos-screen | macOS application |
+| `native-crash-recovery-coordinator` | 0 | 6 | macos-screen | macOS application |
+| `native-cross-surface-history-clipboard` | 0 | 16 | macos-screen | macOS application |
+| `native-easing-preset-library` | 0 | 11 | unfinished-lane | application/services |
+| `native-effects-matte-controls` | 0 | 7 | unfinished-lane | media/engine |
+| `native-embedded-audio-routing` | 0 | 7 | unfinished-lane | media/engine |
+| `native-export-child-codec-integration` | 0 | 19 | unfinished-lane | media/engine |
+| `native-export-queue-snapshots` | 0 | 6 | unfinished-lane | media/engine |
+| `native-first-run-about` | 0 | 6 | macos-screen | macOS application |
+| `native-font-text-animation-controls` | 0 | 19 | unfinished-lane | application/services |
+| `native-graph-editor-and-curve-oracle` | 0 | 27 | macos-screen | macOS application |
+| `native-group-parent-precompose-pixels` | 0 | 33 | unfinished-lane | application/services |
+| `native-input-ime-accessibility` | 0 | 7 | macos-screen | macOS application |
+| `native-inspector-property-bindings` | 0 | 59 | macos-screen | macOS application |
+| `native-key-command-dispatch` | 0 | 16 | macos-screen | macOS application |
+| `native-keyframe-editor` | 0 | 43 | macos-screen | macOS application |
+| `native-launch-open-routing` | 0 | 14 | macos-screen | macOS application |
+| `native-library-live-previews` | 0 | 7 | unfinished-lane | application/services |
+| `native-linked-av-editor-integration` | 0 | 1 | unfinished-lane | application/services |
+| `native-marker-controls` | 0 | 8 | macos-screen | macOS application |
+| `native-media-browser-controller` | 0 | 17 | macos-screen | macOS application |
+| `native-menu-command-dispatch` | 0 | 77 | macos-screen | macOS application |
+| `native-notification-haptic-adapters` | 0 | 5 | macos-platform | macOS engine/platform |
+| `native-palette-dialog-notices` | 0 | 23 | macos-screen | macOS application |
+| `native-panel-popout-lifecycle` | 0 | 5 | macos-screen | macOS application |
+| `native-panel-semantic-surface-host` | 0 | 8 | macos-screen | macOS application |
+| `native-path-mask-editor` | 0 | 24 | macos-screen | macOS application |
+| `native-playback-engine-transport` | 0 | 16 | unfinished-lane | application/services |
+| `native-portable-document-flow` | 0 | 28 | unfinished-lane | application/services |
+| `native-project-library-controls` | 0 | 10 | macos-screen | macOS application |
+| `native-ripple-gesture-integration` | 0 | 2 | unfinished-lane | application/services |
+| `native-roll-slide-gesture-integration` | 0 | 1 | unfinished-lane | application/services |
+| `native-scene3d-editor` | 0 | 29 | unfinished-lane | media/engine |
+| `native-settings-service-bindings` | 0 | 16 | macos-screen | macOS application |
+| `native-shader-compiler-editor` | 0 | 1 | unfinished-lane | media/engine |
+| `native-shuttle-command-engine-routing` | 0 | 1 | unfinished-lane | application/services |
+| `native-signed-updater` | 0 | 4 | macos-platform | macOS engine/platform |
+| `native-source-monitor-three-point` | 0 | 1 | unfinished-lane | media/engine |
+| `native-source-preview-controller` | 0 | 8 | unfinished-lane | media/engine |
+| `native-text-editor-layout` | 0 | 31 | macos-screen | macOS application |
+| `native-theme-host-bindings` | 0 | 17 | macos-screen | macOS application |
+| `native-timeline-layer-controls` | 0 | 60 | macos-screen | macOS application |
+| `native-timeline-snapping` | 0 | 17 | macos-screen | macOS application |
+| `native-viewer-navigation` | 0 | 32 | macos-screen | macOS application |
+| `native-viewer-selection-movement` | 0 | 26 | macos-screen | macOS application |
+| `native-viewer-transform-gestures` | 0 | 19 | macos-screen | macOS application |
+| `native-window-tab-routing` | 0 | 20 | macos-screen | macOS application |
+| `native-work-area-controls` | 0 | 10 | macos-screen | macOS application |
+| `native-workspace-layout-controller` | 0 | 14 | macos-screen | macOS application |
+| `owner-browser-host-scope` | 0 | 8 | retained-owner-scope | owner scope |
+| `owner-web-animation-export-scope` | 0 | 1 | retained-owner-scope | owner scope |
+| `physical-paired-performance-oracles` | 0 | 1 | macos-platform | macOS engine/platform |
+| `real-keyboard-dispatch` | 0 | 1755 | macos-screen | macOS application |
+| `signed-store-helper-admission` | 0 | 13 | macos-platform | macOS engine/platform |
+| `store-account-library-service` | 0 | 5 | unfinished-lane | application/services |
+| `store-remote-install-publish-service` | 0 | 9 | unfinished-lane | application/services |
+| `transcription-model-inference-service` | 0 | 16 | unfinished-lane | media/engine |
+
+The fresh [legacy workflow aggregate table](../../apps/native/crates/acceptance/data/legacy-workflows-2026-11-05.md)
+retains the actual configured per-workflow counts. W007/W031 aggregates now fail
+because of the measured ingress/export defects; the other 81 aggregates remain
+blocked. All 83 complete-workflow contract rows remain blocked and no workflow
+passes. Earlier dated shared W1 tables retain their original evidence instead
+of being rewritten to match this new execution.
+
+### Final merge replay — 2026-11-05
+
+Fetched and merged `origin/feat/native-engine` at
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66` (already contained; no conflict).
+The final locked replay has **106 acceptance + 17 optional-worker + 37 retained-e2e
+Rust tests = 160 passed, 0 failed, 0 ignored**, plus **15 Python tests passed**.
+All three crate-local formatting and Clippy `-D warnings` checks pass. No package
+or workspace member was added, so neither native/engine nor nested lockfiles
+needed any dependency update; every Cargo command uses `--locked`.
+
+Exact suite commands, also executed by `verify.sh --strict`:
+
+```sh
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance
+cargo test --locked --manifest-path apps/native/crates/acceptance/runtime/Cargo.toml
+cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+python3 -m unittest discover -s apps/native/crates/acceptance/scripts -p 'test_*.py'
+```
+
+The final configured acceptance remains **1,700 / 2 / 2,643 main** and
+**1,467 / 2 / 3,135 legacy**; `verify.sh --strict` exits **1**, preserving both
+measured product defects. All 5,798 checked-in census verdicts byte-match a fresh
+reconciliation. Both new file probes are explicit required compatibility-input
+gates in main, alongside their current-main verdicts. Earlier passing file/extension
+checks remain and no historical UI gate reinstates the old UI reference.
+
+Only the owned acceptance subtree and this append-only document differ from the
+integration base. Secret scanning with the repository's staged gitleaks policy
+passes. macOS/application/Opus qualification and the owning production fixes
+listed above remain open; this lane is mergeable, not full product acceptance.

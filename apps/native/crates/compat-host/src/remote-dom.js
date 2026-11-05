@@ -5,6 +5,7 @@
   let panel = null,
     applier = null,
     after = 0,
+    applied = 0,
     stopped = false;
   const call = (value) => {
     const request = new XMLHttpRequest();
@@ -20,7 +21,7 @@
     if (!reply.ok) throw Error(reply.error);
     return reply.value;
   };
-  const apply = (event) => {
+  const apply = async (event) => {
     if (event.kind === "create") {
       if (panel !== null)
         throw Error("Dedicated remote DOM page already owns a panel");
@@ -53,6 +54,21 @@
             },
           });
         if (!applier.apply(batch)) throw Error("Remote DOM page fault");
+        applied = batch.seq;
+      } else if (event.kind === "canvas") {
+        if (event.dom_sequence > applied) throw Error("Native canvas precedes DOM admission");
+        const canvas = applier?.node(event.node);
+        if (!canvas || canvas.localName !== "canvas") throw Error("Unknown native canvas");
+        canvas.width = event.width;
+        canvas.height = event.height;
+        if (event.width && event.height) {
+          const response = await fetch(base + "canvas?q=" + event.resource, { cache: "no-store" });
+          if (!response.ok) throw Error("Native canvas resource unavailable");
+          const bitmap = await createImageBitmap(await response.blob());
+          try { canvas.getContext("2d").drawImage(bitmap, 0, 0); }
+          finally { bitmap.close(); }
+        }
+        call({ kind: "canvas_applied", panel, payload: {resource:event.resource} });
       } else if (event.kind === "destroy") {
         applier?.dispose();
         applier = null;
@@ -76,7 +92,7 @@
         const message = await response.json();
         if (message.generation !== generation)
           throw Error("Stale host generation");
-        for (const event of message.events) apply(event);
+        for (const event of message.events) await apply(event);
         after = message.seq;
       }
     } catch (_) {

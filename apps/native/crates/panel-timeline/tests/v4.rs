@@ -491,3 +491,451 @@ fn shell_mask_reveal_persists_disclosure_without_editing_animation() {
     dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
     assert!(c.model.reveal.layers.values().all(|d| d.collapsed));
 }
+
+#[test]
+fn native_drag_steps_replace_from_start_and_commit_as_one_undo() {
+    let (_actor, mut c) = client();
+    let before = c.model.index.layer("a:[]").unwrap().from;
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["a:[]"]}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    let moved = c.model.index.layer("a:[]").unwrap().from;
+    // Every sample is total displacement, not a repeated relative increment.
+    assert!((moved - before - 2.).abs() < 1. / 30.);
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(c.model.index.layer("a:[]").unwrap().from, before);
+}
+
+#[test]
+fn native_disposal_and_pointer_cancellation_restore_the_active_preview() {
+    for action in ["cancelDrag", "dispose"] {
+        let (_actor, mut c) = client();
+        let before = c.model.index.layer("b").unwrap().duration;
+        dispatch(
+            &mut c,
+            json!({"type":"beginDrag","kind":"trimOut","ids":["b"]}),
+        )
+        .unwrap();
+        dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+        assert_ne!(c.model.index.layer("b").unwrap().duration, before);
+        dispatch(&mut c, json!({"type":action})).unwrap();
+        assert_eq!(c.model.index.layer("b").unwrap().duration, before);
+        assert!(c.active_drag().is_none());
+    }
+}
+
+#[test]
+fn numeric_key_time_uses_composition_time_beyond_strip_and_refuses_collision() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"editKeys","ids":["original"],"time":8.,"value":42.}),
+    )
+    .unwrap();
+    let (l, _, k) = c.model.index.key("original").unwrap();
+    // main timeline.ts snaps the layer-local time, retaining a subframe strip origin.
+    assert_eq!(k.time, ((8.0_f64 + 0.125) * 30.).round() / 30.);
+    assert!(l.from + k.time > l.from + l.duration);
+    assert_eq!(k.value.as_f64(), Some(42.));
+    assert_eq!(
+        k.stored.get("custom").and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"a:[]","path":"opacity"}),
+    )
+    .unwrap();
+    let revision = c.model.index.revision;
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"editKeys","ids":["original"],"time":0.})
+        )
+        .is_err()
+    );
+    assert_eq!(c.model.index.revision, revision);
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(42.)
+    );
+}
+
+fn position_client() -> (KernelActor, TimelineClient) {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[{"id":"p","type":"shape","name":"Position","collapsed":false,"from":0,"dur":10,"p":{"position.x":{"v":0,"kf":[{"i":"x","t":0.125,"v":1,"custom":"keep"}]},"position.y":{"v":0,"kf":[{"i":"y","t":0.125,"v":2},{"i":"subframe","t":0.125001,"v":3}]}}}]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+
+#[test]
+fn separate_dimensions_is_undoable_and_groups_only_exact_legacy_key_times() {
+    let (_actor, mut c) = position_client();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    assert!(!c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"selectKeys","layer":"p","path":"position","ids":["x"]}),
+    )
+    .unwrap();
+    assert_eq!(c.model.selection.keys(), &["x", "y"]);
+    assert_eq!(c.model.index.key("subframe").unwrap().2.time, 0.125001);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position.x"))
+    );
+    assert!(
+        !c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+}
+
+#[test]
+fn axis_diamond_changes_only_its_axis_and_group_diamond_completes_the_other_axis() {
+    let (_actor, mut c) = position_client();
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position.x"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        2
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        3
+    );
+}
+
+#[test]
+fn native_graph_drag_and_easing_keep_ids_and_opaque_metadata_through_undo() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"graphKeys","ids":["original"]}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"drag","timeDelta":1.,"valueDelta":3.}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(13.)
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"easing","ids":["original"],"curve":[0.25,0.1,0.25,1.]}),
+    )
+    .unwrap();
+    dispatch(&mut c,json!({"type":"interpolation","ids":["original"],"side":"both","interpolation":"continuous"})).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .key("original")
+            .unwrap()
+            .2
+            .stored
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    for _ in 0..3 {
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    }
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(10.)
+    );
+    assert_eq!(c.model.index.key("original").unwrap().2.time, 0.125);
+}
+
+#[test]
+fn native_parent_pickwhip_uses_kernel_cycle_validation_and_undo() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"parent","ids":["b"],"parent":"a:[]"})).unwrap();
+    assert_eq!(
+        c.model.index.layer("b").unwrap().parent.as_deref(),
+        Some("a:[]")
+    );
+    let revision = c.model.index.revision;
+    assert!(dispatch(&mut c, json!({"type":"parent","ids":["a:[]"],"parent":"b"})).is_err());
+    assert_eq!(c.model.index.revision, revision);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("b").unwrap().parent.is_none());
+}
+
+#[test]
+fn malformed_native_actions_and_stale_decimal_stamps_make_no_edit_or_lease() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    for intent in [
+        json!({"type":"beginDrag","kind":"layers","ids":["b","b"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":[]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["missing"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["b"],"document":"9999999999999999999"}),
+        json!({"type":"editKeys","ids":["original"],"time":"bad"}),
+        json!({"type":"easing","ids":["original"],"curve":[1,2,3]}),
+        json!({"type":"selectKeys","layer":"b","path":"opacity","ids":["original"]}),
+    ] {
+        assert!(dispatch(&mut c, intent).is_err());
+    }
+    assert_eq!(c.model.index.revision, revision);
+    assert!(c.active_drag().is_none());
+}
+
+fn media_client() -> (KernelActor, TimelineClient) {
+    let layers = [("a",0.),("b",4.),("c",8.)].into_iter().map(|(id,from)|json!({"id":id,"name":id,"type":"video","from":from,"dur":4,"track":0,"on":true,"d":{"asset":"source","trim":{"v":from+2.,"kf":[],"expr":null},"speed":1,"future":{"keep":true}},"p":{},"future":{"keep":id}})).collect::<Vec<_>>();
+    let value = json!({"id":"P","compId":"C","fps":30,"dur":40,"w":100,"h":100,"assets":{"source":{"id":"source","kind":"video","dur":100}},"layers":layers});
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open(
+        "P",
+        OpenSource::Untitled(parse(&value.to_string()).unwrap()),
+    ))
+    .unwrap()
+    .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+fn document(c: &TimelineClient) -> pm_model::Value {
+    c.kernel
+        .published(&c.project)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value()
+}
+#[test]
+fn all_scoped_pro_edit_actions_reach_the_real_kernel_and_undo_exactly() {
+    for (mut input, target, from) in [
+        (json!({"operation":"move","ids":["b"],"delta":1.}), "b", 5.),
+        (
+            json!({"operation":"trim","edge":"in","ids":["b"],"delta":1.}),
+            "b",
+            5.,
+        ),
+        (json!({"operation":"slip","ids":["b"],"delta":1.}), "b", 4.),
+        (
+            json!({"operation":"rippleTrim","edge":"out","layer":"b","delta":1.,"tracks":[{"track":0}]}),
+            "c",
+            9.,
+        ),
+        (
+            json!({"operation":"roll","left":"a","right":"b","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"slide","previous":"a","layer":"b","next":"c","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"rippleDelete","ids":["b"],"tracks":[{"track":0}]}),
+            "c",
+            4.,
+        ),
+    ] {
+        let (_actor, mut c) = media_client();
+        let before = document(&c);
+        input["type"] = json!("proEdit");
+        dispatch(&mut c, input).unwrap();
+        assert_eq!(c.model.index.layer(target).unwrap().from, from);
+        assert_ne!(document(&c), before);
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn ripple_pointer_steps_use_total_delta_and_dispose_restores_downstream_clips() {
+    let (_actor, mut c) = media_client();
+    let before = document(&c);
+    dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":0.,"tracks":[{"track":0}]})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().duration, 6.);
+    assert_eq!(c.model.index.layer("c").unwrap().from, 10.);
+    dispatch(&mut c, json!({"type":"dispose"})).unwrap();
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn locked_downstream_pro_drag_refuses_before_a_gesture_and_preserves_document() {
+    let (_actor, mut c) = media_client();
+    dispatch(&mut c, json!({"type":"switch","id":id("c"),"name":"lock"})).unwrap();
+    let before = document(&c);
+    assert!(dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":1.,"tracks":[{"track":0}]})).is_err());
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn simplify_is_explicit_and_retains_unknown_authored_key_fields() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"simplify","ids":["a:[]"]})).unwrap();
+    assert_eq!(
+        document(&c),
+        before,
+        "unknown authored key fields prevent simplification"
+    );
+}
+
+#[test]
+fn old_native_gesture_cannot_edit_a_reopened_document_with_reused_layer_ids() {
+    let (_actor, mut c) = media_client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["b"]}),
+    )
+    .unwrap();
+    let saved = document(&c);
+    block_on(c.kernel.close("P")).unwrap();
+    block_on(c.kernel.open("P", OpenSource::Untitled(saved.clone())))
+        .unwrap()
+        .unwrap();
+    c.sync().unwrap();
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"drag","timeDelta":2.})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"dispose"})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), saved);
+}
+
+#[test]
+fn handle_property_and_work_area_native_gestures_cancel_without_losing_authored_data() {
+    for begin in [
+        json!({"type":"beginDrag","kind":"handle","id":"original","side":"out"}),
+        json!({"type":"beginDrag","kind":"property","layer":"a:[]","path":"opacity"}),
+        json!({"type":"beginDrag","kind":"workIn"}),
+        json!({"type":"beginDrag","kind":"workOut"}),
+        json!({"type":"beginDrag","kind":"workMove"}),
+        json!({"type":"beginDrag","kind":"transformKeys","ids":["original"],"anchorTime":0.,"anchorValue":0.}),
+        json!({"type":"beginDrag","kind":"stretchKeys","ids":["original"],"anchorTime":0.,"grabbedTime":1.}),
+        json!({"type":"beginDrag","kind":"keys","ids":["original"]}),
+        json!({"type":"beginDrag","kind":"trimIn","ids":["a:[]"]}),
+        json!({"type":"beginDrag","kind":"offsetLayers","ids":["a:[]","b"]}),
+    ] {
+        let (_actor, mut c) = client();
+        let before = document(&c);
+        dispatch(&mut c, begin).unwrap();
+        dispatch(&mut c,json!({"type":"drag","timeDelta":0.1,"valueDelta":1.,"timeScale":1.5,"valueScale":2.,"handleTime":0.25,"handleValue":0.5})).unwrap();
+        dispatch(&mut c, json!({"type":"cancelDrag"})).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn native_numeric_key_dialog_rejects_non_numeric_values_before_any_edit() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    for value in [json!(null), json!("12"), json!([1, 2]), json!({"v":12})] {
+        assert!(
+            dispatch(
+                &mut c,
+                json!({"type":"editKeys","ids":["original"],"value":value})
+            )
+            .is_err()
+        );
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn graph_native_commands_persist_view_facts_without_document_edits() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"command","command":"graph.speed"})).unwrap();
+    let state = c.kernel.state();
+    assert_eq!(
+        state.ui["P"]
+            .timeline
+            .get("graphMode")
+            .and_then(pm_model::Value::as_str),
+        Some("speed")
+    );
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn presentation_can_hold_one_immutable_publication_while_actor_advances() {
+    let (_actor, mut c) = client();
+    let old = c.model.clone();
+    let revision = old.index.revision.to_string();
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("b"),"name":"visibility"}),
+    )
+    .unwrap();
+    let old_frame = v4::project_window(&old, 0, 10).unwrap();
+    assert_eq!(old_frame["revision"], revision);
+    let old_b = old_frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(old_b["visible"], true);
+    let current = v4::window(&mut c, 0, 10).unwrap();
+    assert_ne!(current["revision"], old_frame["revision"]);
+    let new_b = current["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(new_b["visible"], false);
+}

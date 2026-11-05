@@ -30,6 +30,7 @@ pub mod legacy;
 pub mod lights;
 pub(crate) mod metadata;
 pub mod model;
+pub mod provider;
 pub mod studio;
 pub mod textures;
 
@@ -49,6 +50,8 @@ pub use layers::{View3d, scene_from_json};
 /// to the host.
 #[derive(Debug, Clone)]
 pub struct Options3d {
+    pub studio: Option<provider::Settings>,
+    pub studio_final: bool,
     pub view: Option<View3d>,
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`), by
     /// definition id. The built-in OBJ model layer is known by default.
@@ -60,6 +63,8 @@ impl Options3d {
     /// export never draws one).
     pub fn for_request(&self, request: &crate::RenderRequest) -> Options3d {
         Options3d {
+            studio: self.studio,
+            studio_final: request.export || request.output_kind == crate::OutputKind::Final,
             view: request
                 .view
                 .as_ref()
@@ -73,6 +78,8 @@ impl Options3d {
 impl Default for Options3d {
     fn default() -> Self {
         Options3d {
+            studio: None,
+            studio_final: false,
             view: None,
             mesh_definitions: Arc::new(legacy::builtin_mesh_definitions()),
         }
@@ -82,6 +89,12 @@ impl Default for Options3d {
 /// What a 3D render draws.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Render3d {
+    Studio {
+        request: pm_studio::extract::SceneRequest,
+        settings: provider::Settings,
+        final_output: bool,
+        shutter_samples: u32,
+    },
     /// One 3D object layer of a composition pass: the shared prepass of its
     /// depth set, then its own color.
     Layer {

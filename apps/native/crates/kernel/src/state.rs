@@ -137,7 +137,10 @@ impl StateSnapshot {
                         }
                     }
                 }
-                StateOp::Ui { project, next: ui } => {
+                StateOp::Ui { project, next: ui }
+                | StateOp::UiDocument {
+                    project, next: ui, ..
+                } => {
                     if ![
                         &ui.tool,
                         &ui.timeline,
@@ -261,6 +264,12 @@ pub enum StateOp {
     },
     Ui {
         project: String,
+        next: UiState,
+    },
+    /// Native document-owned UI completion, checked atomically by Kernel.
+    UiDocument {
+        project: String,
+        document: u64,
         next: UiState,
     },
     Register {

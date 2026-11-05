@@ -70,7 +70,10 @@ pub mod history;
 pub mod journal;
 pub mod kernel;
 pub mod library;
+pub mod media_archive;
+pub mod media_versions;
 pub mod model;
+pub use media_versions::{MediaAdmission, MediaBinding};
 pub mod navigation;
 pub mod pro_editing;
 pub mod pro_jobs;
@@ -131,3 +134,6 @@ pub mod session;
 pub mod state;
 
 pub mod profile;
+
+pub mod memory_metadata;
+pub use memory_metadata::MemoryCall;

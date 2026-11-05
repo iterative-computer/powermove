@@ -2605,6 +2605,7 @@ dependencies = [
  "pm-eval",
  "pm-export",
  "pm-expr",
+ "pm-fx-defs",
  "pm-geom3d",
  "pm-glsl",
  "pm-gpu",

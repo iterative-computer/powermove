@@ -25,6 +25,44 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
+/// Equal-width tab segments, with the active tab retained when trailing tabs fold.
+/// The caller reserves space for header tools before asking for this track.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabTrack {
+    pub visible: Vec<usize>,
+    pub overflow: Vec<usize>,
+    pub width: f32,
+}
+impl Group {
+    pub fn tab_track(&self, available: f32, tokens: &Tokens) -> TabTrack {
+        let minimum = tokens.metrics.hit * 3.;
+        let n = self.tabs.len();
+        let available = available.max(0.);
+        let fits = (available / minimum).floor() as usize;
+        let capacity = if fits >= n {
+            n
+        } else {
+            ((available - tokens.metrics.hit).max(0.) / minimum).floor() as usize
+        }
+        .max(1)
+        .min(n);
+        let mut visible: Vec<_> = (0..capacity).collect();
+        if self.active >= capacity {
+            visible[capacity - 1] = self.active;
+        }
+        let overflow: Vec<_> = (0..n).filter(|i| !visible.contains(i)).collect();
+        let reserved = if overflow.is_empty() {
+            0.
+        } else {
+            tokens.metrics.hit
+        };
+        TabTrack {
+            width: ((available - reserved).max(0.) / capacity as f32),
+            visible,
+            overflow,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dock {
     pub id: String,
@@ -214,7 +252,11 @@ impl Layout {
     ) -> Geometry {
         if let Some(panel) = panel {
             for (dock, d) in self.docks.iter().enumerate().filter(|(_, d)| !d.collapsed) {
-                if let Some(group) = d.groups.iter().position(|g| g.active() == panel) {
+                if let Some(group) = d
+                    .groups
+                    .iter()
+                    .position(|g| g.tabs.iter().any(|id| id == panel))
+                {
                     return Geometry {
                         panels: vec![Placement {
                             dock,
@@ -256,6 +298,7 @@ impl Layout {
         let bh = bottom.map_or(0., |(_, d)| {
             d.size
                 .unwrap_or(DEFAULT_TIMELINE)
+                .max(t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row)
                 .min((bounds.h - t.metrics.min_panel - gap).max(0.))
         });
         let bg = if bottom.is_some() { gap } else { 0. };
@@ -400,9 +443,12 @@ impl Layout {
             } else {
                 1.
             };
-            d.size = Some(
-                (d.size.unwrap_or(t.metrics.min_panel) + delta * sign).max(t.metrics.min_panel),
-            );
+            let minimum = if d.id == "bottom" {
+                t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row
+            } else {
+                t.metrics.min_panel
+            };
+            d.size = Some((d.size.unwrap_or(minimum) + delta * sign).max(minimum));
         }
     }
     /// Where `(x, y)` would drop a dragged panel, in the coordinates of `geometry`.
@@ -455,23 +501,31 @@ impl Layout {
         }
         let p = geometry.panels.iter().find(|p| p.rect.contains(x, y))?;
         let r = p.rect;
-        if y < r.y + t.metrics.header {
-            let n = self.docks[p.dock].groups[p.group].tabs.len();
-            let index = (((x - r.x) / r.w.max(1.)) * n as f32).round() as usize;
+        let g = &self.docks[p.dock].groups[p.group];
+        let header_end = (r.y + t.metrics.header).min(r.y + r.h);
+        let relative = (y - header_end) / (r.y + r.h - header_end).max(1.);
+        let groupable = !g.tabs.iter().any(|id| id == "viewer");
+        if groupable && (y < header_end || (0.3..=0.7).contains(&relative)) {
+            let n = g.tabs.len();
+            let index = if y < header_end {
+                ((((x - r.x) / r.w.max(1.)) * n as f32).round() as usize).min(n)
+            } else {
+                n
+            };
             return Some(DropPreview {
                 target: DropTarget::Tab {
                     dock: p.dock,
                     group: p.group,
-                    index: index.min(n),
+                    index,
                 },
-                // Joining a tab group highlights the header strip only.
                 rect: Rect {
-                    h: t.metrics.header.min(r.h),
+                    y: header_end,
+                    h: (r.y + r.h - header_end).max(0.),
                     ..r
                 },
             });
         }
-        let lower = y > r.y + r.h / 2.;
+        let lower = relative >= 0.5;
         let half = ((r.h - gap) / 2.).max(0.);
         Some(DropPreview {
             target: DropTarget::Split {
@@ -485,67 +539,183 @@ impl Layout {
             },
         })
     }
-    /// Validated, atomic move of panel `id` to `target`. Moving a lone tab onto its
-    /// own group, or a group's only panel next to itself, leaves the layout unchanged.
+    /// Resolve a real drag. The source has no target when dropping the whole
+    /// stack back on itself. Viewer cannot join another stack in either direction.
+    pub fn drop_target_for(
+        &self,
+        geometry: &Geometry,
+        bounds: Rect,
+        at: (f32, f32),
+        t: &Tokens,
+        id: &str,
+        stack: bool,
+    ) -> Option<DropPreview> {
+        let (di, gi, _) = self.find(id)?;
+        let mut preview = self.drop_target(geometry, bounds, at.0, at.1, t)?;
+        if let Some(p) = geometry.panels.iter().find(|p| p.rect.contains(at.0, at.1))
+            && (p.dock, p.group) == (di, gi)
+            && (stack || self.docks[di].groups[gi].tabs.len() == 1)
+        {
+            return None;
+        }
+        if (id == "viewer"
+            || (stack
+                && self.docks[di].groups[gi]
+                    .tabs
+                    .iter()
+                    .any(|id| id == "viewer")))
+            && matches!(preview.target, DropTarget::Tab { .. })
+        {
+            // An ungroupable source still offers above/below zones.
+            let p = geometry
+                .panels
+                .iter()
+                .find(|p| p.rect.contains(at.0, at.1))?;
+            let lower = at.1 >= p.rect.y + p.rect.h / 2.;
+            let half = ((p.rect.h - t.metrics.gap) / 2.).max(0.);
+            preview = DropPreview {
+                target: DropTarget::Split {
+                    dock: p.dock,
+                    group: p.group + usize::from(lower),
+                },
+                rect: Rect {
+                    y: if lower {
+                        p.rect.y + p.rect.h - half
+                    } else {
+                        p.rect.y
+                    },
+                    h: half,
+                    ..p.rect
+                },
+            };
+        }
+        Some(preview)
+    }
+    /// Validated, atomic move. Destination indices address the original layout.
     pub fn move_panel_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
+        self.move_to(id, target, false)
+    }
+    /// Header drags retain tab order, active tab and the stack's size.
+    pub fn move_stack_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
+        self.move_to(id, target, true)
+    }
+    fn move_to(&mut self, id: &str, target: DropTarget, stack: bool) -> anyhow::Result<()> {
         let (di, gi, ti) = self
             .find(id)
             .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
         match target {
             DropTarget::Tab { dock, group, index } => {
-                anyhow::ensure!(
-                    self.docks.get(dock).is_some_and(|d| group < d.groups.len()),
-                    "Unknown group"
-                );
+                let dest = self
+                    .docks
+                    .get(dock)
+                    .and_then(|d| d.groups.get(group))
+                    .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
                 if (dock, group) == (di, gi) {
-                    return self.reorder_tab(dock, group, ti, index);
+                    return if stack {
+                        Ok(())
+                    } else {
+                        self.reorder_tab(dock, group, ti, index)
+                    };
                 }
-                let mut next = self.clone();
-                let item = next.docks[di].groups[gi].tabs.remove(ti);
-                let g = &mut next.docks[dock].groups[group];
-                let index = index.min(g.tabs.len());
-                g.tabs.insert(index, item);
-                g.active = index;
-                next.commit(self)
+                anyhow::ensure!(
+                    id != "viewer"
+                        && !(stack
+                            && self.docks[di].groups[gi]
+                                .tabs
+                                .iter()
+                                .any(|id| id == "viewer"))
+                        && !dest.tabs.iter().any(|id| id == "viewer"),
+                    "Viewer cannot join a tab stack"
+                );
             }
             DropTarget::Split { dock, group } => {
-                anyhow::ensure!(dock < self.docks.len(), "Unknown dock");
-                let alone = self.docks[di].groups[gi].tabs.len() == 1;
-                if alone && dock == di && (group == gi || group == gi + 1) {
+                anyhow::ensure!(
+                    self.docks
+                        .get(dock)
+                        .is_some_and(|d| group <= d.groups.len()),
+                    "Unknown group"
+                );
+                if (stack || self.docks[di].groups[gi].tabs.len() == 1)
+                    && dock == di
+                    && (group == gi || group == gi + 1)
+                {
                     return Ok(());
                 }
-                let mut next = self.clone();
-                let item = next.docks[di].groups[gi].tabs.remove(ti);
-                let index = group.min(next.docks[dock].groups.len());
-                next.docks[dock]
-                    .groups
-                    .insert(index, self::group(&[&item], None));
+            }
+            DropTarget::Edge(_) => {}
+        }
+        let mut next = self.clone();
+        let source = &mut next.docks[di].groups[gi];
+        let moved = if stack {
+            Group {
+                tabs: std::mem::take(&mut source.tabs),
+                active: source.active,
+                size: source.size,
+            }
+        } else {
+            let item = source.tabs.remove(ti);
+            if ti < source.active {
+                source.active -= 1;
+            }
+            self::group(&[&item], None)
+        };
+        match target {
+            DropTarget::Tab { dock, group, index } => {
+                let g = &mut next.docks[dock].groups[group];
+                let index = index.min(g.tabs.len());
+                g.active = index + moved.active;
+                g.tabs.splice(index..index, moved.tabs);
                 next.docks[dock].collapsed = false;
-                next.commit(self)
+            }
+            DropTarget::Split { dock, group } => {
+                next.docks[dock].groups.insert(group, moved);
+                next.docks[dock].collapsed = false;
             }
             DropTarget::Edge(edge) => {
-                let mut next = self.clone();
-                let item = next.docks[di].groups[gi].tabs.remove(ti);
-                let g = self::group(&[&item], None);
                 if let Some(d) = next.docks.iter_mut().find(|d| d.id == edge.dock_id()) {
                     if d.collapsed {
-                        d.collapsed = false;
-                        // A collapsed dock reopens with only the dropped panel visible on top.
-                        d.groups.insert(0, g);
+                        d.groups.insert(0, moved);
                     } else {
-                        d.groups.push(g);
+                        d.groups.push(moved);
                     }
+                    d.collapsed = false;
                 } else {
                     let size = match edge {
                         Edge::Left => DEFAULT_LEFT,
                         Edge::Right => DEFAULT_RIGHT,
                         Edge::Bottom => DEFAULT_TIMELINE,
                     };
-                    next.docks.push(dock(edge.dock_id(), Some(size), vec![g]));
+                    next.docks
+                        .push(dock(edge.dock_id(), Some(size), vec![moved]));
                 }
-                next.commit(self)
             }
         }
+        next.commit(self)
+    }
+    /// Keyboard/AX counterpart to the pointer zones, resolved by stable panel id.
+    pub fn place_relative(
+        &mut self,
+        id: &str,
+        target: &str,
+        placement: &str,
+    ) -> anyhow::Result<()> {
+        let (dock, group, _) = self
+            .find(target)
+            .ok_or_else(|| anyhow::anyhow!("Unknown target panel"))?;
+        let target = match placement {
+            "group" => DropTarget::Tab {
+                dock,
+                group,
+                index: usize::MAX,
+            },
+            "above" => DropTarget::Split { dock, group },
+            "below" => DropTarget::Split {
+                dock,
+                group: group + 1,
+            },
+            _ => anyhow::bail!("Unknown placement"),
+        };
+        self.move_panel_to(id, target)
     }
     /// Reorders a tab within its group; the moved tab becomes active.
     pub fn reorder_tab(
@@ -658,47 +828,19 @@ impl Layout {
         to_group: usize,
         as_tab: bool,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(to_dock < self.docks.len(), "Unknown dock");
-        let mut next = self.clone();
-        let src = next.docks.iter().enumerate().find_map(|(di, d)| {
-            d.groups
-                .iter()
-                .enumerate()
-                .find_map(|(gi, g)| g.tabs.iter().position(|p| p == id).map(|ti| (di, gi, ti)))
-        });
-        let (di, gi, ti) = src.ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
-        if di == to_dock && gi == to_group && as_tab {
-            return Ok(());
-        }
-        let item = next.docks[di].groups[gi].tabs.remove(ti);
-        // Keep source group until destination is addressed so same-dock indexes stay stable.
-        if as_tab {
-            let target = next.docks[to_dock]
-                .groups
-                .get_mut(to_group)
-                .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
-            target.tabs.push(item);
-            target.active = target.tabs.len() - 1;
+        let target = if as_tab {
+            DropTarget::Tab {
+                dock: to_dock,
+                group: to_group,
+                index: usize::MAX,
+            }
         } else {
-            let index = to_group.min(next.docks[to_dock].groups.len());
-            next.docks[to_dock]
-                .groups
-                .insert(index, group(&[&item], None));
-        }
-        for d in &mut next.docks {
-            d.groups.retain(|g| !g.tabs.is_empty());
-            for g in &mut d.groups {
-                g.active = g.active.min(g.tabs.len() - 1);
+            DropTarget::Split {
+                dock: to_dock,
+                group: to_group,
             }
-            if d.groups.iter().all(|g| g.size.is_some())
-                && let Some(g) = d.groups.first_mut()
-            {
-                g.size = None;
-            }
-        }
-        next.validate()?;
-        *self = next;
-        Ok(())
+        };
+        self.move_panel_to(id, target)
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -37,6 +37,24 @@ pub struct Material {
 }
 
 impl Material {
+    /// One immutable physical record; avoids rebuilding every earlier material
+    /// while an imported assembly appends its parts.
+    pub fn gpu(&self) -> GpuMaterial {
+        GpuMaterial {
+            base: self.base.to4(self.metallic),
+            spec: [
+                self.roughness.max(0.002),
+                self.coat,
+                self.coat_roughness.max(0.002),
+                self.transmission,
+            ],
+            emit: self.emission.to4(self.subsurface),
+            extra: [self.ior, self.specular, 1.0, self.anisotropy],
+            // The display's composition is texture layer 0.
+            maps: [-1.0, if self.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
+            layers: [self.sheen, self.film_nm, self.dispersion, self.droplets],
+        }
+    }
     pub fn dielectric(base: Vec3, roughness: f32) -> Self {
         Material {
             base,
@@ -406,23 +424,7 @@ impl Scene {
     }
 
     pub fn gpu_materials(&self) -> Vec<GpuMaterial> {
-        self.materials
-            .iter()
-            .map(|m| GpuMaterial {
-                base: m.base.to4(m.metallic),
-                spec: [
-                    m.roughness.max(0.002),
-                    m.coat,
-                    m.coat_roughness.max(0.002),
-                    m.transmission,
-                ],
-                emit: m.emission.to4(m.subsurface),
-                extra: [m.ior, m.specular, 1.0, m.anisotropy],
-                // The display's composition is texture layer 0.
-                maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
-                layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
-            })
-            .collect()
+        self.materials.iter().map(|m| m.gpu()).collect()
     }
 
     pub fn gpu_lights(&self) -> Vec<GpuLight> {

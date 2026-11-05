@@ -257,6 +257,18 @@ impl Kernel {
             .root()
             .map(pm_model::hash::canonical_hash)
             .unwrap_or_default();
+        if store
+            .root()
+            .is_some_and(|root| root.get(crate::media_versions::FIELD).is_some())
+            && let Some(profile) = self
+                .library
+                .as_ref()
+                .and_then(|writer| writer.store().dir().parent())
+        {
+            let archive = crate::media_archive::Archive::open(profile)
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+            store.hydrate_originals(&archive);
+        }
         let mut project = Project::new(store);
         project.set_workspace(workspace.clone());
         let journal = match (&self.durability, self.project_dir(id)) {
@@ -393,10 +405,45 @@ impl Kernel {
 
     /// Runs one call on a project.
     pub fn handle(&mut self, id: &str, request: Request) -> Result<Handled, KernelFailure> {
+        if let Call::AdmitMedia(admission) = &request.call {
+            let profile = self
+                .library
+                .as_ref()
+                .and_then(|writer| writer.store().dir().parent())
+                .ok_or_else(|| {
+                    KernelFailure::Storage(
+                        "Media admission requires an attached native profile".into(),
+                    )
+                })?;
+            let root = profile
+                .canonicalize()
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?
+                .join("media/retained");
+            if admission.bindings.iter().any(|binding| {
+                binding.original.root() != root
+                    || binding
+                        .previous
+                        .as_ref()
+                        .is_some_and(|prior| prior.root() != root)
+            }) {
+                return Err(KernelFailure::Storage(
+                    "Original receipts belong to another native profile".into(),
+                ));
+            }
+        }
         let slot = self
             .slots
             .get_mut(id)
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
+        slot.project
+            .store_mut()
+            .set_runtime_state(self.state.clone());
+        let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
+        if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
+            return Err(KernelFailure::Storage(
+                "Project metadata requires durable journal admission".into(),
+            ));
+        }
         let workspace_write = matches!(request.call, Call::Workspace(WorkspaceCall::Mutate { .. }));
         let mut handled = slot.project.handle(request);
         if let (Some(journal), Some(durability)) = (&mut slot.journal, &self.durability) {
@@ -410,6 +457,13 @@ impl Kernel {
                     document: store.current().clone(),
                     history: store.history().snapshot(),
                     workspace: project.workspace().clone(),
+                }
+            });
+            let result = result.and_then(|()| {
+                if metadata_write {
+                    journal.sync_now().and_then(|()| durability.barrier())
+                } else {
+                    Ok(())
                 }
             });
             if let Err(e) = result {
@@ -467,6 +521,7 @@ impl Kernel {
                 }
             }
         }
+        self.project_mut(id).unwrap().retain_final_acks(&handled);
         self.maintain_history(id);
         Ok(handled)
     }
@@ -537,10 +592,22 @@ impl Kernel {
         tx: crate::state::StateTransaction,
     ) -> Result<crate::state::StateAck, KernelFailure> {
         for op in &tx.ops {
-            if let crate::state::StateOp::Ui { project, .. } = op
-                && !self.slots.contains_key(project)
-            {
-                return Err(KernelFailure::NoProject(project.clone()));
+            match op {
+                crate::state::StateOp::Ui { project, .. }
+                | crate::state::StateOp::UiDocument { project, .. } => {
+                    let slot = self
+                        .slots
+                        .get(project)
+                        .ok_or_else(|| KernelFailure::NoProject(project.clone()))?;
+                    if let crate::state::StateOp::UiDocument { document, .. } = op
+                        && *document != slot.project.store().doc_id()
+                    {
+                        return Err(KernelFailure::Storage(
+                            "The document was closed or replaced; UI state was not changed".into(),
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
         let (next, changes) = self.state.stage(tx).map_err(KernelFailure::Storage)?;

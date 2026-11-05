@@ -209,13 +209,205 @@ fn composition_restore_keeps_current_memory_and_agent_access_setting() {
 
 #[test]
 fn disabled_note_redaction_is_recursive_preserves_other_fields_and_never_mutates_source() {
-    let project = json!({"memoryEnabled":false,"memory":[{"text":"Private"}],"other":{"keep":true},"comps":{"child":{"memory":[{"text":"Child private"}],"other":7}}});
+    let project = json!({"memoryEnabled":false,"memory":[{"text":"Private"}],"nativeMemoryArchive":[{"text":"Retired"}],"other":{"keep":true},"comps":{"child":{"memory":[{"text":"Child private"}],"other":7}}});
     let original = project.clone();
     let generated = memory::agent_snapshot(&project);
     assert!(generated.get("memory").is_none());
+    assert!(generated.get("nativeMemoryArchive").is_none());
     assert!(generated["comps"]["child"].get("memory").is_none());
     assert!(generated["comps"]["child"].get("comps").is_none());
     assert_eq!(generated["other"], project["other"]);
     assert_eq!(generated["comps"]["child"]["other"], 7);
     assert_eq!(project, original);
+}
+
+#[test]
+fn actual_session_memory_crud_survives_composition_rollback_and_profile_reopen() {
+    let root = std::env::temp_dir().join(pm_kernel::new_id("memory-durable-session"));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let profile = root.join("profile");
+    let exports = root.join("exports");
+    let id;
+    let expected;
+    {
+        let mut host = Automation::new(profile.clone(), exports.clone()).unwrap();
+        id = host
+            .create_project(
+                &json!({"name":"Synthetic notes","width":320,"height":180,"duration":2,"fps":30}),
+            )
+            .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let shared = Arc::new(Mutex::new(host));
+        let mut session = McpSession::new(shared.clone());
+        session
+            .dispatch(
+                "start_session",
+                &json!({"prompt":"Synthetic memory retention"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "apply_commands",
+                &json!({"commands":[{"type":"add_layer","id":"temporary","layerType":"shape"}]}),
+            )
+            .unwrap();
+        let revision = shared.lock().unwrap().revision(&id).unwrap();
+        let before_history = shared
+            .lock()
+            .unwrap()
+            .store(&id)
+            .unwrap()
+            .history()
+            .snapshot()
+            .to_saved();
+        let first=session.dispatch("project_memory",&json!({"operation":"add","kind":"decision","text":"Keep the authored intent","why":"Synthetic reason"})).unwrap();
+        let note = first["entry"]["id"].clone();
+        assert_eq!(shared.lock().unwrap().revision(&id).unwrap(), revision);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .store(&id)
+                .unwrap()
+                .history()
+                .snapshot()
+                .to_saved(),
+            before_history
+        );
+        let edited = session
+            .dispatch(
+                "project_memory",
+                &json!({"operation":"update","id":note,"text":"Revised intent","resolved":true}),
+            )
+            .unwrap();
+        assert_eq!(edited["entry"]["text"], "Revised intent");
+        assert_eq!(edited["entry"]["resolved"], true);
+        let goal = session
+            .dispatch(
+                "project_memory",
+                &json!({"operation":"add","kind":"goal","text":"Synthetic goal"}),
+            )
+            .unwrap();
+        session
+            .dispatch("project_memory", &json!({"operation":"remove","id":note}))
+            .unwrap();
+        let listed = session
+            .dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["memory"][0]["id"], goal["entry"]["id"]);
+        session.dispatch("rollback_changes", &json!({})).unwrap();
+        let value = shared.lock().unwrap().read_document(&id).unwrap();
+        assert!(value["layers"].as_array().unwrap().is_empty());
+        assert_eq!(value["memory"], listed["memory"]);
+        assert_eq!(value["nativeMemoryArchive"][0]["text"], "Revised intent");
+        expected = value["memory"].clone();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+        shared.lock().unwrap().save_library(&id).unwrap();
+    }
+    {
+        let mut reopened = Automation::new(profile, exports).unwrap();
+        reopened.open_project(&id).unwrap();
+        let value = reopened.read_document(&id).unwrap();
+        assert_eq!(value["memory"], expected);
+        assert_eq!(value["nativeMemoryArchive"][0]["text"], "Revised intent");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn disabled_utf16_notes_are_refused_before_json_projection_and_archives_stay_out_of_inputs() {
+    let project=pm_model::json::parse(r#"{"id":"P","memoryEnabled":false,"memory":[{"text":"\udfff"}],"nativeMemoryArchive":[{"text":"\ud800"}],"future":"\ud800","comps":{"child":{"memory":[{"text":"\udfff"}],"nativeMemoryArchive":[{"text":"Retired"}]}}}"#).unwrap();
+    let original = project.clone();
+    let generated = memory::agent_snapshot_model(&project);
+    assert!(generated.get("memory").is_none());
+    assert!(generated.get("nativeMemoryArchive").is_none());
+    let child = generated.get("comps").unwrap().get("child").unwrap();
+    assert!(child.get("memory").is_none());
+    assert!(child.get("nativeMemoryArchive").is_none());
+    assert_eq!(generated.get("future"), project.get("future"));
+    let root = pm_model::Node::from_value(project.clone(), 0);
+    let error = match pm_mcp::memory_admission::prepare(&root, &json!({"operation":"list"})) {
+        Err(error) => error,
+        Ok(_) => panic!("Disabled notes must be refused"),
+    };
+    assert_eq!(error.message, memory::DISABLED);
+    assert_eq!(project, original);
+}
+
+#[test]
+fn memory_wire_preserves_javascript_slice_surrogate_through_update_list_and_reopen() {
+    let root = std::env::temp_dir().join(pm_kernel::new_id("memory-wire"));
+    std::fs::create_dir_all(&root).unwrap();
+    let profile = root.join("profile");
+    let exports = root.join("exports");
+    let mut host = Automation::new(profile.clone(), exports.clone()).unwrap();
+    let id = host
+        .create_project(&json!({"name":"Synthetic","width":320,"height":180,"duration":2,"fps":30}))
+        .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let shared = Arc::new(Mutex::new(host));
+    let mut session = McpSession::new(shared.clone());
+    session
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Synthetic UTF-16 memory"}),
+        )
+        .unwrap();
+    let decode = |wire: Value| {
+        // The outer transport remains ordinary Unicode JSON; its text is JSON
+        // encoded with JavaScript's full UTF-16 string semantics.
+        let wire: Value = serde_json::from_str(&wire.to_string()).unwrap();
+        assert_eq!(wire["isError"], false, "{wire}");
+        pm_model::json::parse(wire["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let added = decode(session.call(
+        "project_memory",
+        json!({"operation":"add","kind":"decision","text":format!("{}😀", "a".repeat(599))}),
+    ));
+    let entry = added.get("entry").unwrap();
+    let expected = pm_model::JsString::from_utf16_units(&[vec![97; 599], vec![0xd83d]].concat());
+    assert_eq!(entry.get("text").unwrap().as_js_string(), Some(&expected));
+    let note = entry.get("id").unwrap().as_str().unwrap();
+    let updated = decode(session.call(
+        "project_memory",
+        json!({"operation":"update","id":note,"resolved":true}),
+    ));
+    assert_eq!(updated.get("entry").unwrap().get("text"), entry.get("text"));
+    let listed = decode(session.call("project_memory", json!({"operation":"list"})));
+    assert_eq!(
+        listed.get("memory").unwrap().as_array().unwrap()[0],
+        *updated.get("entry").unwrap()
+    );
+    session
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    shared.lock().unwrap().save_library(&id).unwrap();
+    drop(session);
+    drop(shared);
+    let mut reopened = Automation::new(profile, exports).unwrap();
+    reopened.open_project(&id).unwrap();
+    let shared = Arc::new(Mutex::new(reopened));
+    let mut session = McpSession::new(shared);
+    session
+        .dispatch("start_session", &json!({"prompt":"Synthetic reopen"}))
+        .unwrap();
+    assert_eq!(
+        decode(session.call("project_memory", json!({"operation":"list"}))),
+        listed
+    );
+    assert_eq!(
+        decode(session.call("project_memory", json!({"operation":"remove","id":note})))
+            .get("total"),
+        Some(&pm_model::Value::Number(0.0))
+    );
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
 }

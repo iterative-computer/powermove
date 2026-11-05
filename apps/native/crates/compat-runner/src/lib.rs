@@ -9,11 +9,13 @@ use std::{
 };
 mod kernel;
 mod recorder;
+mod store_dispatch;
 mod store_kernel;
 mod store_runtime;
+pub use store_dispatch::KernelStoreDispatch;
 mod transport;
 pub use recorder::NativeHost;
-pub use store_kernel::KernelStoreAdapter;
+pub use store_kernel::{KernelStoreAdapter, StoreArchive};
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
 
 pub struct CompatRunner {
@@ -55,6 +57,7 @@ impl CompatRunner {
         }
         runner.eval(bundle)?;
         runner.eval("if(typeof PowermoveCompat?.CompatRealm!=='function')throw Error('Missing compat bundle')")?;
+        runner.eval(include_str!("canvas-dom.js"))?;
         runner.eval(include_str!("bootstrap.js"))?;
         runner.eval(&format!("__extcheck.create({initial})"))?;
         Ok(runner)
@@ -104,6 +107,12 @@ impl CompatRunner {
     }
     pub fn take_presentation_request(&self) -> bool {
         self.host.take_presentation_request()
+    }
+    /// Called by the worker after flushing DOM and before queueing presentation.
+    /// Immutable native resources are separate from the DOM JSON stream.
+    pub fn canvas_frames(&self) -> Result<Vec<pm_compat_host::CanvasFrame>> {
+        self.eval("__extcheck.flushCanvases?.()")?;
+        self.host.canvas_frames()
     }
     /// The embedder delivers applier feedback on this owner, outside AppKit/main.
     pub fn receive_dom(&self, message: &Value) -> Result<Value> {
@@ -311,5 +320,97 @@ mod tests {
             runner.json("syntheticOutput.textContent").unwrap(),
             "Synthetic typed"
         );
+    }
+    fn dom_runner() -> CompatRunner {
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/dom-bundle.ts");
+        let built = std::process::Command::new("bun")
+            .args([
+                "build",
+                entry.to_str().unwrap(),
+                "--target=browser",
+                "--format=iife",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        CompatRunner::new(std::str::from_utf8(&built.stdout).unwrap(), &initial()).unwrap()
+    }
+    fn decode(bytes: &[u8]) -> (png::OutputInfo, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        pixels.truncate(info.buffer_size());
+        (info, pixels)
+    }
+    #[test]
+    fn dom_canvas_uses_native_pixels_stable_context_and_immutable_png_resources() {
+        let runner = dom_runner();
+        assert_eq!(runner.json("(()=>{globalThis.canvas=document.createElement('canvas');canvas.width=2;canvas.height=2;document.body.append(canvas);globalThis.ctx=canvas.getContext('2d');ctx.fillStyle='#ff0000';ctx.fillRect(0,0,2,2);return [ctx===canvas.getContext('2d'),ctx.canvas===canvas,canvas.getContext('webgl')]})()").unwrap(),json!([true,true,null]));
+        let frames = runner.canvas_frames().unwrap();
+        assert_eq!(frames.len(), 1);
+        let first = &frames[0];
+        assert!(first.dom_sequence > 0);
+        let (info, pixels) = decode(&first.png);
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(pixels, [255, 0, 0, 255].repeat(4));
+        runner
+            .eval("ctx.fillStyle='#0000ff';ctx.fillRect(0,0,2,2)")
+            .unwrap();
+        let next = runner.canvas_frames().unwrap();
+        assert!(next[0].version > first.version);
+        assert_eq!(decode(&next[0].png).1, [0, 0, 255, 255].repeat(4));
+        assert_eq!(decode(&first.png).1, pixels);
+        runner.eval("canvas.width=2").unwrap();
+        assert_eq!(
+            decode(&runner.canvas_frames().unwrap()[0].png).1,
+            vec![0; 16]
+        );
+        assert_eq!(runner.json("ctx===canvas.getContext('2d')").unwrap(), true);
+        runner.eval("canvas.remove()").unwrap();
+        assert!(runner.canvas_frames().unwrap().is_empty());
+    }
+    #[test]
+    fn native_png_encoding_matches_pixel_readback_and_zero_size_contract() {
+        use base64::Engine;
+        let runner = runner();
+        let value=runner.json("(()=>{const c=__extcheck.realm.createCanvas(3,2),x=c.getContext('2d');x.fillStyle='rgba(255,0,0,0.5)';x.fillRect(0,0,3,2);return [c.toDataURL(),x.getImageData(0,0,3,2).data]})()").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(
+                value[0]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(json!(decode(&bytes).1), value[1]);
+        assert_eq!(
+            runner
+                .json("__extcheck.realm.createCanvas(0,2).toDataURL()")
+                .unwrap(),
+            "data:,"
+        );
+    }
+    #[test]
+    fn native_path_transform_stroke_and_hit_test_bindings_reach_the_recorder() {
+        let runner = runner();
+        assert_eq!(runner.json("(()=>{const x=__extcheck.realm.createCanvas(16,16).getContext('2d');x.setTransform(1,0,0,1,2,3);x.transform(2,0,0,2,0,0);const m=x.getTransform();x.lineCap='round';x.lineJoin='bevel';x.miterLimit=4;x.setLineDash([2,3,4]);x.lineDashOffset=1;x.beginPath();x.moveTo(0,0);x.quadraticCurveTo(1,2,3,4);x.bezierCurveTo(1,2,3,4,5,6);x.arc(2,2,1,0,Math.PI);x.arcTo(2,2,3,3,1);x.ellipse(3,3,2,1,0,0,Math.PI);x.stroke();x.resetTransform();x.beginPath();x.rect(0,0,4,4);return [m.a,m.e,m.f,x.lineCap,x.lineJoin,x.miterLimit,x.lineDashOffset,x.getLineDash(),x.isPointInPath(2,2),x.isPointInPath(7,7)]})()").unwrap(),json!([2,2,3,"round","bevel",4,1,[2,3,4,2,3,4],true,false]));
+        assert!(
+            runner.diagnostics()["missing"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn canvas_boolean_direction_and_invalid_winding_preserve_authored_geometry() {
+        let runner = runner();
+        let value=runner.json("(()=>{const draw=ccw=>{const x=__extcheck.realm.createCanvas(8,8).getContext('2d');x.arc(4,4,3,0,Math.PI/2,ccw);x.lineTo(4,4);x.fill();return JSON.stringify(x.getImageData(0,0,8,8).data)};const x=__extcheck.realm.createCanvas(1,1).getContext('2d');x.rect(0,0,1,1);let refused=false;try{x.fill('invalid-rule')}catch{refused=true}return [draw(1)===draw(true),draw(1)!==draw(false),refused,x.getImageData(0,0,1,1).data]})()").unwrap();
+        assert_eq!(value, json!([true, true, true, [0, 0, 0, 0]]));
     }
 }

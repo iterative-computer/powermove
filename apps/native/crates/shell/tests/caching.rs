@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! P-120 regression: parent invalidation reuses a cached subtree without rendering it again.
 use gpui::{
     AppContext, Context, Entity, HeadlessAppContext, IntoElement, Render, StyleRefinement, Window,

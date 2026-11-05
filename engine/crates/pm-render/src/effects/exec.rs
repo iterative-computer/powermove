@@ -249,6 +249,7 @@ fn span_scope(span: &Span) -> ErrorScope {
 
 /// The renderer's own effect state, lent to the chains it prepared.
 pub(crate) struct Native<'a> {
+    pub inputs: &'a [super::resources::Ready],
     pub effects: &'a mut Effects,
     pub timer: Option<&'a mut FrameTimer>,
     pub linear: &'a wgpu::Sampler,
@@ -265,6 +266,7 @@ pub(crate) struct Gpu<'c> {
     precision: Precision,
     /// Intermediates, given back after the frame is submitted.
     taken: &'c mut Vec<Target>,
+    inputs: Vec<super::resources::Ready>,
     effects: &'c mut Effects,
     timer: Option<&'c mut FrameTimer>,
     linear: &'c wgpu::Sampler,
@@ -281,6 +283,7 @@ impl<'c> Gpu<'c> {
             pool: &mut *cx.pool,
             precision: cx.precision,
             taken: &mut *cx.taken,
+            inputs: native.inputs.to_vec(),
             effects: &mut *native.effects,
             timer: native.timer.as_deref_mut(),
             linear: native.linear,
@@ -361,6 +364,11 @@ impl<'c> Gpu<'c> {
         working: WorkingEncoding,
     ) -> Option<Target> {
         let input = self.encode_e(input, working);
+        let mut ready = self.inputs.clone();
+        for r in &mut ready {
+            r.target = self.encode_e(&r.target, working);
+        }
+        self.inputs = ready;
         let backdrop = backdrop.map(|b| self.encode_e(b, working));
         let mut current: Option<Target> = None;
         for step in steps {
@@ -439,8 +447,56 @@ impl<'c> Gpu<'c> {
         if let (Some(timer), Some((b, _))) = (self.timer.as_deref(), span) {
             timer.mark(device, self.encoder, &input.view, b);
         }
+        let mut asset_targets = Vec::new();
+        for (name, asset) in &step.assets {
+            if asset.vector.is_some() {
+                let ready = self
+                    .inputs
+                    .iter()
+                    .find(|r| r.request == asset.request())
+                    .expect("brush vector producer prepared");
+                asset_targets.push((name, ready.target.clone()));
+                continue;
+            }
+            let target = Target::new(
+                device,
+                "pm effect asset lease",
+                asset.width,
+                asset.height,
+                wgpu::TextureFormat::Rgba32Float,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            );
+            let data = asset
+                .lut
+                .as_ref()
+                .map_or(asset.rgba.as_slice(), |c| c.rgba.as_slice());
+            let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+            self.queue.write_texture(
+                target.texture.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(asset.width * 16),
+                    rows_per_image: Some(asset.height),
+                },
+                target.texture.size(),
+            );
+            asset_targets.push((name, target));
+        }
         let mut outputs: Vec<Target> = Vec::new();
-        for pass in 0..step.passes {
+        let passes = if step.temporal {
+            step.references.len() as u8
+        } else {
+            step.passes
+        };
+        for pass in 0..passes {
+            let (ow, oh) = if pass == 0 {
+                step.spatial
+                    .and_then(|s| s.grid)
+                    .map_or((w, h), |g| (g[0], g[1]))
+            } else {
+                (w, h)
+            };
             let mut calls: Vec<(String, Call)> = vec![("u_tex".into(), Call::I(0))];
             if step.keep_orig {
                 calls.push(("u_orig".into(), Call::I(1)));
@@ -448,8 +504,8 @@ impl<'c> Gpu<'c> {
             if step.backdrop {
                 calls.push(("u_backdrop".into(), Call::I(2)));
             }
-            calls.push(("u_m".into(), Call::M3(full_quad(w, h))));
-            calls.push(("u_res".into(), f(&[f64::from(w), f64::from(h)])));
+            calls.push(("u_m".into(), Call::M3(full_quad(ow, oh))));
+            calls.push(("u_res".into(), f(&[f64::from(ow), f64::from(oh)])));
             calls.push(("u_uv".into(), f(&uv)));
             calls.push(("u_coordRes".into(), f(&resolution)));
             calls.push(("u_pxOrigin".into(), f(&origin)));
@@ -459,24 +515,178 @@ impl<'c> Gpu<'c> {
             ));
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
+            if let Some(owner) = &step.owner {
+                calls.push(("u_ownerValid".into(), f(&[1.])));
+                calls.push((
+                    "u_ownerFromUV".into(),
+                    Call::M3(super::resources::from_uv(owner)),
+                ));
+                calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
+                calls.push(("u_layerRes".into(), f(&owner.size)));
+                calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
+                calls.push((
+                    "u_sampleLod".into(),
+                    f(&[step.spatial.map_or(0., |s| s.lod as f64)]),
+                ));
+            }
+            if let Some(grid) = step.spatial.and_then(|s| s.grid) {
+                calls.push(("u_gridRes".into(), f(&[grid[0] as f64, grid[1] as f64])));
+            }
             let program = self
                 .effects
                 .program(device, DefinitionKind::Effect, &step.definition, format)
                 .expect("built above");
             param_calls(program, &step.params, &mut calls);
-            let previous = outputs.last().unwrap_or(input).clone();
-            let units: [Option<&Target>; 3] = [
+            let mut previous = outputs.last().unwrap_or(input).clone();
+            if step.spatial.is_some_and(|s| s.lod > 0)
+                && !(pass > 0 && step.spatial.is_some_and(|s| s.grid.is_some()))
+            {
+                let mut pyramid = Target::with_mips(
+                    device,
+                    "pm spatial effect mips",
+                    previous.width(),
+                    previous.height(),
+                    format,
+                    pm_gpu::target::working_usage(),
+                );
+                self.encoder.copy_texture_to_texture(
+                    previous.texture.as_image_copy(),
+                    pyramid.texture.as_image_copy(),
+                    previous.texture.size(),
+                );
+                let mips = self
+                    .effects
+                    .mips
+                    .get_or_insert_with(|| crate::sampling::gpu::Resampler::new(device));
+                mips.fill_mips(device, self.encoder, &pyramid.texture);
+                pyramid.view = pyramid.texture.create_view(&Default::default());
+                self.taken.push(pyramid.clone());
+                previous = pyramid;
+            }
+            let mut units = vec![
                 Some(&previous),
                 step.keep_orig.then_some(input),
                 backdrop.filter(|_| step.backdrop),
             ];
-            let out = self.take(w, h);
-            self.legacy_pass(
+            let ready = self.inputs.clone();
+            for (index, reference) in step.references.iter().enumerate() {
+                if step.temporal && index != pass as usize {
+                    continue;
+                }
+                let resource = ready
+                    .iter()
+                    .find(|r| r.request == reference.request)
+                    .expect("producer prepared before effect");
+                let name = &reference.name;
+                calls.push((format!("u_{name}"), Call::I(units.len() as i32)));
+                calls.push((format!("u_has_{name}"), f(&[1.])));
+                let source_space = reference.request.space == pm_fx_defs::inputs::Space::Source;
+                calls.push((
+                    format!("u_{name}Res"),
+                    f(&if source_space {
+                        [
+                            resource
+                                .source_extent
+                                .map_or(resource.target.width() as f64, |e| e.width),
+                            resource
+                                .source_extent
+                                .map_or(resource.target.height() as f64, |e| e.height),
+                        ]
+                    } else {
+                        resource.owner.size
+                    }),
+                ));
+                calls.push((format!("u_{name}Midpoint"), f(&[0.5])));
+                calls.push((
+                    format!("u_{name}UV"),
+                    Call::M3(if source_space {
+                        [1. / w as f32, 0., 0., 0., 1. / h as f32, 0., 0., 0., 1.]
+                    } else {
+                        resource.owner.uv
+                    }),
+                ));
+                let mut mapping = super::resources::from_uv(&resource.owner);
+                mapping[6] -= resource.origin[0] as f32;
+                mapping[7] -= resource.origin[1] as f32;
+                let ratio = [
+                    w as f32 / resource.target.width() as f32,
+                    h as f32 / resource.target.height() as f32,
+                ];
+                for column in 0..3 {
+                    mapping[column * 3] *= ratio[0];
+                    mapping[column * 3 + 1] *= ratio[1];
+                }
+                if source_space {
+                    mapping = [w as f32, 0., 0., 0., h as f32, 0., 0., 0., 1.];
+                }
+                calls.push((format!("u_{name}FromUV"), Call::M3(mapping)));
+                if step.temporal {
+                    let owner = step.owner.as_ref().expect("temporal owner prepared");
+                    calls.push(("u_temporalOwnerUV".into(), Call::M3(owner.uv)));
+                    calls.push(("u_temporalBounds".into(), f(&owner.bounds)));
+                    calls.push(("u_temporalPriorBounds".into(), f(&resource.owner.bounds)));
+                    calls.push(("u_temporalRes".into(), f(&[w as f64, h as f64])));
+                    calls.push(("u_temporalIndex".into(), f(&[index as f64])));
+                    calls.push(("u_temporalCount".into(), f(&[step.references.len() as f64])));
+                    calls.push(("u_temporalValid".into(), f(&[1.])));
+                }
+                units.push(Some(&resource.target));
+            }
+            for ((name, asset), (_, target)) in step.assets.iter().zip(&asset_targets) {
+                calls.push((format!("u_{name}"), Call::I(units.len() as i32)));
+                calls.push((format!("u_has_{name}"), f(&[1.])));
+                calls.push((
+                    format!("u_{name}Res"),
+                    f(&[asset.width as f64, asset.height as f64]),
+                ));
+                if let Some(lut) = &asset.lut {
+                    calls.push(("u_lutSize".into(), f(&[lut.size as f64])));
+                    calls.push(("u_lutDomainMin".into(), f(&lut.domain_min.map(f64::from))));
+                    calls.push(("u_lutDomainMax".into(), f(&lut.domain_max.map(f64::from))));
+                } else {
+                    let mapping = if asset.brush {
+                        let sx = w as f32 / asset.width as f32;
+                        let sy = h as f32 / asset.height as f32;
+                        [
+                            w as f32 * sx,
+                            0.,
+                            0.,
+                            0.,
+                            h as f32 * sy,
+                            0.,
+                            origin[0] as f32 * sx,
+                            origin[1] as f32 * sy,
+                            1.,
+                        ]
+                    } else {
+                        full_quad(w, h)
+                    };
+                    calls.push((format!("u_{name}FromUV"), Call::M3(mapping)));
+                }
+                units.push(Some(target));
+            }
+            let out = self.take(ow, oh);
+            let clip = step.source_domain.map(|(d, e)| {
+                let sx = ow as f64 / e.width;
+                let sy = oh as f64 / e.height;
+                let x = ((d.x - e.x) * sx).floor().max(0.) as u32;
+                // Working targets keep GL row order: row zero is the bottom.
+                let y = ((e.y + e.height - d.y - d.height) * sy).floor().max(0.) as u32;
+                (
+                    x,
+                    y,
+                    (d.width * sx).ceil().min((ow - x) as f64) as u32,
+                    (d.height * sy).ceil().min((oh - y) as f64) as u32,
+                )
+            });
+            self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
                 &calls,
                 &units,
                 &out,
+                clip,
             );
             outputs.push(out);
         }
@@ -606,6 +816,13 @@ impl<'c> Gpu<'c> {
                 ));
                 calls.push(("u_time".into(), f(&[time])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
+                if let Some(owner) = &step.owner {
+                    calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
+                    calls.push(("u_layerRes".into(), f(&owner.size)));
+                    calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                    calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
+                    calls.push(("u_sampleLod".into(), f(&[0.])));
+                }
                 runner_param_calls(&step.params, &mut calls);
                 calls
             })
@@ -913,6 +1130,18 @@ impl<'c> Gpu<'c> {
         units: &[Option<&Target>],
         out: &Target,
     ) {
+        self.legacy_pass_clipped(kind, definition, calls, units, out, None);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn legacy_pass_clipped(
+        &mut self,
+        kind: DefinitionKind,
+        definition: &str,
+        calls: &[(String, Call)],
+        units: &[Option<&Target>],
+        out: &Target,
+        clip: Option<(u32, u32, u32, u32)>,
+    ) {
         let device = self.device;
         let queue = self.queue;
         let format = out.format();
@@ -990,6 +1219,12 @@ impl<'c> Gpu<'c> {
             "pm legacy glsl",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
+        if let Some((x, y, w, h)) = clip {
+            if w == 0 || h == 0 {
+                return;
+            }
+            pass.set_scissor_rect(x, y, w, h);
+        }
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &fragment, &[]);
         pass.set_bind_group(1, &vertex, &[]);
@@ -1026,7 +1261,9 @@ impl<'c> Gpu<'c> {
 
 /// An effect chain prepared by [`Effects`] (the compositor's
 /// `PreparedEffects::passes`).
+#[derive(Clone)]
 pub(crate) struct Chain {
+    pub inputs: Vec<super::resources::Producer>,
     pub layer: String,
     pub steps: Vec<EffectStep>,
     /// `u_time`: the level's time in seconds.
@@ -1036,13 +1273,73 @@ pub(crate) struct Chain {
 }
 
 impl EffectPasses for Chain {
+    fn source_allocation_bytes(&self, (w, h): (u32, u32)) -> Option<u64> {
+        self.steps.first()?.source_domain?;
+        let bytes = |w: u32, h: u32| u64::from(w).checked_mul(u64::from(h))?.checked_mul(16);
+        let mut total = bytes(w, h)?.checked_mul(6)?;
+        for step in &self.steps {
+            for (_, asset) in &step.assets {
+                total = total.checked_add(bytes(asset.width, asset.height)?)?;
+            }
+            let mut previous = (w, h);
+            for pass in 0..step.passes {
+                let out = if pass == 0 {
+                    step.spatial
+                        .and_then(|s| s.grid)
+                        .map_or((w, h), |g| (g[0], g[1]))
+                } else {
+                    (w, h)
+                };
+                total = total.checked_add(bytes(out.0, out.1)?)?;
+                if step.spatial.is_some_and(|s| s.lod > 0)
+                    && !(pass > 0 && step.spatial.is_some_and(|s| s.grid.is_some()))
+                {
+                    // A complete pyramid is smaller than twice its base.
+                    total = total.checked_add(bytes(previous.0, previous.1)?.checked_mul(2)?)?;
+                }
+                previous = out;
+            }
+            if step.clamp {
+                total = total.checked_add(bytes(w, h)?)?;
+            }
+        }
+        Some(total)
+    }
+    fn vector_assets(&self) -> Vec<Arc<super::resources::Asset>> {
+        self.steps
+            .iter()
+            .flat_map(|s| {
+                s.assets
+                    .iter()
+                    .filter(|(_, a)| a.vector.is_some())
+                    .map(|(_, a)| a.clone())
+            })
+            .collect()
+    }
+    fn input_requests(&self) -> Vec<super::resources::Reference> {
+        self.steps
+            .iter()
+            .flat_map(|s| s.references.clone())
+            .collect()
+    }
+    fn input_plans(&self) -> &[super::resources::Producer] {
+        &self.inputs
+    }
+    fn with_input_plans(
+        &self,
+        plans: Vec<super::resources::Producer>,
+    ) -> Option<Arc<dyn EffectPasses>> {
+        let mut chain = self.clone();
+        chain.inputs = plans;
+        Some(Arc::new(chain))
+    }
     fn key(&self) -> Vec<u8> {
         format!(
             "effects|{}|{:?}|{:?}|{:?}",
             self.layer,
             self.time.to_bits(),
             self.steps,
-            self.sources
+            (&self.sources, &self.inputs)
         )
         .into_bytes()
     }

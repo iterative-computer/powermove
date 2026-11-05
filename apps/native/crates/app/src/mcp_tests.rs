@@ -213,14 +213,15 @@ fn reopened_identity_and_editor_permissions_are_fenced() {
     );
 }
 #[test]
-fn closing_gate_refuses_new_calls_and_save_uses_app_destination() {
+fn closing_gate_refuses_new_calls_and_export_preserves_the_live_document() {
     let f = Fixture::new();
     let mut c = f.connection();
     start(&mut c);
     add(&mut c, "saved");
     let save = c.dispatch("save_project", &json!({})).unwrap();
     assert!(std::path::Path::new(save["path"].as_str().unwrap()).exists());
-    assert!(!f.host.kernel.published("test").unwrap().dirty);
+    assert!(f.host.kernel.published("test").unwrap().dirty);
+    assert!(f.host.kernel.published("test").unwrap().path.is_none());
     let operation = f.host.try_operation().unwrap();
     assert_eq!(
         c.dispatch("get_project_state", &json!({"indexOnly":true}))
@@ -349,5 +350,340 @@ fn implemented_edits_keep_mcp_origin_in_durable_history() {
     assert_eq!(
         recovered.history.records().last().unwrap().origin,
         Origin::Mcp
+    );
+}
+
+#[test]
+fn live_app_mcp_exports_unique_packed_library_files_without_adopting_a_destination() {
+    let f = Fixture::new();
+    let mut connection = f.connection();
+    start(&mut connection);
+    add(&mut connection, "changed");
+    let before = f.host.kernel.published("test").unwrap();
+    let mut paths = Vec::new();
+    for _ in 0..2 {
+        let response = connection.dispatch("save_project", &json!({})).unwrap();
+        let path = PathBuf::from(response["path"].as_str().unwrap());
+        assert_eq!(
+            path.parent(),
+            Some(f.host.profile.join("exports").as_path())
+        );
+        let opened = pm_kernel::open_project(&path, Default::default()).unwrap();
+        assert_eq!(
+            opened.document.to_value(),
+            before.snapshot.document.to_value()
+        );
+        paths.push(path);
+        let after = f.host.kernel.published("test").unwrap();
+        assert_eq!(after.path, before.path);
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.dirty, before.dirty);
+        assert_eq!(after.history.entries, before.history.entries);
+        assert_eq!(after.saving, before.saving);
+    }
+    assert_ne!(paths[0], paths[1]);
+    assert!(f.host.kernel.published("test").unwrap().path.is_none());
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+}
+
+#[test]
+fn live_app_ingress_and_actor_export_keep_authored_utf16_and_source_bytes() {
+    let f = Fixture::new();
+    let source = f._root.path().join("utf16.pmv");
+    let bytes =
+        include_bytes!("../../../../../engine/crates/pm-model/tests/fixtures/containers/pmv4.pmv");
+    std::fs::write(&source, bytes).unwrap();
+    let opened = f
+        .host
+        .open("utf16".into(), SessionSource::File(source.clone()))
+        .unwrap();
+    assert_eq!(opened["projectId"], "utf16");
+    let current = f.host.current().unwrap();
+    let before = f.host.kernel.published(&current.project).unwrap();
+    let saved = f.host.export(current, before.snapshot.doc_id).unwrap();
+    let opened = pm_kernel::open_project(
+        std::path::Path::new(saved["path"].as_str().unwrap()),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        opened.document.to_value(),
+        before.snapshot.document.to_value()
+    );
+    assert!(
+        pm_model::json::to_canonical_string(&opened.document.to_value().unwrap())
+            .contains("\\ud800")
+    );
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
+}
+
+#[test]
+fn queued_app_mcp_call_cannot_edit_a_reopened_document_with_the_same_project_id() {
+    let f = Fixture::new();
+    let mut connection = f.connection();
+    start(&mut connection);
+    assert!(f.host.kernel.close("test").wait().unwrap());
+    f.host.kernel.open("test",OpenSource::Untitled(model(&json!({"id":"test","name":"Replacement","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})))).wait().unwrap().unwrap();
+    let before = f.host.kernel.published("test").unwrap();
+    assert!(
+        connection
+            .call(
+                "test",
+                HistoryCall::Begin {
+                    label: "Retired request".into()
+                }
+            )
+            .is_err()
+    );
+    let after = f.host.kernel.published("test").unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert!(after.entry.is_none());
+    assert_eq!(
+        after.snapshot.document.to_value(),
+        before.snapshot.document.to_value()
+    );
+}
+
+#[test]
+fn live_app_named_mcp_save_is_in_place_and_stale_document_saves_are_refused() {
+    let f = Fixture::new();
+    let source = f._root.path().join("working.pmv");
+    f.host
+        .save(f.host.current().unwrap(), Some(source.clone()))
+        .unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let mut connection = f.connection();
+    start(&mut connection);
+    add(&mut connection, "named-edit");
+    let before = f.host.kernel.published("test").unwrap();
+    assert!(before.dirty);
+    for _ in 0..2 {
+        let response = connection.dispatch("save_project", &json!({})).unwrap();
+        assert_eq!(response["path"], json!(source));
+        let after = f.host.kernel.published("test").unwrap();
+        assert_eq!(after.path.as_ref(), Some(&source));
+        assert_eq!(after.revision(), before.revision());
+        assert!(!after.dirty);
+        let opened = pm_kernel::open_project(&source, Default::default()).unwrap();
+        assert_eq!(
+            opened.document.to_value(),
+            before.snapshot.document.to_value()
+        );
+    }
+    assert_ne!(std::fs::read(&source).unwrap(), original);
+    assert!(!f.host.profile.join("exports").exists());
+    let bytes = std::fs::read(&source).unwrap();
+    let refused = f
+        .host
+        .kernel
+        .prepare_document_save(f.host.current().unwrap(), before.snapshot.doc_id + 1)
+        .wait()
+        .unwrap();
+    assert!(refused.is_err());
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
+    assert!(!f.host.kernel.published("test").unwrap().saving);
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+}
+
+#[test]
+fn app_memory_uses_durable_metadata_and_survives_agent_rollback_and_reopen() {
+    let f = Fixture::new();
+    let before = f.host.kernel.published("test").unwrap();
+    let mut c = f.connection();
+    start(&mut c);
+    let added = c.dispatch("project_memory", &json!({"operation":"add", "kind":"decision", "text":"Synthetic intent", "why":"Synthetic reason"})).unwrap();
+    let noted = f.host.kernel.published("test").unwrap();
+    assert_eq!(noted.revision(), before.revision());
+    assert_eq!(noted.history.entries, before.history.entries);
+    assert_eq!(noted.dirty, before.dirty);
+    assert!(noted.metadata_revision > before.metadata_revision);
+    assert_eq!(added["entry"]["author"], "agent");
+    add(&mut c, "temporary");
+    c.dispatch("project_memory", &json!({"operation":"update", "id":added["entry"]["id"], "text":"Retained intent", "resolved":true})).unwrap();
+    c.dispatch("rollback_changes", &json!({})).unwrap();
+    let listed = c
+        .dispatch("project_memory", &json!({"operation":"list"}))
+        .unwrap();
+    assert_eq!(listed["memory"][0]["text"], "Retained intent");
+    assert_eq!(layers(&f), 0);
+    c.dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    let session = f.host.current().unwrap();
+    f.host.shell(ShellCall::Close(session)).unwrap();
+    f.host.bind(None);
+    f.host
+        .open(
+            "test".into(),
+            SessionSource::Library {
+                profile: f.host.profile.clone(),
+                project: "test".into(),
+            },
+        )
+        .unwrap();
+    let mut reopened = f.connection();
+    start(&mut reopened);
+    assert_eq!(
+        reopened
+            .dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap()["memory"],
+        listed["memory"]
+    );
+}
+
+#[test]
+fn app_agent_inputs_hide_disabled_active_and_retired_notes_without_deleting_them() {
+    let f = Fixture::new();
+    let mut c = f.connection();
+    start(&mut c);
+    let first = c
+        .dispatch(
+            "project_memory",
+            &json!({"operation":"add","kind":"decision","text":"Synthetic retired intent"}),
+        )
+        .unwrap();
+    c.dispatch(
+        "project_memory",
+        &json!({"operation":"remove","id":first["entry"]["id"]}),
+    )
+    .unwrap();
+    c.dispatch(
+        "project_memory",
+        &json!({"operation":"add","kind":"goal","text":"Synthetic active intent"}),
+    )
+    .unwrap();
+    c.dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    let before = f.host.kernel.published("test").unwrap();
+    let ack = f
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                pm_kernel::MemoryCall::SetEnabled {
+                    expected: None,
+                    enabled: false,
+                },
+            )
+            .with_document(before.snapshot.doc_id),
+        )
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Memory { .. }), "{ack:?}");
+    let mut next = f.connection();
+    let started = next
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Synthetic disabled notes"}),
+        )
+        .unwrap();
+    let input: Value = serde_json::from_slice(
+        &std::fs::read(
+            PathBuf::from(started["workspace"].as_str().unwrap())
+                .join("inputs/powermove-project.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(input.get("memory").is_none());
+    assert!(input.get("nativeMemoryArchive").is_none());
+    assert_eq!(
+        next.dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap_err()
+            .message,
+        pm_mcp::memory::DISABLED
+    );
+    assert_eq!(
+        next.dispatch("get_project_state", &json!({"indexOnly":true}))
+            .unwrap()["memory"],
+        json!({"enabled":false})
+    );
+    let after = f.host.kernel.published("test").unwrap();
+    assert_eq!(
+        after.snapshot.root().unwrap().get("memory"),
+        before.snapshot.root().unwrap().get("memory")
+    );
+    assert_eq!(
+        after.snapshot.root().unwrap().get("nativeMemoryArchive"),
+        before.snapshot.root().unwrap().get("nativeMemoryArchive")
+    );
+    assert_eq!(after.revision(), before.revision());
+}
+
+#[test]
+fn app_memory_wire_keeps_split_utf16_emoji_through_reads_and_updates() {
+    let f = Fixture::new();
+    let mut c = f.connection();
+    start(&mut c);
+    let decode = |wire: Value| {
+        let wire: Value = serde_json::from_str(&wire.to_string()).unwrap();
+        assert_eq!(wire["isError"], false, "{wire}");
+        pm_model::json::parse(wire["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    // The app enforces the public input schema. Existing project notes and
+    // native note admission can still carry a JavaScript slice's lone unit.
+    let too_long = c
+        .invoke(
+            "project_memory",
+            json!({"operation":"add","kind":"decision","text":format!("{}😀", "x".repeat(599))}),
+        )
+        .unwrap();
+    assert_eq!(too_long["isError"], true);
+    let published = f.host.kernel.published("test").unwrap();
+    let ack = f
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                pm_kernel::MemoryCall::Mutate {
+                    expected: None,
+                    operation: pm_model::memory::Operation::Add {
+                        kind: "decision".into(),
+                        text: format!("{}😀", "x".repeat(599)).as_str().into(),
+                        why: None,
+                        resolved: false,
+                    },
+                    now: 1000.,
+                    id: "utf16-note".into(),
+                },
+            )
+            .with_document(published.snapshot.doc_id),
+        )
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Memory { .. }), "{ack:?}");
+    let added = decode(
+        c.invoke("project_memory", json!({"operation":"list"}))
+            .unwrap(),
+    );
+    let entry = &added.get("memory").unwrap().as_array().unwrap()[0];
+    let text = entry.get("text").unwrap().as_js_string().unwrap();
+    assert_eq!(text.utf16_units().count(), 600);
+    assert_eq!(text.utf16_units().last(), Some(0xd83d));
+    let id = entry.get("id").unwrap().as_str().unwrap();
+    let updated = decode(
+        c.invoke(
+            "project_memory",
+            json!({"operation":"update","id":id,"resolved":true}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(updated.get("entry").unwrap().get("text"), entry.get("text"));
+    let listed = decode(
+        c.invoke("project_memory", json!({"operation":"list"}))
+            .unwrap(),
+    );
+    assert_eq!(
+        listed.get("memory").unwrap().as_array().unwrap()[0],
+        *updated.get("entry").unwrap()
+    );
+    assert_eq!(
+        f.host.kernel.published("test").unwrap().revision(),
+        published.revision()
     );
 }

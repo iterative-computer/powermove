@@ -104,6 +104,7 @@ pub mod masks;
 pub mod media;
 pub mod properties;
 pub mod scene3d;
+pub mod shader;
 pub mod text;
 pub mod timing;
 pub mod transform;
@@ -274,7 +275,17 @@ impl Command {
     /// Validates against `root` (the scratch project tree) and returns the
     /// operations; empty when the document already says so.
     pub fn plan(&self, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
+        self.plan_with_state(root, origin, None)
+    }
+
+    pub(crate) fn plan_with_state(
+        &self,
+        root: &Node,
+        origin: Origin,
+        state: Option<&crate::state::StateSnapshot>,
+    ) -> Result<Vec<Op>, CommandError> {
         let mut cx = Cx::new(root, origin);
+        cx.state = state;
         match self {
             Command::SetStaticOpacity { .. }
             | Command::SetLayerName { .. }

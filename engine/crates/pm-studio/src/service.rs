@@ -92,6 +92,26 @@ impl StudioService {
         request: SceneRequest,
         tier: Tier,
     ) -> Result<RenderedScene, String> {
+        self.render_oriented(source, request, tier, false)
+    }
+
+    /// Same transport in the compositor's bottom-up FBO row convention.
+    pub fn render_bottom_up(
+        &mut self,
+        source: &dyn SceneSource,
+        request: SceneRequest,
+        tier: Tier,
+    ) -> Result<RenderedScene, String> {
+        self.render_oriented(source, request, tier, true)
+    }
+
+    fn render_oriented(
+        &mut self,
+        source: &dyn SceneSource,
+        request: SceneRequest,
+        tier: Tier,
+        flip_y: bool,
+    ) -> Result<RenderedScene, String> {
         if request.width == 0 || request.height == 0 {
             return Err("Studio output is empty".into());
         }
@@ -205,7 +225,7 @@ impl StudioService {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 layer: Some(index as u32),
                 include_void: false,
-                flip_y: false,
+                flip_y,
             };
             match tier {
                 Tier::Final {

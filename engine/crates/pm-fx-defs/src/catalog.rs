@@ -203,3 +203,40 @@ pub fn saved_definition(
         }
     }
 }
+
+/// Owner policy: missing/unknown provenance preserves the tagged v1.2.0
+/// generation. No field of the saved effect or file is rewritten.
+pub fn saving_generation(version: Option<&str>) -> ReferenceGeneration {
+    let Some(version) = version else {
+        return ReferenceGeneration::V120;
+    };
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let values = core
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>();
+    match values {
+        Ok(parts) if parts.len() == 3 && (parts[0], parts[1], parts[2]) > (1, 2, 0) => {
+            ReferenceGeneration::Main
+        }
+        _ => ReferenceGeneration::V120,
+    }
+}
+
+pub fn definition_for_file(
+    id: &str,
+    saved: Option<&Value>,
+    app_version: Option<&str>,
+) -> Result<&'static Definition, CatalogError> {
+    let generation = saving_generation(app_version);
+    // Explicit versions added after the tag remain explicit even with unknown
+    // provenance. Version one retains the tag's exact historical definition.
+    let version = effect_version(saved)?;
+    if version > 1
+        || (saved.is_some_and(|v| !v.is_null()) && v120_catalog().get(id, version).is_none())
+    {
+        return main_catalog().instance(id, saved);
+    }
+    saved_definition(id, saved, Some(generation))
+}

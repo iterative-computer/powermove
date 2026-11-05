@@ -180,6 +180,62 @@ impl Automation {
             .map(|p| p.store())
             .ok_or_else(|| Error::invalid("Project is not open"))
     }
+    /// The authored model stays in JavaScript's UTF-16 domain. File ingress,
+    /// portable export and snapshots must not round-trip it through serde JSON.
+    pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
+        let store = self.store(id)?;
+        let mut project = pm_model::canonical::realize_project(
+            store
+                .snapshot()
+                .document
+                .to_value()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+        );
+        if let Some(object) = project.as_object_mut() {
+            object.insert("revision", pm_model::Value::Number(store.revision() as f64));
+        }
+        Ok(project)
+    }
+    fn project_identity(&self, id: &str) -> Result<Value> {
+        // Only the response metadata needs a Unicode projection. An unrelated
+        // opaque authored field may contain any JavaScript UTF-16 code units.
+        let name = self
+            .store(id)?
+            .root()
+            .and_then(|root| root.get("name"))
+            .and_then(|node| match node.kind() {
+                pm_model::NodeKind::String(text) => text.as_str(),
+                _ => None,
+            });
+        Ok(json!({"projectId": id, "name": name}))
+    }
+    pub fn project_memory(
+        &mut self,
+        id: &str,
+        args: &Value,
+        writer: u32,
+    ) -> Result<pm_model::Value> {
+        let store = self.store(id)?;
+        let document = store.doc_id();
+        let prepared = crate::memory_admission::prepare(
+            store
+                .root()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+            args,
+        )?;
+        match prepared {
+            crate::memory_admission::Prepared::Read(value) => Ok(value),
+            crate::memory_admission::Prepared::Write(call) => {
+                let ack = self.call(
+                    id,
+                    Request::new(Caller::realm(writer, 1, Origin::Mcp), call)
+                        .with_document(document),
+                )?;
+                crate::memory_admission::result(ack)
+            }
+        }
+    }
+
     pub fn read_document(&self, id: &str) -> Result<Value> {
         let store = self.store(id)?;
         let mut project = json_value(&pm_model::canonical::realize_project(
@@ -551,8 +607,7 @@ impl Automation {
             self.adopt(reply)?;
         }
         self.active = Some(id.into());
-        let value = self.read_document(id)?;
-        Ok(json!({"projectId":id,"name":value["name"]}))
+        self.project_identity(id)
     }
     /// Explicit host ingress for a caller-selected working file. This uses the
     /// same kernel session/locks, recovery decisions and resident media table
@@ -571,8 +626,7 @@ impl Automation {
             })
             .map_err(Error::kernel)?;
         let project = self.adopt(reply)?;
-        let value = self.read_document(&project)?;
-        Ok(json!({"projectId":project,"name":value["name"]}))
+        self.project_identity(&project)
     }
     pub fn save_library(&mut self, id: &str) -> Result<()> {
         let handle = self
@@ -593,8 +647,17 @@ impl Automation {
         }
     }
     pub fn save_project(&mut self, id: &str) -> Result<Value> {
+        // Pinned main c7f46a056 mcp-project-tools.ts checks filePath before
+        // exporting: an associated working file saves like Cmd-S, retaining
+        // external links even when their originals are currently offline.
+        if let Some(path) = self.store(id)?.path().map(std::path::Path::to_path_buf) {
+            self.save_library(id)?;
+            self.emit(id, "saved");
+            return Ok(json!({"path":path,"projectId":id}));
+        }
         std::fs::create_dir_all(&self.exports)?;
-        let name = self.read_document(id)?["name"]
+        let identity = self.project_identity(id)?;
+        let name = identity["name"]
             .as_str()
             .unwrap_or("Project")
             .chars()
@@ -607,37 +670,28 @@ impl Automation {
             })
             .take(100)
             .collect::<String>();
+        // A library project exports without adopting the new file as the live
+        // session's destination or marking edits clean.
+        let path = self
+            .exports
+            .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
         let session = self
             .sessions
             .get(id)
             .ok_or_else(|| Error::invalid("No shell session"))?
             .clone();
-        let call = if self.store(id)?.path().is_some() {
-            ShellCall::Save(session)
-        } else {
-            ShellCall::SaveAs {
-                session,
-                path: self
-                    .exports
-                    .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export"))),
-            }
-        };
-        // Session SaveAs owns the file lock, destination, metadata and journal
-        // rebase. Writing the DocumentStore alone leaves these out of sync.
-        let reply = self.kernel.shell(call).map_err(Error::kernel)?;
-        if !matches!(
-            reply,
-            ShellReply::Saved {
-                recovery_copy: None,
-                ..
-            }
-        ) {
-            return Err(Error::kernel(reply));
+        let document = self.store(id)?.doc_id();
+        let receipt = self
+            .kernel
+            .prepare_session_export(session, document, path.clone())
+            .map_err(Error::kernel)?
+            .run()
+            .map_err(Error::kernel)?;
+        if !receipt.unavailable_links.is_empty() {
+            return Err(Error::unavailable(
+                "original media unavailable for complete portable project export",
+            ));
         }
-        let path = self
-            .store(id)?
-            .path()
-            .ok_or_else(|| Error::kernel("Missing saved path"))?;
         let result = json!({"path":path,"projectId":id});
         self.emit(id, "saved");
         Ok(result)

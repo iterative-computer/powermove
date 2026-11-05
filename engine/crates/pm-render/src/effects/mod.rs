@@ -18,11 +18,14 @@
 //! shader; [`builtin_definitions`] embeds their snapshots as the kernel
 //! produces them (`tools/effects/builtins.ts`).
 
+mod brush;
 pub(crate) mod exec;
 pub mod fallback;
 pub mod plan;
 pub(crate) mod prewarm;
 pub mod program;
+pub mod resources;
+pub mod versions;
 pub mod watchdog;
 
 use std::collections::BTreeMap;
@@ -69,6 +72,8 @@ struct Entry {
 
 /// The renderer's definitions and their programs.
 pub struct Effects {
+    pub(crate) file_app_version: Option<String>,
+    pub(crate) versioned_builtins: bool,
     set: DefinitionSet,
     /// Whether any definitions were given. Without them nothing is known
     /// missing either, and effects and transitions are routed.
@@ -86,6 +91,8 @@ pub struct Effects {
     pub fallback: fallback::EffectFallback,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
+    pub(crate) assets: resources::Assets,
+    mips: Option<crate::sampling::gpu::Resampler>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
     /// Programs built ahead of their first frame (decision PROBE-1).
     prewarm: prewarm::Prewarm,
@@ -236,6 +243,10 @@ impl Effects {
 
     fn with_cache(cache: Arc<pm_glsl::Cache>, context: String) -> Effects {
         Effects {
+            assets: Default::default(),
+            mips: None,
+            file_app_version: None,
+            versioned_builtins: false,
             set: DefinitionSet::default(),
             configured: false,
             missing_ids: Default::default(),
@@ -319,6 +330,8 @@ impl Effects {
         &mut self,
         snapshot: &DefinitionSetSnapshot,
     ) -> Result<Vec<EngineError>, UpdateError> {
+        self.versioned_builtins = false;
+        self.file_app_version = None;
         let mut set = DefinitionSet::default();
         let generation = snapshot.generation.max(Seq::new(1).expect("safe"));
         let update = DefinitionsUpdate {
@@ -757,10 +770,159 @@ impl crate::composite::EffectHost for Effects {
         layer: &'d pm_model::Node,
         frame: crate::composite::effects::EffectFrame,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps = match plan::effect_steps(scope, self, layer, frame.time)? {
-            Ok(steps) => steps,
+        self.prepare_prefix(scope, layer, frame, None)
+    }
+    fn prepare_source<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+        prefix: Option<usize>,
+        mut raster: crate::composite::effects::SourceRaster,
+        grow: bool,
+    ) -> pm_eval::JsResult<
+        Result<
+            (
+                Option<crate::composite::PreparedEffects>,
+                crate::composite::effects::SourceRaster,
+            ),
+            crate::Feature,
+        >,
+    > {
+        let mut steps = match plan::effect_steps_raster(
+            scope,
+            self,
+            layer,
+            frame.time,
+            (1., 1.),
+            prefix,
+            Some(raster),
+        )? {
+            Ok(s) => s,
             Err(f) => return Ok(Err(f)),
         };
+        let failure = |s: &str| crate::Feature::Definition(s.into());
+        let mut domains = vec![];
+        for step in &steps {
+            let Some(def) = versions::main_definition(&step.definition) else {
+                return Ok(Err(failure("Effect has no source processing contract")));
+            };
+            let Some(contract) = def.metadata.get("sourceProcessing") else {
+                return Ok(Err(failure(
+                    "Effect does not declare source processing support",
+                )));
+            };
+            if step.backdrop || step.temporal || contract.get("geometry").is_some() {
+                return Ok(Err(failure(
+                    "Source raster backdrop/temporal/brush domain adapter unavailable",
+                )));
+            }
+            let value = |key: &str| {
+                step.params
+                    .iter()
+                    .find(|p| p.key == key)
+                    .map_or(0., |p| match p.value {
+                        plan::Binding::Float(v) => v,
+                        _ => 0.,
+                    })
+            };
+            let enabled = contract
+                .get("when")
+                .and_then(|v| v.as_str())
+                .is_none_or(|k| value(k) != 0.);
+            let pad = if grow && enabled {
+                (contract
+                    .get("pixels")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.)
+                    + contract
+                        .get("padding")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                        .map(|k| value(k).abs())
+                        .sum::<f64>()
+                        * contract
+                            .get("factor")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1.))
+                .ceil()
+            } else {
+                0.
+            };
+            raster.extent = match raster.extent.pad(pad) {
+                Ok(e) => e,
+                Err(e) => return Ok(Err(failure(&e.to_string()))),
+            };
+            domains.push(raster.extent);
+        }
+        let (w, h) = match raster.size() {
+            Ok(s) => s,
+            Err(e) => return Ok(Err(e)),
+        };
+        let owner = std::sync::Arc::new(raster.owner());
+        for (step, domain) in steps.iter_mut().zip(domains) {
+            step.owner = Some(owner.clone());
+            step.source_domain = Some((domain, raster.extent));
+            if let Some(spatial) = &mut step.spatial {
+                let def = versions::main_definition(&step.definition).unwrap();
+                if let Some(sampling) = def.metadata.get("sampling") {
+                    let radius = step
+                        .params
+                        .iter()
+                        .find(|p| p.key == sampling["radius"].as_str().unwrap())
+                        .map_or(0., |p| match p.value {
+                            plan::Binding::Float(v) => v,
+                            _ => 0.,
+                        });
+                    spatial.lod = pm_fx_defs::spatial::sample_lod(
+                        radius,
+                        sampling["support"].as_f64().unwrap(),
+                        sampling["maxRadius"].as_f64().unwrap(),
+                        owner.pixel_scale,
+                        w,
+                        h,
+                    )
+                    .unwrap();
+                } else {
+                    spatial.lod = w.max(h).ilog2();
+                }
+            }
+        }
+        let prepared = if steps.is_empty() {
+            None
+        } else {
+            let sources = steps
+                .iter()
+                .map(|s| self.source_key(DefinitionKind::Effect, &s.definition))
+                .collect();
+            Some(crate::composite::PreparedEffects {
+                padding: crate::composite::Padding::Full,
+                backdrop: false,
+                passes: exec::chain_passes(exec::Chain {
+                    inputs: vec![],
+                    layer: crate::js::layer_id(layer),
+                    steps,
+                    time: frame.time,
+                    sources,
+                }),
+            })
+        };
+        Ok(Ok((prepared, raster)))
+    }
+    fn prepare_prefix<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+        prefix: Option<usize>,
+    ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
+        let steps =
+            match plan::effect_steps_prefix(scope, self, layer, frame.time, frame.scale, prefix)? {
+                Ok(steps) => steps,
+                Err(f) => return Ok(Err(f)),
+            };
         if steps.is_empty() {
             return Ok(Ok(None));
         }
@@ -772,6 +934,7 @@ impl crate::composite::EffectHost for Effects {
             padding: plan::chain_padding(&steps),
             backdrop: steps.iter().any(|s| s.backdrop),
             passes: exec::chain_passes(exec::Chain {
+                inputs: vec![],
                 layer: crate::js::layer_id(layer),
                 steps,
                 time: frame.time,

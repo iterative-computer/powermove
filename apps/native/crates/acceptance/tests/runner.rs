@@ -8,7 +8,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1424, 0, 3179));
+    assert_eq!(r.counts(), (1426, 0, 3178));
     assert_eq!(r.exit_code(false), 0);
     assert_eq!(r.exit_code(true), 2);
     assert_eq!(
@@ -27,7 +27,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             .iter()
             .filter(|x| x.kind == "original" && x.status == Status::Pass)
             .count(),
-        21
+        22
     );
     assert_eq!(
         r.cases
@@ -95,7 +95,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1424 pass / 0 fail / 3179 blocked-by")
+            .contains("1426 pass / 0 fail / 3178 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
@@ -163,13 +163,13 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         eprintln!("counts {:?}", report.counts());
         return;
     }
-    assert_eq!(report.counts(), (1467, 0, 3136));
+    assert_eq!(report.counts(), (1469, 0, 3135));
     assert_eq!(
         report.blockers_csv(),
         include_str!("../data/legacy-v1.2.0-remaining-blockers.csv")
     );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
-    assert_eq!(rows.len(), 3137);
+    assert_eq!(rows.len(), 3136);
     assert!(rows.iter().all(|r| r.len() == 6));
     for workflow in &report.workflows {
         let row = format!(
@@ -185,7 +185,7 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
             workflow.blocked
         );
         assert!(
-            pm_acceptance::catalog::WORKFLOWS.contains(&row),
+            include_str!("../data/legacy-workflows-2026-11-05-w12.md").contains(&row),
             "{}",
             workflow.id
         );

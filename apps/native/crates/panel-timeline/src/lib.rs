@@ -14,6 +14,7 @@ pub mod snap;
 mod snapshot;
 pub mod tracks;
 pub mod v4;
+mod v4_actions;
 
 pub use behaviour::*;
 pub use client::{ClientError, TimelineClient};
@@ -138,6 +139,9 @@ impl TimelineModel {
             let mut properties = Vec::new();
             let has_scale = layer.channels.iter().any(|c| c.path == "scale.x")
                 && layer.channels.iter().any(|c| c.path == "scale.y");
+            let position = self.track_channels(&layer.id, "position");
+            let joined_position = !layer.separate_dimensions && position.len() >= 2;
+            let first_position = position.first().map(|c| c.path.as_str());
             for channel in &layer.channels {
                 if !layer.three_d
                     && [
@@ -158,7 +162,16 @@ impl TimelineModel {
                 if has_scale && channel.path == "scale.y" {
                     continue;
                 }
-                let visible = self.reveal.visible(&layer.id, channel)
+                if joined_position
+                    && channel.path.starts_with("position.")
+                    && Some(channel.path.as_str()) != first_position
+                {
+                    continue;
+                }
+                let visible = (joined_position
+                    && Some(channel.path.as_str()) == first_position
+                    && position.iter().any(|c| self.reveal.visible(&layer.id, c)))
+                    || self.reveal.visible(&layer.id, channel)
                     || (has_scale
                         && channel.path == "scale.x"
                         && layer
@@ -167,11 +180,15 @@ impl TimelineModel {
                             .find(|c| c.path == "scale.y")
                             .is_some_and(|c| self.reveal.visible(&layer.id, c)));
                 if visible {
-                    properties.push(if has_scale && channel.path == "scale.x" {
-                        "scale".to_owned()
-                    } else {
-                        channel.path.clone()
-                    });
+                    properties.push(
+                        if joined_position && Some(channel.path.as_str()) == first_position {
+                            "position".to_owned()
+                        } else if has_scale && channel.path == "scale.x" {
+                            "scale".to_owned()
+                        } else {
+                            channel.path.clone()
+                        },
+                    );
                 }
             }
             let query = self.search.trim().to_lowercase();
@@ -247,7 +264,15 @@ impl TimelineModel {
         self.rebuild_rows();
     }
     pub fn track_channels(&self, layer: &str, path: &str) -> Vec<&Channel> {
-        if path == "scale" {
+        if path == "position" {
+            ["position.x", "position.y", "position.z"]
+                .iter()
+                .filter(|p| {
+                    **p != "position.z" || self.index.layer(layer).is_some_and(|l| l.three_d)
+                })
+                .filter_map(|p| self.index.channel(layer, p))
+                .collect()
+        } else if path == "scale" {
             ["scale.x", "scale.y"]
                 .iter()
                 .filter_map(|c| self.index.channel(layer, c))
@@ -350,6 +375,8 @@ impl TimelineModel {
         {
             return Err(ModelError::UnknownId("key".into()));
         }
+        let expanded = self.expand_scale_keys(hit);
+        let hit = expanded.as_slice();
         let before = self.selection.keys();
         let all = hit.iter().any(|id| before.contains(id));
         let mut next = if additive || all {
@@ -444,13 +471,19 @@ impl TimelineModel {
                 if let Some((l, c)) = row {
                     if layer.id != l
                         || (channel.path != c
-                            && !(c == "scale" && channel.path.starts_with("scale.")))
+                            && !self
+                                .track_channels(l, c)
+                                .iter()
+                                .any(|a| a.path == channel.path))
                     {
                         continue;
                     }
                 } else if let Some(c) = self.selection.channel()
                     && channel.path != c
-                    && !(c == "scale" && channel.path.starts_with("scale."))
+                    && !self
+                        .track_channels(&layer.id, c)
+                        .iter()
+                        .any(|a| a.path == channel.path)
                 {
                     continue;
                 }
@@ -481,5 +514,6 @@ impl TimelineModel {
             },
         )
         .with_txid(txid)
+        .with_document(self.index.doc_id)
     }
 }

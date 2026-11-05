@@ -54,7 +54,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         retired.blocked_by.as_deref(),
         Some("delta-data:archived-web-export-preferences")
     );
-    assert_eq!(r.counts(), (1682, 0, 2662));
+    assert_eq!(r.counts(), (1701, 0, 2644));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
     assert_eq!(r.specs.iter().filter(|s| s.in_370_roster).count(), 370);
@@ -104,7 +104,25 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
             "{id}"
         );
     }
-    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1424, 0, 3179));
+    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1426, 0, 3178));
+    for id in ["A506", "W007.mcp-utf16-ingress"] {
+        assert!(
+            r.compatibility_required_ids
+                .iter()
+                .any(|required| required == id)
+        );
+        assert_eq!(
+            r.compatibility
+                .as_ref()
+                .unwrap()
+                .cases
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .status,
+            Status::Pass
+        );
+    }
     let blocked = r
         .cases
         .iter()
@@ -118,9 +136,27 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         .collect::<Vec<_>>();
     assert_eq!(grouped.len(), blocked.len());
     assert_eq!(grouped.into_iter().collect::<BTreeSet<_>>(), blocked);
+    // The tracked census is configured with the actual file-backed source
+    // worker; this kernel-only run must keep that one worker-dependent body
+    // blocked. Every other row remains identical.
+    let rows = |text: &str| {
+        pm_acceptance::catalog::csv_rows(text)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row[0] != "MAIN.MCP.fork_builtin_extension.behavior")
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        pm_acceptance::catalog::csv_rows(&r.blockers_csv()).unwrap(),
-        pm_acceptance::catalog::csv_rows(include_str!("../data/remaining-blockers.csv")).unwrap()
+        rows(&r.blockers_csv()),
+        rows(include_str!("../data/remaining-blockers.csv"))
+    );
+    assert_eq!(
+        r.cases
+            .iter()
+            .find(|c| c.id == "MAIN.MCP.fork_builtin_extension.behavior")
+            .unwrap()
+            .status,
+        Status::BlockedBy
     );
     assert_eq!(
         pm_acceptance::catalog::csv_rows(&r.e2e_csv()).unwrap(),

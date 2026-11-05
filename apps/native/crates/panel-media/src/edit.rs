@@ -72,6 +72,25 @@ impl PreparedEdit {
             },
         )
     }
+    /// Native worker completion: atomically admit sealed byte receipts with
+    /// this already reviewed one-step asset/placement edit.
+    pub fn request_with_media(
+        &self,
+        caller: Caller,
+        bindings: Vec<pm_kernel::MediaBinding>,
+    ) -> Request {
+        Request::new(
+            caller,
+            Call::AdmitMedia(pm_kernel::MediaAdmission {
+                expected_revision: self.stamp.revision,
+                project: self.next.clone(),
+                label: self.label.clone(),
+                bindings,
+            }),
+        )
+        .with_document(self.stamp.document)
+    }
+
     /// Queue the guarded transaction; awaiting/polling is the caller's job.
     pub fn submit(
         &self,

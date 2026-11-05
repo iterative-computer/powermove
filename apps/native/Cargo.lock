@@ -4733,13 +4733,21 @@ dependencies = [
 name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "flate2",
+ "libc",
+ "pm-compat-host",
  "pm-kernel",
  "pm-mcp",
  "pm-model",
  "pm-recorder",
  "pm-runtime-v8",
  "pm-store-host",
+ "png",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 
@@ -4829,8 +4837,10 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-node",
+ "pm-perf",
  "pm-protocol",
  "pm-render",
+ "pm-scene3d",
  "pm-studio",
  "pm-time",
  "serde",
@@ -4932,6 +4942,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-fx-defs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
@@ -4984,9 +5002,11 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "libc",
+ "pm-captions",
  "pm-edit",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-model",
  "pm-scene3d",
  "pm-text",
@@ -5261,6 +5281,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-panel-studio3d"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-scene3d",
+ "pm-surface",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-panel-timeline"
 version = "0.1.0"
 dependencies = [
@@ -5368,6 +5401,7 @@ dependencies = [
  "pm-color",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-geom3d",
  "pm-glsl",
  "pm-gpu",

@@ -65,6 +65,55 @@ pub struct EffectFrame {
     pub time: f64,
 }
 
+/// Local content and padded effect extent, before the layer transform/opacity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SourceRaster {
+    pub bounds: pm_fx_defs::spatial::Extent,
+    pub extent: pm_fx_defs::spatial::Extent,
+}
+impl SourceRaster {
+    pub fn size(self) -> Result<(u32, u32), Feature> {
+        let e = self.extent;
+        if ![e.x, e.y, e.width, e.height].iter().all(|v| v.is_finite())
+            || e.width <= 0.
+            || e.height <= 0.
+            || e.width.ceil() > 16384.
+            || e.height.ceil() > 16384.
+        {
+            return Err(Feature::Definition(
+                "Source raster exceeds GPU dimensions".into(),
+            ));
+        }
+        Ok((e.width.ceil() as u32, e.height.ceil() as u32))
+    }
+    pub fn world(self) -> pm_eval::transform::Mat2d {
+        let (w, h) = self.size().expect("validated source raster");
+        let sx = w as f64 / self.extent.width;
+        let sy = h as f64 / self.extent.height;
+        [sx, 0., 0., sy, -self.extent.x * sx, -self.extent.y * sy]
+    }
+    pub fn owner(self) -> crate::effects::plan::Owner {
+        let m = self.world();
+        let b = self.bounds;
+        crate::effects::plan::Owner {
+            uv: [
+                (1. / (m[0] * b.width)) as f32,
+                0.,
+                0.,
+                0.,
+                (1. / (m[3] * b.height)) as f32,
+                0.,
+                ((self.extent.x - b.x) / b.width) as f32,
+                ((self.extent.y - b.y) / b.height) as f32,
+                1.,
+            ],
+            size: [b.width, b.height],
+            bounds: [b.x, b.y, b.width, b.height],
+            pixel_scale: [m[0], m[3]],
+        }
+    }
+}
+
 /// A layer's effects, prepared at plan time.
 #[derive(Clone)]
 pub struct PreparedEffects {
@@ -126,6 +175,26 @@ pub struct Covered<'a> {
 
 /// A prepared effect chain.
 pub trait EffectPasses: Send + Sync {
+    /// Worst-case source framebuffer bytes at float32, including all retained
+    /// intermediate passes. An opaque host must supply its own estimate.
+    fn source_allocation_bytes(&self, _size: (u32, u32)) -> Option<u64> {
+        None
+    }
+    fn vector_assets(&self) -> Vec<Arc<crate::effects::resources::Asset>> {
+        vec![]
+    }
+    fn input_requests(&self) -> Vec<crate::effects::resources::Reference> {
+        vec![]
+    }
+    fn input_plans(&self) -> &[crate::effects::resources::Producer] {
+        &[]
+    }
+    fn with_input_plans(
+        &self,
+        _plans: Vec<crate::effects::resources::Producer>,
+    ) -> Option<Arc<dyn EffectPasses>> {
+        None
+    }
     /// Identifies the chain and every input that changes its pixels (for
     /// plan equality and render cache keys).
     fn key(&self) -> Vec<u8>;
@@ -196,6 +265,38 @@ pub trait EffectHost: Send + Sync {
         layer: &'d Node,
         frame: EffectFrame,
     ) -> JsResult<Result<Option<PreparedEffects>, Feature>>;
+
+    /// A chain evaluated on an unclipped local source. Hosts must opt in;
+    /// composition-space passes cannot silently stand in for this contract.
+    fn prepare_source<'d>(
+        &self,
+        _scope: &mut Scope<'_, 'd>,
+        _layer: &'d Node,
+        _frame: EffectFrame,
+        _prefix: Option<usize>,
+        _raster: SourceRaster,
+        _grow: bool,
+    ) -> JsResult<Result<(Option<PreparedEffects>, SourceRaster), Feature>> {
+        Ok(Err(Feature::Definition(
+            "Effect host has no source raster adapter".into(),
+        )))
+    }
+
+    fn prepare_prefix<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        frame: EffectFrame,
+        prefix: Option<usize>,
+    ) -> JsResult<Result<Option<PreparedEffects>, Feature>> {
+        if prefix.is_some() {
+            Ok(Err(Feature::Definition(
+                "Effect host cannot render a historical prefix".into(),
+            )))
+        } else {
+            self.prepare(scope, layer, frame)
+        }
+    }
 
     /// Whether a transition type is registered (`PM.transitionDef`), for
     /// `activeTransition` and the group boundary rule.

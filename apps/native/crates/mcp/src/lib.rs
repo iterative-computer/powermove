@@ -14,7 +14,9 @@ pub mod inspection;
 pub mod media;
 pub mod media_tools;
 pub mod memory;
+pub mod memory_admission;
 pub mod registration;
+pub mod registration_cli;
 pub mod scene3d;
 pub mod services;
 pub mod session;
@@ -87,7 +89,11 @@ impl From<std::io::Error> for Error {
     }
 }
 pub fn success(value: Value) -> Value {
-    json!({"content":[{"type":"text","text":pm_model::json::to_canonical_string(&model(&value))}],"isError":false})
+    success_model(&model(&value))
+}
+/// MCP text contains JSON, whose escapes preserve every JavaScript UTF-16 unit.
+pub fn success_model(value: &pm_model::Value) -> Value {
+    json!({"content":[{"type":"text","text":pm_model::json::to_canonical_string(value)}],"isError":false})
 }
 pub fn failure(error: Error) -> Value {
     // The frozen stdio host sends Error.message verbatim. Structured diagnostics

@@ -651,3 +651,57 @@ impl PathMut for Value {
         Some(v)
     }
 }
+
+#[test]
+fn saving_app_effect_provenance_survives_edit_undo_and_native_save_reopen() {
+    for version in ["1.2.0", "1.3.0"] {
+        let dir = TempDir::new("effect-provenance");
+        let path = dir.path("input.pmv");
+        let mut envelope = read_container(
+            &std::fs::File::open(ts_fixture("fresh.pmv")).unwrap(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .document;
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .insert("v", Value::from(version));
+        std::fs::write(&path, to_canonical_string(&envelope)).unwrap();
+        let mut store = open_store(&path);
+        let before = store.snapshot().document.to_value();
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        store
+            .execute(
+                Command::SetStaticOpacity {
+                    layer_id: "a".into(),
+                    value: 25.,
+                },
+                Origin::Interface,
+            )
+            .unwrap();
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        store.undo().unwrap();
+        assert_eq!(store.snapshot().document.to_value(), before);
+        assert_eq!(
+            store.snapshot().document.saving_app_version(),
+            Some(version)
+        );
+        let output = dir.path("saved.pmv");
+        save_as(&mut store, &output).unwrap();
+        let reopened = open_store(&output);
+        assert_eq!(reopened.snapshot().document.to_value(), before);
+        assert_eq!(
+            pm_fx_defs::catalog::saving_generation(
+                reopened.snapshot().document.saving_app_version()
+            ),
+            pm_fx_defs::catalog::saving_generation(Some(version))
+        );
+    }
+}
