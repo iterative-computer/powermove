@@ -97,3 +97,16 @@ made for them here. Mask/component frozen qualification remains separate.
 The existing native-service, V8/remote-DOM, UI, physical routes and performance
 owners remain necessary. This lane changes no capabilities to optimistic
 success and enables no Chromium/Node fallback.
+
+## 2026-11-04 — replay admission repair
+
+The first portable all-target replay could not compile `pm-eval --test corpus`:
+it unconditionally imported the macOS-only `CoreTextRegistry`. The harness now
+selects its existing implementation only on macOS, under `tests/support` (not
+an extra Cargo test target). Linux emits a named **BLOCKED** failure. With
+`--no-fail-fast`, unavailable corpus proof no longer prevents the independent
+CPU suites from running. On Mac, absent captures also fail explicitly; the
+previous successful early return was not corpus proof. Numeric bounds, font
+exclusion pins, semantics and capture selection are unchanged. **N3/N7 and the
+honesty rule** select this behavior; there is no substitute font or skipped
+case. The moved fixture include remains inside the owned engine tree.
