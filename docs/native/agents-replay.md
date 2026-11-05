@@ -283,3 +283,14 @@ The new portable tests also cover durable publication failures/retries, exact
 compaction/question history through reopen and archival, receipt conflicts,
 capacity admission and native inspection retention. These are native correctness
 checks, distinguished from frozen-source conformance probes.
+
+## 2026-11-04 — lane completion boundary
+
+The portable callback, FIFO, history, monitor and task-scope work is implemented
+and tested. The original whole-observation strict assertion is intentionally
+still failing on the explicit lifecycle additions and the four unchanged MCP
+errors. Full P4 completion is blocked on the application/MCP paths this lane is
+not permitted to edit, as well as real-provider credentials and macOS execution.
+The newer primitives do not turn missing tool adapters or unexecuted schedules
+into passes. See the dated integration list in `agents.md` for remaining bodies,
+including task updates, ordinary-thread controls and final queue/cleanup fencing.

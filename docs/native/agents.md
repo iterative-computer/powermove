@@ -285,3 +285,80 @@ Decisions and selecting rules:
 
 No visual surface, copy or interaction design was added. No new
 `DESIGN-TODO(opus)` placeholder is required by these service-only changes.
+
+## 2026-11-04 — durable task scope and combined result barrier
+
+`orchestration::Scope` adds a provider-independent reservation/result state
+machine. `Host` supplies actual provider/model selection and actor-owned durable
+storage; this crate does not advertise provider availability. Its relative path
+matches the shipped archive:
+`Agent Tasks/<sha256(project)>/<sha256(project/thread)>.json`.
+The storage adapter must compare the expected archive on the actor before
+publishing, and reject stale scopes unchanged. The application must additionally
+hold one execution lease per conversation, as the tag's `activeScopes` does.
+
+The service validates requests and inherited identities, preserves the complete
+parent request (project, planning, access, attachments and opaque context), and
+returns typed Start/Cancel/Continue commands. It supports idempotent delegation,
+immutable terminal results, parent ownership, four nesting levels, eight active
+children and 32 tasks per root run. Reservation publication precedes any Start
+command. Failed provider discovery or storage returns no Start and changes no
+reservation. Saved nonterminal tasks reopen as interrupted without silently
+restarting a provider. Unknown archive fields remain, and malformed/versioned or
+scope-mismatched archives are refused unchanged. The 512-record/32-MiB bounds
+refuse new work rather than pruning user history; the host needs an archive
+rotation path for long-lived scopes.
+
+`cancel` requests only the owned task and descendants; provider settlement is
+required before the parent result becomes terminal. `stop` durably records the
+root stop before returning cancellation commands. Independent ordinary threads
+are absent from the task graph and are never stopped by these operations.
+Terminal status reads acknowledge a result. Reading active status has no such
+side effect, and waiting for children does not cancel them.
+
+`after_turn_with_watches` joins child and run-specific watch results. It waits
+for all pending work, then durably publishes a stable delivery ID and complete
+untrusted result snapshots. `nativePendingDeliveries` is an additive archive
+outbox; it survives a crash and preserves unknown result fields. The host must
+idempotently accept that ID into the parent's durable history/continuation
+outbox before calling `acknowledge_delivery` or `acknowledge_with_watches`.
+Failed acknowledgement leaves the same delivery available for retry. Watch
+leases are released only after durable acknowledgement. This intentionally
+strengthens the tagged in-memory continuation handoff; it does not claim that
+an unwired application already resumes work automatically.
+
+| Decision | Selecting rule |
+|---|---|
+| Preserve tagged task fields, path, parent ownership, idempotency and inherited requests; prove the reservation boundary against the source | N3 authored intent; N4 existing task archives; N7 headless IDs |
+| Require real provider selection and actor compare-before-publish; return commands only after reservation durability | N1/N4 prevent duplicate/lost work and stale overwrites; kernel single-writer architecture |
+| Native durable continuation outbox with explicit, idempotent acknowledgement | N2/N4 improve crash behavior; N3 never silently mark undelivered results consumed |
+| Root stop and descendant drain are separate from unrelated ordinary threads | N3 exact scope/authority semantics; N1 cancellation correctness |
+| Retain interrupted/terminal/unknown records and refuse capacity overflow without GC | N4 archive rather than delete; N1 bounded state |
+
+### Concrete integration still required outside this crate
+
+The kernel/application owner must implement `Store` and orchestration `Host` on
+the existing actor/archive authority, supply the real provider catalog, enforce
+one active root per conversation and drive the supplied clock. The application
+must consume Start/Cancel/Continue, retain workspace/session identity, route
+child questions and approvals by original IDs, build the frozen continuation
+prompt, persist/deduplicate deliveries and register the MCP adapters. Explicit
+ordinary-thread launch/list/read/send/cancel, `task_send` live answer/steering and
+provider reconfiguration, bounded wait scheduling, complete child-question
+forwarding and external-MCP-root lifetime management are **not implemented by
+this scope core**. No MCP tool is marked implemented by this lane.
+
+The shell must opt into the typed callback boundary while continuing to consume
+inspection events, and connect event receipts before acknowledging callbacks.
+Final shell/kernel queue order, provider cleanup fences, real process restart
+and automatic watch delivery remain integration gates. These changes stay within
+`crates/agents/**` and the agents documentation; no kernel, MCP, shell, engine,
+vendor, spike or Electron consumer is changed or pruned.
+
+On macOS and with credentials, verify both pinned providers through the signed
+app: questions and Project/Computer approvals, interruption success/error/timeout,
+concurrent runs, reconnect/resume after a process restart, automatic compaction
+with durable history, nested child cancellation/draining, watch/unwatch and
+exactly-once accepted continuation delivery. Test actor/file durability and
+runtime-owned auth/session preservation under process kill. Linux doubles and
+source-derived recordings do not certify these behaviors, native UI or signing.

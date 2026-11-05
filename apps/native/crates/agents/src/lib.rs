@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod delivery;
 pub mod history;
 pub mod monitor;
+pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
 pub mod runtime;
