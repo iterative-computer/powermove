@@ -55,6 +55,9 @@
 //!   renderer upload protocol are not ported (the shell lane owns file
 //!   associations; there is no renderer upload in a native app).
 
+#[path = "file_guard.rs"]
+mod file_guard;
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
@@ -632,6 +635,11 @@ impl SavePlan {
             HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
             HistoryToWrite::Raw(value) => value.clone(),
         };
+        // Freeze the requirement alongside this exact document/history revision.
+        // Old shipped readers ignore it; the transition refusal is specified in
+        // docs/native/file-guard.md. Never advertise a new container version that
+        // our own production reader cannot reopen.
+        let extra = file_guard::save_extra(self.document.root(), &history, &self.extra);
         let doc_offset = out.offset;
         let mut sink = DocSink {
             out: &mut out,
@@ -645,7 +653,7 @@ impl SavePlan {
                 had_comps: self.had_comps,
                 history: &history,
                 workspace: self.workspace.as_ref(),
-                extra: &self.extra,
+                extra: &extra,
             },
             &mut sink,
         );
