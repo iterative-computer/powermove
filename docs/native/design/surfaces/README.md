@@ -16,7 +16,9 @@ are those of panels/README §1.
 | [captions.md](captions.md) | Captions panel, inspector, timeline, generation, speech models, import/export | S087–S093 |
 | [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
 | [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
-| [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; shipped 3D layers, inspector and viewer controls | S097 S098 |
+| [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; S098 points to 3d-studio.md | S097 S098 |
+| [main-delta-ui.md](main-delta-ui.md) | Main's UI changes: docking, Layers column, per-axis keying, tooltips, menus, Memory, Storage, Version History | U01–U16, UI parts of P, E, A |
+| [3d-studio.md](3d-studio.md) | New 3D system: viewer toolbar, preview tiers, navigation, gizmos, light tool, inspector, import, materials, upgrade, failure | S098 |
 | [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
 | [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
 | [onboarding.md](onboarding.md) | Welcome window, timeline, agent, speech model, Bring My Workspace | S107–S110 |
@@ -129,13 +131,17 @@ says *do not build*. Reverse a default here and in the owning family file.
 | # | Question | Default in the spec | Owning row |
 |---|---|---|---|
 | 1 | The region-selection overlay exists in v1.2.0 code but nothing opens it. Ship it, or retire the row? | Specified, **do not build** until decided | S066 |
-| 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | Archive is kept, copy says so, no restore UI | S060, S095, S103 |
-| 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | Keep automatic registration, and make it visible and reversible in Settings | S070 |
-| 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | The shipped surfaces are specified so old projects stay editable; the new system is not designed here | S098 |
-| 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | Inside the window; the overlay is not ported | S107 |
-| 6 | Reverse migration isn't built. What do beta users get promised about going back? | Original app stays untouched; work done in Native leaves only as `.pmv` files | N003 |
+| 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | **Answered:** no restore UI; archives are kept | S060, S095, S103 |
+| 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | **Answered:** ask first, at most once, only when Claude is installed; Settings changes it later | S070 |
+| 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | **Answered:** the new system ships with the rewrite, old projects upgrade automatically, no compat mode | S098 |
+| 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | **Answered:** inside the window; the overlay is not ported | S107 |
+| 6 | Reverse migration isn't built. What do beta users get promised about going back? | **Answered:** no reverse migration; the original app refuses a native file it can't read, and the copy says so | N003 |
+| 7 | Exploded views, place-on and other 3D gestures exist for agents through `edit_3d`, but the 3D source gives people no control for them. Add human controls in the first native release? | Agent-only, as source; [3d-studio.md §12](3d-studio.md#12-not-in-the-source-so-not-in-native-yet) lists them | S098 |
+| 8 | Old 3D projects upgrade in memory on open and save in the new format. After that save, the original app refuses the file. Should the first save of an upgraded project warn about that? | No warning; the upgrade banner and N003 say what's needed | S098, N003 |
+| 9 | Main's Storage cleanup deletes old backups; native archives them, so on a Mac with one disk `Free Up Space…` frees little. Keep archive-only? | Archive-only (N4). Only rebuildable caches are removed | P06 |
+| 10 | `Link Layers` in main reads as linked audio and video in Tracks mode. Native keeps `Parent`. Acceptable? | `Parent` everywhere | U04 |
 
-**Answered by the owner, 2026-11-04** (see p0-decisions.md; these override the defaults above): Q2 no restore UI. Q3 ask first, no silent registration. Q4 the new 3D system ships with the rewrite and replaces the old controls. Q5 inside the window. Q6 the old app refuses a native file it can't read. Q1 is still open.
+Answers to Q2–Q6 are from the owner, 2026-11-04 (see p0-decisions.md), and the family files now state them. Q1 and Q7–Q10 are open.
 
 ## 7. New tokens requested by these specs
 
@@ -153,3 +159,7 @@ on the token; it does not substitute a literal.
 | `colors.scope_blue` | `#6BA6FF` | [colour.md](colour.md) |
 | `metrics.mark_bracket` | 6 | [pro-edit.md](pro-edit.md) |
 | `metrics.sync_badge` | 16 | [pro-edit.md](pro-edit.md) |
+| `metrics.viewer_3d_labels` | 860 | [3d-studio.md](3d-studio.md) |
+| `metrics.viewer_3d_collapse` | 560 | [3d-studio.md](3d-studio.md) |
+| `motion.tooltip_delay` | 0.38 | [main-delta-ui.md](main-delta-ui.md) |
+| `motion.tooltip_warm` | 0.6 | [main-delta-ui.md](main-delta-ui.md) |
