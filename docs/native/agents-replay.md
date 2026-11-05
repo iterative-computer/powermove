@@ -329,3 +329,43 @@ project memory, updated session/publication fences and main's provider approval
 semantics need their own current-source replay and real host support. No
 optimistic Auto/provider capability is added by this lane. The scope of the
 portable services and the integration blockers remain explicit in `agents.md`.
+
+## 2026-11-04 — authoritative main reference (owner scope change)
+
+The primary reference is now **main at
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`**. The primary
+`replay_all_surfaces_and_check_every_difference` test executes the new
+`fixtures/main/replay` corpus. `PM_REPLAY_REQUIRE_IDENTICAL=1` applies to that
+main corpus. Legacy v1.2.0 evidence and exact-difference checks remain in
+`legacy_replay_all_surfaces_and_check_every_difference`; its optional strict
+flag is `PM_REPLAY_REQUIRE_LEGACY_IDENTICAL`. No legacy reference bytes are
+replaced with a native result.
+
+`capture-main-replay.cjs`, `capture-main-oracle.cjs` and the lane-vendored
+`main-catalog.mjs` execute that exact commit. The manifest pins the commit,
+source files, recorder/capture/catalog helpers, toolchain dependencies and every
+case file. Main has **23 cases; 21/23 exact wire streams, 23/23 exact public-event
+streams, 5/23 identical complete observation sets**. All **21 provider callback
+cases match** through the typed adapter, preserving all 28 inspection additions.
+
+The **336 measured leaf differences** remain explicit: 28 lifecycle additions,
+304 catalog/schema/description/order differences in MCP and four MCP tool-error
+strings. The catalog insertion shifts subsequent array positions, so 304 leaves
+are not 304 independently missing tools. Main has 68 tools including
+`project_memory`; the currently integrated MCP executable has the old 67-tool
+catalog. Main also changes `get_project_state` memory guidance and
+`export_video` job fields. The primary exact ledger is regression evidence;
+strict identity still fails on these differences, with no tolerance widening or
+case removal.
+
+Regenerate the primary corpus using the pinned TypeScript/Zod installation:
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+node apps/native/crates/agents/scripts/capture-main-replay.cjs --check
+```
+
+N3 selects main for current behavior; N4 retains v1.2.0 projects/extensions and
+legacy evidence; N7 retains complete native inspection. A01–A10 are the active
+agent scope, including memory, external client registration and recovery.

@@ -1,0 +1,60 @@
+{
+  "baseline": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "source": "CodexAppServerRunner; synthetic FakeAppServer errors derived from app-server-runner.test.ts",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "oracle-run",
+        "cwd": "/workspace/agent",
+        "prompt": "Synthetic error probe",
+        "schema": {
+          "type": "object"
+        },
+        "model": null,
+        "reasoningEffort": null,
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "error": {
+          "code": -32000,
+          "message": "Synthetic provider refusal"
+        }
+      }
+    },
+    {
+      "kind": "result",
+      "value": {
+        "ok": false,
+        "error": "Synthetic provider refusal",
+        "cancelled": false
+      }
+    }
+  ]
+}

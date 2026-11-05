@@ -151,14 +151,14 @@ struct KnownDifference {
     reason: String,
     differences: Vec<Difference>,
 }
-#[test]
-fn replay_all_surfaces_and_check_every_difference() {
-    let m = replay::load_manifest(&root());
+fn check_surfaces(root: PathBuf, reference: &str, strict: &str, report: &str) {
+    let m = replay::load_manifest(&root);
+    assert_eq!(m.baseline, reference);
     let ledger: BTreeMap<String, KnownDifference> =
-        serde_json::from_slice(&fs::read(root().join("differences.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(root.join("differences.json")).unwrap()).unwrap();
     let mut reports = vec![];
     for c in &m.cases {
-        let fixture = serde_json::from_slice(&fs::read(root().join(&c.file)).unwrap()).unwrap();
+        let fixture = serde_json::from_slice(&fs::read(root.join(&c.file)).unwrap()).unwrap();
         let (expected, actual) = if c.surface == "mcp" {
             mcp(&fixture)
         } else {
@@ -167,7 +167,7 @@ fn replay_all_surfaces_and_check_every_difference() {
         reports.push(replay::report(c, &expected, &actual));
     }
     let serialized = serde_json::to_string_pretty(&reports).unwrap();
-    if let Some(path) = std::env::var_os("PM_REPLAY_REPORT") {
+    if let Some(path) = std::env::var_os(report) {
         fs::write(path, &serialized).unwrap();
     }
     println!("{serialized}");
@@ -196,12 +196,31 @@ fn replay_all_surfaces_and_check_every_difference() {
             "orphan difference {name}"
         );
     }
-    if std::env::var_os("PM_REPLAY_REQUIRE_IDENTICAL").is_some() {
+    if std::env::var_os(strict).is_some() {
         assert!(
             reports.iter().all(|r| r.identical),
             "P4 remains open: recorded differences are not an identical replay"
         );
     }
+}
+
+#[test]
+fn replay_all_surfaces_and_check_every_difference() {
+    check_surfaces(
+        root().parent().unwrap().join("main/replay"),
+        replay::MAIN,
+        "PM_REPLAY_REQUIRE_IDENTICAL",
+        "PM_REPLAY_REPORT",
+    );
+}
+#[test]
+fn legacy_replay_all_surfaces_and_check_every_difference() {
+    check_surfaces(
+        root(),
+        "v1.2.0",
+        "PM_REPLAY_REQUIRE_LEGACY_IDENTICAL",
+        "PM_LEGACY_REPLAY_REPORT",
+    );
 }
 #[test]
 fn source_hashes_pin_the_frozen_reference_and_recorder() {
@@ -393,4 +412,41 @@ fn provider_callback_boundary_is_strictly_identical_without_losing_inspection() 
     }
     assert_eq!(cases, 21);
     assert_eq!(inspected, 28);
+}
+
+#[test]
+fn pinned_main_provider_callbacks_match_without_replacing_legacy_fixtures() {
+    let root = root().parent().unwrap().join("main/replay");
+    let manifest = replay::load_manifest(&root);
+    assert_eq!(manifest.commit, replay::MAIN);
+    let mut count = 0;
+    let mut inspection = 0;
+    for case in manifest.cases.iter().filter(|c| c.surface != "mcp") {
+        let fixture = serde_json::from_slice(&fs::read(root.join(&case.file)).unwrap()).unwrap();
+        let (expected, actual, native) = replay::provider_callbacks(case, &fixture);
+        assert_eq!(expected, actual, "main case {}", case.name);
+        count += 1;
+        inspection += native.lifecycle.len();
+    }
+    assert_eq!(count, 21);
+    assert_eq!(inspection, 28);
+    for source in manifest.sources {
+        let mut command = Command::new("git");
+        command
+            .current_dir(repo())
+            .args(["show", &format!("{}:{}", replay::MAIN, source.file)]);
+        assert_eq!(
+            replay::sha256(&execute(command, vec![], Duration::from_secs(10))),
+            source.sha256
+        );
+    }
+    for recorder in [manifest.recorder, manifest.capture]
+        .into_iter()
+        .chain(manifest.helpers)
+    {
+        assert_eq!(
+            replay::sha256(&fs::read(repo().join(recorder.file)).unwrap()),
+            recorder.sha256
+        );
+    }
 }

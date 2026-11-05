@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::Path};
 
 pub const BASELINE: &str = "07ed5fa17ee640659cb075f9cad1af2095011d60";
+pub const MAIN: &str = "c7f46a05641b23944d3692c9d80f9677c7e1ef1d";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -18,6 +19,8 @@ pub struct Manifest {
     pub sources: Vec<Source>,
     pub recorder: Source,
     pub capture: Source,
+    #[serde(default)]
+    pub helpers: Vec<Source>,
     pub dependencies: BTreeMap<String, String>,
     pub cases: Vec<Case>,
 }
@@ -104,8 +107,12 @@ pub fn load_manifest(root: &Path) -> Manifest {
     let m: Manifest =
         serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(m.version, 1, "unsupported replay format");
-    assert_eq!(m.baseline, "v1.2.0");
-    assert_eq!(m.commit, BASELINE);
+    if m.baseline == "v1.2.0" {
+        assert_eq!(m.commit, BASELINE);
+    } else {
+        assert_eq!(m.baseline, MAIN);
+        assert_eq!(m.commit, MAIN);
+    }
     assert!(m.synthetic);
     assert_eq!(
         m.dependencies,
@@ -242,7 +249,7 @@ fn provider_inner(
     fixture: &Value,
     callbacks: bool,
 ) -> (Observations, Observations, Observations) {
-    assert_eq!(fixture["baseline"], "v1.2.0");
+    assert!(fixture["baseline"] == "v1.2.0" || fixture["baseline"] == MAIN);
     assert!(fixture["source"].is_string());
     let frames: Vec<Message> = serde_json::from_value(fixture["frames"].clone()).unwrap();
     let mut c = codex::Client::default();

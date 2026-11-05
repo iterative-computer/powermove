@@ -1,0 +1,144 @@
+{
+  "baseline": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "source": "CodexAppServerRunner; synthetic FakeAppServer errors derived from app-server-runner.test.ts",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "oracle-run",
+        "cwd": "/workspace/agent",
+        "prompt": "Synthetic error probe",
+        "schema": {
+          "type": "object"
+        },
+        "model": null,
+        "reasoningEffort": null,
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialized",
+        "params": {}
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 2,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "serviceName": "powermove"
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thr_123"
+          }
+        }
+      }
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 3,
+        "params": {
+          "threadId": "thr_123",
+          "input": [
+            {
+              "type": "text",
+              "text": "Synthetic error probe"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 3,
+        "result": {
+          "turn": {
+            "id": "turn_456"
+          }
+        }
+      }
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thr_123",
+          "turn": {
+            "id": "turn_456",
+            "status": "failed",
+            "error": {
+              "message": "Synthetic turn failure",
+              "codexErrorInfo": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "result",
+      "value": {
+        "ok": false,
+        "error": "Synthetic turn failure",
+        "cancelled": false
+      }
+    }
+  ]
+}
