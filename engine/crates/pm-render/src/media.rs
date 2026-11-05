@@ -550,7 +550,7 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 ///   codecs and layouts);
 /// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
 ///   woven frame);
-/// - display rotations, non-square pixels, and a cropping clean aperture
+/// - non-square pixels and a cropping clean aperture
 ///   (exact, but not compared with today's viewer).
 ///
 /// Answers are kept per file stamp: capability routing asks at every
@@ -638,13 +638,6 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
     ) {
         return Err(format!(
             "interlaced video (not compared with today's viewer; {WHEN})"
-        ));
-    }
-    if v.rotation
-        .is_some_and(|r| (0.01..359.99).contains(&r.rem_euclid(360.0)))
-    {
-        return Err(format!(
-            "rotated video (not compared with today's viewer; {WHEN})"
         ));
     }
     if v.pixel_aspect.0 != v.pixel_aspect.1 {

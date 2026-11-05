@@ -6,7 +6,7 @@
 //!   equal FFmpeg's bwdif (`mode=send_field`) run on the same decode and
 //!   converted with the same matrix and chroma filter, and at frame rate
 //!   show each frame's first field;
-//! - HDR, interlaced, rotated, non-square-pixel, cropping-clean-aperture and
+//! - HDR, interlaced, non-square-pixel, cropping-clean-aperture and
 //!   wide-gamut video route to the legacy renderer unless the asset carries
 //!   `interpret` (they have no parity test against today's viewer);
 //! - display rotations and the clean aperture are exact permutations and
@@ -481,30 +481,29 @@ fn rotations_and_clean_aperture_are_exact() {
             })
             .collect();
         assert_eq!(mapped, ff, "{file}: FFmpeg rotates the other way");
-        // Uninterpreted, rotated video routes to the legacy renderer; any
-        // interpretation (here the file's own square pixels) draws it.
-        assert!(
-            pm_render::media::probe_video(&path).is_err(),
-            "{file} is drawn without an interpretation"
-        );
+        // Quarter turns use the same exact geometry with the file defaults.
+        assert_eq!(pm_render::media::probe_video(&path), Ok(()), "{file}");
         // The renderer's picture is the same permutation of the unrotated
         // picture, exactly.
-        let (doc_r, res_r) = document(
-            &path,
-            (ow, oh),
-            25.0,
-            Some(json!({ "pixelAspect": [1, 1] })),
-        );
-        let ours = render(&mut r, &doc_r, (ow, oh), t, &res_r);
-        for y in 0..oh {
-            for x in 0..ow {
-                let (u, v) = g.source_of(x, y, (w as u32, h as u32));
-                let o = (y * ow + x) as usize * 4;
-                let p = (v as usize * w + u as usize) * 4;
-                assert_eq!(ours[o..o + 4], plain[p..p + 4], "{file} ({x}, {y})");
+        for interpret in [None, Some(json!({ "pixelAspect": [1, 1] }))] {
+            let (doc_r, res_r) = document(&path, (ow, oh), 25.0, interpret);
+            let ours = render(&mut r, &doc_r, (ow, oh), t, &res_r);
+            for y in 0..oh {
+                for x in 0..ow {
+                    let (u, v) = g.source_of(x, y, (w as u32, h as u32));
+                    let o = (y * ow + x) as usize * 4;
+                    let p = (v as usize * w + u as usize) * 4;
+                    assert_eq!(ours[o..o + 4], plain[p..p + 4], "{file} ({x}, {y})");
+                }
             }
         }
     }
+    // Rotations off the quarter turns still require unsupported geometry.
+    let oblique = formats("video/geom-rot45.mov").expect("generate the 45-degree witness");
+    assert!(
+        pm_render::media::probe_video(&oblique)
+            .is_err_and(|reason| reason.contains("display rotation"))
+    );
     // The clean aperture: the full frame by default, the crop on request.
     let clap = formats("video/geom-clap.mov").unwrap();
     assert!(
@@ -1193,9 +1192,9 @@ fn video_capability_gate_tracks_measured_classes_and_interpretation() {
         ("video/interlaced-bff.mxf", Some("interlaced video")),
         ("video/interlaced-tff.mov", Some("interlaced video")),
         ("video/dv-pal.dv", Some("interlaced video")),
-        ("video/geom-rot90.mov", Some("rotated video")),
-        ("video/geom-rot180.mov", Some("rotated video")),
-        ("video/geom-rot270.mov", Some("rotated video")),
+        ("video/geom-rot90.mov", None),
+        ("video/geom-rot180.mov", None),
+        ("video/geom-rot270.mov", None),
         ("video/geom-clap.mov", Some("a cropping clean aperture")),
         ("video/meta-pasp.mov", Some("non-square pixels")),
         ("video/color-p3.mov", None),

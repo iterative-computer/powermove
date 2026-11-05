@@ -6,7 +6,6 @@ use pm_native_migrate::{
 };
 use std::{collections::BTreeSet, fs, io::Write, path::Path};
 use support::*;
-use tempfile::tempdir;
 fn all_domains() -> BTreeSet<OwnerKind> {
     [
         OwnerKind::Current,
@@ -434,17 +433,18 @@ fn interrupted_delta_archives_old_pass_objects_mappings_and_source_bytes() {
         // A later record revision conflicts with the native key. Preserve both.
         records[0].value["revision"] = "synthetic-delta-revision".into();
         let mut interrupted = false;
+        let result = migration::migrate(&snapshot, &records, &input, &root, |point| {
+            if point == stop && !interrupted {
+                interrupted = true;
+                anyhow::bail!("synthetic delta interruption");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
         assert!(
-            migration::migrate(&snapshot, &records, &input, &root, |point| {
-                if point == stop && !interrupted {
-                    interrupted = true;
-                    anyhow::bail!("synthetic delta interruption");
-                }
-                Ok(())
-            })
-            .is_err()
+            interrupted,
+            "{stop:?} failed before crash injection: {result:?}"
         );
-        assert!(interrupted);
         let pass = migration::migrate(&snapshot, &records, &input, &root, |_| Ok(())).unwrap();
         assert!(!pass.cutover_ready);
         assert_eq!(pass.mapping_conflicts.len(), 1);

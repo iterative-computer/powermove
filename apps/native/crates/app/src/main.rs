@@ -4,9 +4,9 @@ pub mod dialogs;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
-mod lifecycle;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
+mod lifecycle;
 mod mcp;
 mod media;
 mod panels;
@@ -37,53 +37,6 @@ fn native_profile(profile: Option<PathBuf>, home: Option<std::ffi::OsString>) ->
         home.filter(|home| !home.is_empty())
             .map(|home| PathBuf::from(home).join("Library/Application Support/Powermove Native"))
     })
-}
-
-#[cfg(test)]
-mod profile_tests {
-    use super::native_profile;
-    use std::path::PathBuf;
-
-    #[test]
-    fn default_is_durable_and_separate_from_electron() {
-        let home = std::env::temp_dir().join("synthetic-home");
-        let profile = native_profile(None, Some(home.clone().into_os_string())).unwrap();
-        assert_eq!(
-            profile,
-            home.join("Library/Application Support/Powermove Native")
-        );
-        assert_ne!(profile, home.join("Library/Application Support/Powermove"));
-        assert_ne!(
-            profile,
-            std::env::temp_dir().join("powermove-native-integration")
-        );
-    }
-
-    #[test]
-    fn profile_override_takes_precedence() {
-        let profile = std::env::temp_dir().join("synthetic-profile-override");
-        assert_eq!(
-            native_profile(Some(profile.clone()), Some("synthetic-home".into())),
-            Some(profile)
-        );
-    }
-
-    #[test]
-    fn override_does_not_require_home() {
-        let profile = std::env::temp_dir().join("synthetic-profile-without-home");
-        assert_eq!(native_profile(Some(profile.clone()), None), Some(profile));
-    }
-
-    #[test]
-    fn missing_home_never_falls_back_to_shared_temp() {
-        assert_eq!(native_profile(None, None), None);
-        assert_eq!(native_profile(None, Some("".into())), None);
-        // Keep the override's existing absolute-path validation at the caller.
-        assert_eq!(
-            native_profile(Some(PathBuf::from("relative")), None),
-            Some(PathBuf::from("relative"))
-        );
-    }
 }
 
 fn main() -> Result<()> {
@@ -247,5 +200,52 @@ fn node_string(node: &pm_model::Node) -> Option<&str> {
     match node.kind() {
         pm_model::NodeKind::String(s) => s.as_str(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::native_profile;
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_is_durable_and_separate_from_electron() {
+        let home = std::env::temp_dir().join("synthetic-home");
+        let profile = native_profile(None, Some(home.clone().into_os_string())).unwrap();
+        assert_eq!(
+            profile,
+            home.join("Library/Application Support/Powermove Native")
+        );
+        assert_ne!(profile, home.join("Library/Application Support/Powermove"));
+        assert_ne!(
+            profile,
+            std::env::temp_dir().join("powermove-native-integration")
+        );
+    }
+
+    #[test]
+    fn profile_override_takes_precedence() {
+        let profile = std::env::temp_dir().join("synthetic-profile-override");
+        assert_eq!(
+            native_profile(Some(profile.clone()), Some("synthetic-home".into())),
+            Some(profile)
+        );
+    }
+
+    #[test]
+    fn override_does_not_require_home() {
+        let profile = std::env::temp_dir().join("synthetic-profile-without-home");
+        assert_eq!(native_profile(Some(profile.clone()), None), Some(profile));
+    }
+
+    #[test]
+    fn missing_home_never_falls_back_to_shared_temp() {
+        assert_eq!(native_profile(None, None), None);
+        assert_eq!(native_profile(None, Some("".into())), None);
+        // Keep the override's existing absolute-path validation at the caller.
+        assert_eq!(
+            native_profile(Some(PathBuf::from("relative")), None),
+            Some(PathBuf::from("relative"))
+        );
     }
 }

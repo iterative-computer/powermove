@@ -1,0 +1,22 @@
+[package]
+name = "pm-corpus-checks"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace]
+resolver = "3"
+members = ["."]
+
+[dependencies]
+pm-kernel = { path = "../../../apps/native/crates/kernel" }
+pm-model = { path = "../../../engine/crates/pm-model" }
+pm-glsl = { path = "../../../engine/crates/pm-glsl" }
+serde_json = "1"
+blake3 = "1"
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+incremental = false

@@ -68,7 +68,7 @@ fn generation(v: &Value) -> Result<Generation> {
     })
 }
 fn memory(v: &IsolateMemory) -> Value {
-    json!({"used":v.used_heap_bytes,"physical":v.physical_heap_bytes,"external":v.external_bytes,"snapshot":v.snapshot_bytes})
+    json!({"used":v.used_heap_bytes,"physical":v.physical_heap_bytes,"external":v.external_bytes,"fetch_reserved":v.fetch_reserved_bytes,"engine_reserved":v.engine_reserved_bytes,"snapshot":v.snapshot_bytes})
 }
 fn error_wire(e: Error) -> Value {
     match e {
