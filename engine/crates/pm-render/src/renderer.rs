@@ -767,6 +767,7 @@ impl Renderer {
                 view: None,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
+                    inputs: &[],
                     effects: &mut self.effects,
                     timer: None,
                     linear: &self.pipelines.linear,
@@ -1681,6 +1682,9 @@ impl Renderer {
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
+        if self.effects.versioned_builtins {
+            self.effects.assets.prepare(document, assets);
+        }
         // One look at each media file per frame (`media::StampFrame`).
         let _stamps = crate::media::StampFrame::begin();
         let root = document
@@ -2300,6 +2304,9 @@ impl Renderer {
     ) -> Result<(CompPlan, Vec<LayerFailure>), RenderError> {
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        if self.effects.versioned_builtins {
+            self.effects.assets.prepare(document, assets);
+        }
         let root = document.root().unwrap();
         let open = capability::open_composition_id(root);
         let project = open

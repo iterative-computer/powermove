@@ -220,3 +220,16 @@ passed unchanged without concurrent build jobs. Neither test, assertion,
 time budget nor case was edited or skipped. These observations warrant
 attention if they recur in integration; they are not evidence of macOS
 power-loss durability. All Mac and host boundaries listed above still apply.
+
+### Renderer resource boundary — 2026-11-05
+
+`render::Resource` is the worker-side bridge from the admitted core model to
+immutable surface parts. Its parts share static geometry, evaluate glTF pose and
+instance transforms at exact requested time, retain fit normalization and source
+material records, and expose bounded decoded embedded map layers. Geometry hashes
+cover positions, normals, UVs and indices independently of animated transforms.
+`pm-engine-service::studio::DocumentSource` consumes it for preview and the same
+export-child reconstruction. CAD's converted GLB goes through the same decoder;
+this is not evidence of an installed/signed Mac CAD helper or real CAD fixtures.
+Splats retain the existing core decoder and normalization and use the renderer's
+separate Gaussian rasterizer, as required by the Studio spec.

@@ -175,13 +175,15 @@ fn missing_revision_and_resources_fail_visibly() {
 
 #[test]
 fn final_shutter_composition_encodes_deterministically_in_the_windowless_child() {
+    encoded_repeat(document(true, 100.), Default::default());
+}
+fn encoded_repeat(doc: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) {
     use pm_engine_service::jobs::{ExportHandle, ExportRequest};
     use pm_protocol::{
         color::OutputColor,
         common::{FrameRate, SessionId, TickRange},
         priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, JobState, QualityTier},
     };
-    let doc = document(true, 100.);
     let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
         &doc.to_value().unwrap(),
     ))
@@ -224,7 +226,10 @@ fn final_shutter_composition_encodes_deterministically_in_the_windowless_child()
                 composition: "test".into(),
                 settings: settings.clone(),
             },
-            Default::default(),
+            pm_engine_service::MediaCatalog {
+                originals: media.paths.clone(),
+                proxies: Default::default(),
+            },
             destination.clone(),
         )
         .unwrap();
@@ -265,5 +270,273 @@ fn final_shutter_composition_encodes_deterministically_in_the_windowless_child()
     assert_eq!(
         outputs[0], outputs[1],
         "decoded Final/shutter/export pixels must repeat exactly"
+    );
+}
+
+/// Real GLB bytes with two nodes sharing one indexed mesh and authored physical
+/// material. This exercises the importer, not explicit-document mesh fallback.
+fn imported_glb() -> Vec<u8> {
+    let pm_model::Value::Object(source) = pm_scene3d::to_model(
+        &json!({"primitive":"sphere","parameters":{"radius":1,"segments":48}}),
+    ) else {
+        unreachable!()
+    };
+    let g = pm_render::scene3d::model::source_of(&source)
+        .unwrap()
+        .geometry();
+    let mut bin = vec![];
+    for value in &g.positions {
+        bin.extend(value.to_le_bytes());
+    }
+    let normal_offset = bin.len();
+    for value in &g.normals {
+        bin.extend(value.to_le_bytes());
+    }
+    let index_offset = bin.len();
+    for value in &g.indices {
+        bin.extend(value.to_le_bytes());
+    }
+    let mut header = serde_json::to_vec(&json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,1]}],
+        "nodes":[{"name":"Main","mesh":0},{"name":"Small","mesh":0,"translation":[1.6,0,0],"scale":[0.25,0.25,0.25]}],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":normal_offset},{"buffer":0,"byteOffset":normal_offset,"byteLength":index_offset-normal_offset},{"buffer":0,"byteOffset":index_offset,"byteLength":bin.len()-index_offset}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":g.positions.len()/3,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1]}, {"bufferView":1,"componentType":5126,"count":g.normals.len()/3,"type":"VEC3"},{"bufferView":2,"componentType":5125,"count":g.indices.len(),"type":"SCALAR"}],
+        "materials":[{"name":"Imported Mirror","pbrMetallicRoughness":{"baseColorFactor":[0.9,0.9,0.9,1],"metallicFactor":1,"roughnessFactor":0.02}}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"material":0}]}]
+    })).unwrap();
+    while !header.len().is_multiple_of(4) {
+        header.push(b' ');
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let mut out = vec![];
+    for word in [
+        0x46546c67u32,
+        2,
+        (12 + 8 + header.len() + 8 + bin.len()) as u32,
+        header.len() as u32,
+        0x4e4f534a,
+    ] {
+        out.extend(word.to_le_bytes());
+    }
+    out.extend(header);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(0x004e4942u32.to_le_bytes());
+    out.extend(bin);
+    out
+}
+fn imported_document() -> Arc<pm_model::Document> {
+    let doc = document(true, 100.);
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &doc.to_value().unwrap(),
+    ))
+    .unwrap();
+    let object = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap();
+    object["d"]["data"]["object"]["source"] = json!({"assetId":"imported"});
+    object["d"]["data"]["object"]["useSourceMaterials"] = json!(true);
+    for axis in ["x", "y", "z"] {
+        object["p"][format!("scale.{axis}")]["v"] = json!(200);
+    }
+    // The imported physical material must win over this authored override.
+    object["d"]["data"]["object"]["material"]["p"]["color"]["v"] = json!("#000000");
+    pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap())
+        .snapshot()
+        .document
+}
+#[test]
+fn metal_imported_multi_object_reflection_preview_final_and_export() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assembly.glb");
+    std::fs::write(&path, imported_glb()).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let doc = imported_document();
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+    assert_eq!(
+        input.instances.len(),
+        3,
+        "two imported parts plus the reflection card: {}",
+        pm_model::json::to_canonical_string(&doc.to_value().unwrap())
+    );
+    assert!(
+        Arc::ptr_eq(&input.instances[0].mesh, &input.instances[1].mesh),
+        "imported instances share immutable geometry"
+    );
+    assert_ne!(input.instances[0].world.0, input.instances[1].world.0);
+    assert_eq!(
+        input.materials.as_ref().unwrap()[0].base[3],
+        1.,
+        "source metallic material"
+    );
+    let gpu = pm_gpu::Gpu::new("imported studio").unwrap();
+    assert_eq!(gpu.info.backend, wgpu::Backend::Metal);
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    let mut outputs = vec![];
+    for _ in 0..2 {
+        studio::attach(&mut renderer, doc.clone(), &media);
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[0] > 0.08 && p[1] == 0. && p[2] == 0.)
+                .count()
+                > 100,
+            "imported metal must reflect the off-camera card; colored={}, max={:?}",
+            pixels.chunks_exact(4).filter(|p| p[0] > 0.01).count(),
+            pixels.chunks_exact(4).max_by(|a, b| a[0].total_cmp(&b[0]))
+        );
+        outputs.push(pixels);
+    }
+    assert_eq!(outputs[0], outputs[1], "fixed-seed imported Final");
+    assert_eq!(
+        renderer.studio_counters().blas_builds,
+        2,
+        "one imported mesh and one card"
+    );
+    let mut preview = request();
+    preview.export = false;
+    preview.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &preview,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty());
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[0] > 0.08)
+    );
+    let mut host = Headless::new().unwrap();
+    assert_eq!(
+        outputs[0],
+        host.export_reference(
+            &Scene {
+                doc: doc.clone(),
+                comp: "test".into(),
+                media: media.clone(),
+                content: 1
+            },
+            Ticks::ZERO,
+            Size::new(64, 64)
+        )
+        .unwrap()
+    );
+    encoded_repeat(doc, media);
+}
+
+#[test]
+fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture.splat");
+    let mut bytes = vec![];
+    for x in [-1f32, 0., 1.] {
+        for v in [x, 0., 0., 0.15, 0.15, 0.15] {
+            bytes.extend(v.to_le_bytes());
+        }
+        bytes.extend([0, 255, 0, 255, 255, 128, 128, 128]);
+    }
+    std::fs::write(&path, bytes).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let source = imported_document();
+    let mut value: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &source.to_value().unwrap(),
+    ))
+    .unwrap();
+    value["comps"]["test"]["w"] = json!(65);
+    value["comps"]["test"]["h"] = json!(65);
+    let layers = value["comps"]["test"]["layers"].as_array_mut().unwrap();
+    layers.retain(|l| l["id"] != "card");
+    let model = layers.iter_mut().find(|l| l["id"] == "mirror").unwrap();
+    for axis in ["x", "y", "z"] {
+        model["p"][format!("scale.{axis}")]["v"] = json!(100);
+    }
+    let doc =
+        pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&value.to_string()).unwrap())
+            .snapshot()
+            .document;
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let mut request = request();
+    request.output_size = Size::new(65, 65);
+    let mut output = vec![];
+    for _ in 0..2 {
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        assert_eq!(
+            &pixels[(32 * 65 + 32) * 4..][..4],
+            &[0., 1., 0., 1.],
+            "source Gaussian at its center"
+        );
+        assert!(
+            pixels.chunks_exact(4).any(|p| p[3] > 0. && p[3] < 0.5),
+            "Gaussian falloff must survive"
+        );
+        assert!(pixels.chunks_exact(4).all(|p| p[0] == 0. && p[2] == 0.));
+        output.push(pixels);
+    }
+    assert_eq!(output[0], output[1], "fixed imported splat repeat");
+    assert_eq!(
+        renderer.studio_counters().traces,
+        0,
+        "splats never enter the surface tracer"
+    );
+    let mut host = Headless::new().unwrap();
+    assert_eq!(
+        output[0],
+        host.export_reference(
+            &Scene {
+                doc,
+                comp: "test".into(),
+                media,
+                content: 1
+            },
+            Ticks::ZERO,
+            Size::new(65, 65)
+        )
+        .unwrap()
     );
 }

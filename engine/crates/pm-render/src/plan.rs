@@ -254,6 +254,11 @@ pub struct SvgLayer {
 
 /// Inputs and outputs of a build.
 pub struct Build<'r> {
+    input_active: std::collections::BTreeSet<(String, pm_fx_defs::inputs::Request)>,
+    input_cache: std::collections::BTreeMap<
+        (String, pm_fx_defs::inputs::Request),
+        crate::effects::resources::Producer,
+    >,
     pub assets: &'r dyn AssetResolver,
     pub failures: Vec<LayerFailure>,
     /// SVG image layers whose document has a feature the float painter
@@ -478,6 +483,8 @@ pub(crate) fn build_reusing<'r>(
         effects,
         matte_depth: 0,
         forced_on: None,
+        input_active: Default::default(),
+        input_cache: Default::default(),
         shader_fallback: options.shader_fallback,
         text,
         blur: options.blur,
@@ -723,6 +730,17 @@ fn draw_layer<'d>(
         }
     } else {
         None
+    };
+    let effects = match effects {
+        Some(effects) => match effect_inputs(scope, b, layer, effects, width, height, scale, time)?
+        {
+            Ok(effects) => Some(effects),
+            Err(f) => {
+                refuse(b, f);
+                return Ok(None);
+            }
+        },
+        None => None,
     };
     // The transition node (`activeTransition`, `runTransition`): prepared by
     // the host; without one, a layer in a transition is routed.
@@ -2273,6 +2291,164 @@ pub fn normalize_fill(value: Option<&Node>, bg: Option<&Node>) -> Fill {
         kind,
         angle: js::clamp(angle, -180.0, 180.0),
         stops,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn effect_inputs<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    owner: &'d Node,
+    mut effects: composite::PreparedEffects,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    time: f64,
+) -> JsResult<Result<composite::PreparedEffects, Feature>> {
+    use pm_fx_defs::inputs::{Space, Stage};
+    let requests = effects.passes.input_requests();
+    if requests.is_empty() {
+        return Ok(Ok(effects));
+    }
+    let mut producers = vec![];
+    for reference in requests {
+        let request = reference.request;
+        let cache_key = (scope.comp.id().to_string_lossy(), request.clone());
+        if request.space == Space::Source {
+            return Ok(Err(Feature::Definition(
+                "source-space input raster adapter unavailable".into(),
+            )));
+        }
+        if let Some(producer) = b.input_cache.get(&cache_key) {
+            producers.push(producer.clone());
+            continue;
+        }
+        if b.input_active.contains(&cache_key) {
+            return Ok(Err(Feature::Definition(format!(
+                "Effect input cycle at {}",
+                request.layer_id
+            ))));
+        }
+        if b.input_cache.len() + b.input_active.len() >= pm_fx_defs::graph::MAX_FRAME_INPUTS {
+            return Ok(Err(Feature::Definition(
+                "Effect input lease limit exceeded".into(),
+            )));
+        }
+        let source = scope
+            .layers()
+            .iter()
+            .find(|l| js::layer_id(l) == request.layer_id);
+        let Some(source) = source else {
+            return Ok(Err(Feature::Definition(format!(
+                "Effect input layer is missing: {}",
+                request.layer_id
+            ))));
+        };
+        if matches!(js::layer_type(source).as_str(), "group" | "adjustment")
+            || js::flag(source, "threeD")
+            || js::flag(source, "matteSource")
+        {
+            return Ok(Err(Feature::Definition(
+                "Effect input group/3D/matte adapter unavailable".into(),
+            )));
+        }
+        let at = request.time().unwrap_or(time);
+        let owner_binding = match crate::effects::plan::owner(scope, source, at, scale)? {
+            Ok(o) => o,
+            Err(f) => return Ok(Err(f)),
+        };
+        b.input_active.insert(cache_key.clone());
+        let result = (|| -> JsResult<Result<crate::effects::resources::Producer, Feature>> {
+            let mut content = vec![];
+            let active = scope.active_forced_on(source, at)?;
+            if active
+                && let Some(draw) = layer_draw(scope, b, source, at, width, height, scale, 1.)?
+            {
+                content.push(draw);
+            }
+            let masks = if request.stage != Stage::Source {
+                let has = composite::build::has_masks(scope, source, at)?;
+                layer_masks(scope, source, at, scale, b.origin, width, height, has)?
+            } else {
+                None
+            };
+            let nested = if request.stage == Stage::Effects && active {
+                let Some(host) = b.effects else {
+                    return Ok(Err(Feature::Effects));
+                };
+                match host.prepare_prefix(
+                    scope,
+                    source,
+                    composite::effects::EffectFrame {
+                        width,
+                        height,
+                        scale,
+                        time: at,
+                    },
+                    request.prefix,
+                )? {
+                    Ok(Some(e)) => {
+                        if e.backdrop {
+                            return Ok(Err(Feature::Definition(
+                                "Effect input backdrop producer unavailable".into(),
+                            )));
+                        }
+                        match effect_inputs(scope, b, source, e, width, height, scale, at)? {
+                            Ok(e) => Some(e),
+                            Err(f) => return Ok(Err(f)),
+                        }
+                    }
+                    Ok(None) => None,
+                    Err(f) => return Ok(Err(f)),
+                }
+            } else {
+                None
+            };
+            let draws = vec![Draw {
+                layer: js::layer_id(owner),
+                matrix: [width as f64, 0., 0., height as f64, 0., 0.],
+                content: Content::Composite(Box::new(composite::Node::Layer(
+                    composite::LayerNode {
+                        layer: js::layer_id(source),
+                        content,
+                        masks,
+                        effects: nested,
+                        matte: None,
+                        blend: pm_protocol::color::BlendMode::Normal,
+                        alpha: 1.,
+                        transition: None,
+                    },
+                ))),
+            }];
+            Ok(Ok(crate::effects::resources::Producer {
+                request: request.clone(),
+                owner: owner_binding,
+                plan: std::sync::Arc::new(CompPlan {
+                    composition: scope.comp.id().to_string_lossy(),
+                    group: true,
+                    width,
+                    height,
+                    background: Background::Transparent,
+                    draws,
+                    view: level_view(scope, b.origin, width, height, scale),
+                }),
+            }))
+        })();
+        b.input_active.remove(&cache_key);
+        let producer = match result? {
+            Ok(p) => p,
+            Err(f) => return Ok(Err(f)),
+        };
+        b.input_cache.insert(cache_key, producer.clone());
+        producers.push(producer);
+    }
+    if let Some(passes) = effects.passes.with_input_plans(producers) {
+        effects.passes = passes;
+        Ok(Ok(effects))
+    } else {
+        Ok(Err(Feature::Definition(
+            "Effect host cannot bind producer plans".into(),
+        )))
     }
 }
 

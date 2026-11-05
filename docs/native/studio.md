@@ -263,3 +263,31 @@ explicitly rather than drawing placeholders. Fast, depth/id, view overrides,
 full depth-set/barrier/background/catcher presentation, cancellation between GPU
 slices and float/HDR Studio output remain unqualified. No panels, Blender,
 release, packaging or physical-display acceptance is added by this hook.
+
+## Imported resource adapter — 2026-11-05
+
+`DocumentSource` now loads worker-owned model bytes through `pm-scene3d::render::Resource`.
+OBJ and glTF/GLB use the core decoder and normalization; GLB assemblies retain
+part transforms, shared meshes, source physical materials, and embedded maps.
+The native CAD importer's converted GLB uses this same resource path. Geometry
+identity hashes complete mesh data, so replacing a document source does not
+invalidate an unchanged mesh's BLAS. Material extraction is linear in part count.
+
+Gaussian PLY/.splat resources take a separate native EWA raster pass: projected
+covariance, stable depth sorting, source Gaussian cutoff and premultiplied layer
+compositing. They never become substitute surface meshes or enter reflections.
+
+Headless Metal tests in engine-service `tests/studio.rs`:
+
+- `metal_imported_multi_object_reflection_preview_final_and_export` verifies two
+  imported parts sharing geometry, source metal material, an off-camera card's
+  reflection, exact fixed-seed repeat, preview, service output and two matching
+  decoded shutter-enabled PNG exports from the windowless child.
+- `metal_imported_splats_keep_gaussian_pixels_layer_order_and_export` verifies
+  Gaussian center/falloff, exact repeat, service export parity and zero surface
+  traces for a splat-only composition.
+
+This does not close the remaining Studio gates. Real native OpenCascade build
+and end-to-end CAD import qualification, authored material-map slots and live
+screens, complete depth/barrier/catcher handling, Fast, cancellation between GPU
+slices, float/HDR presentation and physical/visual acceptance remain open.

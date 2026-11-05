@@ -10,6 +10,12 @@ use std::sync::Arc;
 pub trait Source: SceneSource {
     /// Authored camera/environment quality; immutable for this request.
     fn final_samples(&self, request: &SceneRequest) -> Result<u32, String>;
+    fn splat_layers(
+        &self,
+        _request: &SceneRequest,
+    ) -> Result<Vec<pm_studio::splats::Layer>, String> {
+        Ok(vec![])
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
@@ -41,6 +47,8 @@ pub(crate) struct Pass {
     service: Option<StudioService>,
     cached: Option<(Tier, RenderedScene)>,
     traces: u64,
+    splats: Option<pm_studio::splats::Rasterizer>,
+    splat_cache: Option<(SceneRequest, Vec<pm_studio::splats::Layer>)>,
 }
 impl Pass {
     pub fn new(source: Arc<dyn Source>) -> Self {
@@ -49,11 +57,14 @@ impl Pass {
             service: None,
             cached: None,
             traces: 0,
+            splats: None,
+            splat_cache: None,
         }
     }
     pub fn replace_source(&mut self, source: Arc<dyn Source>) {
         self.source = source;
         self.cached = None;
+        self.splat_cache = None;
     }
     pub fn begin_frame(&mut self) {
         if self
@@ -92,6 +103,37 @@ impl Pass {
         final_output: bool,
         shutters: u32,
     ) -> Result<super::Rendered3d, super::Error3d> {
+        if self
+            .splat_cache
+            .as_ref()
+            .is_none_or(|(key, _)| key != request)
+        {
+            self.splat_cache = Some((request.clone(), self.source.splat_layers(request)?));
+        }
+        if let Some(splat) = self
+            .splat_cache
+            .as_ref()
+            .unwrap()
+            .1
+            .iter()
+            .find(|s| s.id == layer)
+        {
+            let color = pool.take(
+                device,
+                request.width,
+                request.height,
+                wgpu::TextureFormat::Rgba8Unorm,
+                pm_gpu::target::working_usage(),
+            );
+            self.splats
+                .get_or_insert_with(|| pm_studio::splats::Rasterizer::new(device))
+                .record(device, queue, encoder, splat, &color.texture)?;
+            return Ok(super::Rendered3d {
+                color,
+                depth: None,
+                color_space: super::OutputColor3d::Encoded,
+            });
+        }
         let tier = if final_output {
             let samples = self.source.final_samples(request)?;
             if samples == 0 {

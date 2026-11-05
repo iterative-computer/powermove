@@ -126,6 +126,21 @@ pub struct Covered<'a> {
 
 /// A prepared effect chain.
 pub trait EffectPasses: Send + Sync {
+    fn vector_assets(&self) -> Vec<Arc<crate::effects::resources::Asset>> {
+        vec![]
+    }
+    fn input_requests(&self) -> Vec<crate::effects::resources::Reference> {
+        vec![]
+    }
+    fn input_plans(&self) -> &[crate::effects::resources::Producer] {
+        &[]
+    }
+    fn with_input_plans(
+        &self,
+        _plans: Vec<crate::effects::resources::Producer>,
+    ) -> Option<Arc<dyn EffectPasses>> {
+        None
+    }
     /// Identifies the chain and every input that changes its pixels (for
     /// plan equality and render cache keys).
     fn key(&self) -> Vec<u8>;
@@ -196,6 +211,22 @@ pub trait EffectHost: Send + Sync {
         layer: &'d Node,
         frame: EffectFrame,
     ) -> JsResult<Result<Option<PreparedEffects>, Feature>>;
+
+    fn prepare_prefix<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        frame: EffectFrame,
+        prefix: Option<usize>,
+    ) -> JsResult<Result<Option<PreparedEffects>, Feature>> {
+        if prefix.is_some() {
+            Ok(Err(Feature::Definition(
+                "Effect host cannot render a historical prefix".into(),
+            )))
+        } else {
+            self.prepare(scope, layer, frame)
+        }
+    }
 
     /// Whether a transition type is registered (`PM.transitionDef`), for
     /// `activeTransition` and the group boundary rule.

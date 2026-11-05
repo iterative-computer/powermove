@@ -149,21 +149,6 @@ impl Effects {
         }
         let def = definition_for_file(id, saved.as_ref(), self.file_app_version.as_deref())
             .map_err(|e| e.to_string())?;
-        // These programs need producer rasters/leases or special spatial passes.
-        // Keep their failure visible until those bindings are installed.
-        if def.params.iter().any(|p| p.is_reference())
-            || def.metadata.contains_key("temporal")
-            || def.metadata.contains_key("sampling")
-            || def.metadata.contains_key("grid")
-            || matches!(
-                id,
-                "echo" | "blur" | "pixelate" | "unsharpMask" | "findEdges" | "shadow"
-            ) && revision > 1
-        {
-            return Err(format!(
-                "saved {id} version {revision}: native resource bindings unavailable"
-            ));
-        }
         let tagged = v120_catalog()
             .get(id, revision)
             .is_some_and(|tag| std::ptr::eq(tag, def));
@@ -213,4 +198,10 @@ pub fn for_document(document: &pm_model::Document) -> DefinitionSetSnapshot {
             })
     });
     set
+}
+
+pub(crate) fn main_definition(key: &str) -> Option<&'static Definition> {
+    let key = key.strip_prefix("pm.history.main.")?;
+    let (id, version) = key.rsplit_once('.')?;
+    main_catalog().get(id, version.parse().ok()?)
 }

@@ -36,6 +36,10 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectStep {
     pub owner: Option<std::sync::Arc<Owner>>,
+    pub spatial: Option<Spatial>,
+    pub temporal: bool,
+    pub references: Vec<super::resources::Reference>,
+    pub assets: Vec<(String, std::sync::Arc<super::resources::Asset>)>,
     /// `fx.id`.
     pub instance: String,
     /// `fx.type`, the definition id.
@@ -53,9 +57,15 @@ pub struct EffectStep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spatial {
+    pub lod: u32,
+    pub grid: Option<[u32; 2]>,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Owner {
     pub uv: [f32; 9],
     pub size: [f64; 2],
+    pub bounds: [f64; 4],
     pub pixel_scale: [f64; 2],
 }
 
@@ -196,6 +206,10 @@ pub fn effect_step(
         .sum();
     EffectStep {
         owner: None,
+        spatial: None,
+        temporal: false,
+        references: vec![],
+        assets: vec![],
         instance: instance.to_owned(),
         definition: def.id.as_str().to_owned(),
         passes: def.flags.passes,
@@ -266,9 +280,23 @@ pub fn effect_steps_scaled<'d>(
     time: f64,
     scale: (f64, f64),
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
+    effect_steps_prefix(scope, effects, layer, time, scale, None)
+}
+pub(crate) fn effect_steps_prefix<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    prefix: Option<usize>,
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
-    for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
+    for (fx_index, fx) in node::array_or_empty(node::member(Some(layer), "fx"))?
+        .iter()
+        .enumerate()
+        .take(prefix.unwrap_or(usize::MAX))
+    {
         let fx_id = node::to_js_string(node::member(Some(fx), "id")).to_string_lossy();
         let on = node::member_checked(Some(fx), "on")?;
         if !scope
@@ -320,10 +348,9 @@ pub fn effect_steps_scaled<'d>(
         }
         let mut step = effect_step(def, &fx_id, &values);
         if effects.versioned_builtins
-            && def
-                .glsl
-                .as_ref()
-                .is_some_and(|g| g.source.contains("u_layerUV"))
+            && def.glsl.as_ref().is_some_and(|g| {
+                g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
+            })
         {
             if node::is_str(node::member(Some(layer), "effectSpace"), "source")
                 || node::truthy(node::member(Some(layer), "threeD"))
@@ -334,44 +361,213 @@ pub fn effect_steps_scaled<'d>(
                 )));
                 continue;
             }
-            let Some(bounds) = scope.size_bounds(layer, time)? else {
-                refused.get_or_insert(Feature::Definition(
-                    "effect owner bounds unavailable".into(),
-                ));
-                continue;
+            match owner(scope, layer, time, scale)? {
+                Ok(owner) => step.owner = Some(std::sync::Arc::new(owner)),
+                Err(f) => {
+                    refused.get_or_insert(f);
+                    continue;
+                }
+            }
+        }
+        if let Some(definition) = super::versions::main_definition(&step.definition) {
+            let inputs = node::member(Some(fx), "inputs")
+                .map(|n| {
+                    serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(
+                        &n.to_value(),
+                    ))
+                })
+                .transpose();
+            let inputs = match inputs {
+                Ok(Some(v)) => pm_fx_defs::inputs::validate_inputs(&v).map_err(|e| e.to_string()),
+                Ok(None) => Ok(definition.input_defaults()),
+                Err(e) => Err(e.to_string()),
             };
-            let offset = scope.size_anchor_offset(layer, time)?;
-            let world = scope.world_matrix(layer, time)?;
-            let scaled = [
-                world[0] * scale.0,
-                world[1] * scale.1,
-                world[2] * scale.0,
-                world[3] * scale.1,
-                world[4] * scale.0,
-                world[5] * scale.1,
-            ];
-            let Some(inv) = pm_eval::transform::invert(&scaled) else {
-                refused.get_or_insert(Feature::Definition(
-                    "effect owner transform is singular".into(),
-                ));
-                continue;
+            let inputs = match inputs {
+                Ok(v) => v,
+                Err(e) => {
+                    refused.get_or_insert(Feature::Definition(e));
+                    continue;
+                }
             };
-            let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
-            step.owner = Some(std::sync::Arc::new(Owner {
-                uv: [
-                    (inv[0] / w) as f32,
-                    (inv[1] / h) as f32,
-                    0.,
-                    (inv[2] / w) as f32,
-                    (inv[3] / h) as f32,
-                    0.,
-                    ((inv[4] - bounds.x0 + offset.x) / w) as f32,
-                    ((inv[5] - bounds.y0 + offset.y) / h) as f32,
-                    1.,
-                ],
-                size: [w, h],
-                pixel_scale: [scale.0, scale.1],
-            }));
+            let mut failed = false;
+            for param in definition.params.iter().filter(|p| p.is_reference()) {
+                if let Some(input) = inputs.get(&param.k) {
+                    let valid = matches!(
+                        (param.kind.as_deref(), input),
+                        (Some("layer"), pm_fx_defs::inputs::EffectInput::Layer(_))
+                            | (Some("path"), pm_fx_defs::inputs::EffectInput::Path(_))
+                            | (Some("asset"), pm_fx_defs::inputs::EffectInput::Asset(_))
+                    );
+                    if !valid {
+                        refused.get_or_insert(Feature::Definition(format!(
+                            "Effect reference kind does not match {}",
+                            param.k
+                        )));
+                        failed = true;
+                        continue;
+                    }
+                }
+                match inputs.get(&param.k) {
+                    Some(pm_fx_defs::inputs::EffectInput::Asset(a)) => {
+                        if let Some(id) = &a.asset_id {
+                            let lut = param.presentation.get("assetKind").and_then(|v| v.as_str())
+                                == Some("lut");
+                            match effects.assets.0.get(&(id.clone(), lut)) {
+                                Some(Ok(asset)) => {
+                                    step.assets.push((param.k.clone(), asset.clone()))
+                                }
+                                Some(Err(e)) => {
+                                    refused.get_or_insert(Feature::Definition(e.clone()));
+                                    failed = true;
+                                }
+                                None => {
+                                    refused.get_or_insert(Feature::Definition(format!(
+                                        "Effect asset not prepared: {id}"
+                                    )));
+                                    failed = true;
+                                }
+                            }
+                        }
+                    }
+                    Some(pm_fx_defs::inputs::EffectInput::Layer(l)) if l.layer_id.is_some() => {
+                        let request = pm_fx_defs::inputs::Request::new(
+                            l.layer_id.as_ref().unwrap(),
+                            l.stage,
+                            l.space.unwrap_or_default(),
+                            Some(time),
+                            None,
+                        )
+                        .unwrap();
+                        step.references.push(super::resources::Reference {
+                            effect: step.instance.clone(),
+                            name: param.k.clone(),
+                            request,
+                        });
+                    }
+                    Some(pm_fx_defs::inputs::EffectInput::Path(p)) if p.layer_id.is_some() => {
+                        let provider = scope
+                            .layers()
+                            .iter()
+                            .find(|l| crate::js::layer_id(l) == *p.layer_id.as_ref().unwrap());
+                        if let Some(provider) = provider {
+                            let size = scope.comp_size();
+                            match super::brush::raster(
+                                scope,
+                                provider,
+                                p.path_id.as_ref().unwrap(),
+                                time,
+                                &step,
+                                (
+                                    (size.0 * scale.0.abs()).max(1.) as u32,
+                                    (size.1 * scale.1.abs()).max(1.) as u32,
+                                ),
+                                scale,
+                            )? {
+                                Ok(asset) => step.assets.push((param.k.clone(), asset)),
+                                Err(e) => {
+                                    refused.get_or_insert(Feature::Definition(e));
+                                    failed = true;
+                                }
+                            }
+                        } else {
+                            refused.get_or_insert(Feature::Definition(
+                                "Missing Stroke path provider".into(),
+                            ));
+                            failed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if failed {
+                continue;
+            }
+        }
+        if let Some(definition) = super::versions::main_definition(&step.definition) {
+            let value = |key: &str| {
+                step.params
+                    .iter()
+                    .find(|p| p.key == key)
+                    .map_or(0., |p| match p.value {
+                        Binding::Float(v) => v,
+                        _ => 0.,
+                    })
+            };
+            let size = scope.comp_size();
+            let w = (size.0 * scale.0.abs()).max(1.) as u32;
+            let h = (size.1 * scale.1.abs()).max(1.) as u32;
+            let sampling = definition.metadata.get("sampling");
+            let grid = definition.metadata.get("grid");
+            if sampling.is_some() || grid.is_some() {
+                let lod = if let Some(sampling) = sampling {
+                    pm_fx_defs::spatial::sample_lod(
+                        value(sampling["radius"].as_str().unwrap()),
+                        sampling["support"].as_f64().unwrap(),
+                        sampling["maxRadius"].as_f64().unwrap(),
+                        step.owner
+                            .as_ref()
+                            .map_or([scale.0, scale.1], |o| o.pixel_scale),
+                        w,
+                        h,
+                    )
+                    .unwrap()
+                } else {
+                    w.max(h).ilog2()
+                };
+                step.spatial = Some(Spatial {
+                    lod,
+                    grid: grid.map(|g| {
+                        pm_fx_defs::spatial::grid_size(
+                            value(g["columns"].as_str().unwrap()),
+                            value(g["rows"].as_str().unwrap()),
+                            2048,
+                        )
+                        .unwrap()
+                    }),
+                });
+            }
+        }
+        if let Some(definition) = super::versions::main_definition(&step.definition)
+            && let Some(temporal) = definition.metadata.get("temporal")
+        {
+            let value = |key: &str| {
+                step.params
+                    .iter()
+                    .find(|p| p.key == key)
+                    .map_or(0., |p| match p.value {
+                        Binding::Float(v) => v,
+                        _ => 0.,
+                    })
+            };
+            let times = pm_fx_defs::inputs::temporal_times(
+                value(temporal["count"].as_str().unwrap()),
+                value(temporal["step"].as_str().unwrap()),
+                time,
+                temporal["maxSamples"].as_u64().unwrap() as u32,
+            );
+            let times = match times {
+                Ok(t) => t,
+                Err(e) => {
+                    refused.get_or_insert(Feature::Definition(e.to_string()));
+                    continue;
+                }
+            };
+            step.temporal = true;
+            for at in std::iter::once(time).chain(times) {
+                let request = pm_fx_defs::inputs::Request::new(
+                    crate::js::layer_id(layer),
+                    pm_fx_defs::inputs::Stage::Effects,
+                    pm_fx_defs::inputs::Space::Composition,
+                    Some(at),
+                    Some(fx_index),
+                )
+                .unwrap();
+                step.references.push(super::resources::Reference {
+                    effect: step.instance.clone(),
+                    name: "temporal".into(),
+                    request,
+                });
+            }
         }
         steps.push(step);
     }
@@ -440,6 +636,77 @@ pub fn chain_padding(steps: &[EffectStep]) -> Padding {
             Padding::Full
         })
     })
+}
+
+pub(crate) fn owner<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Result<Owner, Feature>> {
+    let Some(bounds) = scope.size_bounds(layer, time)? else {
+        return Ok(Err(Feature::Definition(
+            "effect owner bounds unavailable".into(),
+        )));
+    };
+    let offset = scope.size_anchor_offset(layer, time)?;
+    let world = scope.world_matrix(layer, time)?;
+    let scaled = [
+        world[0] * scale.0,
+        world[1] * scale.1,
+        world[2] * scale.0,
+        world[3] * scale.1,
+        world[4] * scale.0,
+        world[5] * scale.1,
+    ];
+    if scaled.iter().any(|v| !v.is_finite()) {
+        return Ok(Err(Feature::Definition(
+            "effect owner transform is non-finite".into(),
+        )));
+    }
+    let Some(inv) = pm_eval::transform::invert(&scaled) else {
+        return Ok(Err(Feature::Definition(
+            "effect owner transform is singular".into(),
+        )));
+    };
+    if inv.iter().any(|v| !v.is_finite()) {
+        return Ok(Err(Feature::Definition(
+            "effect owner inverse is non-finite".into(),
+        )));
+    }
+    let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+    if w <= 0. || h <= 0. || ![w, h].iter().all(|v| v.is_finite()) {
+        return Ok(Err(Feature::Definition(
+            "effect owner bounds are empty".into(),
+        )));
+    }
+    let owner = Owner {
+        uv: [
+            (inv[0] / w) as f32,
+            (inv[1] / h) as f32,
+            0.,
+            (inv[2] / w) as f32,
+            (inv[3] / h) as f32,
+            0.,
+            ((inv[4] - bounds.x0 + offset.x) / w) as f32,
+            ((inv[5] - bounds.y0 + offset.y) / h) as f32,
+            1.,
+        ],
+        size: [w, h],
+        bounds: [bounds.x0 - offset.x, bounds.y0 - offset.y, w, h],
+        pixel_scale: pm_fx_defs::spatial::kernel_scale(Some(world), [scale.0, scale.1]),
+    };
+    if owner
+        .uv
+        .iter()
+        .chain(&super::resources::from_uv(&owner))
+        .any(|v| !v.is_finite())
+    {
+        return Ok(Err(Feature::Definition(
+            "effect owner exceeds GPU coordinate precision".into(),
+        )));
+    }
+    Ok(Ok(owner))
 }
 
 #[cfg(test)]

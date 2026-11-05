@@ -18,11 +18,13 @@
 //! shader; [`builtin_definitions`] embeds their snapshots as the kernel
 //! produces them (`tools/effects/builtins.ts`).
 
+mod brush;
 pub(crate) mod exec;
 pub mod fallback;
 pub mod plan;
 pub(crate) mod prewarm;
 pub mod program;
+pub mod resources;
 pub mod versions;
 pub mod watchdog;
 
@@ -89,6 +91,8 @@ pub struct Effects {
     pub fallback: fallback::EffectFallback,
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
+    pub(crate) assets: resources::Assets,
+    mips: Option<crate::sampling::gpu::Resampler>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
     /// Programs built ahead of their first frame (decision PROBE-1).
     prewarm: prewarm::Prewarm,
@@ -239,6 +243,8 @@ impl Effects {
 
     fn with_cache(cache: Arc<pm_glsl::Cache>, context: String) -> Effects {
         Effects {
+            assets: Default::default(),
+            mips: None,
             file_app_version: None,
             versioned_builtins: false,
             set: DefinitionSet::default(),
@@ -764,10 +770,20 @@ impl crate::composite::EffectHost for Effects {
         layer: &'d pm_model::Node,
         frame: crate::composite::effects::EffectFrame,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps = match plan::effect_steps_scaled(scope, self, layer, frame.time, frame.scale)? {
-            Ok(steps) => steps,
-            Err(f) => return Ok(Err(f)),
-        };
+        self.prepare_prefix(scope, layer, frame, None)
+    }
+    fn prepare_prefix<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+        prefix: Option<usize>,
+    ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
+        let steps =
+            match plan::effect_steps_prefix(scope, self, layer, frame.time, frame.scale, prefix)? {
+                Ok(steps) => steps,
+                Err(f) => return Ok(Err(f)),
+            };
         if steps.is_empty() {
             return Ok(Ok(None));
         }
@@ -779,6 +795,7 @@ impl crate::composite::EffectHost for Effects {
             padding: plan::chain_padding(&steps),
             backdrop: steps.iter().any(|s| s.backdrop),
             passes: exec::chain_passes(exec::Chain {
+                inputs: vec![],
                 layer: crate::js::layer_id(layer),
                 steps,
                 time: frame.time,

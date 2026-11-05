@@ -7,6 +7,7 @@ pub mod migration;
 pub mod navigation;
 pub mod operations;
 pub mod presentation;
+pub mod render;
 pub mod schema;
 pub mod service;
 
