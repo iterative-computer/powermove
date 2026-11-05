@@ -182,9 +182,7 @@ impl CompCommand {
             CompCommand::Create { comp_id, settings } => create(cx, comp_id, settings),
             CompCommand::Duplicate { comp_id, new_id } => duplicate(cx, comp_id, new_id),
             CompCommand::Delete { comp_id, fallback } => delete(cx, comp_id, fallback.as_deref()),
-            CompCommand::ReleasePrecomp { .. } => {
-                Err(CommandError::NotImplemented("release precomp"))
-            }
+            CompCommand::ReleasePrecomp { layer_id } => release_precomp(cx, layer_id),
             CompCommand::Precompose { .. } => Err(CommandError::NotImplemented("precompose")),
         }
     }
@@ -712,6 +710,17 @@ fn duplicate(cx: &mut Cx<'_>, comp_id: &str, new_id: &str) -> Result<(), Command
     let name = values::text(&copy, "name").unwrap_or_default().to_owned();
     let name = unique_name(cx, &format!("{} 2", strip_number(&name)), None);
     let layers = cx.layers(Some(comp_id));
+    let copies = clone_layers(&layers);
+    let m = values::obj(&mut copy);
+    m.insert("id", values::s(new_id));
+    m.insert("name", values::s(&name));
+    m.insert("layers", Value::Array(copies));
+    m.insert("comps", Value::Object(Map::new()));
+    cx.set(vec!["comps".into(), new_id.into()], copy)
+}
+
+/// `cloneLayers`: preserve names, renew keys and remap links among the copies.
+fn clone_layers(layers: &[Value]) -> Vec<Value> {
     let ids: Vec<(String, String)> = layers
         .iter()
         .map(|l| {
@@ -724,11 +733,11 @@ fn duplicate(cx: &mut Cx<'_>, comp_id: &str, new_id: &str) -> Result<(), Command
     let map = |id: Option<&str>| {
         id.and_then(|id| ids.iter().find(|(s, _)| s == id).map(|(_, n)| n.clone()))
     };
-    let copies: Vec<Value> = layers
+    layers
         .iter()
         .zip(&ids)
         .map(|(l, (_, nid))| {
-            let mut c = layers::clone_layer(l, nid, &layers);
+            let mut c = layers::clone_layer(l, nid, layers);
             let m = values::obj(&mut c);
             m.insert("name", l.get("name").cloned().unwrap_or_default());
             for f in ["parent", "group", "matteSource"] {
@@ -756,13 +765,186 @@ fn duplicate(cx: &mut Cx<'_>, comp_id: &str, new_id: &str) -> Result<(), Command
             }
             c
         })
-        .collect();
-    let m = values::obj(&mut copy);
-    m.insert("id", values::s(new_id));
-    m.insert("name", values::s(&name));
-    m.insert("layers", Value::Array(copies));
-    m.insert("comps", Value::Object(Map::new()));
-    cx.set(vec!["comps".into(), new_id.into()], copy)
+        .collect()
+}
+
+/// `PM.Comps.release`: the carrier retains the pre-comp's identity and rig.
+fn release_precomp(cx: &mut Cx<'_>, layer_id: &str) -> Result<(), CommandError> {
+    use super::{channels, timing};
+    let (loc, layer) = cx.layer(layer_id)?;
+    let invalid = |message: &str| CommandError::Invalid(message.into());
+    if values::text(&layer, "type") != Some("precomp") {
+        return Err(invalid("Select a pre-comp layer to release"));
+    }
+    let sub_id = layer.get("d").and_then(|d| values::text(d, "comp"));
+    let sub = sub_id
+        .and_then(|id| cx.comp_node(Some(id)).ok())
+        .ok_or_else(|| invalid("This pre-comp’s composition is missing"))?
+        .to_value();
+    cx.check_lock(&loc, layer_id)
+        .map_err(|_| invalid("Unlock the pre-comp before releasing it"))?;
+    if layer.get("threeD").is_some_and(Value::is_truthy) {
+        return Err(invalid("Turn off 3D on the pre-comp before releasing it"));
+    }
+    if values::text(&layer, "effectSpace") == Some("source") {
+        return Err(invalid(
+            "Set Effect Space to Composition before releasing this pre-comp",
+        ));
+    }
+    let speed = layer.get("d").and_then(|d| d.get("speed"));
+    let variable_speed = speed.is_some_and(|s| {
+        values::is_property(s)
+            && (s
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty())
+                || s.get("expr").is_some_and(Value::is_truthy))
+    });
+    let speed_value = speed
+        .and_then(|s| {
+            if values::is_property(s) {
+                s.get("v")
+            } else {
+                Some(s)
+            }
+        })
+        .filter(|s| !s.is_null())
+        .map(track::js_number)
+        .unwrap_or(1.);
+    if variable_speed || speed_value != 1. {
+        return Err(invalid(
+            "Remove time remapping and speed changes before releasing this pre-comp",
+        ));
+    }
+    let start = values::num(&layer, "from").unwrap_or(0.);
+    let end = start + values::num(&layer, "dur").unwrap_or(0.);
+    let node = pm_model::Node::from_value(layer.clone(), 0);
+    let (remap, source_start) = cx.kernel(loc.comp_id.as_deref(), |edit| {
+        edit.read_with(&node, |scope, layer| {
+            let remap = layer.get("d").and_then(|d| d.get("timeRemap"));
+            let enabled = scope
+                .evaluated(layer, remap, start, "c.timeRemap")?
+                .truthy();
+            // Admission requires unit, static speed. At local time zero the
+            // source timestamp is exactly evaluated trim, including its keys.
+            let trim = layer.get("d").and_then(|d| d.get("trim"));
+            let trim = scope.evaluated(layer, trim, start, "c.trim")?;
+            let source_start = if trim.truthy() { trim.to_number() } else { 0. };
+            Ok((enabled, source_start))
+        })
+    })?;
+    if !source_start.is_finite() {
+        return Err(invalid(
+            "The pre-comp source start must be finite before releasing it",
+        ));
+    }
+    if remap {
+        return Err(invalid(
+            "Remove time remapping and speed changes before releasing this pre-comp",
+        ));
+    }
+    let children = sub
+        .get("layers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if children.iter().any(|child| {
+        matches!(
+            child.get("d").and_then(|d| values::text(d, "definition")),
+            Some("powermove.3d.camera" | "powermove.3d.light")
+        )
+    }) {
+        return Err(invalid(
+            "This pre-comp has its own camera or lights. Open it to work on its 3D scene.",
+        ));
+    }
+    let comp = cx.comp_node(loc.comp_id.as_deref())?.to_value();
+    let (w, h, dur) = (
+        values::num(&comp, "w").unwrap_or(1.),
+        values::num(&comp, "h").unwrap_or(1.),
+        cx.duration(loc.comp_id.as_deref()),
+    );
+    let mut group = layers::make_layer(
+        "group",
+        layer_id,
+        values::text(&layer, "name"),
+        (w, h, dur),
+        &Map::new(),
+        &Map::new(),
+    )?;
+    for key in [
+        "id",
+        "from",
+        "dur",
+        "on",
+        "shy",
+        "solo",
+        "color",
+        "blend",
+        "mblur",
+        "parent",
+        "group",
+        "p",
+        "fx",
+        "masks",
+        "matteSource",
+        "matteMode",
+        "transitionIn",
+        "transitionOut",
+        "track",
+    ] {
+        if let Some(value) = layer.get(key) {
+            values::obj(&mut group).insert(key, value.clone());
+        }
+    }
+    values::obj(&mut group).insert("collapsed", Value::Bool(false));
+    let offset = start - source_start;
+    let mut copies = clone_layers(&children);
+    for copy in &mut copies {
+        if !copy.get("group").is_some_and(Value::is_truthy) {
+            values::obj(copy).insert("group", values::s(layer_id));
+        }
+        let old_from = values::num(copy, "from").unwrap_or(0.) + offset;
+        values::obj(copy).insert("from", n(old_from));
+        if values::text(copy, "type") == Some("group") {
+            continue;
+        }
+        let from = old_from.max(start);
+        let to = (old_from + values::num(copy, "dur").unwrap_or(0.)).min(end);
+        if to <= from {
+            values::obj(copy).insert("on", Value::Bool(false));
+            continue;
+        }
+        if from > old_from {
+            let source = copy.clone();
+            timing::start_patch(copy, &source, from);
+            for (_, path) in channels::all(copy) {
+                if let Some(keys) = channels::get_mut(copy, &path)
+                    .and_then(Value::as_object_mut)
+                    .and_then(|prop| prop.get_mut("kf"))
+                    .and_then(Value::as_array_mut)
+                {
+                    for key in keys {
+                        let t = values::num(key, "t").unwrap_or(0.);
+                        values::obj(key).insert("t", n(t - (from - old_from)));
+                    }
+                }
+            }
+            values::obj(copy).insert("from", n(from));
+        }
+        values::obj(copy).insert("dur", n(to - from));
+    }
+    let mut host = cx.layers(loc.comp_id.as_deref());
+    let index = host
+        .iter()
+        .position(|l| values::text(l, "id") == Some(layer_id))
+        .ok_or_else(|| invalid("Select a pre-comp layer to release"))?;
+    host.splice(index..=index, std::iter::once(group).chain(copies));
+    layers::write_layers(
+        cx,
+        loc.comp_id.as_deref(),
+        layers::normalize_group_stack(host),
+    )
 }
 
 fn new_id_for(prefix: &str) -> String {

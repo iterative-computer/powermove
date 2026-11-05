@@ -77,10 +77,12 @@ fn named<'a>(list: &'a [Value], name: &str) -> &'a Value {
         .unwrap()
 }
 fn field<'a>(v: &'a Value, k: &str) -> &'a Value {
-    v.get(k).unwrap()
+    v.get(k).unwrap_or_else(|| panic!("missing {k} in {v:?}"))
 }
 fn number(v: &Value, k: &str) -> f64 {
-    field(v, k).as_f64().unwrap()
+    field(v, k)
+        .as_f64()
+        .unwrap_or_else(|| panic!("not numeric {k}: {v:?}"))
 }
 
 #[test]
@@ -265,10 +267,23 @@ fn e12_release_guards_are_atomic_and_match_main_admission() {
                 obj(host(&mut v)).insert("effectSpace", Value::from("source"));
             }
             "camera" | "light" => {
-                obj(&mut source(&mut v)[0]).insert(
-                    "d",
-                    parse(&format!(r#"{{"definition":"powermove.3d.{case}"}}"#)).unwrap(),
-                );
+                obj(&mut source(&mut v)[0]).insert("type", Value::from("extension"));
+                obj(&mut source(&mut v)[0]).insert("d", {
+                    let role = if case == "camera" {
+                        pm_scene3d::schema::Role::Camera
+                    } else {
+                        pm_scene3d::schema::Role::Light
+                    };
+                    let input = if case == "camera" {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::json!({"light":{"type":"point","p":{},"castShadow":true}})
+                    };
+                    let data = pm_scene3d::schema::layer_data(role, input).unwrap();
+                    pm_scene3d::to_model(
+                        &serde_json::json!({"definition":role.definition(),"data":data}),
+                    )
+                });
             }
             _ => {
                 let d = obj(host(&mut v)).get_mut("d").unwrap();
@@ -284,6 +299,25 @@ fn e12_release_guards_are_atomic_and_match_main_admission() {
         let mut s = DocumentStore::new_untitled(v);
         let before = s.root().unwrap().to_value();
         let rev = s.revision();
+        if matches!(case, "camera" | "light") {
+            let saved = before
+                .get("comps")
+                .unwrap()
+                .get("sub")
+                .unwrap()
+                .get("layers")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                saved[0]
+                    .get("d")
+                    .and_then(|d| d.get("definition"))
+                    .and_then(Value::as_str),
+                Some(format!("powermove.3d.{case}").as_str()),
+                "fixture must keep its 3D scene definition"
+            );
+        }
         let error = run(&mut s).expect_err(case);
         let expected = match case {
             "wrong-type" => "Select a pre-comp layer",
