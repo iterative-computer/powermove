@@ -259,3 +259,15 @@ This establishes data coverage, not Memory MCP/Settings or rendering parity.
 Validation: `cd engine && cargo test --locked -p pm-model --test main_delta`
 (**2 passed**); pm-model all-target Clippy with `-D warnings` passed.
 No visual changes or new design decisions.
+
+### Revision consistency discovered by the data sweep — 2026-11-04
+
+The unfiltered `pm-model` suite found an existing generated-ops failure (seed
+`11096547269030033895`): removing a nested record's id through leaf edits
+preserved unchanged child revisions, while a whole-array reconciliation rebuilt
+them. Reconciliation now retains the corresponding positional node when its old
+id has retired, and handles an added id without stealing another live identity.
+Both Value and Node paths follow the same rule. **N3** selected equal authored
+values AND equal revisioned state; the comparison was not relaxed. The seed and
+an exact regression remain tracked. The full model suite passed **130 tests,
+0 failed, 1 existing ignored benchmark** after this fix.
