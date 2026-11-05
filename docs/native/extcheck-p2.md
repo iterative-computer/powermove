@@ -345,3 +345,57 @@ latest `main` (`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`). This report and its
 frozen driver remain **v1.2.0 legacy-input evidence**, still required by that
 decision and N4. They do not cover the newly required main deltas or establish
 current-target parity. See the handoff for this additional open boundary.
+
+## 2026-11-04 — owner reference change applied
+
+The active comparison/compiler reference is now **main at
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`**. This supersedes the previous
+continuation's legacy-only tool limitation. `tools/extcheck/references.json`
+is the shared immutable pin registry. All capture requests and repeat reports
+carry the selected revision; compiled bundles include `compiler.json`, and the
+native driver refuses a mismatched compiler checkout before activation.
+Preparation defaults to the current pin and refuses an old checkout unless its
+legacy pin is explicitly supplied. Legacy gate success has a distinct
+`LEGACY_PASS` label; it cannot become current-main `PASS` (**N3/N4/N6**).
+
+A separate current-main reference checkout was prepared and built on Linux.
+The build-tool-to-real-V8 controls/history regression passes against **both**
+pins. The public corpus produced **9 repeatable native component probes per
+pin**, with **three identical recordings per executable case**: **27 current
++ 27 legacy recordings**. The tenth case remains an invalid frozen/current
+manifest in both pairs. No owner input, scenario or public Store code was
+substituted with a synthetic success. Current-main full comparison still reports
+**0 match / 0 measured mismatch / 58 can't run**, with four public releases
+integrity-checked and no catalog drift. These are not WebKit or PNG acceptances.
+
+Extension-area main-delta reconciliation (read with the complete source audit):
+
+| Row / concern | Pinned source finding and disposition |
+| --- | --- |
+| A08 theme ownership, appearance and fork rebase | `theme-state.ts`, `workspace-appearance.ts`, `rebase.ts`, `update-fork.ts` are byte-identical between both pins. Required carry behavior remains in scope. Frozen helpers/component tests exist; full native theme lifecycle/rebase coordinator and paired scenarios remain open. |
+| A09 extension publication and panel generation | `external-session.ts` and renderer `panel-tools.ts` are byte-identical. The finishing/panel generation fences already exist at the tag; the main bridge's surviving diff is resumable export-job work. Do not claim a newly ported fence. Native router/session generation tests are component evidence; application publication/recovery/capture-input fencing remains unverified and needs app/MCP wiring outside this lane. |
+| X ledger `25bc8219c`, `37e9e0b71`, `c5fd263b1`, `e5bbfb677`, `908c89091` | Cleanup deadlines, retired-owner registration/shortcut rules, disconnected publication and serialized recovery remain required baseline carries. The host factory's surviving source diff is effects API exposure, not retirement semantics. Existing 177 compat tests and 20 Linux host tests do not establish all extension scenarios; retain the open lifecycle gate. |
+| Compiler and initial factory | `main/extensions/compiler.ts` and `legacy/core/model.ts` are byte-identical between pins. Their provenance is audited, and each compiler/bundle pair is exercised independently. This does not certify every imported dependency or project conversion. |
+| E04/E05/E16 and related effects members | Current-main adds version/default helpers, effect registration metadata and capability flags. Those E rows go to delta-fx, as directed. No unsupported flag was enabled here; native effects/recorder/resource gaps remain visible. Async render siblings remain the recorded native superset, not an invented current-main public member. |
+| U02/U08 and other U rows | Axis increments/grouping, fitContent and menu presentation go to the later UI lane. No visual/interaction choices were made here. P-row data work remains with delta-data. |
+
+`node tools/extcheck/source-audit.mjs` emits source-only hashes for the eight
+named carry/compiler/factory files; its regression checks both immutable Git
+objects. It explicitly reports `native_acceptance: false`. No shared delta
+inventory was rewritten, and no byte-identical source finding closes a native
+gate (**N3**, source evidence and authored behavior kept distinct).
+
+Current reference-change checks: **40 Python pass**, **3 reference/source/pair
+regressions pass**, clock preparation/startup **8 pass**, real V8 clock **3
+pass**, and the bundle regression passes separately for both pins. Updated Mac
+commands and remaining implementation blockers are in the area handoff.
+
+One transport boundary changes at the new pin: `legacy/core/engine.ts` now
+pauses on the last actually displayed input-preview time when its project and
+render-content generation still match. The worker's existing basic seek/clock/
+loop tests cover the non-preview path; they do **not** establish that presented
+frame behavior. Real renderer presentation feedback is still unattached in
+this runner. Keep this E18/transport integration boundary explicit; do not
+substitute clock time for an acknowledged preview or advertise that it passes
+(**N3**, authored displayed-frame intent). The presentation/engine lane needs
+to supply that feedback before full-script acceptance.

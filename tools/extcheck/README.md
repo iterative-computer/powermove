@@ -22,10 +22,10 @@ exact byte count and pauses below 5,000,000,000 bytes. The recorder must be enab
 
 ```sh
 mkdir -p /tmp/pm-extcheck
-git worktree add --detach /tmp/pm-extcheck/reference v1.2.0
-node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference
-(cd /tmp/pm-extcheck/reference && bun install --frozen-lockfile)
-(cd /tmp/pm-extcheck/reference && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
+git worktree add --detach /tmp/pm-extcheck/reference-main c7f46a05641b23944d3692c9d80f9677c7e1ef1d
+node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference-main
+(cd /tmp/pm-extcheck/reference-main && bun install --frozen-lockfile)
+(cd /tmp/pm-extcheck/reference-main && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
 bun install --frozen-lockfile --cwd apps/native/js/compat
 # Remote DOM's lockfile v2 needs a supporting Bun; on Bun 1.3.14 use:
 (cd apps/native/js/remote-dom && npm install --ignore-scripts --no-package-lock)
@@ -34,7 +34,7 @@ bash tools/extcheck/build.sh test pm-compat-host
 bash tools/extcheck/build.sh test pm-store-host
 bash tools/extcheck/build.sh build
 bash tools/extcheck/run.sh \
-  --reference-root /tmp/pm-extcheck/reference \
+  --reference-root /tmp/pm-extcheck/reference-main \
   --native-runner "$HOME/Developer/pm-target/debug/pm-compat-runner" \
   --store --summary /tmp/pm-extcheck/summary.json
 ```
@@ -190,12 +190,12 @@ a worker and is not callable as a blocking AppKit/main-thread API.
 
 ```sh
 python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
-node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference \
+node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference-main \
   "$HOME/Developer/pm-target/debug/pm-compat-runner"
 bash tools/extcheck/build.sh test
 bash tools/extcheck/build.sh clippy
 bash tools/extcheck/build.sh fmt
-git worktree remove --force /tmp/pm-extcheck/reference
+git worktree remove --force /tmp/pm-extcheck/reference-main
 ```
 
 Pillow is needed for the visual comparator (`python3 -m pip install Pillow` in
@@ -231,7 +231,7 @@ python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
 node tools/extcheck/test_clock_fixture.mjs
 node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs
 PM_EXTCHECK_RUNNER="$CARGO_TARGET_DIR/debug/pm-compat-runner" node --test tools/extcheck/test_clock_v8.mjs
-python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference \
+python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference-main \
   --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" \
   --output /tmp/pm-extcheck/native-component-probes.json
 ```
@@ -251,7 +251,29 @@ or absent population cannot close the gate. See
 [the handoff](../../docs/native/handoff/extcheck-p2.md) for exact Mac commands,
 observed test instability and unfinished implementation work.
 
-The owner decision merged at `711f44ba0` moves overall parity to latest `main`.
-This pinned harness remains the required **v1.2.0 legacy-input** check; it does
-not implement or certify that additional current-main oracle. Keep its compiler
-and reference revision paired and audit a new pairing separately.
+The owner decision merged at `711f44ba0` moves behavior parity to `main` at
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This is now the harness default.
+`references.json` pins both current and legacy revisions. Driver requests,
+compiler outputs and reports carry the revision, and mismatched pairings are
+refused before activation. `source-audit.mjs` reports public source-only evidence
+for the extension carry rows; it never labels that native acceptance.
+
+Legacy inputs remain required. To run the old oracle explicitly, prepare a
+separate owned checkout and pass its pin through every driver:
+
+```sh
+git worktree add --detach /tmp/pm-extcheck/reference-legacy v1.2.0
+# Install its frozen dependencies before preparation/build.
+node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference-legacy 07ed5fa17ee640659cb075f9cad1af2095011d60
+# Rebuild that reference with POWERMOVE_TRACE_RECORDER=1.
+python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference-legacy \
+  --reference-revision 07ed5fa17ee640659cb075f9cad1af2095011d60 \
+  --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" \
+  --output /tmp/pm-extcheck/legacy-component-probes.json
+node --test tools/extcheck/test_references.mjs
+node tools/extcheck/source-audit.mjs
+```
+
+`run.py` and `repeat.py` accept the same explicit `--reference-revision` for
+legacy runs. A complete legacy-only gate would be labelled `LEGACY_PASS`, never
+current-main `PASS`. Neither scope currently has an accepted full comparison.

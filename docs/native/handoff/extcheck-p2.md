@@ -5,12 +5,13 @@ Merged integration base: `711f44ba0667f81ce8388c4ec57565d1d0378630`.
 **BLOCKED / P2 OPEN: 0 accepted matches, 0 measured mismatches, 58 can't run.**
 The work is a tested continuation, not completion of handoff item 5.
 
-The final integration refresh adds the 2026-11-04 owner decision moving overall
-parity to `main` at `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`.
-This lane's frozen `v1.2.0` tool remains a **required legacy-input check** under
-that decision and N4; it is not the latest-main oracle. The newly required
-main-delta parity is also unverified. Do not silently relabel these recordings
-or switch compiler/reference revisions without a separate audited pairing.
+Active behavior/compiler reference: **`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`**
+(current main, owner change applied). The tool now defaults to this pin, with
+explicit `--reference-revision` selection for legacy
+`07ed5fa17ee640659cb075f9cad1af2095011d60`. Current and legacy captures cannot
+cross compiler/reference revisions; full legacy acceptance has the separate
+`LEGACY_PASS` label. The public corpus produced 27 repeatable native component
+recordings under each compiler pair (54 total), not full visual acceptances.
 
 ## What is implemented
 
@@ -104,8 +105,8 @@ lock files to make this pass (**N3/N4**, admission/data correctness).
 ## Exact Mac continuation command
 
 Run in this branch from the checkout root. Reuse an **owned disposable** frozen
-reference at `/tmp/pm-extcheck/reference`; if absent, create it with
-`git worktree add --detach /tmp/pm-extcheck/reference v1.2.0`, then install its
+reference at `/tmp/pm-extcheck/reference-main`; if absent, create it with
+`git worktree add --detach /tmp/pm-extcheck/reference-main c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, then install its
 frozen dependencies. Do not use an installed app/profile or another lane's
 worktree. Provide the private reviewed script directory as
 `PM_EXTCHECK_SCRIPTS`; neither names nor those scripts belong in Git.
@@ -116,8 +117,8 @@ export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 export PM_S1_ARTIFACT=/private/tmp/pm-s1-v8-artifact-final
 export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 TZ=UTC
 : "${PM_EXTCHECK_SCRIPTS:?set the private reviewed scenario directory}"
-node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference
-(cd /tmp/pm-extcheck/reference && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
+node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference-main
+(cd /tmp/pm-extcheck/reference-main && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
 bash tools/extcheck/build.sh test
 bash tools/extcheck/build.sh test pm-compat-host
 bash tools/extcheck/build.sh test pm-store-host
@@ -128,14 +129,14 @@ bash tools/extcheck/build.sh fmt pm-compat-host
 bash tools/extcheck/build.sh build
 python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
 node tools/extcheck/test_clock_fixture.mjs
-node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs
+node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs tools/extcheck/test_references.mjs
 PM_EXTCHECK_RUNNER="$CARGO_TARGET_DIR/debug/pm-compat-runner" node --test tools/extcheck/test_clock_v8.mjs
 nice -n 20 python3 tools/extcheck/repeat.py \
-  --reference-root /tmp/pm-extcheck/reference --store --repeats 3 \
+  --reference-root /tmp/pm-extcheck/reference-main --store --repeats 3 \
   --scripts "$PM_EXTCHECK_SCRIPTS" \
   --output /tmp/pm-extcheck/cloud-continuation-reference-stability.json
 nice -n 20 bash tools/extcheck/run.sh \
-  --reference-root /tmp/pm-extcheck/reference \
+  --reference-root /tmp/pm-extcheck/reference-main \
   --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" --store --repeat 3 \
   --scripts "$PM_EXTCHECK_SCRIPTS" \
   --summary /tmp/pm-extcheck/cloud-continuation-summary.json
@@ -147,7 +148,7 @@ flags. Never remove another lane's lock or flag. Configure the existing
 prepared matching Electron binary. Until the endpoint/Store work above is
 implemented, the final command is expected to exit **2 / P2 OPEN**.
 
-## Final post-merge verification
+## Pre-reference-change post-merge verification
 
 Base merged before this sweep: `711f44ba0667f81ce8388c4ec57565d1d0378630`.
 Counts below are independent suites, not unique extension acceptances.
@@ -187,3 +188,72 @@ reference passed all nine. No timeout, assertion, pixel tolerance or case
 selection was relaxed. The profile-reopen failure remains unresolved and is
 one reason, alongside unfinished capture/Store/scenario implementation, why
 this branch must not receive a MERGE-READY finish signal.
+
+
+## Owner reference change — current commands and delta scope
+
+The active Mac command above now prepares the pinned-main checkout at
+`/tmp/pm-extcheck/reference-main`. Its paired run is current-main, not a relabelled
+legacy run. For an independent required legacy input check, reuse an owned
+legacy checkout and pass its revision explicitly:
+
+```sh
+node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference-legacy 07ed5fa17ee640659cb075f9cad1af2095011d60
+# Build that checkout with POWERMOVE_TRACE_RECORDER=1 before full capture.
+python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference-legacy \
+  --reference-revision 07ed5fa17ee640659cb075f9cad1af2095011d60 \
+  --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" \
+  --output /tmp/pm-extcheck/legacy-native-probes.json
+```
+
+`repeat.py` and `run.py` take the same explicit legacy revision. Never point the
+default current-main request at the old compiler. Source/pair fences and reports
+are covered by `node --test tools/extcheck/test_references.mjs` and the expanded
+**40-test** Python suite. The build-tool-to-V8 regression passes independently
+against each checkout; each public corpus pairing has **9 repeatable cases ×
+3 recordings**, with **1 invalid-manifest case retained**. The pinned-main
+reference builds successfully on Linux. Current-main full capture remains
+**0 / 0 / 58 can't run**, not a qualification.
+
+The X-area delta audit is recorded in the new dated section of
+`../extcheck-p2.md`. A08 theme/fork sources and A09 publication/panel-generation
+sources are byte-identical across the pins; these remain required native carry
+work. No native lifecycle acceptance is inferred from those facts. Retirement
+and publication ledger carries remain under the open 58-case gate. E-row effect
+helpers/metadata/capabilities go to delta-fx; U-row interaction/presentation goes
+to the later UI lane; P rows go to delta-data. No optimistic effects capability
+was enabled to activate a main-only consumer. The original endpoint, recorder,
+Store, scenario and profile-lock blockers above remain open.
+
+At the new pin, the worker transport also needs real presented-frame feedback
+for the changed input-preview pause path (`legacy/core/engine.ts`): pause uses
+the last displayed preview only while project/content generation still match.
+The headless worker currently has no attached renderer providing that receipt.
+Basic clock/seek/loop tests pass; presented-preview pause remains an explicit
+E18/transport integration gap. Do not report the basic tests as that behavior.
+
+Post-reference-change verification (same merged base, all Cargo commands locked):
+
+| Exact command | Result |
+| --- | --- |
+| `bash tools/extcheck/build.sh test` | **24 pass**, earlier intermittent admission failures unresolved |
+| `bash tools/extcheck/build.sh test pm-compat-host` | **20 pass** |
+| `bash tools/extcheck/build.sh test pm-store-host` | **90 pass** |
+| `python3 -m unittest discover -s tools/extcheck -p 'test_*.py'` | **40 pass** |
+| `node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs tools/extcheck/test_references.mjs` | **11 pass** |
+| `PM_EXTCHECK_RUNNER="$CARGO_TARGET_DIR/debug/pm-compat-runner" node --test tools/extcheck/test_clock_v8.mjs` | **3 pass** |
+| `node tools/extcheck/test_clock_fixture.mjs` | **1 script pass** |
+| `node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference-main "$CARGO_TARGET_DIR/debug/pm-compat-runner"` | **1 script pass** |
+| `node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference "$CARGO_TARGET_DIR/debug/pm-compat-runner"` | **1 legacy script pass**; this existing owned checkout is at the legacy pin |
+| `bun run --cwd apps/native/js/compat test` | **177 pass** |
+| `PM_REMOTE_DOM_WIRE_BIN="$CARGO_TARGET_DIR/debug/examples/wire" bun run --cwd apps/native/js/remote-dom test` | **39 pass**, original timeout |
+| `PM_TRACE_REF=/tmp/pm-extcheck/reference-main bun test tools/trace-recorder/tests` | **9 pass**, 1,564 assertions, no skip |
+| `python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference-main --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" --output /tmp/pm-extcheck/main-native-probes.json` | **9 repeatable / 1 invalid**, **27 recordings**, exit **2** |
+| `python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference --reference-revision 07ed5fa17ee640659cb075f9cad1af2095011d60 --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" --output /tmp/pm-extcheck/legacy-native-probes.json` | **9 repeatable / 1 invalid**, **27 legacy recordings**, exit **2** |
+| `python3 tools/extcheck/run.py --reference-root /tmp/pm-extcheck/reference-main --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" --store --repeat 3 --summary /tmp/pm-extcheck/main-summary.json` | **current-main**, **0 match / 0 mismatch / 58 can't run**, exit **2** |
+
+The same runner/host all-target Clippy commands (`--no-deps -- -D warnings`)
+and fmt checks were rerun cleanly after the reference change. Both native
+lockfiles remain unchanged. Main-reference preparation/build succeeds; actual
+Electron and WebKit execution, complete authored scenarios, preview-frame
+feedback and the production endpoint/Store work are still unverified/incomplete.
