@@ -12,4 +12,5 @@ pm-protocol = { path = "../pm-protocol", default-features = false }
 libm.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 sha2 = { workspace = true, features = ["std"] }

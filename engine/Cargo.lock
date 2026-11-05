@@ -2232,6 +2232,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "pm-protocol",
+ "serde_json",
  "sha2",
 ]
 
