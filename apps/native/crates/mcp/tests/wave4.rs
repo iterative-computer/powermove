@@ -294,16 +294,20 @@ fn explicit_file_ingress_save_reopen_keeps_original_audio_memory_and_history() {
             &json!({"prompt":"Save synthetic working copy"}),
         )
         .unwrap();
+    let exported = session.dispatch("save_project", &json!({})).unwrap();
+    let exported = std::path::PathBuf::from(exported["path"].as_str().unwrap());
+    assert_ne!(exported, working);
     assert_eq!(
-        session.dispatch("save_project", &json!({})).unwrap()["path"],
-        json!(working)
+        exported.parent(),
+        Some(f.root.join("file-exports").as_path())
     );
+    assert_eq!(std::fs::read(&working).unwrap(), original_bytes);
     session
         .dispatch("finish_session", &json!({"commit":true}))
         .unwrap();
     drop(session);
     drop(shared);
-    let opened = open_project(&working, OpenOptions::default()).unwrap();
+    let opened = open_project(&exported, OpenOptions::default()).unwrap();
     assert_eq!(opened.file.media.len(), 1);
     opened
         .file
