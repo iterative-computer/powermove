@@ -72,7 +72,7 @@ impl ProjectBridge {
                 .into_iter()
                 .cloned()
                 .collect(),
-            selected_count: self.panel.selected_assets().len(),
+            selected_count: self.panel.selected_count(),
             focused: self.panel.focused().cloned(),
             renaming: self.panel.renaming.clone(),
             drag: self.panel.drag.clone(),

@@ -191,6 +191,7 @@ exports[`no-project: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": null,
   "focusOrder": [
     4,
     11,
@@ -757,6 +758,7 @@ exports[`empty-project: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [],
   "focusOrder": [
     4,
     9,
@@ -973,7 +975,6 @@ exports[`empty-project: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -1415,6 +1416,7 @@ exports[`empty-folder: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [],
   "focusOrder": [
     4,
     9,
@@ -1631,7 +1633,6 @@ exports[`empty-folder: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -2052,6 +2053,7 @@ exports[`restoring-before-delay: op tree, real validator and AX projection 1`] =
       "value": null,
     },
   ],
+  "cards": [],
   "focusOrder": [
     4,
     9,
@@ -2267,7 +2269,6 @@ exports[`restoring-before-delay: op tree, real validator and AX projection 1`] =
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -2507,6 +2508,7 @@ exports[`restoring-after-delay: op tree, real validator and AX projection 1`] = 
       "value": null,
     },
   ],
+  "cards": [],
   "focusOrder": [
     4,
     9,
@@ -2722,7 +2724,6 @@ exports[`restoring-after-delay: op tree, real validator and AX projection 1`] = 
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -3101,6 +3102,91 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 0.5,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 48,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Loading…",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -3316,7 +3402,6 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -3418,6 +3503,7 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -3428,9 +3514,12 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, loading",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -3493,6 +3582,9 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -3964,6 +4056,161 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "b",
+      },
+      "kind_symbol": "film",
+      "name": "b.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 0.5,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 48,
+              "x": 161,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Loading…",
+      "tooltip": "b.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -4179,7 +4426,6 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -4281,6 +4527,7 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -4291,9 +4538,12 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -4417,6 +4667,7 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -4427,9 +4678,12 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                           "label": "b.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, loading",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -4492,6 +4746,9 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -4848,6 +5105,90 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": {
+          "bounds": {
+            "height": 76.25,
+            "width": 134,
+            "x": 11,
+            "y": 5,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 8,
+          "role": "selection",
+          "stroke": 2,
+        },
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -5063,7 +5404,6 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -5165,6 +5505,7 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": true,
                           "attr": {
                             "item": {
@@ -5175,9 +5516,12 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": true,
                           },
                           "style": {
@@ -5620,6 +5964,162 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [
+        {
+          "disabled": false,
+          "glyph_color": 16777215,
+          "input": {
+            "Invoke": {
+              "Reveal": "a",
+            },
+          },
+          "label": "Show in Finder",
+          "symbol": "folder",
+        },
+        {
+          "disabled": false,
+          "glyph_color": 16777215,
+          "input": {
+            "Invoke": {
+              "AddAsset": "a",
+            },
+          },
+          "label": "Add to Timeline",
+          "symbol": "plus",
+        },
+        {
+          "disabled": false,
+          "glyph_color": 16777215,
+          "input": {
+            "DeleteAsset": "a",
+          },
+          "label": "Delete Media",
+          "symbol": "trash",
+        },
+      ],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 67,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 91,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 115,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+        ],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": {
+          "bounds": {
+            "height": 78.25,
+            "width": 136,
+            "x": 10,
+            "y": 4,
+          },
+          "color": 16747093,
+          "opacity": 1,
+          "radius": 8,
+          "role": "focus",
+          "stroke": 2,
+        },
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -5835,7 +6335,6 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -5937,6 +6436,7 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -5947,9 +6447,12 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": true,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -6591,6 +7094,172 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": {
+          "bounds": {
+            "height": 76.25,
+            "width": 134,
+            "x": 11,
+            "y": 5,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 8,
+          "role": "selection",
+          "stroke": 2,
+        },
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "b",
+      },
+      "kind_symbol": "film",
+      "name": "b.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": {
+          "bounds": {
+            "height": 76.25,
+            "width": 134,
+            "x": 155,
+            "y": 5,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 8,
+          "role": "selection",
+          "stroke": 2,
+        },
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "b.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -6807,7 +7476,6 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -6909,6 +7577,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": true,
                           "attr": {
                             "item": {
@@ -6919,9 +7588,12 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": true,
                           },
                           "style": {
@@ -7047,6 +7719,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": true,
                           "attr": {
                             "item": {
@@ -7057,9 +7730,12 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                           "label": "b.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": true,
                           },
                           "style": {
@@ -7565,6 +8241,140 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "Invoke": {
+              "NestComposition": "C",
+            },
+          },
+          "label": "Add to Timeline",
+          "symbol": "plus",
+        },
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "Invoke": {
+              "DeleteComposition": "C",
+            },
+          },
+          "label": "Delete Composition…",
+          "symbol": "trash",
+        },
+      ],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:20",
+      "id": {
+        "Composition": "C",
+      },
+      "kind_symbol": "rectangle.stack",
+      "name": "Launch Film",
+      "open_composition": true,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 91,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 115,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+        ],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": {
+          "bounds": {
+            "height": 78.25,
+            "width": 136,
+            "x": 10,
+            "y": 4,
+          },
+          "color": 16747093,
+          "opacity": 1,
+          "radius": 8,
+          "role": "focus",
+          "stroke": 2,
+        },
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "Launch Film",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -7780,7 +8590,6 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -7882,6 +8691,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -7892,9 +8702,12 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                           "label": "Launch Film, composition, 1920 by 1080, 20 seconds, open in the timeline",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": true,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -8388,6 +9201,91 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 78,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Media offline",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -8603,7 +9501,6 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -8705,6 +9602,7 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -8715,9 +9613,12 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, offline",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -8780,6 +9681,9 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -9150,6 +10054,91 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 102,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Media unavailable",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -9365,7 +10354,6 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -9467,6 +10455,7 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -9477,9 +10466,12 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -9542,6 +10534,9 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -9886,6 +10881,78 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -10101,7 +11168,6 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -10203,6 +11269,7 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -10213,9 +11280,12 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -10330,6 +11400,2753 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                                 "text",
                                 {},
                                 "MOV · 1920×1080 · 0:12 · 48 MB",
+                                [],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`unknown-after-delay: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioGroup",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 11,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 3,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 14,
+      "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "Loading…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "Loading…",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 21,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 22,
+      "label": "MOV · 1920×1080 · 0:12 · 48 MB",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 23,
+      "label": "MOV · 1920×1080 · 0:12 · 48 MB",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 0.5,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 48,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Loading…",
+      "tooltip": "a.mov",
+    },
+  ],
+  "focusOrder": [
+    4,
+    9,
+    10,
+    11,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "div",
+                {
+                  "data-pm-component": "segmented-control",
+                  "label": "Project",
+                  "role": "radiogroup",
+                  "style": {
+                    "background": {
+                      "token": "colors.field",
+                    },
+                    "borderRadius": {
+                      "token": "metrics.control_radius",
+                    },
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-checked": true,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:assets",
+                      "label": "Project",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "background": {
+                          "token": "colors.floating",
+                        },
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": 0,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Project",
+                        [],
+                      ],
+                    ],
+                  ],
+                  [
+                    "button",
+                    {
+                      "aria-checked": false,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:layer-effects",
+                      "label": "Effect Controls",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": -1,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Effect Controls",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Asset": "a",
+                            },
+                          },
+                          "id": "media:{"Asset":"a"}",
+                          "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": true,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                          },
+                          "tabIndex": -1,
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "background": {
+                                  "token": "colors.field",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.selected_text",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "0:12",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "text",
+                                {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.selected_text",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "Loading…",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "background": null,
+                                "borderRadius": {
+                                  "token": "metrics.capsule_radius",
+                                },
+                                "color": {
+                                  "token": "colors.text",
+                                },
+                                "fontSize": {
+                                  "token": "typography.body",
+                                },
+                                "marginTop": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                              "title": "a.mov",
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "a.mov",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.muted",
+                                },
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "MOV · 1920×1080 · 0:12 · 48 MB",
+                                [],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`transport-error: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioGroup",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 10,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 11,
+      "label": "Error",
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": "Project media isn’t updating right now.",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 14,
+      "label": "Project media isn’t updating right now.",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 18,
+      "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 21,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 22,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 23,
+      "label": "Show in Finder",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 24,
+      "label": "Add to Timeline",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": true,
+      "id": 25,
+      "label": "Delete Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 26,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 27,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 28,
+      "label": "MOV · 1920×1080 · 0:12 · 48 MB",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 29,
+      "label": "MOV · 1920×1080 · 0:12 · 48 MB",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "cards": [
+    {
+      "actions": [
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "Invoke": {
+              "Reveal": "a",
+            },
+          },
+          "label": "Show in Finder",
+          "symbol": "folder",
+        },
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "Invoke": {
+              "AddAsset": "a",
+            },
+          },
+          "label": "Add to Timeline",
+          "symbol": "plus",
+        },
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "DeleteAsset": "a",
+          },
+          "label": "Delete Media",
+          "symbol": "trash",
+        },
+      ],
+      "actions_disabled": true,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 67,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 91,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 115,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+        ],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": {
+          "bounds": {
+            "height": 78.25,
+            "width": 136,
+            "x": 10,
+            "y": 4,
+          },
+          "color": 16747093,
+          "opacity": 1,
+          "radius": 8,
+          "role": "focus",
+          "stroke": 2,
+        },
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
+  "focusOrder": [
+    4,
+    9,
+    15,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "div",
+                {
+                  "data-pm-component": "segmented-control",
+                  "label": "Project",
+                  "role": "radiogroup",
+                  "style": {
+                    "background": {
+                      "token": "colors.field",
+                    },
+                    "borderRadius": {
+                      "token": "metrics.control_radius",
+                    },
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-checked": true,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:assets",
+                      "label": "Project",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "background": {
+                          "token": "colors.floating",
+                        },
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": 0,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Project",
+                        [],
+                      ],
+                    ],
+                  ],
+                  [
+                    "button",
+                    {
+                      "aria-checked": false,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:layer-effects",
+                      "label": "Effect Controls",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": -1,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Effect Controls",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": true,
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "id": "media:transport-error",
+              "label": "Error",
+              "metadata": {
+                "sequence": 1,
+              },
+              "role": "status",
+              "style": {
+                "color": {
+                  "token": "colors.warning",
+                },
+                "fontSize": {
+                  "token": "typography.body",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "text",
+                {
+                  "attr": {
+                    "symbol": "exclamationmark.triangle.fill",
+                  },
+                  "style": {
+                    "color": {
+                      "token": "colors.warning",
+                    },
+                  },
+                },
+                "",
+                [],
+              ],
+              [
+                "text",
+                {},
+                "",
+                [
+                  [
+                    "text",
+                    {},
+                    "Project media isn’t updating right now.",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": true,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Asset": "a",
+                            },
+                          },
+                          "id": "media:{"Asset":"a"}",
+                          "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "role": "cell",
+                          "state": {
+                            "disabled": true,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": true,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                          },
+                          "tabIndex": -1,
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "background": {
+                                  "token": "colors.field",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.selected_text",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "0:12",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                              [
+                                "div",
+                                {
+                                  "style": {
+                                    "display": "flex",
+                                    "flexDirection": "row",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "button",
+                                    {
+                                      "attr": {
+                                        "symbol": "folder",
+                                      },
+                                      "data-pm-component": "toolbar-item",
+                                      "disabled": true,
+                                      "label": "Show in Finder",
+                                      "style": {
+                                        "color": {
+                                          "token": "colors.selected_text",
+                                        },
+                                        "minHeight": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "minWidth": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "symbolSize": {
+                                          "token": "metrics.symbol_toolbar",
+                                        },
+                                      },
+                                      "tabIndex": -1,
+                                      "title": "Show in Finder",
+                                    },
+                                    "",
+                                    [],
+                                  ],
+                                  [
+                                    "button",
+                                    {
+                                      "attr": {
+                                        "symbol": "plus",
+                                      },
+                                      "data-pm-component": "toolbar-item",
+                                      "disabled": true,
+                                      "label": "Add to Timeline",
+                                      "style": {
+                                        "color": {
+                                          "token": "colors.selected_text",
+                                        },
+                                        "minHeight": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "minWidth": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "symbolSize": {
+                                          "token": "metrics.symbol_toolbar",
+                                        },
+                                      },
+                                      "tabIndex": -1,
+                                      "title": "Add to Timeline",
+                                    },
+                                    "",
+                                    [],
+                                  ],
+                                  [
+                                    "button",
+                                    {
+                                      "attr": {
+                                        "symbol": "trash",
+                                      },
+                                      "data-pm-component": "toolbar-item",
+                                      "disabled": true,
+                                      "label": "Delete Media",
+                                      "style": {
+                                        "color": {
+                                          "token": "colors.selected_text",
+                                        },
+                                        "minHeight": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "minWidth": {
+                                          "token": "metrics.hit",
+                                        },
+                                        "symbolSize": {
+                                          "token": "metrics.symbol_toolbar",
+                                        },
+                                      },
+                                      "tabIndex": -1,
+                                      "title": "Delete Media",
+                                    },
+                                    "",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "background": null,
+                                "borderRadius": {
+                                  "token": "metrics.capsule_radius",
+                                },
+                                "color": {
+                                  "token": "colors.text",
+                                },
+                                "fontSize": {
+                                  "token": "typography.body",
+                                },
+                                "marginTop": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                              "title": "a.mov",
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "a.mov",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.muted",
+                                },
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "MOV · 1920×1080 · 0:12 · 48 MB",
+                                [],
+                              ],
+                            ],
+                          ],
+                        ],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ],
+}
+`;
+
+exports[`changed-source: op tree, real validator and AX projection 1`] = `
+{
+  "ax": [
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 0,
+      "label": null,
+      "multiselectable": false,
+      "role": "Pane",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 1,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Group",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 2,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 3,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioGroup",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 4,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 5,
+      "label": "Project",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 6,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "RadioButton",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 7,
+      "label": "Effect Controls",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 8,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 9,
+      "label": "Search Media",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 10,
+      "label": "Add",
+      "multiselectable": false,
+      "role": "Button",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 11,
+      "label": "Project media",
+      "multiselectable": true,
+      "role": "List",
+      "rowCount": 1,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 12,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 13,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [
+        {
+          "id": 7,
+          "label": "Locate",
+        },
+        {
+          "id": 3,
+          "label": "Delete",
+        },
+      ],
+      "disabled": false,
+      "id": 14,
+      "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, changed",
+      "multiselectable": false,
+      "role": "Cell",
+      "rowCount": null,
+      "selected": false,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 15,
+      "label": null,
+      "multiselectable": false,
+      "role": "GenericContainer",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 16,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 17,
+      "label": "0:12",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 18,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 19,
+      "label": "a.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 20,
+      "label": "Changed · /synthetic/changed.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "id": 21,
+      "label": "Changed · /synthetic/changed.mov",
+      "multiselectable": false,
+      "role": "Label",
+      "rowCount": null,
+      "selected": null,
+      "value": null,
+    },
+  ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
+  "focusOrder": [
+    4,
+    9,
+    10,
+    11,
+  ],
+  "tree": [
+    "root",
+    {},
+    "",
+    [
+      [
+        "div",
+        {
+          "label": "Project",
+          "role": "group",
+          "style": {
+            "background": {
+              "token": "colors.panel",
+            },
+            "borderRadius": {
+              "token": "metrics.panel_radius",
+            },
+            "display": "flex",
+            "flexDirection": "column",
+          },
+        },
+        "",
+        [
+          [
+            "div",
+            {
+              "style": {
+                "alignItems": "center",
+                "display": "flex",
+                "flexDirection": "row",
+                "height": {
+                  "token": "metrics.header",
+                },
+                "justifyContent": "space-between",
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+              },
+            },
+            "",
+            [
+              [
+                "div",
+                {
+                  "data-pm-component": "segmented-control",
+                  "label": "Project",
+                  "role": "radiogroup",
+                  "style": {
+                    "background": {
+                      "token": "colors.field",
+                    },
+                    "borderRadius": {
+                      "token": "metrics.control_radius",
+                    },
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-checked": true,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:assets",
+                      "label": "Project",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "background": {
+                          "token": "colors.floating",
+                        },
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": 0,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Project",
+                        [],
+                      ],
+                    ],
+                  ],
+                  [
+                    "button",
+                    {
+                      "aria-checked": false,
+                      "data-pm-component": "segment",
+                      "id": "P0-0:layer-effects",
+                      "label": "Effect Controls",
+                      "preventDefault": {
+                        "keydown": [
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "ArrowDown",
+                          "Home",
+                          "End",
+                        ],
+                      },
+                      "role": "radio",
+                      "style": {
+                        "borderRadius": {
+                          "token": "metrics.inner_radius",
+                        },
+                        "color": {
+                          "token": "colors.text",
+                        },
+                        "fontSize": {
+                          "token": "typography.body",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                      },
+                      "tabIndex": -1,
+                    },
+                    "",
+                    [
+                      [
+                        "text",
+                        {},
+                        "Effect Controls",
+                        [],
+                      ],
+                    ],
+                  ],
+                ],
+              ],
+              [
+                "div",
+                {
+                  "style": {
+                    "alignItems": "center",
+                    "display": "flex",
+                    "flexDirection": "row",
+                  },
+                },
+                "",
+                [
+                  [
+                    "button",
+                    {
+                      "aria-pressed": false,
+                      "attr": {
+                        "symbol": "magnifyingglass",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "disabled": false,
+                      "label": "Search Media",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Search Media",
+                    },
+                    "",
+                    [],
+                  ],
+                  [
+                    "button",
+                    {
+                      "attr": {
+                        "symbol": "plus",
+                      },
+                      "data-pm-component": "toolbar-item",
+                      "label": "Add",
+                      "style": {
+                        "color": {
+                          "token": "colors.secondary",
+                        },
+                        "minHeight": {
+                          "token": "metrics.hit",
+                        },
+                        "minWidth": {
+                          "token": "metrics.hit",
+                        },
+                        "symbolSize": {
+                          "token": "metrics.symbol_panel",
+                        },
+                      },
+                      "title": "Add",
+                    },
+                    "",
+                    [],
+                  ],
+                ],
+              ],
+            ],
+          ],
+          [
+            "div",
+            {
+              "attr": {
+                "multiselectable": true,
+                "rowCount": 1,
+              },
+              "data-pm-component": "list",
+              "label": "Project media",
+              "preventDefault": {
+                "keydown": [
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowDown",
+                  "Home",
+                  "End",
+                  "Enter",
+                  " ",
+                  "Delete",
+                  "Backspace",
+                  "Escape",
+                  "a",
+                  "A",
+                  "F2",
+                ],
+              },
+              "role": "list",
+              "style": {
+                "minHeight": {
+                  "token": "metrics.hit",
+                },
+                "minWidth": {
+                  "token": "metrics.hit",
+                },
+                "paddingLeft": {
+                  "token": "metrics.inset",
+                },
+                "paddingRight": {
+                  "token": "metrics.inset",
+                },
+                "paddingTop": {
+                  "token": "metrics.gap",
+                },
+              },
+              "tabIndex": 0,
+            },
+            "",
+            [
+              [
+                "virtual-list",
+                {
+                  "count": 1,
+                  "itemSize": 160,
+                  "range": [
+                    0,
+                    1,
+                  ],
+                },
+                "",
+                [
+                  [
+                    "div",
+                    {
+                      "style": {
+                        "display": "flex",
+                        "flexDirection": "row",
+                        "gap": {
+                          "token": "metrics.inset",
+                        },
+                      },
+                    },
+                    "",
+                    [
+                      [
+                        "div",
+                        {
+                          "aria-disabled": false,
+                          "aria-selected": false,
+                          "attr": {
+                            "item": {
+                              "Asset": "a",
+                            },
+                          },
+                          "id": "media:{"Asset":"a"}",
+                          "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, changed",
+                          "role": "cell",
+                          "state": {
+                            "disabled": false,
+                            "dragging": false,
+                            "dropTarget": false,
+                            "focused": false,
+                            "hovered": false,
+                            "loading": false,
+                            "selected": false,
+                          },
+                          "style": {
+                            "color": {
+                              "token": "colors.text",
+                            },
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "fontSize": {
+                              "token": "typography.body",
+                            },
+                            "minHeight": {
+                              "token": "metrics.hit",
+                            },
+                            "minWidth": {
+                              "token": "metrics.hit",
+                            },
+                          },
+                          "tabIndex": -1,
+                        },
+                        "",
+                        [
+                          [
+                            "div",
+                            {
+                              "style": {
+                                "background": {
+                                  "token": "colors.field",
+                                },
+                                "borderRadius": {
+                                  "token": "metrics.control_radius",
+                                },
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {
+                                  "style": {
+                                    "color": {
+                                      "token": "colors.selected_text",
+                                    },
+                                    "fontSize": {
+                                      "token": "typography.minimum",
+                                    },
+                                    "fontVariantNumeric": "tabular-nums",
+                                  },
+                                },
+                                "",
+                                [
+                                  [
+                                    "text",
+                                    {},
+                                    "0:12",
+                                    [],
+                                  ],
+                                ],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "background": null,
+                                "borderRadius": {
+                                  "token": "metrics.capsule_radius",
+                                },
+                                "color": {
+                                  "token": "colors.text",
+                                },
+                                "fontSize": {
+                                  "token": "typography.body",
+                                },
+                                "marginTop": {
+                                  "token": "metrics.gap",
+                                },
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                              "title": "a.mov",
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "a.mov",
+                                [],
+                              ],
+                            ],
+                          ],
+                          [
+                            "text",
+                            {
+                              "style": {
+                                "color": {
+                                  "token": "colors.warning",
+                                },
+                                "fontSize": {
+                                  "token": "typography.minimum",
+                                },
+                                "fontVariantNumeric": "tabular-nums",
+                                "overflow": "hidden",
+                                "whiteSpace": "nowrap",
+                              },
+                            },
+                            "",
+                            [
+                              [
+                                "text",
+                                {},
+                                "Changed · /synthetic/changed.mov",
                                 [],
                               ],
                             ],
@@ -10626,6 +14443,91 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 48,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "In cloud",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -10841,7 +14743,6 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -10943,6 +14844,7 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -10953,9 +14855,12 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -11018,6 +14923,9 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -11417,6 +15325,151 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [
+        {
+          "disabled": true,
+          "glyph_color": 9737364,
+          "input": {
+            "Invoke": {
+              "Download": "a",
+            },
+          },
+          "label": "Download from Cloud",
+          "symbol": "icloud.and.arrow.down",
+        },
+        {
+          "disabled": false,
+          "glyph_color": 16777215,
+          "input": {
+            "DeleteAsset": "a",
+          },
+          "label": "Delete Media",
+          "symbol": "trash",
+        },
+      ],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 91,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 115,
+              "y": 51.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 12,
+            "role": "action",
+            "stroke": 0,
+          },
+        ],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 72,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": {
+          "bounds": {
+            "height": 78.25,
+            "width": 136,
+            "x": 10,
+            "y": 4,
+          },
+          "color": 16747093,
+          "opacity": 1,
+          "radius": 8,
+          "role": "focus",
+          "stroke": 2,
+        },
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "Downloading…",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -11632,7 +15685,6 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -11734,6 +15786,7 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -11744,9 +15797,12 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": true,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -11809,6 +15865,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -12248,6 +16307,91 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+          {
+            "bounds": {
+              "height": 18,
+              "width": 48,
+              "x": 17,
+              "y": 57.25,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "status",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": "In cloud",
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -12463,7 +16607,6 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -12565,6 +16708,7 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -12575,9 +16719,12 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -12640,6 +16787,9 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "progress": null,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.selected_text",
@@ -12996,6 +17146,90 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": {
+          "bounds": {
+            "height": 76.25,
+            "width": 134,
+            "x": 11,
+            "y": 5,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 8,
+          "role": "selection",
+          "stroke": 2,
+        },
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -13211,7 +17445,6 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -13313,6 +17546,7 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": true,
                           "attr": {
                             "item": {
@@ -13323,9 +17557,12 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": true,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": true,
                           },
                           "style": {
@@ -13869,6 +18106,134 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": null,
+      "id": {
+        "Folder": "f",
+      },
+      "kind_symbol": "folder.fill",
+      "name": "Shots",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "Shots",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a",
+      },
+      "kind_symbol": "film",
+      "name": "a.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -14084,7 +18449,6 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -14186,6 +18550,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -14196,9 +18561,12 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                           "label": "Shots, folder, 4 items",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -14298,6 +18666,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -14308,9 +18677,12 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -14774,6 +19146,64 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": null,
+      "id": {
+        "Folder": "f",
+      },
+      "kind_symbol": "folder.fill",
+      "name": "Shots",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "Shots",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -14989,7 +19419,6 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -15091,6 +19520,7 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -15101,9 +19531,12 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                           "label": "Shots, folder, 4 items",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": true,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -15439,6 +19872,64 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": null,
+      "id": {
+        "Folder": "f",
+      },
+      "kind_symbol": "folder.fill",
+      "name": "Shots",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "Shots",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -15655,7 +20146,6 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -15757,6 +20247,7 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -15767,9 +20258,12 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                           "label": "Shots, folder, 4 items",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -17363,6 +21857,848 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "value": null,
     },
   ],
+  "cards": [
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a0",
+      },
+      "kind_symbol": "film",
+      "name": "a0.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a0.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a1",
+      },
+      "kind_symbol": "film",
+      "name": "a1.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 11,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 11,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 6,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a1.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a2",
+      },
+      "kind_symbol": "film",
+      "name": "a2.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 171,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 171,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 166,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a2.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a3",
+      },
+      "kind_symbol": "film",
+      "name": "a3.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 171,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 171,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 166,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a3.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a4",
+      },
+      "kind_symbol": "film",
+      "name": "a4.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 331,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 331,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 326,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a4.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a5",
+      },
+      "kind_symbol": "film",
+      "name": "a5.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 331,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 331,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 326,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a5.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a6",
+      },
+      "kind_symbol": "film",
+      "name": "a6.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 491,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 491,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 486,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a6.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a7",
+      },
+      "kind_symbol": "film",
+      "name": "a7.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 491,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 491,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 486,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a7.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a8",
+      },
+      "kind_symbol": "film",
+      "name": "a8.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 651,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 651,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 646,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a8.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a9",
+      },
+      "kind_symbol": "film",
+      "name": "a9.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 651,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 651,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 646,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a9.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a10",
+      },
+      "kind_symbol": "film",
+      "name": "a10.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 17,
+              "y": 811,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 133,
+            "y": 811,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 12,
+            "y": 806,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a10.mov",
+    },
+    {
+      "actions": [],
+      "actions_disabled": false,
+      "background": null,
+      "duration": "0:12",
+      "id": {
+        "Asset": "a11",
+      },
+      "kind_symbol": "film",
+      "name": "a11.mov",
+      "open_composition": false,
+      "poster": null,
+      "poster_opacity": 1,
+      "progress": null,
+      "recipe": {
+        "actions": [],
+        "badge_inset": 5,
+        "badges": [
+          {
+            "bounds": {
+              "height": 18,
+              "width": 24,
+              "x": 161,
+              "y": 811,
+            },
+            "color": 0,
+            "opacity": 0.55,
+            "radius": 17,
+            "role": "duration",
+            "stroke": 0,
+          },
+        ],
+        "contrast": null,
+        "focus": null,
+        "name_padding": 4,
+        "selection": null,
+        "status_dot": {
+          "bounds": {
+            "height": 6,
+            "width": 6,
+            "x": 277,
+            "y": 811,
+          },
+          "color": 16736281,
+          "opacity": 1,
+          "radius": 3,
+          "role": "open-composition",
+          "stroke": 1,
+        },
+        "status_dot_keyline": [
+          0,
+          0.55,
+        ],
+        "thumbnail": {
+          "bounds": {
+            "height": 74.25,
+            "width": 132,
+            "x": 156,
+            "y": 806,
+          },
+          "color": 2500134,
+          "opacity": 1,
+          "radius": 6,
+          "role": "thumbnail",
+          "stroke": 0,
+        },
+      },
+      "status": null,
+      "tooltip": "a11.mov",
+    },
+  ],
   "focusOrder": [
     4,
     9,
@@ -17578,7 +22914,6 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -17680,6 +23015,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -17690,9 +23026,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a0.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -17816,6 +23155,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -17826,9 +23166,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a1.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -17967,6 +23310,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -17977,9 +23321,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a2.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18103,6 +23450,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18113,9 +23461,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a3.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18254,6 +23605,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18264,9 +23616,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a4.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18390,6 +23745,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18400,9 +23756,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a5.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18541,6 +23900,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18551,9 +23911,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a6.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18677,6 +24040,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18687,9 +24051,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a7.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18828,6 +24195,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18838,9 +24206,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a8.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -18964,6 +24335,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -18974,9 +24346,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a9.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -19115,6 +24490,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -19125,9 +24501,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a10.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -19251,6 +24630,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -19261,9 +24641,12 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           "label": "a11.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": false,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -19919,7 +25302,6 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {
@@ -20021,6 +25403,7 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                       [
                         "div",
                         {
+                          "aria-disabled": false,
                           "aria-selected": false,
                           "attr": {
                             "item": {
@@ -20031,9 +25414,12 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
                           "role": "cell",
                           "state": {
+                            "disabled": false,
                             "dragging": false,
                             "dropTarget": false,
                             "focused": false,
+                            "hovered": true,
+                            "loading": false,
                             "selected": false,
                           },
                           "style": {
@@ -20652,7 +26038,6 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
                         "symbol": "plus",
                       },
                       "data-pm-component": "toolbar-item",
-                      "disabled": false,
                       "label": "Add",
                       "style": {
                         "color": {

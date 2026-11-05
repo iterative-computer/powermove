@@ -17,6 +17,7 @@ name = "behaviour"
 path = "../tests/behaviour.rs"
 
 [dependencies]
+pm-design = { path = "../../design" }
 pm-kernel = { path = "../../kernel" }
 pm-model = { path = "../../../../../engine/crates/pm-model" }
 serde = { version = "1", features = ["derive"] }

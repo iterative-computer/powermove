@@ -301,6 +301,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -1007,6 +1025,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -1541,6 +1577,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -1786,6 +1855,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -2320,6 +2407,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -2568,6 +2688,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -3102,6 +3240,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -3465,6 +3636,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -3999,6 +4188,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -4359,6 +4581,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -4893,6 +5133,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -5394,6 +5667,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -5928,6 +6219,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -6192,6 +6516,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -6726,6 +7068,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -7095,6 +7470,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -7631,6 +8024,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -7779,6 +8205,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -8039,6 +8498,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [
@@ -8577,6 +9054,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -8818,6 +9328,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [
@@ -9356,6 +9884,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -9501,6 +10062,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -9650,6 +10244,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -9795,6 +10422,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -9944,6 +10604,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -10089,6 +10782,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -10238,6 +10964,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -10383,6 +11142,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -10532,6 +11324,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -10677,6 +11502,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -10826,6 +11684,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -10971,6 +11862,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -11120,6 +12044,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -11265,6 +12222,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -11414,6 +12404,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -11559,6 +12582,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -11708,6 +12764,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -11853,6 +12942,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -12002,6 +13124,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -12147,6 +13302,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -12296,6 +13484,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -12441,6 +13662,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -12590,6 +13844,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -12735,6 +14022,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -12884,6 +14204,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -13029,6 +14382,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -13178,6 +14564,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -13323,6 +14742,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -13472,6 +14924,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -13617,6 +15102,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -13860,6 +15378,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [
@@ -14423,6 +15959,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "title": "Expand Headline",
                       },
                       "type": "button",
+                    },
+                    {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
                     },
                     {
                       "children": [
@@ -14701,6 +16270,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -15264,6 +16851,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -15526,6 +17146,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [
@@ -16296,6 +17934,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "type": "text",
                 },
                 {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
+                },
+                {
                   "children": [
                     {
                       "children": [
@@ -16832,6 +18488,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "type": "button",
                     },
                     {
+                      "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
                       "children": [
                         {
                           "props": {},
@@ -17073,6 +18762,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [
@@ -17688,6 +19395,39 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                     {
                       "props": {
+                        "attr": {
+                          "symbol": "textformat",
+                        },
+                        "metadata": {
+                          "designTodo": null,
+                          "recipe": "kind-badge",
+                        },
+                        "role": "presentation",
+                        "style": {
+                          "background": {
+                            "token": "colors.labels.blue",
+                          },
+                          "borderRadius": {
+                            "token": "metrics.inner_radius",
+                          },
+                          "color": {
+                            "token": "colors.text",
+                          },
+                          "height": {
+                            "token": "metrics.kind_badge",
+                          },
+                          "symbolSize": {
+                            "token": "metrics.symbol_inline",
+                          },
+                          "width": {
+                            "token": "metrics.kind_badge",
+                          },
+                        },
+                      },
+                      "type": "div",
+                    },
+                    {
+                      "props": {
                         "binding": "native:name",
                         "control": "text",
                         "data-pm-component": "text-field",
@@ -17941,6 +19681,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     },
                   },
                   "type": "text",
+                },
+                {
+                  "props": {
+                    "id": "timeline:header-separator",
+                    "role": "presentation",
+                    "style": {
+                      "background": {
+                        "token": "colors.separator",
+                      },
+                      "height": {
+                        "token": "metrics.symbol_panel",
+                      },
+                      "width": {
+                        "token": "metrics.border",
+                      },
+                    },
+                  },
+                  "type": "div",
                 },
                 {
                   "children": [

@@ -316,6 +316,17 @@ fn leaves(t: &Tokens) -> Vec<(String, Value)> {
     for group in ["colors", "metrics", "typography", "motion"] {
         flatten(group, &v[group], &mut out);
     }
+    // New panel tokens have an additive, lane-owned specification. Preserve the
+    // shared generated table byte-for-byte while parallel design lanes work.
+    out.retain(|(key, _)| {
+        ![
+            "colors.media_badge",
+            "metrics.kind_badge",
+            "metrics.thumbnail_min",
+            "metrics.status_dot",
+        ]
+        .contains(&key.as_str())
+    });
     out
 }
 

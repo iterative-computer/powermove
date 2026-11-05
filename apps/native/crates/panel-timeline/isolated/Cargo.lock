@@ -808,6 +808,7 @@ dependencies = [
 name = "pm-panel-timeline"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "pm-design",
  "pm-kernel",
  "pm-model",
