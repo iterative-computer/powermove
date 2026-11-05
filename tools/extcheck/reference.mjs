@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { prepareReferenceExtension } from "./reference-profile.mjs";
 import { admitFixtureWorkspace } from "./fixture-aliases.mjs";
+import { CLOCK_FIXTURE } from "./clock-source.mjs";
 
 delete process.env.ELECTRON_RUN_AS_NODE;
 delete process.env.POWERMOVE_E2E_LIVE;
@@ -59,6 +60,19 @@ try {
     },
   });
   await session.page.setViewportSize({ width: 1024, height: 768 });
+  const clock = await session.page.evaluate(
+    () => window.__extcheckClock?.fixture,
+  );
+  if (
+    JSON.stringify(clock) !== JSON.stringify(CLOCK_FIXTURE) ||
+    JSON.stringify(request.clock_fixture) !== JSON.stringify(CLOCK_FIXTURE)
+  ) {
+    status.reason = "reference-clock-fixture-unavailable";
+    throw Error(
+      "Prepare and rebuild the reference with the current shared clock",
+    );
+  }
+  status.clock_fixture = clock;
   const installed = await session.page.evaluate(
     () => window.__PMTrace?.buildFingerprint,
   );
@@ -151,6 +165,9 @@ try {
     },
   );
   await session.page.evaluate(admitFixtureWorkspace);
+  await session.page.evaluate(() =>
+    window.__PMTrace.point("driver.clock", window.__extcheckClock.snapshot()),
+  );
   const interactions = [];
   for (let index = 0; index < request.script.steps.length; index++) {
     const step = request.script.steps[index];
@@ -198,6 +215,11 @@ try {
         },
         { step, id: manifest.id },
       );
+    } else if (step.op === "advance") {
+      await session.page.evaluate(
+        (ms) => window.__extcheckClock.advance(ms),
+        step.ms,
+      );
     } else if (step.op === "click") {
       await session.page.locator(step.selector).click();
     } else if (step.op === "fill") {
@@ -212,13 +234,12 @@ try {
           : await locator.textContent();
       result = { pass: actual === step.equals, actual };
     } else if (step.op === "screenshot") {
-      // A paint checkpoint, not a timing/performance measurement.
-      await session.page.evaluate(
-        () =>
-          new Promise((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(resolve)),
-          ),
-      );
+      // Script-owned animation frames, followed by actual host paint.
+      // No pixels, render-time values or trace rows are rewritten.
+      await session.page.evaluate(async () => {
+        await window.__extcheckClock.settle(2);
+        await window.__extcheckClock.nativePaint();
+      });
       await session.page.screenshot({
         path: path.join(out, step.label + ".png"),
         animations: "disabled",

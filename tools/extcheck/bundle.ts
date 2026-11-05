@@ -3,8 +3,10 @@ import path from "node:path";
 import { readFile, writeFile, realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { initial } from "./initial";
+import { CLOCK_SOURCE } from "./clock-source.mjs";
 import { controlImports, controlPlugin } from "./shared-controls";
 const [reference, input, output] = process.argv.slice(2);
+await writeFile(path.join(output!, "clock.js"), CLOCK_SOURCE);
 await writeFile(path.join(output!, "initial.json"), JSON.stringify(initial()));
 const rawManifest = JSON.parse(
   await readFile(path.join(input!, "manifest.json"), "utf8"),

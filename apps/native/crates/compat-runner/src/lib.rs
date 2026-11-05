@@ -24,6 +24,11 @@ pub struct CompatRunner {
 
 impl CompatRunner {
     pub fn new(bundle: &str, initial: &Value) -> Result<Self> {
+        Self::with_prelude(bundle, initial, "")
+    }
+    /// Disposable comparison fixtures run before the bundle or any extension.
+    /// Production embedders keep using `new`, without altered time or entropy.
+    pub fn with_prelude(bundle: &str, initial: &Value, prelude: &str) -> Result<Self> {
         let host = Arc::new(NativeHost::new(initial)?);
         let initial = host.publication();
         let pool = RuntimePool::new(
@@ -45,6 +50,9 @@ impl CompatRunner {
             _pool: pool,
             host,
         };
+        if !prelude.is_empty() {
+            runner.eval(prelude)?;
+        }
         runner.eval(bundle)?;
         runner.eval("if(typeof PowermoveCompat?.CompatRealm!=='function')throw Error('Missing compat bundle')")?;
         runner.eval(include_str!("bootstrap.js"))?;

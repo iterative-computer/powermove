@@ -2,6 +2,7 @@
 use pm_runtime_v8::{Error, Result};
 use serde_json::{Value, json};
 
+#[derive(Clone)]
 pub struct Transport {
     time: f64,
     playing: bool,
@@ -22,6 +23,12 @@ impl Default for Transport {
 }
 impl Transport {
     pub fn command(&mut self, input: &Value, document: &Value) -> Result<Value> {
+        let mut next = self.clone();
+        let result = next.apply(input, document)?;
+        *self = next;
+        Ok(result)
+    }
+    fn apply(&mut self, input: &Value, document: &Value) -> Result<Value> {
         let old_time = self.time;
         let old_playing = self.playing;
         let fps = document["fps"]
@@ -152,6 +159,33 @@ mod tests {
         assert_eq!(
             clock.command(&json!({"method":"state"}), &doc).unwrap()["playing"],
             false
+        );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn invalid_seek_clock_preserves_the_running_transport() {
+        let mut clock = Transport::default();
+        let doc = json!({"fps":30,"dur":2,"assets":[]});
+        clock
+            .command(&json!({"method":"play","now":1000}), &doc)
+            .unwrap();
+        let before = clock.command(&json!({"method":"state"}), &doc).unwrap();
+        assert!(
+            clock
+                .command(&json!({"method":"seek","time":1,"now":null}), &doc)
+                .is_err()
+        );
+        let after = clock.command(&json!({"method":"state"}), &doc).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            clock
+                .command(&json!({"method":"tick","now":1250}), &doc)
+                .unwrap()["time"],
+            0.25
         );
     }
 }

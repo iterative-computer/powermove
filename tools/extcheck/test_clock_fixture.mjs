@@ -63,3 +63,38 @@ await assert.rejects(a.clock.advance(-1));
 console.log(
   "PASS: comparison time, entropy, timer/microtask order, cancellation and frame progression",
 );
+
+const frozen = vm.createContext({
+  performance: Object.freeze({ now: () => -1 }),
+  crypto: {},
+});
+const frozenClock = vm.runInContext(
+  `(${installClockFixture.toString()})()`,
+  frozen,
+);
+assert.equal(vm.runInContext("performance.now()", frozen), 60000);
+await frozenClock.advance(8);
+assert.equal(vm.runInContext("performance.now()", frozen), 60008);
+assert.throws(() =>
+  vm.runInContext("crypto.getRandomValues(new Float32Array(1))", frozen),
+);
+assert.throws(() =>
+  vm.runInContext(
+    "crypto.getRandomValues(new DataView(new ArrayBuffer(8)))",
+    frozen,
+  ),
+);
+assert.throws(() =>
+  vm.runInContext("crypto.getRandomValues(new Uint8Array(65537))", frozen),
+);
+const samples = Array.from({ length: 3 }, () => {
+  const { context } = create();
+  return vm.runInContext(
+    "JSON.stringify([Array.from(crypto.getRandomValues(new Uint16Array(4))),crypto.randomUUID(),Math.random()])",
+    context,
+  );
+});
+assert.equal(new Set(samples).size, 1);
+console.log(
+  "PASS: frozen V8 performance and three identical entropy recordings",
+);

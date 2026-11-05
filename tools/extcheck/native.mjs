@@ -2,6 +2,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { CLOCK_FIXTURE } from "./clock-source.mjs";
 import { fileURLToPath } from "node:url";
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -13,6 +14,7 @@ const status = {
   case: request.case,
   input_sha256: request.input_sha256,
   script_sha256: request.script_sha256,
+  clock_fixture: CLOCK_FIXTURE,
 };
 try {
   execFileSync(
@@ -38,6 +40,7 @@ try {
     const reply = JSON.parse(
       execFileSync(process.argv[3], [], {
         input: JSON.stringify({
+          clock_fixture: path.join(out, "clock.js"),
           compat_bundle: path.join(out, "compat.js"),
           module: path.join(out, "extension.js"),
           manifest,

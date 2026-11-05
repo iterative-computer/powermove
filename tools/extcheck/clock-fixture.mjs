@@ -14,8 +14,10 @@ export function installClockFixture(root = globalThis, seed = 0x504d5032) {
   const epoch = 1_600_000_000_000;
   const timers = new Map(),
     frames = new Map();
+  let draws = 0;
   const next = () => {
-    random += 0x6d2b79f5;
+    draws++;
+    random = (random + 0x6d2b79f5) >>> 0;
     let v = random;
     v = Math.imul(v ^ (v >>> 15), v | 1);
     v ^= v + Math.imul(v ^ (v >>> 7), v | 61);
@@ -41,25 +43,52 @@ export function installClockFixture(root = globalThis, seed = 0x504d5032) {
   ClockDate.now = () => epoch + now;
   root.Date = ClockDate;
   root.Math.random = next;
-  Object.defineProperty(root.performance, "now", {
+  // V8 freezes its snapshot performance object; keep it as the prototype.
+  const performance = Object.isExtensible(root.performance)
+    ? root.performance
+    : (root.performance = Object.create(root.performance));
+  Object.defineProperty(performance, "now", {
     configurable: true,
     value: () => now,
   });
-  Object.defineProperty(root.performance, "timeOrigin", {
+  Object.defineProperty(performance, "timeOrigin", {
     configurable: true,
     value: epoch,
   });
-  if (root.crypto)
-    Object.defineProperty(root.crypto, "randomUUID", {
-      configurable: true,
-      value: () =>
-        "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
-          (
-            Number(c) ^
-            ((Math.floor(next() * 16) & 15) >> (Number(c) / 4))
-          ).toString(16),
-        ),
-    });
+  const crypto = root.crypto ?? (root.crypto = {});
+  Object.defineProperty(crypto, "getRandomValues", {
+    configurable: true,
+    value(array) {
+      if (
+        !ArrayBuffer.isView(array) ||
+        array instanceof DataView ||
+        !/^(?:Uint|Int)(?:8|16|32|64)(?:Clamped)?Array$|^Big(?:Uint|Int)64Array$/.test(
+          array.constructor.name,
+        )
+      )
+        throw new TypeError("Expected an integer typed array");
+      if (array.byteLength > 65536)
+        throw new RangeError("Entropy fixture quota");
+      const bytes = new Uint8Array(
+        array.buffer,
+        array.byteOffset,
+        array.byteLength,
+      );
+      for (let i = 0; i < bytes.length; i++)
+        bytes[i] = Math.floor(next() * 256);
+      return array;
+    },
+  });
+  Object.defineProperty(crypto, "randomUUID", {
+    configurable: true,
+    value: () =>
+      "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+        (
+          Number(c) ^
+          ((Math.floor(next() * 16) & 15) >> (Number(c) / 4))
+        ).toString(16),
+      ),
+  });
   const schedule = (fn, delay, args, repeat) => {
     if (typeof fn !== "function")
       throw TypeError("Comparison timers require a function");
@@ -93,6 +122,7 @@ export function installClockFixture(root = globalThis, seed = 0x504d5032) {
   };
   root.__extcheckClock = {
     task: (fn) => fn(),
+    snapshot: () => ({ now, draws, timers: timers.size, frames: frames.size }),
     get now() {
       return now;
     },

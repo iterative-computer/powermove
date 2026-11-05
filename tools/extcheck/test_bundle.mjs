@@ -1,5 +1,6 @@
 // End-to-end build-tool -> actual V8 CLI test with an original public synthetic extension.
 import assert from "node:assert/strict";
+import { CLOCK_SOURCE } from "./clock-source.mjs";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -52,10 +53,16 @@ try {
     ],
     { stdio: "pipe" },
   );
+  assert.equal(
+    await readFile(path.join(out, "clock.js"), "utf8"),
+    CLOCK_SOURCE,
+    "Bun and Node must install identical fixture source bytes",
+  );
   const result = JSON.parse(
     execFileSync(runner, [], {
       encoding: "utf8",
       input: JSON.stringify({
+        clock_fixture: path.join(out, "clock.js"),
         compat_bundle: path.join(out, "compat.js"),
         module: path.join(out, "extension.js"),
         manifest: JSON.parse(

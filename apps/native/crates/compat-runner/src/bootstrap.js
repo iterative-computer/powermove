@@ -34,9 +34,16 @@ globalThis.__extcheck = {
           session: { panel: "extcheck", generation: 1 },
           realmGlobal: globalThis,
           send: (batch) => call("dom.batch", { batch }),
-          requestAnimationFrame: (fn) =>
-            setTimeout(() => this.realm.task(() => fn(performance.now())), 16),
-          cancelAnimationFrame: (id) => clearTimeout(id),
+          requestAnimationFrame: globalThis.__extcheckClock
+            ? requestAnimationFrame
+            : (fn) =>
+                setTimeout(
+                  () => this.realm.task(() => fn(performance.now())),
+                  16,
+                ),
+          cancelAnimationFrame: globalThis.__extcheckClock
+            ? cancelAnimationFrame
+            : (id) => clearTimeout(id),
           reportError: (error) => host.reportError(error),
         })
       : undefined;
@@ -146,6 +153,8 @@ globalThis.__extcheck = {
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     this.realm.installGlobals(globalThis);
+    if (globalThis.__extcheckClock)
+      globalThis.__extcheckClock.task = (fn) => this.realm.task(fn);
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(
         this.realm,

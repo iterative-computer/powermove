@@ -22,7 +22,13 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
     )?;
     let module = fs::read_to_string(input["module"].as_str().ok_or("module required")?)?;
     let initial = input.get("initial").cloned().unwrap_or_else(initial);
-    let runner = CompatRunner::new(&bundle, &initial)?;
+    let prelude = input
+        .get("clock_fixture")
+        .and_then(Value::as_str)
+        .map(fs::read_to_string)
+        .transpose()?
+        .unwrap_or_default();
+    let runner = CompatRunner::with_prelude(&bundle, &initial, &prelude)?;
     let activation = runner.activate(&input["manifest"], &module)?;
     let mut results = vec![];
     if activation["ok"] == true {
@@ -30,8 +36,13 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
             results.push(runner.json(expression.as_str().ok_or("expression must be a string")?)?);
         }
     }
+    let dom_batches = if input["inspect_dom"] == true {
+        runner.take_dom_batches()
+    } else {
+        vec![]
+    };
     Ok(
-        json!({"version":1,"logic":"runtime-v8","activation":activation,"results":results,"diagnostics":runner.diagnostics(),
+        json!({"version":1,"logic":"runtime-v8","activation":activation,"results":results,"dom_batches":dom_batches,"diagnostics":runner.diagnostics(),
         "gates":{"kernel":false,"webkit_panels":false,"full_recorder":false,"store_helper":false}}),
     )
 }
