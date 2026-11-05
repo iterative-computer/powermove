@@ -247,7 +247,7 @@ fn small_file(path: &Path) -> Result<Option<String>> {
 // swap between listing and reading must never turn a source request into a read
 // of private configuration outside the inventory. No /proc or /dev/fd paths.
 #[cfg(unix)]
-mod bounded_fs {
+pub(crate) mod bounded_fs {
     use super::Entry;
     use std::{
         ffi::{CStr, CString},
@@ -259,7 +259,7 @@ mod bounded_fs {
         },
         path::{Component, Path},
     };
-    pub(super) fn open(path: &Path, directory: bool) -> io::Result<File> {
+    pub(crate) fn open(path: &Path, directory: bool) -> io::Result<File> {
         if !path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -375,7 +375,7 @@ mod bounded_fs {
     }
 }
 #[cfg(not(unix))]
-mod bounded_fs {
+pub(crate) mod bounded_fs {
     use super::Entry;
     use std::{fs::File, io, path::Path};
     pub(super) fn open(_: &Path, _: bool) -> io::Result<File> {

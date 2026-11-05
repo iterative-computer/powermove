@@ -14,6 +14,7 @@ pub mod inspection;
 pub mod media;
 pub mod media_tools;
 pub mod memory;
+pub mod registration;
 pub mod services;
 pub mod session;
 pub mod store;
