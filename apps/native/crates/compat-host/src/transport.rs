@@ -54,7 +54,9 @@ impl Channel {
             return Err(Error::Forbidden);
         }
         let route = parts.next().ok_or(Error::InvalidRequest)?.to_owned();
-        if parts.next().is_some() || !matches!(route.as_str(), "call" | "events" | "page") {
+        if parts.next().is_some()
+            || !matches!(route.as_str(), "call" | "events" | "page" | "canvas")
+        {
             return Err(Error::InvalidRequest);
         }
         let pairs: Vec<_> = u.query_pairs().collect();
