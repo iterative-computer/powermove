@@ -105,8 +105,11 @@ fn n003_summary_omits_zero_rows_and_report_promises_no_way_back() {
         report
             .footer_actions()
             .iter()
-            .all(|button| !button.label.contains("Back") && !button.label.contains("Restore"))
+            .any(|button| button.id == "about_native_files")
     );
+    assert!(m::about_native_files().line.contains("doesn’t move back"));
+    assert_eq!(m::about_native_files().buttons.len(), 1);
+    assert_eq!(m::about_native_files().buttons[0].label, "OK");
     assert!(!m::project_open_allowed(true));
     assert!(m::project_open_allowed(false));
     assert_eq!(m::blocked_project_view("Synthetic").default, Some("relink"));
@@ -354,4 +357,50 @@ fn command_w_cancels_verification_but_never_discards_ready_update() {
     model.state = u::State::Ready;
     assert!(!model.close_window());
     assert_eq!(model.state, u::State::Ready);
+}
+
+#[test]
+fn main_storage_report_keeps_zero_reclaimable_disabled_and_handles_failure() {
+    let mut report = n::StorageReport {
+        state: n::StorageReportState::Loading,
+        used: "10 GB".into(),
+        reclaimable: "0 B".into(),
+        reclaimable_bytes: 0,
+        categories: vec![],
+    };
+    assert_eq!(report.copy().0, "Calculating storage…");
+    assert!(!report.free_space_enabled());
+    report.state = n::StorageReportState::Ready;
+    assert_eq!(report.copy().0, "10 GB used");
+    assert!(!report.free_space_enabled());
+    report.reclaimable_bytes = 1;
+    assert!(report.free_space_enabled());
+    report.state = n::StorageReportState::Unavailable;
+    assert_eq!(report.copy().0, "Storage unavailable");
+    assert!(!report.free_space_enabled());
+}
+#[test]
+fn main_cleanup_keeps_protected_backups_and_requests_only_rebuildable_cache_clear() {
+    use n::{CleanupClass as C, CleanupRequest as R};
+    for class in [
+        C::OlderBackups,
+        C::TemporaryCaches,
+        C::Media(n::StorageClass::Originals),
+    ] {
+        assert_eq!(n::cleanup_request(class, 0, false, true), R::Keep);
+        assert_eq!(n::cleanup_request(class, 1, false, false), R::Keep);
+    }
+    assert_eq!(
+        n::cleanup_request(C::OlderBackups, 0, false, false),
+        R::MoveToArchive
+    );
+    assert_eq!(
+        n::cleanup_request(C::TemporaryCaches, 0, false, false),
+        R::RequestRebuildableCacheClear
+    );
+    assert_eq!(
+        n::cleanup_request(C::Media(n::StorageClass::Archive), 0, false, false),
+        R::Keep
+    );
+    assert_eq!(n::OlderBackupBudget::FiveGb.label(), "5 GB");
 }

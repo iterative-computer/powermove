@@ -339,3 +339,22 @@ This lane does not set it in production or reinterpret it as reverse-migration
 proof. The distribution owner must align that contract with actual installer
 recovery and the no-reverse product decision. The Sparkle public-API mismatch and
 application evidence/import leases remain unresolved outside the owned paths.
+
+## 2026-11-04 — final Opus refresh (78294c4c9)
+
+Merged integration `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`. The updated
+migration spec now provides an informational `About Going Back…` explanation:
+Native work does not move back; the original app can open a file only if it can
+read every part, otherwise it refuses without changing it. The model projects
+that exact explanation with only OK. It offers no reverse operation or guarantee
+that a Native file opens in the old app; actual refusal remains the fileguard
+lane's responsibility. This supersedes the earlier temporary omission of an
+informational footer, without restoring the removed How to Go Back promise.
+
+The updated N005 models include storage-report loading/unavailable/zero-reclaim
+states, Older Backups and approved budget choices. Referenced items, protected
+newest backups and recovery snapshots stay kept. Rebuildable-cache clearing is
+only a typed request to the storage owner, never a deletion in this lane. Source
+or authored data always moves to archive, never deletion. Remaining two neutral
+Opus defaults (initial scope type and non-original cleanup selections) are
+unchanged. No literal token fallback is supplied.

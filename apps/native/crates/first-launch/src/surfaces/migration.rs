@@ -328,14 +328,18 @@ impl Report {
             .is_empty()
             .then_some(("Nothing to Review", "Everything came across."))
     }
-    /// The latest owner decision supersedes migration.md's How to Go Back
-    /// footer. No return path or native-file compatibility is promised.
+    /// Current Opus spec: informational explanation only. No reverse-migration
+    /// command, return path, or guaranteed native-file compatibility.
     pub fn footer_actions(&self) -> Vec<Button> {
         vec![
             Button::new("copy_report", "Copy Report"),
             Button::new("show_library", "Show Library in Finder"),
+            Button::new("about_native_files", "About Going Back…"),
         ]
     }
+}
+pub fn about_native_files() -> View {
+    View{surface:"N003",title:"Your original app still has everything from before.".into(),line:"Work you do in Powermove Native doesn’t move back to it. It can open a .pmv saved here only if it can read everything in the file. If it can’t, it refuses the file, and the file isn’t changed.".into(),status:None,buttons:vec![Button::new("ok","OK")],default:Some("ok")}
 }
 pub fn blocked_project_view(project: &str) -> View {
     View{surface:"N003",title:format!("Media for “{project}” is missing."),line:"Powermove Native can’t open this copy until the media is found. The original project wasn’t changed.".into(),status:None,buttons:vec![Button::new("relink","Relink…"),Button::new("cancel","Cancel")],default:Some("relink")}

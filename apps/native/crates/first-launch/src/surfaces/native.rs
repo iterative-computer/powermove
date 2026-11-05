@@ -435,3 +435,95 @@ impl EditRefusal {
         }
     }
 }
+
+// Main-reference additions from tasks-storage.md at 78294c4c9. These are
+// requests/data projections; actual storage capabilities remain with the owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageReportState {
+    Loading,
+    Ready,
+    Unavailable,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageCategory {
+    pub label: String,
+    pub formatted_size: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageReport {
+    pub state: StorageReportState,
+    pub used: String,
+    pub reclaimable: String,
+    pub reclaimable_bytes: u64,
+    pub categories: Vec<StorageCategory>,
+}
+impl StorageReport {
+    pub fn copy(&self) -> (String, String) {
+        match self.state {
+            StorageReportState::Loading => (
+                "Calculating storage…".into(),
+                "Checking backups, media and app data.".into(),
+            ),
+            StorageReportState::Unavailable => ("Storage unavailable".into(), String::new()),
+            StorageReportState::Ready => (
+                format!("{} used", self.used),
+                format!(
+                    "{} can be freed from older backups and temporary caches.",
+                    self.reclaimable
+                ),
+            ),
+        }
+    }
+    pub fn free_space_enabled(&self) -> bool {
+        self.state == StorageReportState::Ready && self.reclaimable_bytes > 0
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupClass {
+    Media(StorageClass),
+    OlderBackups,
+    TemporaryCaches,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupRequest {
+    Keep,
+    MoveToArchive,
+    RequestRebuildableCacheClear,
+}
+/// The owner supplies verified reference/protection facts and rechecks them at
+/// the actual side effect. Cache clearing is a request, never a deletion here.
+pub fn cleanup_request(
+    class: CleanupClass,
+    references: u64,
+    sole_playable_proxy: bool,
+    protected_backup: bool,
+) -> CleanupRequest {
+    if references > 0 || sole_playable_proxy || protected_backup {
+        return CleanupRequest::Keep;
+    }
+    match class {
+        CleanupClass::TemporaryCaches => CleanupRequest::RequestRebuildableCacheClear,
+        CleanupClass::Media(StorageClass::Archive) => CleanupRequest::Keep,
+        _ => CleanupRequest::MoveToArchive,
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OlderBackupBudget {
+    OneGb,
+    FiveGb,
+    TenGb,
+    TwentyGb,
+}
+impl OlderBackupBudget {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneGb => "1 GB",
+            Self::FiveGb => "5 GB",
+            Self::TenGb => "10 GB",
+            Self::TwentyGb => "20 GB",
+        }
+    }
+}
+pub const NEWEST_BACKUPS_OVER_BUDGET: &str =
+    "The newest recovery copies are over this budget. They’ll be kept.";
+pub const TEMPORARY_CACHE_DETAIL: &str = "Rebuilt when needed, so these are removed, not archived.";

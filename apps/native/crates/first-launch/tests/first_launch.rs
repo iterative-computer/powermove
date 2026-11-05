@@ -1160,3 +1160,43 @@ fn declining_after_partial_secret_import_retains_receipts_and_retries_only_remai
     assert_eq!(access.reads, 2);
     assert_eq!(source, files(&config.electron_profile));
 }
+
+#[test]
+fn later_main_file_media_delta_stays_pending_and_preserves_native_edits() {
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    run(&config, |_| Ok(())).unwrap();
+    let base = files(&config.native_profile.join("first-launch-checkpoint"));
+    fs::write(
+        config.native_profile.join("store/theme.json"),
+        b"\"native-authored\"",
+    )
+    .unwrap();
+    write(
+        &config
+            .electron_profile
+            .join(format!("Media Store/Index/{}.json", "c".repeat(64))),
+        &json!({"key":"main:new","sourcePath":t.path().join("unavailable.mov"),"future":true}),
+    );
+    let source = files(&config.electron_profile);
+    let error = run(&config, |_| Ok(())).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<pm_first_launch::MigrationRequirement>(),
+        Some(&pm_first_launch::MigrationRequirement::MainFileMediaAdapter)
+    );
+    assert!(
+        config
+            .native_profile
+            .join("first-launch-deltas/pending/checkpoint.json")
+            .is_file()
+    );
+    assert_eq!(
+        files(&config.native_profile.join("first-launch-checkpoint")),
+        base
+    );
+    assert_eq!(files(&config.electron_profile), source);
+    assert_eq!(
+        fs::read(config.native_profile.join("store/theme.json")).unwrap(),
+        b"\"native-authored\""
+    );
+}
