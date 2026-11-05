@@ -17,6 +17,7 @@ are those of panels/README §1.
 | [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
 | [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
 | [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; S098 points to 3d-studio.md | S097 S098 |
+| [3d-studio.md](3d-studio.md) | New 3D system: viewer toolbar, preview tiers, navigation, gizmos, light tool, inspector, import, materials, upgrade, failure | S098 |
 | [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
 | [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
 | [onboarding.md](onboarding.md) | Welcome window, timeline, agent, speech model, Bring My Workspace | S107–S110 |
@@ -135,7 +136,10 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | **Answered:** inside the window; the overlay is not ported | S107 |
 | 6 | Reverse migration isn't built. What do beta users get promised about going back? | **Answered:** no reverse migration; the original app refuses a native file it can't read, and the copy says so | N003 |
 
-Answers are from the owner, 2026-11-04 (see p0-decisions.md), and the family files now state them. Q1 is still open.
+| 7 | Exploded views, place-on and other 3D gestures exist for agents through `edit_3d`, but the 3D source gives people no control for them. Add human controls in the first native release? | Agent-only, as source; [3d-studio.md §12](3d-studio.md#12-not-in-the-source-so-not-in-native-yet) lists them | S098 |
+| 8 | Old 3D projects upgrade in memory on open and save in the new format. After that save, the original app refuses the file. Should the first save of an upgraded project warn about that? | No warning; the upgrade banner and N003 say what's needed | S098, N003 |
+
+Answers to Q2–Q6 are from the owner, 2026-11-04 (see p0-decisions.md), and the family files now state them. Q1, Q7 and Q8 are open.
 
 ## 7. New tokens requested by these specs
 
@@ -153,3 +157,5 @@ on the token; it does not substitute a literal.
 | `colors.scope_blue` | `#6BA6FF` | [colour.md](colour.md) |
 | `metrics.mark_bracket` | 6 | [pro-edit.md](pro-edit.md) |
 | `metrics.sync_badge` | 16 | [pro-edit.md](pro-edit.md) |
+| `metrics.viewer_3d_labels` | 860 | [3d-studio.md](3d-studio.md) |
+| `metrics.viewer_3d_collapse` | 560 | [3d-studio.md](3d-studio.md) |

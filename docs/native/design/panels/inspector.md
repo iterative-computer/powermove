@@ -80,8 +80,8 @@ Property names (exact, Title Case): Content — `Text`, `Font`, `Weight`,
 `Stroke`, `Stroke Color`, `Points`, `Fit`, `Source`, `Speed`, `Trim Start`,
 `Gain`, `Fade In`, `Fade Out`, `Mute Audio`. Transform — `Anchor Point`,
 `Position`, `Scale`, `Rotation`, `Skew`, `Opacity` (3-D layers add
-`Orientation`, `X Rotation`, `Y Rotation`, `Perspective` — hidden while 3D is
-unshipped). Layer — `Blend Mode`, `Motion Blur`, `Track Matte`, `Matte Mode`,
+`Orientation`, `X Rotation`, `Y Rotation`, `Perspective`; everything else about 3D
+layers is the `3D` section in [3d-studio.md §8](../surfaces/3d-studio.md#8-3d-section-in-properties)). Layer — `Blend Mode`, `Motion Blur`, `Track Matte`, `Matte Mode`,
 `Parent`, `Visible`, `Solo`, `Label Color`. Time — `Time Remap`, `Source
 Time`, `Reverse`, `Freeze Frame`. Masks — `Mask Shape`, `Mode`, `Enabled`.
 

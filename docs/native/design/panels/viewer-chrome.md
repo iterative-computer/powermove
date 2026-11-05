@@ -49,7 +49,7 @@ The viewer panel has **no title**. The bar is part of the panel (solid
 
 | Slot | Spec |
 |---|---|
-| Leading (Composition mode) | empty. |
+| Leading (Composition mode) | empty, unless the composition has 3D layers: then the 3D toolbar in [3d-studio.md §2](../surfaces/3d-studio.md#2-viewer-3d-toolbar). |
 | Leading (Source mode) | `Source:` `t.body` `c.muted` + ` ` + asset name `t.body` `c.text` (truncating), then `m.gap`, then a borderless text button `chevron.left` + `Back to Composition` (`t.body` `c.accent_text`). Esc does the same (W021). |
 | Spacer | flexible |
 | **Zoom pop-up** | trailing, first. `NSPopUpButton`-style GPUI pop-up **in the bar** (not over the image): borderless at rest (`t.body` `c.secondary`, chevron `chevron.up.chevron.down` `m.symbol_inline` `c.muted`), `c.hover` fill on hover, `m.field` tall, `m.control_radius`. Title: `Fit (54 %)` when fitting, `54 %` when fixed. Fixed width = width of `Fit (100 %)` + chevron, so it never jumps. Menu (real `NSMenu`): `Fit` ✓, separator, `5 %`, `12.5 %`, `25 %`, `50 %`, `100 %`, `200 %`, `400 %`, `800 %` (✓ on the matching fixed value; none when custom), separator, `Zoom In` ⌘=, `Zoom Out` ⌘−, `Actual Size` ⌘1, `Fit Composition` ⌘0. Tooltip `Zoom`. |
