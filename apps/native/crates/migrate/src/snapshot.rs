@@ -119,8 +119,9 @@ impl Snapshot {
         fs::create_dir(&target)?;
         #[cfg(unix)]
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
-        // On failure remove only the directory created by THIS capture.
-        let result = (|| {
+        // On failure retain this attempt for inspection/recovery (N4). A failed
+        // capture has no valid snapshot.json and cannot be opened as complete.
+        (|| {
             fs::create_dir(target.join("leveldb"))?;
             fs::create_dir(target.join("blobs"))?;
             let mut hashes = BTreeMap::new();
@@ -157,7 +158,10 @@ impl Snapshot {
                         });
                         if matches!(policy, BlobCopy::Sample { .. }) && permission {
                             if out.exists() {
-                                fs::remove_file(&out)?;
+                                let retained = target.join("unreadable-partials").join(relative);
+                                fs::create_dir_all(retained.parent().unwrap())?;
+                                fs::rename(&out, &retained)?;
+                                File::open(retained.parent().unwrap())?.sync_all()?;
                             }
                             continue;
                         }
@@ -208,11 +212,7 @@ impl Snapshot {
                 root: target.clone(),
                 inventory: inv,
             })
-        })();
-        if result.is_err() {
-            fs::remove_dir_all(&target)?;
-        }
-        result
+        })()
     }
     pub fn open(root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
@@ -602,10 +602,12 @@ fn try_clone(_: &Path, _: &Path) -> Result<bool> {
 
 pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let tmp = path.with_extension("json.part");
+    if fs::symlink_metadata(&tmp).is_ok() {
+        archive_attempt(&tmp)?;
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
@@ -650,5 +652,52 @@ mod capacity_tests {
                 .raw_os_error(),
             Some(libc::ENOSPC)
         );
+    }
+}
+
+/// Caller owns the migration lease and a private destination. Retain interrupted
+/// payload/metadata attempts under distinct sibling names; never follow links.
+pub(crate) fn archive_attempt(path: &Path) -> Result<()> {
+    ensure!(
+        !fs::symlink_metadata(path)?.file_type().is_symlink(),
+        "linked migration attempt"
+    );
+    let parent = path.parent().context("attempt has no parent")?;
+    let name = path
+        .file_name()
+        .context("attempt has no name")?
+        .to_string_lossy();
+    for sequence in 0u64.. {
+        let target = parent.join(format!("{name}.archive-{sequence:016x}"));
+        if fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        fs::rename(path, target)?;
+        File::open(parent)?.sync_all()?;
+        return Ok(());
+    }
+    unreachable!()
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn atomic_snapshot_metadata_retains_torn_previous_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let state = root.join("snapshot.json");
+        fs::write(
+            state.with_extension("json.part"),
+            b"synthetic torn metadata",
+        )
+        .unwrap();
+        atomic_json(&state, &serde_json::json!({"complete":true})).unwrap();
+        assert_eq!(
+            fs::read(root.join("snapshot.json.part.archive-0000000000000000")).unwrap(),
+            b"synthetic torn metadata"
+        );
+        let value: serde_json::Value = serde_json::from_reader(File::open(state).unwrap()).unwrap();
+        assert_eq!(value["complete"], true);
     }
 }

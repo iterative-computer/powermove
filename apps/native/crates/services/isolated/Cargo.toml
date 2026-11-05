@@ -13,6 +13,7 @@ path = "../src/lib.rs"
 resolver = "3"
 
 [dependencies]
+pm-update-policy = { path = "../../update-policy" }
 anyhow = "1"
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }

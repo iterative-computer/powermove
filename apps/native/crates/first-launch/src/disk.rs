@@ -38,6 +38,16 @@ pub fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn regular(path: &Path) -> Result<File> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        // Darwin SF_DATALESS: reading would materialize a cloud placeholder.
+        // Preserve it as an unavailable input; never cause a download here.
+        ensure!(
+            !dataless(fs::symlink_metadata(path)?.st_flags()),
+            "source is a dataless file; explicit source availability is required"
+        );
+    }
     let f = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -68,10 +78,12 @@ pub fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 pub fn bytes(path: &Path, value: &[u8]) -> Result<()> {
     let tmp = path.with_extension("first-launch-part");
+    if fs::symlink_metadata(&tmp).is_ok() {
+        archive(&tmp)?;
+    }
     let mut f = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
@@ -192,4 +204,64 @@ pub fn resolved(path: &Path) -> Result<PathBuf> {
     }
     let parent = resolved(path.parent().context("profile has no parent")?)?;
     Ok(parent.join(path.file_name().context("profile has no name")?))
+}
+
+/// Retain an owned attempt under a fresh sibling name. Caller holds the migration
+/// lease. Never follows links or removes a prior archive, even after a no-op delta.
+pub fn archive(path: &Path) -> Result<PathBuf> {
+    ensure!(
+        !fs::symlink_metadata(path)?.file_type().is_symlink(),
+        "linked attempt"
+    );
+    let parent = path.parent().context("attempt has no parent")?;
+    let name = path
+        .file_name()
+        .context("attempt has no name")?
+        .to_string_lossy();
+    for sequence in 0u64.. {
+        let archived = parent.join(format!("{name}.archive-{sequence:016x}"));
+        if fs::symlink_metadata(&archived).is_ok() {
+            continue;
+        }
+        fs::rename(path, &archived)?;
+        File::open(parent)?.sync_all()?;
+        return Ok(archived);
+    }
+    unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn interrupted_state_append_is_archived_before_atomic_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let state = root.join("migration.json");
+        let partial = state.with_extension("first-launch-part");
+        fs::write(&partial, b"synthetic interrupted state").unwrap();
+        atomic(&state, &serde_json::json!({"version":1})).unwrap();
+        assert_eq!(
+            fs::read(root.join("migration.first-launch-part.archive-0000000000000000")).unwrap(),
+            b"synthetic interrupted state"
+        );
+        assert_eq!(json::<serde_json::Value>(&state).unwrap()["version"], 1);
+    }
+}
+
+/// Darwin stat.h SF_DATALESS. Pure flag policy is exercised with Linux doubles;
+/// the actual macOS metadata/provider behavior remains a signed Mac check.
+#[cfg(any(test, target_os = "macos"))]
+fn dataless(flags: u32) -> bool {
+    flags & 0x4000_0000 != 0
+}
+#[cfg(test)]
+mod dataless_tests {
+    #[test]
+    fn cloud_placeholders_are_not_read_as_local_bytes() {
+        assert!(super::dataless(0x4000_0000));
+        assert!(super::dataless(0x4000_0001));
+        assert!(!super::dataless(0));
+        assert!(!super::dataless(1));
+    }
 }

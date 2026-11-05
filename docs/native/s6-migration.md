@@ -445,3 +445,29 @@ proofs; signed Keychain consent/ACL; live/crashed Chromium and OS permissions;
 real media/reference closure; signed TR/updater and current-state forward/reverse
 restore-build round trips. No distribution action, real profile access, source
 deletion, or secret access was performed by this Linux lane.
+
+## 2026-11-04 — beta2 retention and Restore preparation
+
+Failed snapshots and unreadable sampled partials remain retained. First-launch
+also archives stale captures and duplicate delta checkpoints. The denied-blob test
+verifies copied LevelDB files remain while an incomplete snapshot is refused.
+[Beta2 readiness](beta2-readiness.md) records experimental supplied-store merge,
+unknown/null/tombstone/conflict preservation, interrupted preparation, and direct/
+skipped-TR/Keychain-denial coverage. Whole-profile/media/secret Restore and signed
+Mac installer proofs remain blocked; no S6 gate is declared passed.
+
+
+## 2026-11-04 — consent decline and current going-back contract
+
+The new [Opus migration spec](design/surfaces/migration.md) and
+[beta2 alignment report](beta2-readiness.md) supersede earlier presentation gaps.
+`skip_secret_consent` makes Not Now / Continue Without Them durable without any
+Keychain read. Explicit later retries capture current encrypted inputs; an
+attached-library retry registers locators through the kernel actor.
+
+Reverse migration is not built. Earlier Restore descriptions are intended
+cutover requirements or experimental store preparation, not an available beta
+feature. The latest owner decision permits no way-back or file-compatibility promise.
+The original data stays unchanged; no Restore, How to Go Back or three-way
+conflict-resolution UI is shipped. `feat/na-cloud-fileguard` owns the old app
+refusing native files.

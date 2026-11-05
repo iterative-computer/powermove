@@ -151,3 +151,32 @@ fn checksum_failure_keeps_source_and_checkpoint_recoverable_and_retries_exact_by
     fs::write(&path, records[0]["payload"].as_str().unwrap()).unwrap();
     assert!(run(&config, |_| Ok(())).is_err());
 }
+
+#[test]
+fn verified_main_index_does_not_admit_unindexed_or_unknown_payloads() {
+    for relative in ["unindexed.bin", "Index/future-record.json"] {
+        let t = tempfile::tempdir().unwrap();
+        let config = main_profile(&t.path().canonicalize().unwrap());
+        let path = config.electron_profile.join("Media Store").join(relative);
+        fs::write(&path, b"synthetic unrecognized media").unwrap();
+        let source = files(&config.electron_profile);
+        let error = run(&config, |_| Ok(())).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<pm_first_launch::MigrationRequirement>(),
+            Some(&pm_first_launch::MigrationRequirement::MainFileMediaAdapter)
+        );
+        assert_eq!(source, files(&config.electron_profile));
+        assert_eq!(
+            fs::read(
+                config
+                    .native_profile
+                    .join("first-launch-checkpoint/profile/Media Store")
+                    .join(relative)
+            )
+            .unwrap(),
+            b"synthetic unrecognized media"
+        );
+        assert!(!config.native_profile.join("Media Store/keys").exists());
+        assert!(run(&config, |_| Ok(())).is_err());
+    }
+}

@@ -6,6 +6,7 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
+pm-update-policy = { path = "../crates/update-policy" }
 anyhow = "1"
 base64 = "0.22"
 ed25519-dalek = "2.2"

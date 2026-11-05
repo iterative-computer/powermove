@@ -14,6 +14,8 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 fs2 = "0.4"
 libc = "0.2"
 pbkdf2 = "0.12"
+pm-update-policy = { path = "../update-policy" }
+sha2 = "0.10"
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-native-migrate = { path = "../migrate" }

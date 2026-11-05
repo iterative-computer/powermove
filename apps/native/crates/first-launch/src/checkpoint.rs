@@ -13,6 +13,8 @@ use std::{
 // credentials and unrelated terminal homes are never discovered or copied.
 const FAMILIES: &[&str] = &[
     "store",
+    // main c7f46a056: flat SHA-256 payloads / source links and Index records.
+    // Retain these verbatim alongside the verified file-index adapter.
     "extensions",
     "Agent Workspaces",
     "Agent State",
@@ -77,10 +79,10 @@ impl Checkpoint {
         // Only our fixed private staging directory, while the coordinator lock
         // is held. A completed checkpoint is never removed or rewritten.
         if stage.exists() {
-            fs::remove_dir_all(&stage)?;
+            disk::archive(&stage)?;
         }
         disk::private_dir(&stage)?;
-        let result = (|| {
+        (|| {
             let before = inventory(source)?;
             let chromium_before = (
                 disk::walk(&source.join("IndexedDB"))?,
@@ -227,11 +229,8 @@ impl Checkpoint {
             fs::rename(&stage, root)?;
             File::open(root.parent().unwrap())?.sync_all()?;
             Ok(cp)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_dir_all(&stage);
-        }
-        result
+        })()
+        // Leave failed captures intact. A retry archives them before starting.
     }
 }
 fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
@@ -278,7 +277,11 @@ pub(crate) fn relative(path: &Path) -> Result<()> {
 pub(crate) fn file_target(path: &Path) -> Result<PathBuf> {
     relative(path)?;
     let first = path.components().next().context("empty path")?.as_os_str();
-    if first == "extensions" {
+    if first == "Media Store" {
+        // Never mix the main reference's incompatible Index/flat-file schema
+        // into the active native BLAKE3 media store.
+        Ok(Path::new("electron-media-archive").join(path.strip_prefix("Media Store")?))
+    } else if first == "extensions" {
         Ok(Path::new("extensions-shared").join(path.strip_prefix("extensions")?))
     } else if first
         .to_string_lossy()

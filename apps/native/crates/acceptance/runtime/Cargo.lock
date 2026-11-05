@@ -2043,9 +2043,11 @@ dependencies = [
  "pm-kernel",
  "pm-model",
  "pm-native-migrate",
+ "pm-update-policy",
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "zeroize",
 ]
 
@@ -2203,6 +2205,7 @@ dependencies = [
  "pm-captions",
  "pm-first-launch",
  "pm-promedia",
+ "pm-update-policy",
  "semver",
  "serde",
  "serde_json",
@@ -2263,6 +2266,19 @@ dependencies = [
 [[package]]
 name = "pm-time"
 version = "0.1.0"
+
+[[package]]
+name = "pm-update-policy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
 
 [[package]]
 name = "pm-vector"

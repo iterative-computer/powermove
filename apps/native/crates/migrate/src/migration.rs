@@ -6,7 +6,10 @@
 use crate::{
     Result,
     indexeddb::{Record, v2_fingerprint},
-    snapshot::{Snapshot, atomic_json, check_space, copy_verified_length, hash_file, open_regular},
+    snapshot::{
+        Snapshot, archive_attempt, atomic_json, check_space, copy_verified_length, hash_file,
+        open_regular,
+    },
 };
 use anyhow::{Context, ensure};
 use fs2::FileExt;
@@ -652,16 +655,19 @@ fn publish_key(root: &Path, key: &KeyRecord, conflicts: &mut BTreeSet<String>) -
 }
 fn import_empty(root: &Path, key: &str, mime: &str, revision: Option<&str>) -> Result<KeyRecord> {
     let part = root.join("tmp/empty.part");
+    if fs::symlink_metadata(&part).is_ok() {
+        archive_attempt(&part)?;
+    }
     let f = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&part)?;
     f.sync_all()?;
     drop(f);
-    let result = import_file(
+    // The owned scratch input remains available even if import_file fails.
+    import_file(
         root,
         &part,
         0,
@@ -672,9 +678,7 @@ fn import_empty(root: &Path, key: &str, mime: &str, revision: Option<&str>) -> R
             at: Some(0.0),
             expected: None,
         },
-    );
-    fs::remove_file(&part)?;
-    result
+    )
 }
 struct ImportInfo<'a> {
     key: &'a str,
@@ -702,7 +706,7 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
         let temp = root.join("tmp").join(format!("{hash}.part"));
         // Only our migration lock holder can own this deterministic staging file.
         if temp.exists() {
-            fs::remove_file(&temp)?;
+            archive_attempt(&temp)?;
         }
         copy_verified_length(source, &temp, size)?;
         let (stored_hash, stored_size) = hash_file(&temp)?;
@@ -802,4 +806,61 @@ pub fn export_local_storage(snapshot: &Snapshot, path: &Path) -> Result<usize> {
     let entries = crate::local_storage::read(snapshot)?;
     atomic_json(path, &entries)?;
     Ok(entries.len())
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn interrupted_payload_is_archived_before_recopy() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        let source = root.join("source");
+        fs::write(&source, b"synthetic original").unwrap();
+        let (hash, size) = hash_file(&source).unwrap();
+        fs::write(
+            root.join("tmp").join(format!("{hash}.part")),
+            b"synthetic partial",
+        )
+        .unwrap();
+        let key = import_file(
+            &root,
+            &source,
+            size,
+            ImportInfo {
+                key: "synthetic",
+                mime: "application/octet-stream",
+                revision: Some("v1"),
+                at: Some(0.0),
+                expected: Some(&hash),
+            },
+        )
+        .unwrap();
+        verify_key(&root, &key).unwrap();
+        assert_eq!(
+            fs::read(
+                root.join("tmp")
+                    .join(format!("{hash}.part.archive-0000000000000000"))
+            )
+            .unwrap(),
+            b"synthetic partial"
+        );
+        assert_eq!(fs::read(source).unwrap(), b"synthetic original");
+    }
+    #[test]
+    fn empty_payload_never_truncates_an_existing_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        fs::write(root.join("tmp/empty.part"), b"retained unexpected input").unwrap();
+        let key = import_empty(&root, "empty", "application/octet-stream", Some("v1")).unwrap();
+        assert_eq!(key.size, 0);
+        verify_key(&root, &key).unwrap();
+        assert_eq!(
+            fs::read(root.join("tmp/empty.part.archive-0000000000000000")).unwrap(),
+            b"retained unexpected input"
+        );
+        assert_eq!(fs::metadata(root.join("tmp/empty.part")).unwrap().len(), 0);
+    }
 }

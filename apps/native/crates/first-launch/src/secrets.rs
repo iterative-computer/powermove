@@ -15,6 +15,8 @@ pub enum SecretStep {
     NotStarted,
     PromptRequired,
     AccessStarted,
+    /// Explicit Not Now / Continue Without Them; ordinary launches never prompt.
+    Skipped,
     Complete,
 }
 /// Implementations must be idempotent, preserve existing differing items, and
@@ -241,4 +243,60 @@ impl SecretAccess for MacKeychain {
     fn put_native(&mut self, _: &str, _: &[u8]) -> Result<()> {
         anyhow::bail!("macOS Keychain required")
     }
+}
+
+/// An explicit later Settings retry reads CURRENT encrypted input, never stale
+/// sign-ins from the first migration checkpoint. Caller holds first-launch lease.
+/// Failed attempts remain private and retained. No Keychain access happens here.
+pub(crate) fn capture_retry(source: &Path, native: &Path) -> Result<std::path::PathBuf> {
+    use std::{collections::BTreeMap, fs};
+    fn files(source: &Path) -> Result<BTreeMap<std::path::PathBuf, disk::Stamp>> {
+        let mut out = BTreeMap::new();
+        for family in ["env", "cloud", "agent-provider.json"] {
+            let root = source.join(family);
+            if root.is_file() {
+                out.extend(disk::walk(&root)?.into_values().map(|s| (family.into(), s)));
+            } else {
+                out.extend(
+                    disk::walk(&root)?
+                        .into_iter()
+                        .map(|(p, s)| (std::path::Path::new(family).join(p), s)),
+                );
+            }
+        }
+        Ok(out)
+    }
+    let retries = native.join("secret-consent-retries");
+    disk::private_dir(&retries)?;
+    let attempt = (0u64..)
+        .map(|n| retries.join(format!("retry-{n:016x}")))
+        .find(|p| fs::symlink_metadata(p).is_err())
+        .unwrap();
+    disk::private_dir(&attempt)?;
+    let before = files(source)?;
+    let mut copied = BTreeMap::new();
+    for relative in before.keys() {
+        let target = attempt.join(relative);
+        disk::private_dir(target.parent().unwrap())?;
+        copied.insert(
+            relative.clone(),
+            disk::copy(&source.join(relative), &target)?,
+        );
+    }
+    ensure!(
+        before == files(source)?,
+        "secret source changed; retry after original app quits"
+    );
+    for (relative, entry) in &copied {
+        ensure!(
+            disk::hash(&source.join(relative))? == (entry.hash.clone(), entry.bytes),
+            "secret source changed during capture"
+        );
+    }
+    ensure!(
+        !pm_kernel::locks::older_electron_running(source),
+        "original app started during secret capture"
+    );
+    disk::atomic(&attempt.join("encrypted-inputs.json"), &copied)?;
+    Ok(attempt)
 }
