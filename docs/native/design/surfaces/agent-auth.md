@@ -224,8 +224,8 @@ Powermove can install. It is the card's default button:
 | Done | `checkmark.circle.fill` `c.success` `{runtime} {version} is installed. Reconnecting…` (`Try again to continue.` when the surface cannot reconnect itself) |
 | Failed | Error state, the failure or `The update couldn’t finish.`; button `Try the Fix Again` |
 
-**Repair window** — opened by `Repair…` in S082 and S073, one per extension;
-reopening focuses the existing one. v1.2.0 used a draggable floating panel. Native
+**Repair window** — opened by `Fix with Agent` in S082 (and the Sandbox group of
+S079), one per extension; reopening focuses the existing one. v1.2.0 used a draggable floating panel. Native
 uses a standard titled utility window (`NSPanel`, utility style, closable,
 resizable, frame autosaved), title `Repair Extension`, subtitle
 `{extension}`, default `m.agent_width` × 2 × `m.agent_width`, content on solid
