@@ -158,7 +158,7 @@ impl Release {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Offer {
-    release: Release,
+    release: Box<Release>,
     id: String,
     policy: Vec<u8>,
 }
@@ -246,7 +246,7 @@ fn verify_policy(bytes: &[u8], verifier: &impl SignatureVerifier) -> Result<Offe
     }
     Version::parse(&release.version)?;
     Ok(Offer {
-        release,
+        release: Box::new(release),
         id: hex(Sha256::digest(bytes)),
         policy: bytes.to_vec(),
     })
