@@ -780,9 +780,11 @@ mod tests {
             &init,
         )
         .unwrap();
-        let result=runner.activate("var ExtCheckModule={async default(api){api.commands.register({id:'calculate',label:'Synthetic calculate',run:(n)=>n+7});globalThis.result=await api.commands.run('calculate',35);}}").unwrap();
+        let result=runner.activate("var ExtCheckModule={async default(api){api.commands.register({id:'calculate',label:'Synthetic calculate',when:()=>false,run:(n)=>n+7});api.commands.register({id:'throws',label:'Synthetic throw',run:()=>{throw Error('synthetic callback error')}});globalThis.result=await api.commands.run('calculate',35);globalThis.fallback=(await api.commands.run('throws'))===undefined;}}").unwrap();
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(runner.json("result").unwrap(), 42);
+        assert_eq!(runner.json("fallback").unwrap(), true);
+        assert!(host.private_reports().iter().any(|report|report["method"]=="runtime-error"));
         assert!(
             kernel
                 .lock()
