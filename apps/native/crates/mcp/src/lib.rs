@@ -6,11 +6,15 @@
 pub mod automation;
 pub mod catalog;
 pub mod commands;
+pub mod creative;
 pub mod effect;
+pub mod export_jobs;
 pub mod extensions;
 pub mod inspection;
 pub mod media;
 pub mod media_tools;
+pub mod memory;
+pub mod registration;
 pub mod services;
 pub mod session;
 pub mod store;

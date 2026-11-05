@@ -1,4 +1,5 @@
-//! Public names, descriptions and schemas are generated from v1.2.0, unchanged.
+//! Public names, descriptions and schemas come from owner-pinned main.
+//! The v1.2.0 catalog remains available as compatibility evidence.
 use crate::{Error, Result};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -6,8 +7,15 @@ use std::sync::OnceLock;
 pub fn catalog() -> &'static Value {
     static VALUE: OnceLock<Value> = OnceLock::new();
     VALUE.get_or_init(|| {
-        serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
+        serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
             .expect("frozen catalog")
+    })
+}
+pub fn legacy_catalog() -> &'static Value {
+    static LEGACY: OnceLock<Value> = OnceLock::new();
+    LEGACY.get_or_init(|| {
+        serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
+            .expect("legacy catalog")
     })
 }
 pub fn tools() -> &'static Vec<Value> {
@@ -137,6 +145,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "edit_layer_strips",
     "rollback_changes",
     "get_panel_layout",
+    "inspect_creative_workspace",
+    "inspect_creative_extension",
     "get_3d_scene",
     "check_project",
     "list_media",
@@ -188,6 +198,9 @@ pub fn backing(name: &str) -> &'static str {
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
         "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
+        "project_memory" => {
+            "kernel non-revision durable memory metadata admission and application actor binding"
+        }
         "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
         "set_panel_layout" => {
             "workspace editing state and external workspace Undo/Redo continuation host"

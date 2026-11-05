@@ -1,6 +1,6 @@
 // Execute tagged bodies with explicit synthetic host seams. No native expected
 // output, installed editor, real project, media file or profile is consulted.
-import { tag, evaluate } from './tag-oracle.mjs';
+import { tag, evaluate } from './main-oracle.mjs';
 import fs from 'node:fs';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
 const project=structuredClone(input.project);

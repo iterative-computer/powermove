@@ -230,3 +230,100 @@ fn concurrent_recovery_publishes_one_host_and_one_archive() {
     drop(servers);
     assert!(!profile.descriptor().exists());
 }
+
+#[test]
+fn running_stdio_proxy_reconnects_new_descriptor_without_replaying_or_inheriting_session() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    struct Scoped {
+        active: bool,
+        calls: Arc<AtomicUsize>,
+    }
+    impl ToolConnection for Scoped {
+        fn list(&mut self) -> Result<Value> {
+            Ok(json!([]))
+        }
+        fn invoke(&mut self, name: &str, _: Value) -> Result<Value> {
+            if name == "start_session" {
+                self.active = true;
+                return Ok(pm_mcp::success(json!({"started":true})));
+            }
+            if !self.active {
+                return Ok(pm_mcp::failure(pm_mcp::Error::invalid(
+                    "Call start_session before using Powermove tools.",
+                )));
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(pm_mcp::success(json!({"applied":true})))
+        }
+        fn disconnect(&mut self) -> Result<()> {
+            self.active = false;
+            Ok(())
+        }
+    }
+    let profile = Profile::new();
+    let first = Arc::new(AtomicUsize::new(0));
+    let counter = first.clone();
+    let mut server = LoopbackServer::start_with(&profile.0, move || Scoped {
+        active: false,
+        calls: counter.clone(),
+    })
+    .unwrap();
+    let mut process = Command::new(env!("CARGO_BIN_EXE_powermove-mcp"))
+        .arg("--profile")
+        .arg(&profile.0)
+        .arg("--powermove-mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap());
+    let mut call = |id: u64, method: &str, name: &str| -> Value {
+        let request =
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"name":name,"arguments":{}}});
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    };
+    call(1, "initialize", "");
+    assert_eq!(
+        call(2, "tools/call", "start_session")["result"]["isError"],
+        false
+    );
+    assert_eq!(call(3, "tools/call", "mutate")["result"]["isError"], false);
+    server.shutdown();
+    let failed = call(4, "tools/call", "mutate");
+    assert_eq!(failed["result"]["isError"], true);
+    assert!(
+        failed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not replayed")
+    );
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    let second = Arc::new(AtomicUsize::new(0));
+    let counter = second.clone();
+    let mut replacement = LoopbackServer::start_with(&profile.0, move || Scoped {
+        active: false,
+        calls: counter.clone(),
+    })
+    .unwrap();
+    let fresh = call(5, "tools/call", "mutate");
+    assert_eq!(
+        fresh["result"]["content"][0]["text"],
+        "Call start_session before using Powermove tools."
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 0);
+    call(6, "tools/call", "start_session");
+    assert_eq!(call(7, "tools/call", "mutate")["result"]["isError"], false);
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+    drop(input);
+    assert!(process.wait().unwrap().success());
+    replacement.shutdown();
+}

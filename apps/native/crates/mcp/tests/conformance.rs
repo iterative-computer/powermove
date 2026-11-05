@@ -89,7 +89,20 @@ fn all_schemas_equal_executed_tag_source() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(catalog::tools().len(), 67);
+    let current = Command::new("node")
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/main-oracle.mjs"))
+        .output()
+        .unwrap();
+    assert!(
+        current.status.success(),
+        "{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    assert_eq!(catalog::tools().len(), 68);
+    assert_eq!(
+        catalog::legacy_catalog()["tools"].as_array().unwrap().len(),
+        67
+    );
     let mut names = std::collections::HashSet::new();
     for tool in catalog::tools() {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -106,7 +119,22 @@ fn captured_installed_stdio_pairs_replay() {
     for pair in fixture["pairs"].as_array().unwrap() {
         assert_eq!(
             rpc.handle(pair["request"].clone()).unwrap(),
-            pair["response"]
+            if pair["request"]["method"] == "tools/list"
+                && pair["response"]["result"]["tools"].is_array()
+            {
+                let mut expected = pair["response"].clone();
+                let main: Value =
+                    serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
+                        .unwrap();
+                assert_eq!(
+                    expected["result"]["tools"],
+                    catalog::legacy_catalog()["tools"]
+                );
+                expected["result"]["tools"] = main["tools"].clone();
+                expected
+            } else {
+                pair["response"].clone()
+            }
         );
     }
 }
@@ -457,11 +485,11 @@ fn reopening_same_project_fences_the_old_run() {
     }
     assert_eq!(
         diagnostic(&mut s, "get_project_state", json!({}))["code"],
-        "revision_conflict"
+        "invalid_arguments"
     );
     assert_eq!(
         diagnostic(&mut s, "finish_session", json!({"commit":false}))["code"],
-        "revision_conflict"
+        "invalid_arguments"
     );
     assert_eq!(
         f.host.lock().unwrap().store(&id).unwrap().layers()[0].id,

@@ -99,8 +99,10 @@ pub struct Automation {
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub export_jobs: Arc<crate::export_jobs::ExportJobs>,
     pub export_child: Arc<dyn crate::services::ExportChild>,
     pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
+    pub creative: Arc<dyn crate::creative::CreativeInspection>,
     pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
 }
 impl Automation {
@@ -138,9 +140,11 @@ impl Automation {
             engine: None,
             surfaces: None,
             media_registry: None,
+            export_jobs: Arc::new(crate::export_jobs::ExportJobs::default()),
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
             extension_sources: None,
+            creative: Arc::new(crate::creative::CreativeReader::default()),
         })
     }
     pub fn kernel(&self) -> &Kernel {
@@ -321,7 +325,25 @@ impl Automation {
             other => Err(Error::kernel(other)),
         }
     }
-    pub fn restore(&mut self, id: &str, value: Value, expected: u64, writer: u32) -> Result<u64> {
+    pub fn restore(
+        &mut self,
+        id: &str,
+        mut value: Value,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        // Main treats notes and their agent-access setting as durable metadata,
+        // not video content. Composition rollback must preserve current notes.
+        let current = self.read_document(id)?;
+        if let Some(target) = value.as_object_mut() {
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(current) = current.get(key) {
+                    target.insert(key.into(), current.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+        }
         let document = self.store(id)?.doc_id();
         let ack = self
             .call(
