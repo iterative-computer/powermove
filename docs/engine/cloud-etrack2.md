@@ -274,3 +274,21 @@ probe; they do not attribute the earlier Mac miss or qualify AUDIO-2.
 # From engine/; optional diagnostic, no platform deadline assertion.
 CARGO_TARGET_DIR=../work/stretch-target cargo run --locked -p pm-stretch --example cold_work -- 30
 ```
+
+
+## 2026-11-04 — final base refresh
+
+Final merged native-engine base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`, merged without
+conflicts in `9d8acb18e`. This update contains design documentation only; its
+engine tree is identical to the preceding base. The staged secret scan ran
+before this merge commit, which includes the requested co-author trailer.
+
+All ten Cargo replay/clippy commands listed in the cloud etrack2 report were
+repeated after this merge. Results remain **661 ordinary passing tests / zero
+ordinary failures / three inherited ignores, plus the one explicitly failed
+CoreText/corpus executable**; proxy **9/9**, export core **67/67**, portable
+all-target clippy clean. The full engine/node/TIFF/cold-audio/full-clippy
+commands remain build-blocked before execution by Mac media/Apple dependencies.
+Node helper tests **4/4**, Python helpers **5+5**, standalone device policy
+**5/5**, formatting and the static inventory were also checked again. No new
+Mac, frozen-corpus, latest-main or new-3D qualification is inferred.
