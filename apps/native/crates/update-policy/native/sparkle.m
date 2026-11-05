@@ -25,6 +25,21 @@ int pm_sparkle_matches(const char *policy, const char *enclosure) {
     }
 }
 
+// Native cancellation is independent of the worker journal: an old cycle's
+// confirmed Skip must never release a new cycle's extraction guard.
+enum { PMCycleExtracting = 1, PMCycleCancelConfirmed = 2 };
+unsigned pm_sparkle_cycle_transition(unsigned state, int signal) {
+    switch (signal) {
+        case 0: return 0; // a new check has no inherited extraction/cancellation
+        case 1: return PMCycleExtracting;
+        case 2: return state | PMCycleCancelConfirmed;
+        default: return state;
+    }
+}
+int pm_sparkle_cycle_can_dismiss(unsigned state) {
+    return !(state & PMCycleExtracting) || (state & PMCycleCancelConfirmed);
+}
+
 @interface PMPolicyDriver : NSObject <SPUUserDriver, SPUUpdaterDelegate>
 @property(nonatomic, strong) SPUUpdater *updater;
 @property(nonatomic, strong) NSDictionary *policy;
@@ -33,8 +48,7 @@ int pm_sparkle_matches(const char *policy, const char *enclosure) {
 @property(nonatomic, copy) void (^ready)(SPUUserUpdateChoice);
 @property(nonatomic, copy) void (^cancelDownload)(void);
 @property(nonatomic) BOOL started;
-@property(nonatomic) BOOL extracting;
-@property(nonatomic) BOOL confirmedCancel;
+@property(nonatomic) unsigned cycle;
 @end
 @implementation PMPolicyDriver
 - (void)emit:(int)event { [self.events addObject:@(event)]; }
@@ -81,14 +95,14 @@ int pm_sparkle_matches(const char *policy, const char *enclosure) {
     if (n != [self.policy[@"size"] unsignedLongLongValue]) { if (self.cancelDownload) self.cancelDownload(); [self emit:6]; }
 }
 - (void)showDownloadDidReceiveDataOfLength:(uint64_t)n {}
-- (void)showDownloadDidStartExtractingUpdate { self.extracting = YES; self.cancelDownload = nil; [self emit:3]; }
+- (void)showDownloadDidStartExtractingUpdate { self.cycle = pm_sparkle_cycle_transition(self.cycle, 1); self.cancelDownload = nil; [self emit:3]; }
 - (void)showExtractionReceivedProgress:(double)p {}
 - (void)showReadyToInstallAndRelaunch:(void (^)(SPUUserUpdateChoice))r { self.ready = r; [self emit:4]; }
 - (void)showInstallingUpdateWithApplicationTerminated:(BOOL)t retryTerminatingApplication:(void (^)(void))retry {}
 - (void)showUpdateInstalledAndRelaunched:(BOOL)r acknowledgement:(void (^)(void))a { [self emit:5]; a(); }
 - (void)dismissUpdateInstallation {
     self.found = nil; self.ready = nil; self.cancelDownload = nil;
-    if (!self.extracting || self.confirmedCancel) [self emit:7];
+    if (pm_sparkle_cycle_can_dismiss(self.cycle)) [self emit:7];
 }
 - (void)showUpdateInFocus {}
 @end
@@ -115,6 +129,8 @@ int pm_sparkle_check(void *context, const char *json) {
     id release = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
     if (![release isKindOfClass:NSDictionary.class]) return 0;
     if (![release[@"bundleId"] isEqualToString:d.updater.hostBundle.bundleIdentifier]) return 0;
+    d.cycle = pm_sparkle_cycle_transition(d.cycle, 0);
+    d.found = nil; d.ready = nil; d.cancelDownload = nil; [d.events removeAllObjects];
     d.policy = release;
     if (!d.started) { if (![d.updater startUpdater:NULL]) return 0; d.started = YES; }
     d.updater.automaticallyChecksForUpdates = NO;
@@ -128,7 +144,7 @@ int pm_sparkle_action(void *context, int action) {
     if (action == 2 && d.ready) { void (^reply)(SPUUserUpdateChoice) = d.ready; d.ready = nil; reply(SPUUserUpdateChoiceInstall); return 1; }
     if (action == 3) {
         if (d.found) { d.found(SPUUserUpdateChoiceDismiss); d.found = nil; }
-        if (d.ready) { d.confirmedCancel = YES; d.ready(SPUUserUpdateChoiceSkip); d.ready = nil; }
+        if (d.ready) { d.cycle = pm_sparkle_cycle_transition(d.cycle, 2); d.ready(SPUUserUpdateChoiceSkip); d.ready = nil; }
         if (d.cancelDownload) { d.cancelDownload(); d.cancelDownload = nil; }
         // Extraction cannot be cancelled through a public cancellation method.
         // The application's termination guard MUST remain held through Ready.

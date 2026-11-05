@@ -137,21 +137,35 @@ impl InstalledProof for SignedInstalledBundle {
 /// All hashing, journals and quit barriers stay on the worker; pump on the app's
 /// main run loop without waiting for that worker or a JavaScript continuation.
 enum Action {
-    Check(Release),
-    Download,
-    Install,
-    Cancel,
+    Check(u64, Release),
+    Download(u64),
+    Install(u64),
+    Cancel(u64),
+}
+impl Action {
+    fn cycle(&self) -> u64 {
+        match self {
+            Self::Check(cycle, _)
+            | Self::Download(cycle)
+            | Self::Install(cycle)
+            | Self::Cancel(cycle) => *cycle,
+        }
+    }
 }
 pub struct WorkerBinding {
+    cycle: u64,
     commands: std::sync::mpsc::Sender<Action>,
-    events: std::sync::mpsc::Receiver<Event>,
+    events: std::sync::mpsc::Receiver<(u64, Event)>,
 }
 impl WorkerBinding {
     pub fn try_event(&self) -> Result<Option<Event>> {
-        match self.events.try_recv() {
-            Ok(e) => Ok(Some(e)),
-            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
-            Err(_) => anyhow::bail!("Sparkle main loop disconnected"),
+        loop {
+            match self.events.try_recv() {
+                Ok((cycle, e)) if cycle == self.cycle => return Ok(Some(e)),
+                Ok(_) => continue, // a late terminal callback from a prior cycle
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
+                Err(_) => anyhow::bail!("Sparkle main loop disconnected"),
+            }
         }
     }
     fn send(&self, action: Action) -> Result<()> {
@@ -162,22 +176,29 @@ impl WorkerBinding {
 }
 impl Binding for WorkerBinding {
     fn check(&mut self, release: &Release) -> Result<()> {
-        self.send(Action::Check(release.clone()))
+        let cycle = self
+            .cycle
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Sparkle cycle exhausted"))?;
+        self.send(Action::Check(cycle, release.clone()))?;
+        self.cycle = cycle;
+        Ok(())
     }
     fn download(&mut self) -> Result<()> {
-        self.send(Action::Download)
+        self.send(Action::Download(self.cycle))
     }
     fn install(&mut self) -> Result<()> {
-        self.send(Action::Install)
+        self.send(Action::Install(self.cycle))
     }
     fn cancel(&mut self) -> Result<()> {
-        self.send(Action::Cancel)
+        self.send(Action::Cancel(self.cycle))
     }
 }
 pub struct MainLoop {
     driver: MacSparkle,
+    cycle: u64,
     commands: std::sync::mpsc::Receiver<Action>,
-    events: std::sync::mpsc::Sender<Event>,
+    events: std::sync::mpsc::Sender<(u64, Event)>,
 }
 impl MainLoop {
     pub fn connect(driver: MacSparkle) -> (Self, WorkerBinding) {
@@ -186,10 +207,12 @@ impl MainLoop {
         (
             Self {
                 driver,
+                cycle: 0,
                 commands,
                 events,
             },
             WorkerBinding {
+                cycle: 0,
                 commands: commands_tx,
                 events: events_rx,
             },
@@ -197,20 +220,24 @@ impl MainLoop {
     }
     pub fn pump(&mut self) -> Result<()> {
         while let Ok(action) = self.commands.try_recv() {
+            let cycle = action.cycle();
             let result = match action {
-                Action::Check(r) => self.driver.check(&r),
-                Action::Download => self.driver.download(),
-                Action::Install => self.driver.install(),
-                Action::Cancel => self.driver.cancel(),
+                Action::Check(cycle, r) if cycle > self.cycle => {
+                    self.driver.check(&r).map(|()| self.cycle = cycle)
+                }
+                Action::Download(cycle) if cycle == self.cycle => self.driver.download(),
+                Action::Install(cycle) if cycle == self.cycle => self.driver.install(),
+                Action::Cancel(cycle) if cycle == self.cycle => self.driver.cancel(),
+                _ => Err(anyhow::anyhow!("stale Sparkle main-loop command")),
             };
             if let Err(e) = result {
-                let _ = self.events.send(Event::Aborted);
+                let _ = self.events.send((cycle, Event::Aborted));
                 return Err(e);
             }
         }
         while let Some(event) = self.driver.poll()? {
             self.events
-                .send(event)
+                .send((self.cycle, event))
                 .map_err(|_| anyhow::anyhow!("Sparkle worker disconnected"))?;
         }
         Ok(())
@@ -250,6 +277,54 @@ mod tests {
             changed[key] = value;
             assert!(!matches(&changed), "{key}");
         }
+    }
+    #[test]
+    fn native_cancellation_from_previous_cycle_cannot_release_new_extraction() {
+        unsafe extern "C" {
+            fn pm_sparkle_cycle_transition(state: u32, signal: c_int) -> u32;
+            fn pm_sparkle_cycle_can_dismiss(state: u32) -> c_int;
+        }
+        unsafe {
+            let extracting = pm_sparkle_cycle_transition(0, 1);
+            assert_eq!(pm_sparkle_cycle_can_dismiss(extracting), 0);
+            let cancelled = pm_sparkle_cycle_transition(extracting, 2);
+            assert_eq!(pm_sparkle_cycle_can_dismiss(cancelled), 1);
+            let new_cycle = pm_sparkle_cycle_transition(cancelled, 0);
+            assert_eq!(pm_sparkle_cycle_can_dismiss(new_cycle), 1);
+            let new_extraction = pm_sparkle_cycle_transition(new_cycle, 1);
+            assert_eq!(pm_sparkle_cycle_can_dismiss(new_extraction), 0);
+            let ready_cancelled = pm_sparkle_cycle_transition(new_extraction, 2);
+            assert_eq!(pm_sparkle_cycle_can_dismiss(ready_cancelled), 1);
+        }
+    }
+    #[test]
+    fn worker_ignores_late_terminal_callbacks_from_previous_manual_cycle() {
+        let (commands, received) = std::sync::mpsc::channel();
+        let (events, delivered) = std::sync::mpsc::channel();
+        let mut worker = WorkerBinding {
+            cycle: 0,
+            commands,
+            events: delivered,
+        };
+        let release: Release = serde_json::from_value(serde_json::json!({
+            "schema":1,"channel":"beta","version":"2.0.0","sparkleVersion":"42",
+            "architecture":"arm64","bundleId":"com.powermove.signature-proof",
+            "minimumMacos":14,"archiveUrl":"https://updates.invalid/app.zip","size":42,
+            "sha256":"0".repeat(64),"sparkleSignature":"synthetic","expiresUnix":42
+        }))
+        .unwrap();
+        worker.check(&release).unwrap();
+        assert_eq!(received.recv().unwrap().cycle(), 1);
+        events.send((0, Event::Cancelled)).unwrap();
+        events.send((1, Event::Ready)).unwrap();
+        assert_eq!(worker.try_event().unwrap(), Some(Event::Ready));
+        worker.check(&release).unwrap();
+        assert_eq!(received.recv().unwrap().cycle(), 2);
+        events.send((1, Event::Cancelled)).unwrap();
+        events.send((1, Event::Aborted)).unwrap();
+        events.send((2, Event::Extracting)).unwrap();
+        assert_eq!(worker.try_event().unwrap(), Some(Event::Extracting));
+        assert_eq!(worker.try_event().unwrap(), None);
     }
     fn run(command: &str, args: &[&str]) {
         assert!(
@@ -316,6 +391,9 @@ mod tests {
             expires_unix: 1,
         };
         assert!(proof.matches(&release).unwrap());
+        release.sparkle_version = Some("43".into());
+        assert!(!proof.matches(&release).unwrap());
+        release.sparkle_version = Some("42".into());
         release.architecture = Architecture::X86_64;
         assert!(proof.matches(&release).unwrap());
         release.version = "3.0.0".into();
