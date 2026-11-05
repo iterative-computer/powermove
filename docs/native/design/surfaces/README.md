@@ -24,6 +24,9 @@ are those of panels/README §1.
 | [diagnostics.md](diagnostics.md) | Performance panel | S115 |
 | [os-authorization.md](os-authorization.md) | Notifications, OS permission outcomes, usage strings | S114 N007 |
 | [migration.md](migration.md) | Native first-launch gate, Keychain consent, outcomes and report | N001–N003 |
+| [colour.md](colour.md) | Project colour and validation, scopes, LUTs, HDR presentation | S068 N004 |
+| [tasks-storage.md](tasks-storage.md) | Background Tasks states, renditions, Keep Rendered, Settings ▸ Storage | N005 |
+| [pro-edit.md](pro-edit.md) | Shuttle, edit tools, linked A/V, source monitor marks and edits | N006 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
@@ -131,3 +134,20 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | The shipped surfaces are specified so old projects stay editable; the new system is not designed here | S098 |
 | 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | Inside the window; the overlay is not ported | S107 |
 | 6 | Reverse migration isn't built. What do beta users get promised about going back? | Original app stays untouched; work done in Native leaves only as `.pmv` files | N003 |
+
+## 7. New tokens requested by these specs
+
+Added by the pm-design lane through tokens.md *How to change a token*. A lane blocks
+on the token; it does not substitute a literal.
+
+| Token | Value | Spec |
+|---|---|---|
+| `metrics.channel_strip` | 72 | [mixer-3d.md](mixer-3d.md) |
+| `metrics.fader_knob` | 14 | [mixer-3d.md](mixer-3d.md) |
+| `metrics.welcome_width` | 900 | [onboarding.md](onboarding.md) |
+| `metrics.welcome_height` | 640 | [onboarding.md](onboarding.md) |
+| `colors.scope_red` | `#FF6B62` | [colour.md](colour.md) |
+| `colors.scope_green` | `#4FD58A` | [colour.md](colour.md) |
+| `colors.scope_blue` | `#6BA6FF` | [colour.md](colour.md) |
+| `metrics.mark_bracket` | 6 | [pro-edit.md](pro-edit.md) |
+| `metrics.sync_badge` | 16 | [pro-edit.md](pro-edit.md) |
