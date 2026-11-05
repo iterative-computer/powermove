@@ -514,3 +514,127 @@ fn e07_application_ramp_swap_and_undo_render_the_published_project_offscreen() {
         "Undo restores every rendered pixel from the published project"
     );
 }
+
+#[test]
+fn e04_effect_control_requests_cannot_edit_a_reopened_document_with_reused_ids_and_revision() {
+    use pm_panel_inspector::{Binding, PropertyId};
+    for action in ["reset", "action", "add", "parameter"] {
+        let (actor, mut backend) = setup();
+        let kernel = actor.handle();
+        let request = backend
+            .model
+            .as_mut()
+            .unwrap()
+            .add_effect(Caller::native(), "a", "gradient")
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+        backend.sync().unwrap();
+        let id = effect(&kernel)["id"].as_str().unwrap().to_owned();
+        let property = PropertyId::new("a", format!("{id}.startX"));
+        let request = backend
+            .model
+            .as_mut()
+            .unwrap()
+            .set(
+                Caller::native(),
+                Binding::Property(property.clone()),
+                pm_model::Value::Number(10.),
+                0.,
+            )
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+        let projection = backend.projection().unwrap();
+        let intent = match action {
+            "reset" => json!({"type":"reset","id":id}),
+            "action" => json!({"type":"action","id":id,"index":0}),
+            "add" => json!({"type":"add","definition":"gradient"}),
+            _ => {
+                json!({"type":"parameter","id":pm_model::json::to_canonical_string(&property.value()),"action":"diamond"})
+            }
+        };
+        let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":intent});
+        let mut panel =
+            pm_panel_inspector::v4_effects::EffectsPanel::new(Default::default(), 0..200);
+        let mut plan = panel
+            .plan(
+                backend.model.as_mut().unwrap(),
+                Caller::native(),
+                &data::model(&args).unwrap(),
+                0.,
+            )
+            .unwrap();
+        let old = kernel.published("synthetic").unwrap();
+        let revision = old.revision();
+        let replacement = old.snapshot.document.to_value().unwrap();
+        assert!(kernel.close("synthetic").wait().unwrap());
+        kernel
+            .open("synthetic", OpenSource::Untitled(replacement))
+            .wait()
+            .unwrap()
+            .unwrap();
+        while kernel.published("synthetic").unwrap().revision() < revision {
+            let current_revision = kernel.published("synthetic").unwrap().revision();
+            let request = Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Replacement revision".into()),
+                    expected_revision: Some(current_revision),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                name: Some(format!("Replacement {current_revision}")),
+                                ..Default::default()
+                            }),
+                        },
+                    )]),
+                },
+            );
+            kernel.call("synthetic", request).wait().unwrap().unwrap();
+        }
+        let replacement = kernel.published("synthetic").unwrap();
+        assert_ne!(replacement.snapshot.doc_id, old.snapshot.doc_id);
+        assert_eq!(
+            replacement.revision(),
+            revision,
+            "the revision guard alone cannot distinguish this lifetime"
+        );
+        assert_eq!(
+            effect(&kernel)["id"],
+            id,
+            "the authored effect ID is reused"
+        );
+        assert_eq!(effect(&kernel)["p"]["startX"]["v"], 10.);
+        let before = replacement.snapshot.document.to_value();
+        let request = plan.request.take().unwrap();
+        let mut current = request.clone();
+        current.expected_document = Some(replacement.snapshot.doc_id);
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(
+            matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "stale {action} request must be refused by the actor: {:?}",
+            ack.reply
+        );
+        let after = kernel.published("synthetic").unwrap();
+        assert_eq!(after.revision(), revision);
+        assert_eq!(
+            after.snapshot.document.to_value(),
+            before,
+            "stale {action} must not mutate replacement artwork"
+        );
+        let ack = kernel.call("synthetic", current).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "the same {action} operation with current document authority must remain available: {:?}",
+            ack.reply
+        );
+        assert_ne!(
+            kernel
+                .published("synthetic")
+                .unwrap()
+                .snapshot
+                .document
+                .to_value(),
+            before
+        );
+    }
+}

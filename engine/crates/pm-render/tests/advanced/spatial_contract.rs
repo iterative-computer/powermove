@@ -392,6 +392,76 @@ fn e06_wide_saved_gaussian_and_mosaic_kernels_keep_hdr_alpha_and_crop_zoom() {
     }
 }
 
+// Independent bilinear taps of the pinned Mosaic program. Composition-space
+// input retains transparent pixels beyond the owner; a local source target
+// clamps its own edge. Uniform taps, rather than an idealized area integral,
+// therefore give different edge-cell averages in these two spaces.
+fn mosaic_cell_reference(
+    source: bool,
+    rotated: bool,
+    scale: f64,
+    sharp: bool,
+    world: [f64; 2],
+    depth: u32,
+) -> [f64; 4] {
+    let owner = |x: f64, y: f64| {
+        if rotated {
+            [(y - 32.) / scale, (96. - x) / scale]
+        } else {
+            [(x - 32.) / scale, (y - 32.) / scale]
+        }
+    };
+    let size = if source { 32 } else { 128 };
+    let image: Vec<[f64; 4]> = (0..size * size)
+        .map(|i| {
+            let p = if source {
+                [(i % size) as f64 + 0.5, (i / size) as f64 + 0.5]
+            } else {
+                owner((i % size) as f64 + 0.5, (i / size) as f64 + 0.5)
+            };
+            if p.iter().any(|v| *v < 0. || *v >= 32.) {
+                [0.; 4]
+            } else if p[0] < 16. {
+                [-0.125, 0.25, 1., 0.5]
+            } else {
+                [0.75, 0.5, 2., 1.]
+            }
+        })
+        .collect();
+    let q = owner(world[0], world[1]);
+    let cell = [(q[0] / 32. * 3.).floor(), (q[1] / 32. * 5.).floor()];
+    let density = if source { 1. } else { scale };
+    let samples = if sharp {
+        [1, 1]
+    } else {
+        [
+            (32. * density / 3.).ceil() as usize,
+            (32. * density / 5.).ceil() as usize,
+        ]
+    };
+    let mut sum = [0.; 4];
+    for y in 0..samples[1] {
+        for x in 0..samples[0] {
+            let local = [
+                (cell[0] + (x as f64 + 0.5) / samples[0] as f64) / 3. * 32.,
+                (cell[1] + (y as f64 + 0.5) / samples[1] as f64) / 5. * 32.,
+            ];
+            let p = if source {
+                local
+            } else if rotated {
+                [96. - local[1] * scale, 32. + local[0] * scale]
+            } else {
+                [32. + local[0] * scale, 32. + local[1] * scale]
+            };
+            let tap = super::shadow_ramp::sample_sized(&image, size, p[0], p[1], false);
+            for k in 0..4 {
+                sum[k] += tap[k];
+            }
+        }
+    }
+    super::color_contract::quantize(sum.map(|v| v / (samples[0] * samples[1]) as f64), depth)
+}
+
 #[test]
 fn e06_mosaic_cells_follow_translated_rotated_scaled_owner_and_partial_alpha_hdr() {
     let mut renderer = Renderer::headless().unwrap();
@@ -445,16 +515,20 @@ fn e06_mosaic_cells_follow_translated_rotated_scaled_owner_and_partial_alpha_hdr
                             .unwrap();
                         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
                         let full = renderer.read_rgba(&frame).unwrap();
-                        for (x, expected) in [
-                            (5., [-0.125, 0.25, 1., 0.5]),
-                            (16., [0.3125, 0.375, 1.5, 0.75]),
-                            (26., [0.75, 0.5, 2., 1.]),
-                        ] {
+                        for x in [5., 16., 26.] {
                             let (px, py) = if rotated {
                                 (96. - 16. * scale, 32. + x * scale)
                             } else {
                                 (32. + x * scale, 32. + 16. * scale)
                             };
+                            let expected = mosaic_cell_reference(
+                                source,
+                                rotated,
+                                scale,
+                                sharp,
+                                [px.floor() + 0.5, py.floor() + 0.5],
+                                depth,
+                            );
                             let p = &full[((py as usize) * 128 + px as usize) * 4..][..4];
                             for k in 0..4 {
                                 assert!(

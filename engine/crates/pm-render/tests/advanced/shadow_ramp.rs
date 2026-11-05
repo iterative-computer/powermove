@@ -11,7 +11,13 @@ fn storage(v: f64, depth: u32) -> f64 {
 pub(super) fn sample(image: &[[f64; 4]], x: f64, y: f64, transparent: bool) -> [f64; 4] {
     sample_sized(image, 32, x, y, transparent)
 }
-fn sample_sized(image: &[[f64; 4]], size: usize, x: f64, y: f64, transparent: bool) -> [f64; 4] {
+pub(super) fn sample_sized(
+    image: &[[f64; 4]],
+    size: usize,
+    x: f64,
+    y: f64,
+    transparent: bool,
+) -> [f64; 4] {
     if transparent && (!(0. ..=size as f64).contains(&x) || !(0. ..=size as f64).contains(&y)) {
         return [0.; 4];
     }
