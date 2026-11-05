@@ -875,3 +875,288 @@ fn denied_or_locked_keychain_needs_fresh_consent_then_final_delta_without_source
     let migration: Value = read(&config.native_profile.join("Media Store/migration.json"));
     assert_eq!(migration["passes"].as_object().unwrap().len(), 2);
 }
+
+#[test]
+fn not_now_finishes_without_keychain_and_never_prompts_on_later_launch() {
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR,"future":{"kept":true}}),
+    );
+    let source = files(&config.electron_profile);
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::NeedsSecretConsent { .. }
+    ));
+    let base = files(&config.native_profile.join("first-launch-checkpoint"));
+    assert!(matches!(
+        pm_first_launch::skip_secret_consent(&config, |_| Ok(())).unwrap(),
+        Outcome::Complete { .. }
+    ));
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(state.secrets, SecretStep::Skipped);
+    assert!(state.completed.contains(&Step::Secrets));
+    assert!(state.imported_secrets.is_empty());
+    assert!(!config.native_profile.join("secret-locators.json").exists());
+    for _ in 0..2 {
+        assert!(matches!(
+            run(&config, |event| {
+                assert_ne!(event, Event::SecretPromptRequired);
+                Ok(())
+            })
+            .unwrap(),
+            Outcome::Complete { .. }
+        ));
+    }
+    assert_eq!(source, files(&config.electron_profile));
+    assert_eq!(
+        base,
+        files(&config.native_profile.join("first-launch-checkpoint"))
+    );
+    let mut access = SyntheticSecrets {
+        reads: 0,
+        values: Vec::new(),
+        fail: false,
+    };
+    pm_first_launch::retry_secret_consent(&config, &mut access, |_| Ok(())).unwrap();
+    assert_eq!(access.reads, 1);
+    assert_eq!(access.values.len(), 1);
+    assert_eq!(source, files(&config.electron_profile));
+}
+#[test]
+fn later_consent_reads_current_signout_and_keeps_old_ciphertext_archived() {
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR,"future":42}),
+    );
+    run(&config, |_| Ok(())).unwrap();
+    pm_first_launch::skip_secret_consent(&config, |_| Ok(())).unwrap();
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"future":42}),
+    );
+    let mut access = SyntheticSecrets {
+        reads: 0,
+        values: Vec::new(),
+        fail: false,
+    };
+    pm_first_launch::retry_secret_consent(&config, &mut access, |_| Ok(())).unwrap();
+    assert_eq!(access.reads, 0);
+    assert!(access.values.is_empty());
+    let old: Value = read(
+        &config
+            .native_profile
+            .join("first-launch-checkpoint/profile/agent-provider.json"),
+    );
+    assert_eq!(old["secret"], VECTOR);
+    let current: Value = read(
+        &config
+            .native_profile
+            .join("secret-consent-retries/retry-0000000000000000/agent-provider.json"),
+    );
+    assert_eq!(current, json!({"future":42}));
+}
+#[test]
+fn continue_without_them_after_denial_is_durable_even_if_completion_callback_fails() {
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR}),
+    );
+    run(&config, |_| Ok(())).unwrap();
+    let mut access = SyntheticSecrets {
+        reads: 0,
+        values: Vec::new(),
+        fail: true,
+    };
+    assert!(resume_with_secret_consent(&config, &mut access, |_| Ok(())).is_err());
+    assert!(
+        pm_first_launch::skip_secret_consent(&config, |event| {
+            if event == Event::Published(Step::Secrets) {
+                anyhow::bail!("synthetic interrupted completion");
+            }
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::Complete { .. }
+    ));
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(state.secrets, SecretStep::Skipped);
+    assert_eq!(access.reads, 1);
+}
+
+#[test]
+fn settings_retry_registers_through_attached_kernel_without_a_second_writer() {
+    use pm_kernel::{
+        KernelActor,
+        persistence::DiskFormat,
+        profile::{ProfileCall, ProfileReply},
+        session::ShellCall,
+    };
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR}),
+    );
+    run(&config, |_| Ok(())).unwrap();
+    pm_first_launch::skip_secret_consent(&config, |_| Ok(())).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let handle = actor.handle();
+    handle
+        .shell(ShellCall::AttachLibrary {
+            profile: config.native_profile.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut access = SyntheticSecrets {
+        reads: 0,
+        values: Vec::new(),
+        fail: false,
+    };
+    assert_eq!(
+        pm_first_launch::retry_secret_consent_in_library(&config, &handle, &mut access, |_| Ok(()))
+            .unwrap(),
+        pm_first_launch::SecretRetryOutcome::Complete
+    );
+    let ProfileReply::Secrets(locators) = handle
+        .profile(ProfileCall::SecretLocators {
+            id: "agent-provider".into(),
+        })
+        .wait()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(locators.len(), 1);
+    assert_eq!(access.reads, 1);
+    pm_first_launch::retry_secret_consent_in_library(&config, &handle, &mut access, |_| Ok(()))
+        .unwrap();
+    assert_eq!(access.reads, 1);
+    assert_eq!(access.values.len(), 1);
+}
+
+#[test]
+fn main_file_media_and_upgrade_receipt_are_preserved_and_never_reported_as_migrated() {
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    let record = json!({"key":"media:main-owned","revision":"main-rev","size":9,"type":"video/mp4","file":format!("{}.mp4","a".repeat(64)),"sha256":"a".repeat(64),"mtime":1,"future":{"kept":true}});
+    write(
+        &config
+            .electron_profile
+            .join(format!("Media Store/Index/{}.json", "b".repeat(64))),
+        &record,
+    );
+    fs::write(
+        config
+            .electron_profile
+            .join(format!("Media Store/{}.mp4", "a".repeat(64))),
+        b"synthetic",
+    )
+    .unwrap();
+    write(
+        &config.electron_profile.join("storage-upgrade-v1.json"),
+        &json!({"version":1,"origins":{"app://powermove":{"steps":["recovery","browser"],"beforeBytes":9}},"future":42}),
+    );
+    write(
+        &config.electron_profile.join("store/storageSettings.json"),
+        &json!({"future":{"quota":123}}),
+    );
+    let source = files(&config.electron_profile);
+    let error = run(&config, |_| Ok(())).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<pm_first_launch::MigrationRequirement>(),
+        Some(&pm_first_launch::MigrationRequirement::MainFileMediaAdapter)
+    );
+    let base = config
+        .native_profile
+        .join("first-launch-checkpoint/profile");
+    assert_eq!(
+        read::<Value>(&base.join(format!("Media Store/Index/{}.json", "b".repeat(64)))),
+        record
+    );
+    assert_eq!(
+        fs::read(base.join(format!("Media Store/{}.mp4", "a".repeat(64)))).unwrap(),
+        b"synthetic"
+    );
+    assert_eq!(
+        read::<Value>(&base.join("storage-upgrade-v1.json"))["future"],
+        42
+    );
+    assert_eq!(
+        read::<Value>(&base.join("store/storageSettings.json"))["future"]["quota"],
+        123
+    );
+    assert_eq!(source, files(&config.electron_profile));
+    assert!(!config.native_profile.join("Media Store/Index").exists());
+    assert!(run(&config, |_| Ok(())).is_err());
+}
+
+#[test]
+fn declining_after_partial_secret_import_retains_receipts_and_retries_only_remaining_values() {
+    struct Partial {
+        reads: usize,
+        ids: std::collections::BTreeSet<String>,
+        fail: bool,
+    }
+    impl SecretAccess for Partial {
+        fn legacy_password(&mut self) -> anyhow::Result<zeroize::Zeroizing<Vec<u8>>> {
+            self.reads += 1;
+            Ok(zeroize::Zeroizing::new(b"S6 synthetic password".to_vec()))
+        }
+        fn put_native(&mut self, id: &str, _: &[u8]) -> anyhow::Result<()> {
+            if self.fail && !self.ids.is_empty() {
+                anyhow::bail!("synthetic denied second value");
+            }
+            assert!(
+                self.ids.insert(id.into()),
+                "completed receipt must prevent repeated writes"
+            );
+            Ok(())
+        }
+    }
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR}),
+    );
+    use base64::Engine;
+    fs::create_dir_all(config.electron_profile.join("cloud")).unwrap();
+    fs::write(
+        config.electron_profile.join("cloud/session.bin"),
+        base64::engine::general_purpose::STANDARD
+            .decode(VECTOR)
+            .unwrap(),
+    )
+    .unwrap();
+    let source = files(&config.electron_profile);
+    run(&config, |_| Ok(())).unwrap();
+    let mut access = Partial {
+        reads: 0,
+        ids: Default::default(),
+        fail: true,
+    };
+    assert!(resume_with_secret_consent(&config, &mut access, |_| Ok(())).is_err());
+    assert_eq!(access.ids.len(), 1);
+    pm_first_launch::skip_secret_consent(&config, |_| Ok(())).unwrap();
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert_eq!(state.imported_secrets.len(), 1);
+    assert_eq!(state.secrets, SecretStep::Skipped);
+    access.fail = false;
+    pm_first_launch::retry_secret_consent(&config, &mut access, |_| Ok(())).unwrap();
+    assert_eq!(access.ids.len(), 2);
+    assert_eq!(access.reads, 2);
+    assert_eq!(source, files(&config.electron_profile));
+}

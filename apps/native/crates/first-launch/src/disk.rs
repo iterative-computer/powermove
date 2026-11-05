@@ -38,6 +38,16 @@ pub fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn regular(path: &Path) -> Result<File> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        // Darwin SF_DATALESS: reading would materialize a cloud placeholder.
+        // Preserve it as an unavailable input; never cause a download here.
+        ensure!(
+            !dataless(fs::symlink_metadata(path)?.st_flags()),
+            "source is a dataless file; explicit source availability is required"
+        );
+    }
     let f = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -236,5 +246,22 @@ mod tests {
             b"synthetic interrupted state"
         );
         assert_eq!(json::<serde_json::Value>(&state).unwrap()["version"], 1);
+    }
+}
+
+/// Darwin stat.h SF_DATALESS. Pure flag policy is exercised with Linux doubles;
+/// the actual macOS metadata/provider behavior remains a signed Mac check.
+#[cfg(any(test, target_os = "macos"))]
+fn dataless(flags: u32) -> bool {
+    flags & 0x4000_0000 != 0
+}
+#[cfg(test)]
+mod dataless_tests {
+    #[test]
+    fn cloud_placeholders_are_not_read_as_local_bytes() {
+        assert!(super::dataless(0x4000_0000));
+        assert!(super::dataless(0x4000_0001));
+        assert!(!super::dataless(0));
+        assert!(!super::dataless(1));
     }
 }

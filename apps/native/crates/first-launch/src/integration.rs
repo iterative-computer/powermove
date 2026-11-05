@@ -1,13 +1,17 @@
-//! Background-worker integration. UI maps stable states to N001–N007 only after
-//! Opus supplies the specs. DESIGN-TODO(opus): no new copy or interaction here.
+//! Background-worker integration. `surfaces` projects Opus specifications at
+//! ce36cb6fc. Native UI/OS effect bindings remain separate application owners.
 use crate::{Config, Event, Outcome, delta, run};
 use anyhow::Result;
-use pm_distribution::update_handoff::{self, DeltaReport, Handoff, HandoffHost, LaunchSource};
+use pm_distribution::update_handoff::{
+    self, DeltaReport, Handoff, HandoffHost, HandoffStatus, LaunchSource,
+};
 
 /// Trusted application capability, never renderer flags. Implementations keep
 /// source/import leases for the entire `first_run` call. Evidence must be read
-/// again AFTER the final delta, including signed identity, full closure and a
-/// current-state Restore round trip. Missing production adapters return false.
+/// again AFTER the final delta, including signed identity and full closure.
+/// The distribution contract still has an unresolved `restore_verified` field;
+/// it must not be asserted as proof of nonexistent reverse migration. Its owner
+/// must align that gate with actual installer recovery. Missing proof is false.
 pub trait Evidence {
     fn electron_quiescent(&mut self) -> Result<bool>;
     fn verify_transition_receipt(&mut self) -> Result<bool>;
@@ -70,7 +74,18 @@ impl<E: Evidence, F: FnMut(Event) -> Result<()>> HandoffHost for Coordinator<'_,
 }
 impl<E: Evidence, F: FnMut(Event) -> Result<()>> Coordinator<'_, E, F> {
     pub fn first_run(&mut self, source: LaunchSource) -> Result<Handoff> {
-        update_handoff::first_run(source, self)
+        let mut handoff = update_handoff::first_run(source, self)?;
+        if handoff.status == HandoffStatus::NeedsSecretConsent {
+            let state: crate::State =
+                crate::disk::json(&self.config.native_profile.join("migration.json"))?;
+            // A settled Not Now / Continue Without Them choice (or a completed
+            // secret import) must not become another consent gate just because
+            // cutover evidence remains incomplete. Keep the update gate closed.
+            if state.completed.contains(&crate::Step::Secrets) {
+                handoff.status = HandoffStatus::Blocked;
+            }
+        }
+        Ok(handoff)
     }
 }
 

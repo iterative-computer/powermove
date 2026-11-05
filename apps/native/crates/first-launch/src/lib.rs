@@ -5,9 +5,10 @@ mod checkpoint;
 mod closure;
 mod disk;
 pub mod integration;
-pub mod restore;
 pub mod secrets;
 pub mod sparkle;
+pub mod store_preparation;
+pub mod surfaces;
 pub use checkpoint::Checkpoint;
 
 use anyhow::{Context, Result, ensure};
@@ -34,6 +35,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A preserved input requiring a real adapter, not a success-shaped capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationRequirement {
+    MainFileMediaAdapter,
+}
+impl std::fmt::Display for MigrationRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("main_file_media_adapter_required: preserved main-reference Media Store is not yet supported by the Chromium importer")
+    }
+}
+impl std::error::Error for MigrationRequirement {}
+fn require_supported_media(cp: &Checkpoint) -> Result<()> {
+    if cp.files.keys().any(|path| {
+        path.starts_with("Media Store/Index")
+            || (path.starts_with("Media Store") && path.components().count() == 2)
+    }) {
+        return Err(MigrationRequirement::MainFileMediaAdapter.into());
+    }
+    Ok(())
+}
 pub const BETA_BUNDLE_ID: &str = "com.zellzoi.powermove.native-beta";
 pub fn beta_profile(application_support: &Path) -> PathBuf {
     application_support.join(BETA_BUNDLE_ID)
@@ -110,7 +131,7 @@ pub fn run(config: &Config, hook: impl FnMut(Event) -> Result<()>) -> Result<Out
             return delta(config, hook);
         }
     }
-    run_inner(config, None, hook)
+    run_inner(config, None, false, false, hook)
 }
 /// The host must display `secrets::PROMPT` and receive a fresh user approval
 /// before each invocation of this opt-in entry point. A crash after access began
@@ -120,7 +141,26 @@ pub fn resume_with_secret_consent(
     access: &mut dyn SecretAccess,
     hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
-    run_inner(config, Some(access), hook)
+    run_inner(config, Some(access), false, false, hook)
+}
+/// N002 Not Now / Continue Without Them. Finishes the isolated beta import,
+/// retaining every encrypted input and imported locator. Never accesses Keychain.
+/// A later ordinary launch/delta cannot turn this choice into another prompt.
+pub fn skip_secret_consent(
+    config: &Config,
+    hook: impl FnMut(Event) -> Result<()>,
+) -> Result<Outcome> {
+    run_inner(config, None, true, false, hook)
+}
+/// Settings ▸ Accounts ▸ Bring Sign-Ins from the Original App…; call only after a
+/// fresh explicit consent. Reads current encrypted source (including deletions),
+/// preserves the original checkpoint and never reimports settings/library edits.
+pub fn retry_secret_consent(
+    config: &Config,
+    access: &mut dyn SecretAccess,
+    hook: impl FnMut(Event) -> Result<()>,
+) -> Result<Outcome> {
+    run_inner(config, Some(access), false, true, hook)
 }
 fn validate(config: &Config) -> Result<(PathBuf, PathBuf)> {
     let source = config.electron_profile.canonicalize()?;
@@ -178,6 +218,8 @@ fn finish(
 fn run_inner(
     config: &Config,
     mut access: Option<&mut dyn SecretAccess>,
+    skip_secrets: bool,
+    retry_current_secrets: bool,
     mut hook: impl FnMut(Event) -> Result<()>,
 ) -> Result<Outcome> {
     let (source, native) = validate(config)?;
@@ -250,6 +292,7 @@ fn run_inner(
         Checkpoint::capture(&source, &root)?;
     }
     let cp = Checkpoint::load(&root)?;
+    require_supported_media(&cp)?;
     ensure!(cp.source == source, "checkpoint belongs to another source");
     let hash = disk::hash(&root.join("checkpoint.json"))?.0;
     if let Some(expected) = &state.checkpoint_hash {
@@ -327,19 +370,45 @@ fn run_inner(
         extensions(&native)?;
         finish(&native, &mut state, Step::Extensions, &mut hook)?;
     }
-    if state.secrets != SecretStep::Complete {
-        let payloads = secrets::inventory(&root.join("profile"))?;
+    if state.secrets != SecretStep::Complete || retry_current_secrets {
+        let retry =
+            retry_current_secrets || (access.is_some() && state.completed.contains(&Step::Secrets));
+        if retry_current_secrets {
+            ensure!(
+                state.completed.contains(&Step::Secrets),
+                "finish first launch before retrying sign-ins from Settings"
+            );
+        }
+        let secret_profile = if retry {
+            secrets::capture_retry(&source, &native)?
+        } else {
+            root.join("profile")
+        };
+        let payloads = secrets::inventory(&secret_profile)?;
         if payloads.is_empty() {
             state.secrets = SecretStep::Complete;
+            finish(&native, &mut state, Step::Secrets, &mut hook)?;
+        } else if skip_secrets {
+            ensure!(
+                matches!(
+                    state.secrets,
+                    SecretStep::PromptRequired | SecretStep::AccessStarted | SecretStep::Skipped
+                ),
+                "show the consent choice before declining it"
+            );
+            state.secrets = SecretStep::Skipped;
             finish(&native, &mut state, Step::Secrets, &mut hook)?;
         } else if let Some(access) = access.as_mut() {
             ensure!(
                 state.secrets == SecretStep::PromptRequired
-                    || state.secrets == SecretStep::AccessStarted,
+                    || state.secrets == SecretStep::AccessStarted
+                    || state.secrets == SecretStep::Skipped
+                    || retry_current_secrets,
                 "run first launch and show the secret prompt before granting consent"
             );
             state.secrets = SecretStep::AccessStarted;
             publish(&native, &state)?;
+            hook(Event::Started(Step::Secrets))?;
             let password = access.legacy_password()?;
             for payload in payloads {
                 let id = format!(
@@ -368,7 +437,7 @@ fn run_inner(
             }
             state.secrets = SecretStep::Complete;
             finish(&native, &mut state, Step::Secrets, &mut hook)?;
-        } else {
+        } else if state.secrets != SecretStep::Skipped {
             let interrupted = state.secrets == SecretStep::AccessStarted;
             if !interrupted && state.secrets != SecretStep::PromptRequired {
                 state.secrets = SecretStep::PromptRequired;
@@ -795,6 +864,7 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
     } else {
         Checkpoint::capture(&source, &pending)?
     };
+    require_supported_media(&cp)?;
     let batches = read_batches(&cp, &pending)?;
     let availability = pending.join("availability.json");
     let closure = if availability.exists() {
@@ -820,4 +890,84 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
     }
     hook(Event::Complete)?;
     Ok(summary(&state, &pass))
+}
+
+/// Result of an explicit Settings retry. No secret count or decrypted value is
+/// part of the UI contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretRetryOutcome {
+    WaitingForElectron,
+    Complete,
+}
+/// Bring Sign-Ins from the Original App… while the native library is attached.
+/// Run on a worker after fresh consent. `kernel` must own `config.native_profile`.
+/// Locators go through its actor; this never creates a competing LibraryWriter.
+/// It reads fresh encrypted source and retains every old checkpoint/receipt.
+pub fn retry_secret_consent_in_library(
+    config: &Config,
+    kernel: &pm_kernel::KernelHandle,
+    access: &mut dyn SecretAccess,
+    mut hook: impl FnMut(Event) -> Result<()>,
+) -> Result<SecretRetryOutcome> {
+    let (source, native) = validate(config)?;
+    if older_electron_running(&source) {
+        return Ok(SecretRetryOutcome::WaitingForElectron);
+    }
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(native.join("first-launch.lock"))?;
+    lease
+        .try_lock_exclusive()
+        .context("first launch already running")?;
+    validate_native_paths(&native)?;
+    let mut state: State = disk::json(&native.join("migration.json"))?;
+    ensure!(
+        state.version == 1 && state.bundle_id == BETA_BUNDLE_ID && state.source == source,
+        "profile migration identity mismatch"
+    );
+    ensure!(
+        state.completed.contains(&Step::Secrets),
+        "finish first launch before retrying sign-ins from Settings"
+    );
+    let profile = secrets::capture_retry(&source, &native)?;
+    let payloads = secrets::inventory(&profile)?;
+    let pending: Vec<_> = payloads
+        .into_iter()
+        .filter(|p| {
+            !state.imported_secrets.contains(&format!(
+                "{}:{}",
+                p.id,
+                blake3::hash(&p.ciphertext).to_hex()
+            ))
+        })
+        .collect();
+    if !pending.is_empty() {
+        state.secrets = SecretStep::AccessStarted;
+        publish(&native, &state)?;
+        hook(Event::Started(Step::Secrets))?;
+        let password = access.legacy_password()?;
+        for payload in pending {
+            let version = blake3::hash(&payload.ciphertext).to_hex().to_string();
+            let id = format!("{}:{version}", payload.id);
+            let plain = secrets::decrypt_mac(&password, &payload.ciphertext)?;
+            access.put_native(&id, &plain)?;
+            let locator = pm_kernel::profile::SecretLocator {
+                id: payload.id,
+                version,
+                service: format!("{BETA_BUNDLE_ID} migration secrets"),
+                account: blake3::hash(id.as_bytes()).to_hex().to_string(),
+            };
+            kernel
+                .profile(pm_kernel::profile::ProfileCall::RegisterSecret(locator))
+                .wait()
+                .context("native kernel stopped during secret registration")??;
+            state.imported_secrets.insert(id);
+            publish(&native, &state)?;
+        }
+    }
+    state.secrets = SecretStep::Complete;
+    finish(&native, &mut state, Step::Secrets, &mut hook)?;
+    Ok(SecretRetryOutcome::Complete)
 }

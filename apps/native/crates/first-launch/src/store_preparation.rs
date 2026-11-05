@@ -1,4 +1,5 @@
-//! Current-state, bidirectional store merge and unpublished Restore preparation.
+//! Experimental unpublished store merge preparation. This is not an implemented
+//! forward/reverse profile migration or a product Restore action.
 //! The kernel owner must compact ALL open journals and capture current settings,
 //! projects/history and secret tombstones under its save/quit/import leases first.
 //! This API deliberately cannot certify media/Keychain/whole-app Restore proof.
@@ -32,7 +33,7 @@ pub struct Plan {
     pub values: Store,
     pub conflicts: Vec<Conflict>,
 }
-/// Same algorithm for forward and reverse: `current` is the destination's latest
+/// Three-way algorithm over supplied snapshots: `current` is the destination's latest
 /// state, `incoming` is the other application's CURRENT state, never its backup.
 /// Missing differs from JSON null. Extension objects merge one member at a time;
 /// arrays/projects/history/workspaces remain atomic to preserve authored intent.
@@ -101,7 +102,8 @@ fn merge_value(
     current.cloned()
 }
 
-/// Publish a new, Electron-readable store; never overwrite either source profile.
+/// Prepare a new store through the current kernel writer; never overwrite either
+/// source profile. This is not an old-app compatibility or migration promise.
 /// Caller passes a new sibling destination outside both inputs and holds their
 /// leases. Full input maps and conflicts remain archived even for unknown keys.
 /// A failure keeps `.preparing` intact; an explicit retry archives that attempt.

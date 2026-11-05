@@ -13,6 +13,10 @@ use std::{
 // credentials and unrelated terminal homes are never discovered or copied.
 const FAMILIES: &[&str] = &[
     "store",
+    // main c7f46a056: flat SHA-256 payloads / source links and Index records.
+    // Retain these verbatim until their native media adapter is admitted.
+    "Media Store",
+    "storage-upgrade-v1.json",
     "extensions",
     "Agent Workspaces",
     "Agent State",
@@ -259,7 +263,11 @@ pub(crate) fn relative(path: &Path) -> Result<()> {
 pub(crate) fn file_target(path: &Path) -> Result<PathBuf> {
     relative(path)?;
     let first = path.components().next().context("empty path")?.as_os_str();
-    if first == "extensions" {
+    if first == "Media Store" {
+        // Never mix the main reference's incompatible Index/flat-file schema
+        // into the active native BLAKE3 media store.
+        Ok(Path::new("electron-media-archive").join(path.strip_prefix("Media Store")?))
+    } else if first == "extensions" {
         Ok(Path::new("extensions-shared").join(path.strip_prefix("extensions")?))
     } else {
         Ok(path.into())
