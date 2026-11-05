@@ -466,13 +466,22 @@ pub(super) fn decoded_png(renderer: &mut Renderer, value: &Value, depth: u32, la
                 .collect()
         };
         for (actual, p) in decoded.chunks_exact(4).zip(pixels.chunks_exact(4)) {
+            let alpha = f64::from(p[3]).clamp(0., 1.);
+            let rgb = if alpha < 1. / 4096. {
+                [0.; 3]
+            } else {
+                std::array::from_fn(|i| f64::from(p[i]) / alpha)
+            };
+            // The established SDR delivery contract maps extended sRGB through
+            // CSS Color 4 for PNG8; PNG16 clips only at integer encoding.
+            let rgb = if sixteen_bit {
+                rgb
+            } else {
+                pm_color::css_srgb(rgb)
+            };
             let expected: [u16; 4] = std::array::from_fn(|i| {
-                let v = if i == 3 {
-                    p[3] as f64
-                } else {
-                    p[i] as f64 / p[3] as f64
-                };
-                (v.clamp(0., 1.) * maximum).round() as u16
+                let v = if i == 3 { alpha } else { rgb[i] };
+                (v.clamp(0., 1.) * maximum).round_ties_even() as u16
             });
             assert_eq!(
                 actual, expected,

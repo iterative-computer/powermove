@@ -561,7 +561,9 @@ impl<'c> Gpu<'c> {
                     .get_or_insert_with(|| crate::sampling::gpu::Resampler::new(device));
                 mips.fill_mips(device, self.encoder, &pyramid.texture);
                 pyramid.view = pyramid.texture.create_view(&Default::default());
-                self.taken.push(pyramid.clone());
+                // The encoder retains sampled resources through submission.
+                // This private pyramid was never charged to TargetPool and its
+                // all-mip sampling view must never become a working attachment.
                 previous = pyramid;
             }
             let mut units = vec![

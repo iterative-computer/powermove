@@ -243,10 +243,10 @@ fn e07_saved_current_ramp_source_dimensions_linear_radial_blend_and_reset_points
                             )
                         })
                         .collect();
-                    assert_eq!(params["startX"], json!(16.));
-                    assert_eq!(params["endX"], json!(16.));
-                    assert_eq!(params["startY"], json!(0.));
-                    assert_eq!(params["endY"], json!(32.));
+                    assert_eq!(params["startX"].as_f64(), Some(16.));
+                    assert_eq!(params["endX"].as_f64(), Some(16.));
+                    assert_eq!(params["startY"].as_f64(), Some(0.));
+                    assert_eq!(params["endY"].as_f64(), Some(32.));
                     params.insert("rampShape".into(), json!(u32::from(radial)));
                     params.insert("blendWithOriginal".into(), json!(blend));
                     let mut value = fixture(
