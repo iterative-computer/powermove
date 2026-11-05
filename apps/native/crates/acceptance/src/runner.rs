@@ -50,7 +50,7 @@ pub struct BlockerGroup {
     pub workflows: BTreeSet<String>,
     pub case_ids: Vec<String>,
 }
-fn grouped_blockers(cases: &[CaseResult]) -> Vec<BlockerGroup> {
+pub(crate) fn grouped_blockers(cases: &[CaseResult]) -> Vec<BlockerGroup> {
     let mut groups = std::collections::BTreeMap::<String, BlockerGroup>::new();
     for case in cases.iter().filter(|c| c.status == Status::BlockedBy) {
         let backing = case
@@ -73,6 +73,8 @@ fn grouped_blockers(cases: &[CaseResult]) -> Vec<BlockerGroup> {
 }
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub reference: &'static str,
+    pub purpose: &'static str,
     pub format: String,
     pub version: u32,
     pub platform: String,
@@ -521,6 +523,8 @@ pub fn run_with_runtime(
         SpecMapping{legacy:spec.clone(),acceptance_ids,supporting_probe_ids,replacement_status:Status::BlockedBy,reason:if spec.classification=="plumbing-only" {"Retirement candidate only; keep frozen evidence until replacement safety/resource gates pass".into()}else{"Planned requirement links; supporting probes do not replace full assertions. Complete integration validation remains open".into()}}
     }).collect();
     Ok(Report {
+        reference: crate::main_reference::LEGACY_REFERENCE,
+        purpose: "legacy-compatibility",
         format: "powermove.acceptance".into(),
         version: 1,
         platform: std::env::consts::OS.into(),

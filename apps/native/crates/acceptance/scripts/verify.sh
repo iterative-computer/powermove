@@ -35,6 +35,11 @@ if [[ $acceptance_exit -le 2 ]]; then
   python3 - "$acceptance_work/report.json" <<'PY'
 import collections, csv, json, pathlib, sys
 report = json.load(open(sys.argv[1]))
+if report.get('reference'):
+    print('Selected reference:', report['reference'])
+    legacy = report.get('compatibility')
+    if legacy:
+        pathlib.Path(sys.argv[1]).with_name('legacy-report.json').write_text(json.dumps(legacy, indent=2)+'\n')
 counts = collections.Counter(case['status'] for case in report['cases'])
 print(f"{counts['pass']} pass / {counts['fail']} fail / {counts['blocked-by']} blocked-by")
 for case in report['cases']:

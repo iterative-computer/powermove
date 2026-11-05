@@ -1,0 +1,33 @@
+case_id,workflow,kind,needs_macos,blocked_by,reason
+MAIN.MCP.export_video.catalog,W033,main-tool-contract,false,,"Exact pinned main name, description and input schema: pinned main contract differs at /description, /inputSchema/properties/jobId"
+MAIN.MCP.get_project_state.catalog,W033,main-tool-contract,false,,"Exact pinned main name, description and input schema: pinned main contract differs at /description"
+MAIN.MCP.project_memory.catalog,W033,main-tool-contract,false,,"Exact pinned main name, description and input schema: pinned main contract differs at /"
+MAIN.MCP.tools.identity,W033,main-catalog-contract,false,,Exact pinned main catalog/allowlist/instruction/command/easing identity: pinned main contract differs at /
+MAIN.A07.project-memory-call,W030,main-mcp-execution,false,,"Actual main project_memory list call through the native MCP session: main project_memory list refused: ""{\""code\"":\""invalid_arguments\"",\""message\"":\""Unknown tool: project_memory\""}"""
+MAIN.A07.memory-index,W030,main-mcp-execution,false,,Current main empty project exposes the memory index without edits: pinned main contract differs at /
+MAIN.curve.set,W061,main-authored-curve,false,,"Pinned main Glide [0.16,0.84,0.24,1], independent authored curve oracle: set_property: rotation at 1s is 90.42094586353606, expected 104.94929544957891; complete glide curve was not preserved"
+MAIN.KEY.133.definition,W010,main-key-definition,false,,Current main binding metadata against production shell: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-normal,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-held,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-extra-modifier,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-input,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-contenteditable,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-prior-decline,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.133.route-key-up,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding ` → maximizePanel is absent from native shell
+MAIN.KEY.196.definition,W010,main-key-definition,false,,Current main binding metadata against production shell: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-normal,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-held,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-extra-modifier,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-input,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-contenteditable,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-prior-decline,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.196.route-key-up,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding tab → composition.flowchart is absent from native shell
+MAIN.KEY.198.definition,W010,main-key-definition,false,,Current main binding metadata against production shell: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-normal,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-held,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-extra-modifier,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-input,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-contenteditable,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-prior-decline,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.KEY.198.route-key-up,W010,main-key-routing,false,,Production resolver against pinned main routing flags/args: main binding m → toggleLayerStrips is absent from native shell
+MAIN.E2E.apps/desktop/e2e/agent-keyframe-easing.spec.ts#L5,W030,main-e2e-declaration,false,,"c7f46a05641b23944d3692c9d80f9677c7e1ef1d:apps/desktop/e2e/agent-keyframe-easing.spec.ts:5 — `one MCP ${operation} batch applies the complete easing curve and rolls back cleanly`; declaration SHA ""44818a0df2caae3fef46a6737b7322de0e4badf97d1a2a634f3d42c33b26c598""; parameters [""const operation of ['replace_keyframes', 'set_property'] as const""]; original guards []. Complete native controller/oracle: Native agent-run coordinator around MCP inspection/edit/review/finish, exact baseline refresh, interleaved Undo and final-frame verification; kernel/MCP checks cover only the explicitly linked assertions.; measured strict variant: Current main complete Glide set_property variant: set_property: rotation at 1s is 90.42094586353606, expected 104.94929544957891; complete glide curve was not preserved"

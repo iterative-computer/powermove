@@ -539,3 +539,122 @@ specifications do not add portable production backing. Replayed the locked
 verification on the merged branch: the same 79/17/36 Rust tests and four Python
 tests pass; formatting/strict Clippy pass; configured acceptance retains
 1,466 pass / 1 measured Glide failure / 3,136 blockers. No new macOS claim.
+
+## Main reference change — 2026-11-04
+
+The owner's new behavior target is main commit
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This section supersedes the earlier
+v1.2.0 parity target and project-memory/version-approval interpretation. Both
+`pm-acceptance` and `pm-e2e-triage` now default to this exact main reference.
+`--reference v1.2.0` explicitly selects the retained legacy evidence. Projects
+and v1–3 extensions from v1.2.0 remain mandatory compatibility inputs; their
+passing assertions are never added to current-main parity counts.
+
+Source discovery executes only pure public declarations from the pinned Git
+object, using development-only TypeScript 5.9.3/Bun. It freezes the complete
+**68-tool** union, descriptions/input schemas, allowlists/instructions, command
+fields/easing, **198 binding definitions** and the hashes of their 13 source
+files. Main e2e extraction retains **315 source files / 314 specs / 719 test
+declarations / 81 parameterized declarations**, including original parameters,
+guards, titles and hashes. The regex-only fixture is still distinguished from
+specs. Neither extractor launches Electron or touches installed profiles.
+
+The active report has **4,344 cases: 1,651 pass / 32 fail / 2,661 blocked**,
+partitioning blockers into **229 exact backing groups**. These are assertion
+counts, not distinct product-defect counts. Passes distinguish schema identity,
+actual shell resolver behavior and real kernel/MCP supporting assertions from
+complete tool/application acceptance. All **83 full workflow contracts remain
+blocked**. Of the 719 current main declarations, the unchanged strict Glide
+case fails and the other **718 remain blocked**. All complete spec replacements
+remain blocked. Strict mode exits **1** for measured failures, preserving all
+blockers; a filtered unresolved A-row exits **2**, and a filtered passing schema
+assertion exits **0**.
+
+| Failing assertions | Measured result / next backing |
+|---|---|
+| 24 binding definition/routing variants | Native shell lacks bare backtick → maximizePanel; viewer Tab → composition.flowchart (`inFields`); timeline M → toggleLayerStrips at priority 90. These are three missing definitions across eight checks each. Native/AppKit command delivery remains a separate blocked gate for all 198 × 9 variants. |
+| 3 tool catalog checks + union identity | Native still exposes 67 tools. Main adds project_memory; get_project_state now promises its memory index; export_video adds jobId continuation and its running/progress result contract. Exact JSON paths are reported; the catalog is not silently relabeled current. |
+| 2 actual memory calls | Main-valid project_memory list returns Unknown tool; get_project_state lacks the empty memory index required by pinned main. Source proves these are now required A07/P02 behavior. Full mutation/non-Undo/autosave semantics remain delta-data/kernel/MCP work outside acceptance ownership. |
+| 2 Glide assertions | Current main's exact unchanged declaration hash and operation parameters reproduce the existing sequential set_property defect: 90.42094586353606 versus 104.94929544957891 at 1 second. The paired replace_keyframes oracle passes. The probe and declaration each retain the failure; no tolerance changed. |
+
+[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv),
+[failures.csv](../../apps/native/crates/acceptance/data/failures.csv) and
+[blocker-groups.csv](../../apps/native/crates/acceptance/data/blocker-groups.csv)
+now describe active main. The e2e union map retains **all 396 legacy rows and the
+frozen 370 roster**, adding the main-only scrub-framebuffer-reuse spec for **397
+rows**. Existing acceptance links survive in `legacy_acceptance_ids`; every main
+declaration has its own reference-qualified ID. The old snapshots are archived
+as `legacy-v1.2.0-{remaining-blockers,e2e-map,blocker-groups}.csv`, and both frozen
+source/declaration ledgers remain. No legacy test, file, extension or consumer was
+deleted. Shared e2e-triage.csv remains read-only.
+
+### Delta scope and owner boundaries
+
+[main-deltas.json](../../apps/native/crates/acceptance/data/main-deltas.json)
+retains all **57** audited rows and their routes. A01–A10 have individual current
+acceptance gates and immutable source hashes: provider discovery; client setup;
+Claude Auto classification; rich markdown/local media grants; visual replies;
+headless tools; project memory; extension rebase/appearance; publication and
+panel-generation fences; provider review/consent/error identity. These gates
+remain blocked until their complete production backing and assertions execute.
+Existing kernel/MCP primitives run as narrower supporting evidence where main's
+public contract is unchanged. Old 3D/effect fixtures are not promoted into new
+main 3D/versioned-effect acceptance.
+
+P rows route to **delta-data**, E rows to **delta-fx**, U rows to the **later UI
+lane**; this lane adds requirements/evidence, not their production implementation.
+The owner reference change itself reconciles A511/A512/A07: no extra permission
+request is required to target the new catalog. The native catalog/body/index
+still need their owning implementation. Missing bindings require the shell/UI
+owner. No writes to real agent-client settings occur; Claude desktop setup still
+requires the owner's explicit consent. No reverse-migration or archive-Restore UI
+requirement is introduced. W072's current gate preserves archived web-export
+preferences and verifies that the retired action stays absent; it does not
+request reinstating standalone web delivery.
+
+The configured legacy compatibility census stays **1,466 pass / 1 fail / 3,136
+blocked**, separately nested under `compatibility` with the tagged reference.
+Its original 23 closures and all file/extension checks remain available by ID.
+The default unconfigured legacy subreport remains 1,423 / 1 / 3,179. These are
+historical/compatibility requirements, not the new main baseline.
+
+### Reproduction and decisions
+
+```sh
+source /workspace/.tools/activate.sh; cd /workspace/powermove
+apps/native/crates/acceptance/scripts/verify.sh --strict
+python3 apps/native/crates/acceptance/scripts/refresh-main-reports.py work/native-acceptance/report.json
+# Read-only oracle checks, with TypeScript 5.9.3 available through NODE_PATH:
+bun apps/native/crates/acceptance/scripts/main-catalog.cjs
+bun apps/native/crates/acceptance/src/e2e/extract.cjs
+bun apps/native/crates/acceptance/src/e2e/extract.cjs --reference=v1.2.0
+```
+
+The first command deliberately exits 1 for actual main failures, after running
+both configured current and retained compatibility assertions. Both CLIs accept
+`--reference main|v1.2.0`; legacy IDs keep selecting their original compatibility scope automatically when
+no explicit reference is supplied, preserving existing ID-based consumers. Their
+results identify the tagged reference/purpose, never a current-main pass. The standalone e2e CLI's
+`--check` uses current `MAIN.*` IDs by default. Old reference-specific extraction
+is explicit; the default extractor now checks main. Pure Rust suites require no
+TypeScript installation; the optional V8 companion still needs its documented
+Bun/remote-DOM build prerequisites and the matching S1 artifact on macOS.
+
+| Decision | Selecting rule |
+|---|---|
+| Default every behavior-facing CLI and extractor to pinned main; label v1.2.0 explicitly as compatibility | Owner decision, N3/N4/N6: current intent plus every old input retained |
+| Keep every declaration, parameter/guard, frozen roster and resolved legacy assertion; archive old snapshots before changing active filenames | N4/N7 and prune: no lost requirement, no removed consumer |
+| Fail exact schemas, valid memory calls, missing native binding definitions and the unchanged authored curve | N1/N3/N7: execute real backing; no optimistic flags or reclassification of failure as a blocker |
+| Separate schema/routing/supporting evidence, complete bodies/workflows and legacy results | N3: no old or partial pass certifies current main behavior |
+| Route data/effect/UI production work to its owners and make no visual/UX changes | Ownership and Opus design rule; no new DESIGN-TODO(opus) |
+
+Linux verification: **84 acceptance + 17 optional-worker + 37 retained-e2e Rust
+tests and 8 Python report tests pass**, with no ignored tests. Formatting and
+crate-local Clippy `-D warnings` pass across the three manifests. Main and legacy
+oracle regeneration checks match their pinned sources. No native workspace or
+engine lockfile change is needed: no new package dependency was introduced.
+Mac verification remains required for actual menus/maximize/flowchart/input,
+AppKit/IME/AX/WebKit panels, complete current extension scenarios, new 3D/effect
+pixels, media/export/audio, client setup consent, signed boundaries and physical
+performance. Linux proves none of those. The previously recorded unusable Linux
+Playwright CLI still prevents an Electron ledger execution; no GUI pass is claimed.

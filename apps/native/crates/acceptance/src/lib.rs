@@ -5,6 +5,7 @@ pub mod closure_mcp;
 pub mod curve_oracle;
 pub mod fixture;
 pub mod keyboard;
+pub mod main_reference;
 pub mod mcp_cases;
 pub mod pro;
 pub mod runner;

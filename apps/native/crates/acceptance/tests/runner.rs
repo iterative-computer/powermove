@@ -87,7 +87,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     }
     assert_eq!(
         r.e2e_csv(),
-        include_str!("../data/e2e-map.csv"),
+        include_str!("../data/legacy-v1.2.0-e2e-map.csv"),
         "regenerate e2e mapping after inventory/scenario changes"
     );
     let csv = csv_rows(&r.e2e_csv()).unwrap();
@@ -155,7 +155,10 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
     )
     .unwrap();
     if std::env::var_os("PM_UPDATE_BLOCKERS").is_some() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/remaining-blockers.csv");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/legacy-v1.2.0-remaining-blockers.csv"
+        );
         std::fs::write(path, report.blockers_csv()).unwrap();
         eprintln!("counts {:?}", report.counts());
         return;
@@ -163,7 +166,7 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
     assert_eq!(report.counts(), (1466, 1, 3136));
     assert_eq!(
         report.blockers_csv(),
-        include_str!("../data/remaining-blockers.csv")
+        include_str!("../data/legacy-v1.2.0-remaining-blockers.csv")
     );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
     assert_eq!(rows.len(), 3137);
@@ -248,17 +251,20 @@ fn errors_and_panics_fail_instead_of_becoming_blockers() {
 fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     use std::process::Command;
     let bin = env!("CARGO_BIN_EXE_pm-acceptance");
-    let output = Command::new(bin).args(["--case", "A517"]).output().unwrap();
+    let output = Command::new(bin)
+        .args(["--reference", "v1.2.0", "--case", "A517"])
+        .output()
+        .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["cases"][0]["id"], "A517");
     let blocked = Command::new(bin)
-        .args(["--case", "K001.normal", "--strict"])
+        .args(["--reference", "v1.2.0", "--case", "K001.normal", "--strict"])
         .output()
         .unwrap();
     assert_eq!(blocked.status.code(), Some(2));
     let bad = Command::new(bin)
-        .args(["--case", "unknown"])
+        .args(["--reference", "v1.2.0", "--case", "unknown"])
         .output()
         .unwrap();
     assert_eq!(bad.status.code(), Some(3));
@@ -273,6 +279,8 @@ fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     }
     let unavailable = Command::new(bin)
         .args([
+            "--reference",
+            "v1.2.0",
             "--case",
             "W037.v8-reload",
             "--runtime-runner",
@@ -285,7 +293,7 @@ fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     assert_eq!(json["cases"][0]["status"], "fail");
     assert!(json["cases"][0]["blocked_by"].is_null());
     let catalog = Command::new(bin)
-        .args(["--format", "catalog"])
+        .args(["--reference", "v1.2.0", "--format", "catalog"])
         .output()
         .unwrap();
     assert!(catalog.status.success());
@@ -301,7 +309,13 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
     std::fs::write(&path, pm_acceptance::fixture::CORPUS[0].1).unwrap();
     let bin = env!("CARGO_BIN_EXE_pm-acceptance");
     let r = Command::new(bin)
-        .args(["--case", "W007.corpus-0000", "--corpus"])
+        .args([
+            "--reference",
+            "v1.2.0",
+            "--case",
+            "W007.corpus-0000",
+            "--corpus",
+        ])
         .arg(&scratch.0)
         .output()
         .unwrap();
@@ -312,7 +326,13 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
     );
     std::fs::write(&path, b"invalid synthetic input").unwrap();
     let r = Command::new(bin)
-        .args(["--case", "W007.corpus-0000", "--corpus"])
+        .args([
+            "--reference",
+            "v1.2.0",
+            "--case",
+            "W007.corpus-0000",
+            "--corpus",
+        ])
         .arg(&scratch.0)
         .output()
         .unwrap();

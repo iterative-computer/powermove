@@ -86,7 +86,7 @@ def main():
         raise ValueError("dated W1 evidence differs; append a new dated section")
     data = root / "apps/native/crates/acceptance/data"
     for name, content in [("remaining-blockers.csv", blockers), ("e2e-map.csv", mapping), ("blocker-groups.csv", groups)]:
-        (data / name).write_text(content)
+        (data / ("legacy-v1.2.0-" + name)).write_text(content)
     if marker not in previous:
         path.write_text(previous.rstrip() + "\n\n" + status)
 

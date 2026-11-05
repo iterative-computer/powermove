@@ -134,3 +134,25 @@ The 36 Rust tests pass; 29/1 executable product checks and 3/1/610 complete
 headless declaration results remain unchanged. See the dated section of
 `docs/native/acceptance.md` for the 23 newly connected W1 cases and exact backing
 groups. No source extraction or expected pixel/curve tolerance changed.
+
+## Active main reference — 2026-11-04
+
+The owner's current behavior reference is
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. The CLI and source extractor now default
+to main; `--reference v1.2.0` on the CLI and `--reference=v1.2.0` on the extractor
+retain the old evidence explicitly. The legacy inventory module/tests remain
+compatibility evidence, not a current-main certificate.
+
+Current main has 719 declarations in 314 specs; the exact source snapshot lives
+in `../../data/main-e2e-frozen.json`. Both CLI entry points use the shared active
+main acceptance report and `MAIN.*` IDs; the configured parent harness additionally
+runs native V8 backing for the separately labeled compatibility census. The
+unchanged main Glide declaration retains its measured failure; 718 main
+complete declarations remain blocked. The union map retains 396 legacy rows and
+the frozen 370 roster, adding one current spec. No original ledger was removed.
+
+Run `pm-e2e-triage --reference v1.2.0 --check selection_preserves_redo` for the
+old complete headless check, or `pm-e2e-triage --check MAIN.MCP.list_projects.catalog`
+for a current schema-only check. Neither filtered result establishes app parity.
+
+Existing non-MAIN check IDs still select their original compatibility source when no explicit reference is given; result metadata identifies that scope. Full/default reports use main.
