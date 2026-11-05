@@ -26,7 +26,9 @@ pub fn qualify(
         if !base.iter().chain(&ours).all(|x| x.is_finite()) {
             return Err("nonfinite rotation pixels".into());
         }
-        if !base.chunks_exact(4).any(|p| p[0] != p[1]) {
+        if base.chunks_exact(4).all(|p| p == &base[..4])
+            || !base.chunks_exact(4).any(|p| p[0] != p[1])
+        {
             return Err("blank rotation witness".into());
         }
         for y in 0..oh {
@@ -117,6 +119,13 @@ mod tests {
             qualify(&mut fake, "base", "rotated", (2, 3), 1)
                 .unwrap_err()
                 .contains("mismatch")
+        );
+        fake.base = [1., 0., 0., 1.].repeat(6);
+        fake.rotated = Ok(fake.base.clone());
+        assert!(
+            qualify(&mut fake, "base", "rotated", (2, 3), 1)
+                .unwrap_err()
+                .contains("blank")
         );
         fake.base = vec![0.; 24];
         fake.rotated = Ok(vec![0.; 24]);
