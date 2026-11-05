@@ -265,8 +265,9 @@ impl DocumentStore {
             history,
             ..
         } = opened;
-        let history_owned = history.is_some();
-        DocumentStore::from_parts(file, document, history.unwrap_or_default(), history_owned)
+        // A replayable history can still contain unknown metadata. Keep its
+        // original representation until an actual history mutation (N4).
+        DocumentStore::from_parts(file, document, history.unwrap_or_default(), false)
     }
 
     /// A never-saved project from a project value (stored or canonical form).
@@ -689,6 +690,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_undone();
+        self.history_owned = true;
         self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -722,6 +724,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_redone();
+        self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -742,6 +745,7 @@ impl DocumentStore {
         }
         let before_len = self.history.len();
         let id = self.history.squash_since(mark, label)?;
+        self.history_owned = true;
         let count = before_len + 1 - self.history.len();
         self.tap(|h| Tap::Squash {
             count,
@@ -1086,22 +1090,74 @@ impl DocumentStore {
             }
             SaveTarget::SaveAs { path, replace } => (path, None, replace, false),
         };
-        // Media the project or its undo history can still reach (`fileAssets`).
-        let reachable = self.reachable_assets();
+        // Retain owned media even when no known consumer currently reaches it.
+        // Future/extension records and refused histories may still own it (N4).
         let media = self
             .file
             .media
             .iter()
-            .filter(|m| m.id.as_str().is_some_and(|id| reachable.contains(id)))
+            .filter(|m| {
+                // Omit linked bytes only when the saved document retains a
+                // reference to that source. An incomplete admission must never
+                // silently lose its sole remaining payload.
+                let reference = self
+                    .root()
+                    .and_then(|r| r.get("assets"))
+                    .and_then(|a| m.id.as_str().and_then(|id| a.get(id)))
+                    .and_then(|a| a.get("sourcePath"))
+                    .and_then(model::str_of);
+                let retained = match (&m.source, reference) {
+                    (project_io::MediaSource::File { path, .. }, Some(reference)) => {
+                        path == std::path::Path::new(reference)
+                    }
+                    _ => false,
+                };
+                options.portable || !self.file.media.is_linked(&m.id) || !retained
+            })
             .cloned()
+            .collect();
+        let live_media = self.reachable_assets();
+        let source_links = self
+            .file
+            .media
+            .iter()
+            .filter(|m| self.file.media.is_linked(&m.id))
+            .map(|m| m.id.clone())
             .collect();
         let history = match (&self.file.envelope.history, self.history_owned) {
             (Some(raw), false) => HistoryToWrite::Raw(raw.clone()),
             _ => HistoryToWrite::Session(self.history.snapshot()),
         };
+        let mut extra = self.file.envelope.extra.clone();
+        if self.history_owned
+            && let Some(raw) = &self.file.envelope.history
+            && project_io::history_needs_archive(
+                raw,
+                model::open_comp_id(self.root().expect("project root")).as_deref(),
+            )
+        {
+            // Preserve the complete input after editing a history whose newer
+            // metadata this kernel cannot represent. Never overwrite a future
+            // archive with the same key: retain both as values.
+            let key = "nativeHistoryArchive";
+            let previous = extra.remove(key);
+            let archived = match previous {
+                Some(v) if v == *raw => v,
+                Some(Value::Array(mut items)) => {
+                    if !items.contains(raw) {
+                        items.push(raw.clone());
+                    }
+                    Value::Array(items)
+                }
+                Some(v) => Value::Array(vec![v, raw.clone()]),
+                None => raw.clone(),
+            };
+            extra.insert(key, archived);
+        }
         let ticket = Arc::new(());
         self.save_ticket = Arc::downgrade(&ticket);
         Ok(SavePlan {
+            container_index: self.file.envelope.container_index.clone(),
             revision: self.revision(),
             doc_id: self.doc_id,
             state_token: self.state_token,
@@ -1109,8 +1165,10 @@ impl DocumentStore {
             had_comps: self.file.envelope.had_comps,
             history,
             workspace: self.file.envelope.workspace.clone(),
-            extra: self.file.envelope.extra.clone(),
+            extra,
             media,
+            live_media,
+            source_links,
             destination,
             publish,
             replace_existing,
@@ -1124,6 +1182,11 @@ impl DocumentStore {
     /// and *exactly* the saved state as clean (edits made while it ran stay
     /// dirty).
     pub fn finish_save(&mut self, receipt: SaveReceipt) -> Result<(), ProjectIoError> {
+        if receipt.portable {
+            return Err(ProjectIoError::Invalid(
+                "A portable export is not a document save.".into(),
+            ));
+        }
         if receipt.doc_id != self.doc_id {
             return Err(ProjectIoError::WrongDocument);
         }
@@ -1131,12 +1194,13 @@ impl DocumentStore {
         self.file.format = pm_model::container::ContainerFormat::Pmv4;
         self.file.version = Some(receipt.version.clone());
         self.file.envelope.wrapped = true;
-        // The file now holds this session's history.
-        self.file.envelope.history = None;
-        self.history_owned = true;
+        // Keep the raw history until it is changed, including across repeated
+        // saves. Changed stacks archive their input in prepare_save.
         for entry in receipt.media.iter() {
             let current = self.file.media.get(entry.id.as_str().unwrap_or_default());
-            if current.is_some_and(|c| c.revision == entry.revision) {
+            if current.is_some_and(|c| c.revision == entry.revision)
+                && !self.file.media.is_linked(&entry.id)
+            {
                 self.file.media.insert(entry.clone());
             }
         }
@@ -1270,9 +1334,11 @@ impl DocumentStore {
     pub(crate) fn kernel_unstep(&mut self, undone: bool) {
         if undone {
             self.history.mark_redone();
+            self.history_owned = true;
             self.tap(|_| Tap::Redo { external: true });
         } else {
             self.history.mark_undone();
+            self.history_owned = true;
             self.tap(|_| Tap::Undo { external: true });
         }
         self.set_state_token(self.history.state_token());
@@ -1282,6 +1348,7 @@ impl DocumentStore {
     /// `PM.hist.clear()`.
     pub(crate) fn kernel_clear(&mut self) {
         self.history.clear();
+        self.history_owned = true;
         self.tap(|_| Tap::Clear);
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -1438,11 +1505,13 @@ impl DocumentStore {
         if let Some(selection) = &record.selection {
             self.set_selection(selection.0.clone());
             self.history.mark_undone();
+            self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
             return Ok(Step::Selection);
         }
         if let Some(external) = record.external {
             self.history.mark_undone();
+            self.history_owned = true;
             self.tap(|_| Tap::Undo { external: true });
             self.set_state_token(self.history.state_token());
             self.emit(StoreEvent::HistoryChanged);
@@ -1460,6 +1529,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_undone();
+        self.history_owned = true;
         self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -1480,11 +1550,13 @@ impl DocumentStore {
         if let Some(selection) = &record.selection {
             self.set_selection(selection.1.clone());
             self.history.mark_redone();
+            self.history_owned = true;
             self.emit(StoreEvent::HistoryChanged);
             return Ok(Step::Selection);
         }
         if let Some(external) = record.external {
             self.history.mark_redone();
+            self.history_owned = true;
             self.tap(|_| Tap::Redo { external: true });
             self.set_state_token(self.history.state_token());
             self.emit(StoreEvent::HistoryChanged);
@@ -1502,6 +1574,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_redone();
+        self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
