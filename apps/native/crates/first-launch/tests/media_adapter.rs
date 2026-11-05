@@ -137,3 +137,23 @@ fn source_and_index_symlinks_are_refused_with_source_bytes_retained() {
     assert!(adapter.metadata("media:clip").is_err());
     assert_eq!(fs::read(target).unwrap(), b"synthetic media");
 }
+
+#[test]
+fn metadata_corruption_wrong_keys_and_oversized_records_remain_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (store, payload) = fixture(&root, true);
+    let adapter = FileMedia::open(&store, ResidentSources).unwrap();
+    let index = store
+        .join("Index")
+        .join(format!("{:x}.json", Sha256::digest(b"media:clip")));
+    let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+    raw["key"] = json!("media:different");
+    fs::write(&index, raw.to_string()).unwrap();
+    assert!(adapter.metadata("media:clip").is_err());
+    fs::write(&index, b"{invalid JSON").unwrap();
+    assert!(adapter.metadata("media:clip").is_err());
+    fs::write(&index, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    assert!(adapter.metadata("media:clip").is_err());
+    assert_eq!(fs::read(payload).unwrap(), b"synthetic media");
+}

@@ -179,6 +179,7 @@ impl DiskMediaRecord {
                 break;
             }
             total += n as u64;
+            ensure!(total <= self.size, "media expanded during verification");
             hash.update(&buffer[..n]);
         }
         ensure!(
