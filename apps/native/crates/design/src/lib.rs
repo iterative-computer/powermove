@@ -44,6 +44,12 @@ pub struct Colors {
     /// Badges drawn over media (duration, offline): always dark, drawn at
     /// `metrics.media_badge_opacity`.
     pub media_badge: u32,
+    /// Red channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_red: u32,
+    /// Green channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_green: u32,
+    /// Blue channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
 }
@@ -196,6 +202,18 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// Mixer channel strip width.
+    pub channel_strip: f32,
+    /// Mixer fader knob height.
+    pub fader_knob: f32,
+    /// Welcome window width.
+    pub welcome_width: f32,
+    /// Welcome window height.
+    pub welcome_height: f32,
+    /// Width of In and Out brackets on rulers and scrubbers.
+    pub mark_bracket: f32,
+    /// Linked-clip sync badge height.
+    pub sync_badge: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -334,6 +352,9 @@ impl Tokens {
                 warning: 0xf59e0b,
                 success: 0x3fcf8e,
                 media_badge: 0x000000,
+                scope_red: 0xff6b62,
+                scope_green: 0x4fd58a,
+                scope_blue: 0x6ba6ff,
                 labels: Labels {
                     blue: 0x3b4250,
                     violet: 0x4a3b6b,
@@ -367,6 +388,9 @@ impl Tokens {
                 warning: 0xa15c00,
                 success: 0x117a52,
                 media_badge: 0x000000,
+                scope_red: 0xff6b62,
+                scope_green: 0x4fd58a,
+                scope_blue: 0x6ba6ff,
                 labels: Labels {
                     blue: 0xc9d4e8,
                     violet: 0xd8cff0,
@@ -452,6 +476,12 @@ impl Tokens {
                 drop_stroke: 1.5,
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                channel_strip: 72.,
+                fader_knob: 14.,
+                welcome_width: 900.,
+                welcome_height: 640.,
+                mark_bracket: 6.,
+                sync_badge: 16.,
             },
             typography: TypeScale {
                 minimum: 11.,

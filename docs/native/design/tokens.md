@@ -108,6 +108,9 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.muted` | Captions, metadata, placeholder, units | `#62646A` | `#949494` | `#414148` | `#BFBFBF` |
 | `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1A1A1A` | `#FDFDFE` | `#1A1A1A` |
 | `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#161616` | `#F5F5F7` | `#161616` |
+| `colors.scope_blue` | Blue channel scope trace on the dark viewer | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` | `#6BA6FF` |
+| `colors.scope_green` | Green channel scope trace on the dark viewer | `#4FD58A` | `#4FD58A` | `#4FD58A` | `#4FD58A` |
+| `colors.scope_red` | Red channel scope trace on the dark viewer | `#FF6B62` | `#FF6B62` | `#FF6B62` | `#FF6B62` |
 | `colors.secondary` | Row labels, secondary text | `#52545A` | `#B4B4B4` | `#303036` | `#DDDDDD` |
 | `colors.selected_fill` | Neutral selected row / segment fill | `#D5D5DA` | `#3A3A3A` | `#D5D5DA` | `#3A3A3A` |
 | `colors.selected_text` | Text and glyphs on an accent fill | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
@@ -121,6 +124,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
 | `metrics.border` | Separator thickness (Increase Contrast doubles it) | 1 | 1 | 2 | 2 |
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
+| `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
@@ -128,6 +132,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
+| `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
 | `metrics.field_menu_width` | Field menu width | 300 | 300 | 300 | 300 |
@@ -144,6 +149,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
 | `metrics.layer_column` | Timeline layer list column width | 266 | 266 | 266 | 266 |
+| `metrics.mark_bracket` | Width of In and Out brackets on rulers and scrubbers | 6 | 6 | 6 | 6 |
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |
@@ -174,6 +180,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.symbol_inline` | SF Symbol size inside rows | 11 | 11 | 11 | 11 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 13 | 13 | 13 | 13 |
 | `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 15 | 15 | 15 | 15 |
+| `metrics.sync_badge` | Linked-clip sync badge height | 16 | 16 | 16 | 16 |
 | `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
 | `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
 | `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
@@ -183,6 +190,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.track_row` | Timeline layer row | 28 | 28 | 28 | 28 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Inspector value column width shared by every row | 128 | 128 | 128 | 128 |
+| `metrics.welcome_height` | Welcome window height | 640 | 640 | 640 | 640 |
+| `metrics.welcome_width` | Welcome window width | 900 | 900 | 900 | 900 |
 | `metrics.window_height` | Default window height | 900 | 900 | 900 | 900 |
 | `metrics.window_width` | Default window width | 1440 | 1440 | 1440 | 1440 |
 | `typography.body` | Dense UI text: values, list rows, menus in panels | 12 | 12 | 12 | 12 |
@@ -209,3 +218,17 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.start_scale` | Scale an appearing surface starts from | 0.96 | 0.96 | 0.96 | 0.96 |
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 <!-- tokens:end -->
+
+## Surface token additions — 2026-11-04
+
+Added the nine Opus-specified tokens in [surfaces/README.md §7](surfaces/README.md#7-new-tokens-requested-by-these-specs),
+with their exact values and roles. Decision (N1, N3): scope traces are data
+colours, identical in both schemes and drawn with dark-scheme viewer tokens as
+[colour.md](surfaces/colour.md) specifies; their contrast floor is 3:1 on that
+viewer. Decision (N3, N6): these native surface metrics and data colours do not
+extend the theme patch contract, so theme mappings and compat editions are
+unchanged. Existing values and consumers remain in place (prune rule).
+
+This adds tokens for the approved surface specs; it does not implement those
+surfaces or establish macOS visual acceptance. Actual Mac output remains
+provisional until Opus design review.

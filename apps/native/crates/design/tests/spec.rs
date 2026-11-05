@@ -65,6 +65,18 @@ const ROLES: &[(&str, &str)] = &[
     ("colors.warning", "Warnings, missing-but-recoverable states"),
     ("colors.success", "Completed, online, rendered"),
     (
+        "colors.scope_red",
+        "Red channel scope trace on the dark viewer",
+    ),
+    (
+        "colors.scope_green",
+        "Green channel scope trace on the dark viewer",
+    ),
+    (
+        "colors.scope_blue",
+        "Blue channel scope trace on the dark viewer",
+    ),
+    (
         "colors.media_badge",
         "Badge fill over media (duration, offline); always dark",
     ),
@@ -129,6 +141,15 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("metrics.window_width", "Default window width"),
     ("metrics.window_height", "Default window height"),
+    ("metrics.channel_strip", "Mixer channel strip width"),
+    ("metrics.fader_knob", "Mixer fader knob height"),
+    ("metrics.welcome_width", "Welcome window width"),
+    ("metrics.welcome_height", "Welcome window height"),
+    (
+        "metrics.mark_bracket",
+        "Width of In and Out brackets on rulers and scrubbers",
+    ),
+    ("metrics.sync_badge", "Linked-clip sync badge height"),
     ("metrics.min_width", "Minimum window width"),
     ("metrics.min_height", "Minimum window height"),
     ("metrics.palette_width", "Command palette width"),
@@ -614,4 +635,74 @@ fn every_patchable_field_reads_back() {
     assert_eq!(t.field("colors.nope"), None);
     t.apply_patch([("colors.accent", 0x123456 as f64)]).unwrap();
     assert_eq!(t.field("colors.accent"), Some(0x123456 as f64));
+}
+
+#[test]
+fn surface_tokens_match_opus_spec_in_every_appearance() {
+    let doc = std::fs::read_to_string(root().join("docs/native/design/surfaces/README.md"))
+        .expect("surface spec");
+    let section = doc
+        .split("## 7. New tokens requested by these specs")
+        .nth(1)
+        .expect("new surface tokens section");
+    let requested: Vec<_> = section
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .map(|line| {
+            let mut cells = line.split('|').skip(1).map(str::trim);
+            let name = cells.next().unwrap().trim_matches('`');
+            let value = cells.next().unwrap();
+            (name, value)
+        })
+        .collect();
+    assert_eq!(requested.len(), 9, "review new surface token requests");
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        for increase_contrast in [false, true] {
+            for reduce_transparency in [false, true] {
+                for reduce_motion in [false, true] {
+                    let mut t = Tokens::new(
+                        scheme,
+                        Accessibility {
+                            increase_contrast,
+                            reduce_transparency,
+                            reduce_motion,
+                        },
+                    );
+                    let values = leaves(&t);
+                    for (name, expected) in &requested {
+                        let (_, value) = values
+                            .iter()
+                            .find(|(key, _)| key == name)
+                            .unwrap_or_else(|| panic!("missing surface token {name}"));
+                        assert_eq!(show(name, value), *expected, "{name}: {scheme:?}");
+                        let before = t.clone();
+                        assert!(
+                            t.apply_patch([(*name, 0.)]).is_err(),
+                            "surface data colours and geometry are not theme-patchable: {name}"
+                        );
+                        assert_eq!(t, before, "a rejected patch changes nothing");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scope_traces_meet_contrast_on_the_specified_dark_viewer() {
+    // colour.md and language.md: scope plots use dark-scheme tokens even in
+    // light appearance. The data colours are not chrome or text on light panels.
+    for increase_contrast in [false, true] {
+        let c = Tokens::new(
+            Scheme::Dark,
+            Accessibility {
+                increase_contrast,
+                ..Default::default()
+            },
+        )
+        .colors;
+        for trace in [c.scope_red, c.scope_green, c.scope_blue] {
+            assert!(contrast(trace, c.viewer) >= 3., "scope trace #{trace:06X}");
+        }
+    }
 }
