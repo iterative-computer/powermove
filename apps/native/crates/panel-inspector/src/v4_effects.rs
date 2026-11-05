@@ -300,7 +300,10 @@ impl EffectsPanel {
                     ("mixed", state.as_ref().is_some_and(|s| s.mixed).into()),
                     (
                         "readonly",
-                        (param.is_none() || !model.editable(&layer) || display.is_none()).into(),
+                        (param.is_none()
+                            || !model.editable(&layer)
+                            || display.is_none_or(|d| d.control == "opaque"))
+                        .into(),
                     ),
                 ]);
                 let fields = p.as_object_mut().expect("parameter");

@@ -31,6 +31,11 @@ pub(crate) struct Models {
     pub timeline: Option<TimelineClient>,
     pub timeline_scene: Option<std::sync::Arc<crate::timeline_scene::Scene>>,
     pub viewer: pm_panel_viewerchrome::v4::Session,
+    viewer_projection: Option<(
+        pm_panel_viewerchrome::Stamp,
+        pm_panel_viewerchrome::Viewport,
+        Value,
+    )>,
     pub project: ProjectBridge,
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
@@ -70,6 +75,7 @@ impl Models {
             timeline,
             timeline_scene: None,
             viewer: Default::default(),
+            viewer_projection: None,
             project: ProjectBridge::default(),
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
             fields: BTreeMap::new(),
@@ -363,13 +369,23 @@ impl Backend {
                     .inset as f64,
             )
             .map_err(|e| e.to_string())?;
-        let model = wire(
-            &self
-                .native
-                .viewer
-                .publish(&vm, viewport)
-                .map_err(|e| e.to_string())?,
-        );
+        let model = if let Some((stamp, previous_viewport, projection)) =
+            &self.native.viewer_projection
+            && *stamp == vm.stamp
+            && *previous_viewport == viewport
+        {
+            projection.clone()
+        } else {
+            let projection = wire(
+                &self
+                    .native
+                    .viewer
+                    .publish(&vm, viewport)
+                    .map_err(|e| e.to_string())?,
+            );
+            self.native.viewer_projection = Some((vm.stamp.clone(), viewport, projection.clone()));
+            projection
+        };
         Ok(
             json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
         )
@@ -771,6 +787,7 @@ impl Backend {
                         "Local controls must dispatch their authored change listener".into(),
                     );
                 }
+                self.validate_binding_owner(handle)?;
                 if self.panel_id == "layer-effects" {
                     return self
                         .parameter_write(handle, model(&args["value"])?, time)

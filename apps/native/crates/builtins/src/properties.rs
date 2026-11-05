@@ -169,12 +169,31 @@ impl Properties {
                                 json!(["rect", "ellipse", "polygon", "star", "line"])
                             }
                             "content.fit" => json!(["cover", "contain", "stretch"]),
-                            "content.weight" => json!([
-                                {"v":100,"label":"Thin"},{"v":200,"label":"Extra Light"},
-                                {"v":300,"label":"Light"},{"v":400,"label":"Regular"},
-                                {"v":500,"label":"Medium"},{"v":600,"label":"Semi Bold"},
-                                {"v":700,"label":"Bold"},{"v":800,"label":"Extra Bold"},
-                                {"v":900,"label":"Black"}]),
+                            "content.weight" => {
+                                let mut options = vec![
+                                    json!({"v":100,"label":"Thin"}),
+                                    json!({"v":200,"label":"Extra Light"}),
+                                    json!({"v":300,"label":"Light"}),
+                                    json!({"v":400,"label":"Regular"}),
+                                    json!({"v":500,"label":"Medium"}),
+                                    json!({"v":600,"label":"Semi Bold"}),
+                                    json!({"v":700,"label":"Bold"}),
+                                    json!({"v":800,"label":"Extra Bold"}),
+                                    json!({"v":900,"label":"Black"}),
+                                ];
+                                if let Some(weight) = value.as_f64()
+                                    && !options.iter().any(|o| o["v"] == value)
+                                {
+                                    options.push(json!({"v":weight,"label":weight.to_string()}));
+                                    options.sort_by(|a, b| {
+                                        a["v"]
+                                            .as_f64()
+                                            .unwrap()
+                                            .total_cmp(&b["v"].as_f64().unwrap())
+                                    });
+                                }
+                                json!(options)
+                            }
                             "content.align" => json!(["left", "center", "right"]),
                             "layer.parent" | "layer.matteSource" => {
                                 let ids = if id == "layer.parent" {

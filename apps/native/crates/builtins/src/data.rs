@@ -44,7 +44,8 @@ pub(crate) struct Backend {
     panel: EffectsPanel,
     extension: String,
     bindings: BTreeMap<String, Vec<String>>,
-    binding_owners: BTreeMap<String, (u64, Vec<String>)>,
+    binding_owners: BTreeMap<String, (u64, Arc<[String]>)>,
+    binding_selection: Option<(u64, Arc<[String]>)>,
     pending: Vec<Inflight>,
     states: Vec<StateInflight>,
     retired: bool,
@@ -108,6 +109,7 @@ impl Backend {
             timeline_waiter: None,
             bindings: BTreeMap::new(),
             binding_owners: BTreeMap::new(),
+            binding_selection: None,
             pending: vec![],
             states: vec![],
             retired: false,
@@ -277,20 +279,25 @@ impl Backend {
             .collect::<Vec<_>>();
         Ok(json!({"id":id,"effects":fx}))
     }
+    pub(crate) fn validate_binding_owner(&self, handle: &str) -> Result<(), String> {
+        let (document, selection) = self
+            .binding_owners
+            .get(handle)
+            .ok_or("Unregistered binding")?;
+        let inspector = self.model.as_ref().ok_or("No open project")?;
+        if *document != inspector.document_id() || selection.as_ref() != inspector.selected_layers()
+        {
+            return Err("Binding selection changed".into());
+        }
+        Ok(())
+    }
     pub(crate) fn parameter_write(
         &mut self,
         handle: &str,
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
-        let owner = self
-            .binding_owners
-            .get(handle)
-            .ok_or("Unregistered effect binding")?;
-        let inspector = self.model.as_ref().ok_or("No open project")?;
-        if owner.0 != inspector.document_id() || owner.1 != inspector.selected_layers() {
-            return Err("Effect binding selection changed".into());
-        }
+        self.validate_binding_owner(handle)?;
         let channels = self
             .bindings
             .get(handle)
@@ -489,8 +496,23 @@ impl KernelData for Data {
                     if !valid {
                         return Err("unknown model binding".into());
                     }
-                    let model = b.model.as_ref().ok_or("No open project")?;
-                    let owner = (model.document_id(), model.selected_layers().to_vec());
+                    let inspector = b.model.as_ref().ok_or("No open project")?;
+                    if !b
+                        .binding_selection
+                        .as_ref()
+                        .is_some_and(|(doc, selection)| {
+                            *doc == inspector.document_id()
+                                && selection.as_ref() == inspector.selected_layers()
+                        })
+                    {
+                        b.binding_selection =
+                            Some((inspector.document_id(), inspector.selected_layers().into()));
+                    }
+                    let owner = b
+                        .binding_selection
+                        .as_ref()
+                        .ok_or("No binding selection")?
+                        .clone();
                     b.binding_owners.insert(handle.clone(), owner);
                     b.bindings.insert(handle.clone(), channels.clone());
                 }
@@ -647,6 +669,7 @@ impl KernelData for Data {
             );
             b.bindings.clear();
             b.binding_owners.clear();
+            b.binding_selection = None;
             b.retired = true;
         }
         Ok(())
