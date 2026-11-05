@@ -40,7 +40,7 @@ class BundleAudit(unittest.TestCase):
             return self.arches
         if '-hv' in args:
             kind = 'DYLIB' if args[-1].endswith('.dylib') else 'EXECUTE'
-            return 'Mach header\n magic cputype cpusubtype caps filetype ncmds sizeofcmds flags\n MH_MAGIC_64 ARM64 ALL 0x00 ' + kind + ' 10 1000 DYLDLINK\n'
+            return 'Mach header\n magic cputype cpusubtype caps filetype ncmds sizeofcmds flags\n MH_MAGIC_64 ARM64 ALL 0x00 ' + kind + ' 10 1000 NOUNDEFS DYLDLINK TWOLEVEL PIE\n'
         return self.loads[pathlib.Path(args[-1]).relative_to(self.root).as_posix()]
 
     def result(self):

@@ -95,7 +95,7 @@ def header(text):
         fields = line.split()
         if 'filetype' in fields:
             values = lines[index + 1].split()
-            if len(values) != len(fields):
+            if len(values) < len(fields):
                 break
             kind = values[fields.index('filetype')]
             if kind in ('EXECUTE', 'DYLIB', 'BUNDLE', '2', '6', '8'):
