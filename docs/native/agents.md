@@ -219,3 +219,69 @@ commands and full descendant draining; `renameatx_np` swap/exclusive behavior,
 same-volume archive recovery and durability under process kill; kernel lock,
 attachment/media closure and rollback; and shell progress/question/approval UX.
 No GPUI, AppKit, WebKit, Metal, Keychain or real account was exercised on Linux.
+
+## 2026-11-04 — ordered delivery, history and ordinary-run watches
+
+This section supersedes the earlier alternate-lockfile setup. The integration
+base already contains the `pm-agents` package in `apps/native/Cargo.lock`.
+`crates/agents/scripts/check.sh` uses ordinary locked workspace commands. There
+are no new dependencies or lockfile resolutions in this change. The old
+lane-owned lockfile remains historical evidence, with no active check consumer.
+
+`delivery::{Surface, Queue, Delivery}` provides a bounded, actor-owned FIFO.
+Each admitted batch receives monotonic sequence numbers. Saturation returns the
+entire `Effects` unchanged, with no sequence consumed. Dispatch order is outgoing
+messages, the original event order, then stdin closure. The process worker uses
+that same ordering function. A wire enqueue is not a provider acknowledgement;
+interruption completion is fenced by the RPC response or its bounded failure.
+
+The typed boundary separates frozen callbacks from native inspection. Codex and
+Codex-exec session identities, Ready, Stopped and unknown notifications remain
+Inspection deliveries. Claude's session callback remains a Callback, matching
+its tagged parser. Every event is retained. The existing native process handle
+continues to expose all events; consumers opting into the compatibility boundary
+must use the typed adapter and retain its inspection deliveries. This is an
+application integration API, not a claim that the shell already consumes it.
+
+`history::{Receipt, publish, read}` stores exact native event JSON in the existing
+thread archive's additive `nativeRunEvents` field. A receipt's source/run and
+sequence are immutable; retries are idempotent, reordered/conflicting receipts
+fail atomically, and compaction does not replace earlier messages or decisions.
+`Threads::update` validates and durably publishes a candidate before changing
+its in-memory view. Failed publication acknowledges no event. Archive removal
+retains these receipts with the entire thread. Unknown fields are preserved;
+unrecognized history shapes are refused unchanged. Wire entries can create gaps
+in receipt sequence numbers without making event order ambiguous.
+
+`monitor::Monitor` ports the frozen ordinary-thread monitor behind a supplied
+clock. It retains run/project/thread identity, progress, question/wait state,
+terminal summaries and the 30-second announced-but-never-started timeout.
+Run-specific watch leases enforce project ownership, reject cycles and support
+idempotent release, including duplicate edges. Watching an older run never
+switches to a later turn. It has a 32-watch-per-parent limit. At 512 retained run
+records, admission refuses more work until the host explicitly archives a
+terminal, unwatched snapshot. `archive_terminal` invokes the host's durable
+archive operation before retiring that in-memory entry. The host must retain
+its immutable run-ID index and serve archived reads; no silent pruning or GC is
+provided.
+
+Concurrent Codex initialization, broadcast progress and shutdown now use run
+admission order, rather than lexicographic map order. Held questions retain
+arrival order. For an identified active turn, cancellation sends interruption
+first, refuses further answers/steering, and settles held questions and the
+terminal result after interrupt settlement. The early-turn cleanup tombstone
+still prevents a late `turn/start` reply from leaking work or a second result.
+
+Decisions and selecting rules:
+
+| Decision | Selecting rule |
+|---|---|
+| Make callback/inspection channels explicit; preserve every native observation and keep the original strict gate | N3 exact compatibility boundary; N7 inspectability; no filtered claim of whole-service identity |
+| Atomic FIFO batch admission and one worker dispatch order | N1 bounded backpressure; N7 deterministic headless driving; N8 no JS/main-thread wait |
+| Preserve run/question arrival order and fence cancellation on interruption | N3 authored request ownership and sequencing, demonstrated by tagged execution |
+| Publish lossless event receipts before acknowledging them; retain opaque fields and archived history | N4 no lost data; N3 exact authored decisions and compaction history |
+| Refuse capacity overflow and require durable archival instead of the monitor's automatic pruning | N1 bounded state; N4 archive, never silently delete |
+| Canonicalize test temporary roots | macOS-safe root-owned `/tmp`/`/var` system symlinks; no Linux-only filesystem assumptions |
+
+No visual surface, copy or interaction design was added. No new
+`DESIGN-TODO(opus)` placeholder is required by these service-only changes.

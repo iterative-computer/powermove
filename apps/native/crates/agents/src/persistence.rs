@@ -37,6 +37,23 @@ impl Threads {
             archive,
         })
     }
+    /// Execute on the kernel actor. Publish a candidate before updating the
+    /// in-memory view, so failed durable writes cannot acknowledge lost history.
+    /// Unknown fields and all existing payload references remain in the clone.
+    pub fn update(
+        &mut self,
+        store: &mut impl Store,
+        edit: impl FnOnce(&mut Value) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut candidate = Self {
+            project: self.project.clone(),
+            archive: self.archive.clone(),
+        };
+        edit(&mut candidate.archive)?;
+        candidate.save(store)?;
+        self.archive = candidate.archive;
+        Ok(())
+    }
     pub fn raw(&self) -> &Value {
         &self.archive
     }

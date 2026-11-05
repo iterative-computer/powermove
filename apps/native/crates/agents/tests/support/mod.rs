@@ -14,7 +14,7 @@ impl Temp {
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path.canonicalize().unwrap())
     }
 }
 impl Drop for Temp {

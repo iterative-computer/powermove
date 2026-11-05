@@ -5,6 +5,9 @@ pub mod claude;
 pub mod codex;
 pub mod codex_exec;
 pub mod conversation;
+pub mod delivery;
+pub mod history;
+pub mod monitor;
 pub mod persistence;
 pub mod protocol;
 pub mod runtime;
@@ -78,7 +81,8 @@ impl RunResult {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
 pub enum Event {
     Ready,
     Trace { run: String, value: Value },

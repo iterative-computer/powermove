@@ -226,6 +226,22 @@ fn absorb(e: Effects, out: &mut Observations) {
 }
 
 pub fn provider(case: &Case, fixture: &Value) -> (Observations, Observations) {
+    let (expected, actual, _) = provider_inner(case, fixture, false);
+    (expected, actual)
+}
+/// Exercise the production callback/inspection adapter as well as the raw
+/// service observations. Full-observation strict identity remains a distinct gate.
+pub fn provider_callbacks(
+    case: &Case,
+    fixture: &Value,
+) -> (Observations, Observations, Observations) {
+    provider_inner(case, fixture, true)
+}
+fn provider_inner(
+    case: &Case,
+    fixture: &Value,
+    callbacks: bool,
+) -> (Observations, Observations, Observations) {
     assert_eq!(fixture["baseline"], "v1.2.0");
     assert!(fixture["source"].is_string());
     let frames: Vec<Message> = serde_json::from_value(fixture["frames"].clone()).unwrap();
@@ -239,6 +255,8 @@ pub fn provider(case: &Case, fixture: &Value) -> (Observations, Observations) {
     );
     let mut actual = Observations::default();
     let mut expected = Observations::default();
+    let mut inspection = Observations::default();
+    let mut queue = pm_agents::delivery::Queue::new(1024);
     let mut stimulus = 0;
     for f in frames {
         let v = f.value;
@@ -313,7 +331,45 @@ pub fn provider(case: &Case, fixture: &Value) -> (Observations, Observations) {
             other => panic!("unsupported frame {other}"),
         };
         let mut effects = Observations::default();
-        absorb(e, &mut effects);
+        if callbacks {
+            use pm_agents::delivery::{Delivery, Surface};
+            let surface = match case.surface.as_str() {
+                "codex" => Surface::Codex,
+                "claude" => Surface::Claude,
+                "exec" => Surface::CodexExec,
+                _ => panic!("invalid provider"),
+            };
+            queue.push(surface, e).unwrap();
+            while let Some(entry) = queue.pop() {
+                match entry.delivery {
+                    Delivery::Wire(v) => effects.wire.push(msg("out", v)),
+                    Delivery::Callback(event) => absorb(
+                        Effects {
+                            events: vec![event],
+                            ..Effects::default()
+                        },
+                        &mut effects,
+                    ),
+                    Delivery::Inspection(event) => {
+                        let mut observed = Observations::default();
+                        absorb(
+                            Effects {
+                                events: vec![event],
+                                ..Effects::default()
+                            },
+                            &mut observed,
+                        );
+                        for message in &mut observed.lifecycle {
+                            message.after = stimulus;
+                        }
+                        inspection.lifecycle.extend(observed.lifecycle);
+                    }
+                    Delivery::CloseStdin => effects.lifecycle.push(msg("close-stdin", json!(true))),
+                }
+            }
+        } else {
+            absorb(e, &mut effects);
+        }
         for messages in [
             &mut effects.wire,
             &mut effects.events,
@@ -345,7 +401,7 @@ pub fn provider(case: &Case, fixture: &Value) -> (Observations, Observations) {
             ..msg("result", serde_json::to_value(result).unwrap())
         });
     }
-    (expected, actual)
+    (expected, actual, inspection)
 }
 pub fn report(case: &Case, expected: &Observations, actual: &Observations) -> Report {
     let count = |o: &Observations| o.wire.len() + o.events.len() + o.lifecycle.len();

@@ -156,16 +156,15 @@ fn cancel_drains_held_questions_and_interrupts_exact_turn() {
             .unwrap()["params"],
         json!({"threadId":"t","turnId":"u"})
     );
-    assert!(
-        e.outgoing
-            .contains(&json!({"id":"q","result":{"answers":{}}}))
-    );
+    assert_eq!(e.outgoing.len(), 1);
     assert_eq!(completed(&e), 0);
     assert!(c.answer("a", "i", &BTreeMap::new()).is_none());
-    let interrupt = e.outgoing.last().unwrap()["id"].clone();
+    let interrupt = e.outgoing[0]["id"].clone();
+    let settled = c.receive(json!({"id":interrupt,"result":{}}), 1);
+    assert_eq!(completed(&settled), 1);
     assert_eq!(
-        completed(&c.receive(json!({"id":interrupt,"result":{}}), 1)),
-        1
+        settled.outgoing,
+        vec![json!({"id":"q","result":{"answers":{}}})]
     );
 }
 #[test]
@@ -499,4 +498,24 @@ fn stopping_during_interrupt_completes_once_then_reinitializes() {
     let id = e.outgoing[0]["id"].clone();
     let e = c.receive(json!({"id":id,"result":{}}), 3);
     assert_eq!(e.outgoing[1]["method"], "thread/start");
+}
+
+#[test]
+fn cancellation_settles_questions_in_authored_arrival_order_after_interrupt() {
+    let mut c = started();
+    for id in ["z-first", "a-second"] {
+        c.receive(json!({"id":id,"method":"item/tool/requestUserInput","params":{"threadId":"t","turnId":"u","itemId":id,"questions":[{"id":"q","question":"Choose?"}]}}),0);
+    }
+    let e = c.cancel("a", 0).unwrap();
+    assert_eq!(e.outgoing.len(), 1);
+    let rpc = e.outgoing[0]["id"].clone();
+    let e = c.receive(json!({"id":rpc,"result":{}}), 1);
+    assert_eq!(
+        e.outgoing,
+        vec![
+            json!({"id":"z-first","result":{"answers":{}}}),
+            json!({"id":"a-second","result":{"answers":{}}})
+        ]
+    );
+    assert_eq!(completed(&e), 1);
 }

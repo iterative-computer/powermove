@@ -217,3 +217,69 @@ original full-observation strict gate is still open. No reference transcript was
 replaced. The shared workspace lock already contains `pm-agents` on the lane's
 base; `scripts/check.sh` now uses it directly with `--locked`. Its former
 alternate lockfile is retained as historical input, with no active script consumer.
+
+## 2026-11-04 — strict callback replay and new synthetic flow evidence
+
+All **21 provider callback cases now match exactly**, including cancellation's
+causal stimulus boundary. `provider_callback_boundary_is_strictly_identical_without_losing_inspection`
+uses the production typed delivery adapter. It also reconstructs every original
+native lifecycle observation from the disjoint callback/inspection streams,
+asserting that all **28** native inspection additions remain. This is a separate
+named check; the original full-observation strict gate is unchanged.
+
+The original 23-case report now has **23/23 public-event matches**, **22/23 wire
+matches**, and **6/23 full-observation matches**. Its remaining **32 exact leaf
+differences** are 28 native lifecycle additions and four MCP tool-error strings.
+The difference ledger still checks every one. `PM_REPLAY_REQUIRE_IDENTICAL=1`
+continues to fail visibly. The richer service interface is not falsely described
+as identical to the frozen callback interface, and the MCP failures are not
+normalized or waived.
+
+Three additional, independent frozen-source recorders add evidence without
+changing any of the original reference bytes:
+
+- `scripts/capture-concurrent.cjs` executes the tagged App Server runner with
+  two runs admitted before initialization completes. It records exact wire and
+  callback values, run IDs and causal positions for non-lexical admission,
+  broadcast reconnect, colliding question item IDs, an answer scoped to one run,
+  cancellation with a held question, interrupt acknowledgement and the other
+  run's successful answer. Native inspection is asserted separately, unchanged.
+- `scripts/capture-monitor.cjs` executes the tagged `AgentThreadMonitor` with an
+  injected clock: **28 operations**, covering queued/running/waiting/terminal
+  states, older-run selection, scope errors, duplicate watch leases, cycle
+  rejection/release, timeout and shutdown. Rust compares every result/error.
+- `scripts/capture-tasks.cjs` executes the tagged orchestrator with synthetic
+  provider discovery and a held execution host. Rust compares the queued task,
+  complete inherited child request, durable reservation archive, exact path and
+  idempotency fingerprint. This is a reservation/start-boundary probe, not a
+  full live orchestrator or MCP-tool-body certification.
+
+Each new fixture pins the frozen source hashes and its recorder hash. The task
+recorder supplies deterministic UUIDs and a clock; the monitor supplies a clock;
+the concurrent peer uses explicit response/terminal barriers. Expectations are
+obtained only from tagged TypeScript execution. Node/TypeScript/Zod remain
+oracle-only dependencies. Regenerate/check with:
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+npm install --prefix work/oracle typescript@5.9.3 zod@4.6.5
+node apps/native/crates/agents/tests/replay/capture.cjs --check
+node apps/native/crates/agents/scripts/capture-concurrent.cjs --check
+node apps/native/crates/agents/scripts/capture-monitor.cjs --check
+node apps/native/crates/agents/scripts/capture-tasks.cjs --check
+```
+
+The concurrent fixture waits for the cancelled runner's terminal callback before
+supplying later frames. An unfenced source probe observed the tagged callback
+later than the native state-machine callback while tagged temporary-directory
+cleanup awaited disk (stimulus 15 versus 13). That application cleanup/dispatch
+fence remains **unqualified**, not an accepted timing tolerance or a reproduced
+Electron scheduling quirk. The fixture does not certify arbitrary provider/IO
+schedules or final shell queue ordering. The FIFO and durable receipt primitives
+provide explicit boundaries for that application integration.
+
+The new portable tests also cover durable publication failures/retries, exact
+compaction/question history through reopen and archival, receipt conflicts,
+capacity admission and native inspection retention. These are native correctness
+checks, distinguished from frozen-source conformance probes.

@@ -369,3 +369,28 @@ fn process_replay_drains_full_pipes_and_kills_a_stalled_peer() {
     );
     assert!(before.elapsed() < Duration::from_secs(3));
 }
+
+#[test]
+fn provider_callback_boundary_is_strictly_identical_without_losing_inspection() {
+    let manifest = replay::load_manifest(&root());
+    let mut cases = 0;
+    let mut inspected = 0;
+    for case in manifest.cases.iter().filter(|c| c.surface != "mcp") {
+        let fixture = serde_json::from_slice(&fs::read(root().join(&case.file)).unwrap()).unwrap();
+        let (expected, actual, inspection) = replay::provider_callbacks(case, &fixture);
+        assert_eq!(expected, actual, "{} callback boundary", case.name);
+        // The disjoint native stream must reconstruct every raw observation.
+        let (_, raw) = replay::provider(case, &fixture);
+        assert_eq!(actual.events, raw.events);
+        let mut combined = actual.lifecycle.clone();
+        combined.extend(inspection.lifecycle.clone());
+        combined.sort_by_key(|m| m.after);
+        let mut raw_lifecycle = raw.lifecycle;
+        raw_lifecycle.sort_by_key(|m| m.after);
+        assert_eq!(combined, raw_lifecycle, "{} inspection lost", case.name);
+        cases += 1;
+        inspected += inspection.lifecycle.len();
+    }
+    assert_eq!(cases, 21);
+    assert_eq!(inspected, 28);
+}
