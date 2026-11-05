@@ -491,3 +491,241 @@ fn shell_mask_reveal_persists_disclosure_without_editing_animation() {
     dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
     assert!(c.model.reveal.layers.values().all(|d| d.collapsed));
 }
+
+#[test]
+fn native_drag_steps_replace_from_start_and_commit_as_one_undo() {
+    let (_actor, mut c) = client();
+    let before = c.model.index.layer("a:[]").unwrap().from;
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["a:[]"]}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    let moved = c.model.index.layer("a:[]").unwrap().from;
+    // Every sample is total displacement, not a repeated relative increment.
+    assert!((moved - before - 2.).abs() < 1. / 30.);
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert_eq!(c.model.index.layer("a:[]").unwrap().from, before);
+}
+
+#[test]
+fn native_disposal_and_pointer_cancellation_restore_the_active_preview() {
+    for action in ["cancelDrag", "dispose"] {
+        let (_actor, mut c) = client();
+        let before = c.model.index.layer("b").unwrap().duration;
+        dispatch(
+            &mut c,
+            json!({"type":"beginDrag","kind":"trimOut","ids":["b"]}),
+        )
+        .unwrap();
+        dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+        assert_ne!(c.model.index.layer("b").unwrap().duration, before);
+        dispatch(&mut c, json!({"type":action})).unwrap();
+        assert_eq!(c.model.index.layer("b").unwrap().duration, before);
+        assert!(c.active_drag().is_none());
+    }
+}
+
+#[test]
+fn numeric_key_time_uses_composition_time_beyond_strip_and_refuses_collision() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"editKeys","ids":["original"],"time":8.,"value":42.}),
+    )
+    .unwrap();
+    let (l, _, k) = c.model.index.key("original").unwrap();
+    // main timeline.ts snaps the layer-local time, retaining a subframe strip origin.
+    assert_eq!(k.time, ((8.0_f64 + 0.125) * 30.).round() / 30.);
+    assert!(l.from + k.time > l.from + l.duration);
+    assert_eq!(k.value.as_f64(), Some(42.));
+    assert_eq!(
+        k.stored.get("custom").and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"a:[]","path":"opacity"}),
+    )
+    .unwrap();
+    let revision = c.model.index.revision;
+    assert!(
+        dispatch(
+            &mut c,
+            json!({"type":"editKeys","ids":["original"],"time":0.})
+        )
+        .is_err()
+    );
+    assert_eq!(c.model.index.revision, revision);
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(42.)
+    );
+}
+
+fn position_client() -> (KernelActor, TimelineClient) {
+    let value = parse(r#"{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{},"assets":{},"layers":[{"id":"p","type":"shape","name":"Position","collapsed":false,"from":0,"dur":10,"p":{"position.x":{"v":0,"kf":[{"i":"x","t":0.125,"v":1,"custom":"keep"}]},"position.y":{"v":0,"kf":[{"i":"y","t":0.125,"v":2},{"i":"subframe","t":0.125001,"v":3}]}}}]}"#).unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+
+#[test]
+fn separate_dimensions_is_undoable_and_groups_only_exact_legacy_key_times() {
+    let (_actor, mut c) = position_client();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    assert!(!c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"selectKeys","layer":"p","path":"position","ids":["x"]}),
+    )
+    .unwrap();
+    assert_eq!(c.model.selection.keys(), &["x", "y"]);
+    assert_eq!(c.model.index.key("subframe").unwrap().2.time, 0.125001);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("p").unwrap().separate_dimensions);
+    assert!(
+        c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position.x"))
+    );
+    assert!(
+        !c.model
+            .rows()
+            .iter()
+            .any(|r| matches!(&r.id,RowId::Property { channel,.. } if channel == "position"))
+    );
+}
+
+#[test]
+fn axis_diamond_changes_only_its_axis_and_group_diamond_completes_the_other_axis() {
+    let (_actor, mut c) = position_client();
+    dispatch(
+        &mut c,
+        json!({"type":"separateDimensions","layer":"p","separate":false}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position.x"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        2
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"keyToggle","layer":"p","path":"position"}),
+    )
+    .unwrap();
+    assert_eq!(
+        c.model.index.channel("p", "position.x").unwrap().keys.len(),
+        2
+    );
+    assert_eq!(
+        c.model.index.channel("p", "position.y").unwrap().keys.len(),
+        3
+    );
+}
+
+#[test]
+fn native_graph_drag_and_easing_keep_ids_and_opaque_metadata_through_undo() {
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"graphKeys","ids":["original"]}),
+    )
+    .unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"drag","timeDelta":1.,"valueDelta":3.}),
+    )
+    .unwrap();
+    dispatch(&mut c, json!({"type":"endDrag"})).unwrap();
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(13.)
+    );
+    dispatch(
+        &mut c,
+        json!({"type":"easing","ids":["original"],"curve":[0.25,0.1,0.25,1.]}),
+    )
+    .unwrap();
+    dispatch(&mut c,json!({"type":"interpolation","ids":["original"],"side":"both","interpolation":"continuous"})).unwrap();
+    assert_eq!(
+        c.model
+            .index
+            .key("original")
+            .unwrap()
+            .2
+            .stored
+            .get("custom")
+            .and_then(pm_model::Value::as_str),
+        Some("retained")
+    );
+    for _ in 0..3 {
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    }
+    assert_eq!(
+        c.model.index.key("original").unwrap().2.value.as_f64(),
+        Some(10.)
+    );
+    assert_eq!(c.model.index.key("original").unwrap().2.time, 0.125);
+}
+
+#[test]
+fn native_parent_pickwhip_uses_kernel_cycle_validation_and_undo() {
+    let (_actor, mut c) = client();
+    dispatch(&mut c, json!({"type":"parent","ids":["b"],"parent":"a:[]"})).unwrap();
+    assert_eq!(
+        c.model.index.layer("b").unwrap().parent.as_deref(),
+        Some("a:[]")
+    );
+    let revision = c.model.index.revision;
+    assert!(dispatch(&mut c, json!({"type":"parent","ids":["a:[]"],"parent":"b"})).is_err());
+    assert_eq!(c.model.index.revision, revision);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    assert!(c.model.index.layer("b").unwrap().parent.is_none());
+}
+
+#[test]
+fn malformed_native_actions_and_stale_decimal_stamps_make_no_edit_or_lease() {
+    let (_actor, mut c) = client();
+    let revision = c.model.index.revision;
+    for intent in [
+        json!({"type":"beginDrag","kind":"layers","ids":["b","b"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":[]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["missing"]}),
+        json!({"type":"beginDrag","kind":"layers","ids":["b"],"document":"9999999999999999999"}),
+        json!({"type":"editKeys","ids":["original"],"time":"bad"}),
+        json!({"type":"easing","ids":["original"],"curve":[1,2,3]}),
+        json!({"type":"selectKeys","layer":"b","path":"opacity","ids":["original"]}),
+    ] {
+        assert!(dispatch(&mut c, intent).is_err());
+    }
+    assert_eq!(c.model.index.revision, revision);
+    assert!(c.active_drag().is_none());
+}

@@ -53,6 +53,7 @@ pub struct Layer {
     pub group_collapsed: bool,
     pub preferred_track: usize,
     pub scale_linked: bool,
+    pub separate_dimensions: bool,
     pub effects: Vec<(String, String)>,
     pub masks: Vec<String>,
     pub definition: Option<String>,
@@ -248,6 +249,10 @@ impl TimelineIndex {
                     Some(NodeKind::Bool(false))
                 ),
                 scale_linked: boolean(layer.get("scaleLinked")),
+                separate_dimensions: !matches!(
+                    layer.get("separateDimensions").map(Node::kind),
+                    Some(NodeKind::Bool(false))
+                ),
                 effects,
                 masks,
                 definition: string(content.and_then(|d| d.get("definition"))),

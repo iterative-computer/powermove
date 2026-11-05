@@ -123,6 +123,9 @@ pub async fn dispatch(
     {
         return Err(Error::InvalidIntent("stale native surface"));
     }
+    if let Some(effects) = crate::v4_actions::dispatch(client, intent, context).await? {
+        return Ok(effects);
+    }
     let action = string(intent, "type")?;
     let mut persist = false;
     let plan = match action {
@@ -168,21 +171,32 @@ pub async fn dispatch(
                     .get("modifiers")
                     .ok_or(Error::InvalidIntent("modifiers"))?,
             )?;
-            let id = match row {
-                RowId::Layer(id) => id,
-                // Property/curve focus requires the native field/key hit, not a guessed layer click.
-                _ => return Err(Error::MissingHost("property selection/hit")),
-            };
-            let calls = if client.model.mode == TimelineMode::Tracks {
-                client.model.select_track_layer(&id, m)?.0
-            } else {
-                client.model.select_layer(&id, m)?
+            let calls = match row {
+                RowId::Layer(id) => {
+                    if client.model.mode == TimelineMode::Tracks {
+                        client.model.select_track_layer(&id, m)?.0
+                    } else {
+                        client.model.select_layer(&id, m)?
+                    }
+                }
+                RowId::Property { layer_id, channel } => {
+                    client.model.graph_focus = Some((layer_id.clone(), channel.clone()));
+                    vec![
+                        pm_kernel::SelectionCall::Layers {
+                            ids: vec![layer_id],
+                            add: m.command() || m.shift,
+                        }
+                        .into(),
+                        pm_kernel::SelectionCall::Channel(Some(channel)).into(),
+                    ]
+                }
             };
             Plan {
                 calls,
                 ..Plan::default()
             }
         }
+
         "disclosure" => {
             let id = layer_row(intent)?;
             let open = boolean(intent, "open")?;
