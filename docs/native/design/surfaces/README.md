@@ -1,12 +1,32 @@
 # Surface specs — dialogs, alerts, recovery and secondary windows
 
-Status: **build specs** for the P0 and P1 rows of
-[surfaces.md](../../surfaces.md) that carried `DESIGN-TODO(opus)`. Owner:
+Status: **build specs** for the rows of [surfaces.md](../../surfaces.md) that
+carried `DESIGN-TODO(opus)`: P0 and P1 (first table), P2, P3 and the native-only
+rows (second table). Owner:
 design lead, 2026-11-01. Same contract as [panels/README.md](../panels/README.md):
 a lane builds from the spec **without making design decisions**; if the spec
 is silent it writes `DESIGN-TODO(opus): <question>` and stops. Token short
 forms (`c.`, `m.`, `t.`, `mo.`) and copy conventions (`…`, `“ ”`, `{name}`)
 are those of panels/README §1.
+
+| File | Family | Rows |
+|---|---|---|
+| [agent-auth.md](agent-auth.md) | Agent surfaces, providers, runtime, sign-in, account | S057 S059 S060 S062–S066 S070–S072 S083–S086 |
+| [store.md](store.md) | Store window, Library, extension management, updates, publishing, sandbox check | S073 S075–S082 |
+| [captions.md](captions.md) | Captions panel, inspector, timeline, generation, speech models, import/export | S087–S093 |
+| [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
+| [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
+| [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; shipped 3D layers, inspector and viewer controls | S097 S098 |
+| [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
+| [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
+| [onboarding.md](onboarding.md) | Welcome window, timeline, agent, speech model, Bring My Workspace | S107–S110 |
+| [updates.md](updates.md) | App updates, What's New, About | S111–S113 |
+| [diagnostics.md](diagnostics.md) | Performance panel | S115 |
+| [os-authorization.md](os-authorization.md) | Notifications, OS permission outcomes, usage strings | S114 N007 |
+| [migration.md](migration.md) | Native first-launch gate, Keychain consent, outcomes and report | N001–N003 |
+| [colour.md](colour.md) | Project colour and validation, scopes, LUTs, HDR presentation | S068 N004 |
+| [tasks-storage.md](tasks-storage.md) | Background Tasks states, renditions, Keep Rendered, Settings ▸ Storage | N005 |
+| [pro-edit.md](pro-edit.md) | Shuttle, edit tools, linked A/V, source monitor marks and edits | N006 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
@@ -81,3 +101,55 @@ Error alerts take their message and informative text from the
 The last row's informative text is amended here to
 `Try again. If it keeps happening, choose Window ▸ Error Log for details.`
 (the shipped app has no Help menu entry for reporting).
+
+## 5. Baseline for the P2, P3 and native-only families
+
+The family files state only what differs from this baseline. A state a family
+does not mention is the panels/README §3 default, not an open question.
+
+| Topic | Rule |
+|---|---|
+| Light and dark | Tokens only, so both schemes come from the same spec. Anything drawn over footage or artwork uses dark-scheme tokens in light mode too (language §4). |
+| Increase Contrast | `m.border` 2; panels and cards draw their edge; selected rows gain an `m.border` `c.separator` outline; data marks (meters, curves, scope graticules) gain a `c.separator` keyline. |
+| Reduce Transparency | Glass frames turn solid through `Tokens::material`. No panel content changes. |
+| Reduce Motion | Springs and scale become the `mo.reduced` cross-fade. Live data (meters, scopes, progress) keeps moving because it is content. |
+| Focus | Full Keyboard Access reaches every control in reading order. AppKit controls use the system ring; GPUI controls draw `c.focus`. Esc cancels the innermost transient. |
+| Loading | Nothing for 0.5 s, then the panels/README Loading state. |
+| Disabled | panels/README Disabled state. A control unavailable for a reason shows that reason as its tooltip. |
+| VoiceOver | panels/README §7: visible text is the label, values read with units, status lines are polite live regions, errors post `.high`. |
+| Window-level panels | A dockable panel takes the panels/README §2 card, header and dock menu. Its id and default dock are the v1.2.0 ones. |
+| Errors | README §4 error copy. Developer text goes to the Error Log (S053). |
+
+
+## 6. Owner questions raised by these specs
+
+The specs below hold a default so a lane is never blocked, except where a row
+says *do not build*. Reverse a default here and in the owning family file.
+
+| # | Question | Default in the spec | Owning row |
+|---|---|---|---|
+| 1 | The region-selection overlay exists in v1.2.0 code but nothing opens it. Ship it, or retire the row? | Specified, **do not build** until decided | S066 |
+| 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | Archive is kept, copy says so, no restore UI | S060, S095, S103 |
+| 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | Keep automatic registration, and make it visible and reversible in Settings | S070 |
+| 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | The shipped surfaces are specified so old projects stay editable; the new system is not designed here | S098 |
+| 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | Inside the window; the overlay is not ported | S107 |
+| 6 | Reverse migration isn't built. What do beta users get promised about going back? | Original app stays untouched; work done in Native leaves only as `.pmv` files | N003 |
+
+**Answered by the owner, 2026-11-04** (see p0-decisions.md; these override the defaults above): Q2 no restore UI. Q3 ask first, no silent registration. Q4 the new 3D system ships with the rewrite and replaces the old controls. Q5 inside the window. Q6 the old app refuses a native file it can't read. Q1 is still open.
+
+## 7. New tokens requested by these specs
+
+Added by the pm-design lane through tokens.md *How to change a token*. A lane blocks
+on the token; it does not substitute a literal.
+
+| Token | Value | Spec |
+|---|---|---|
+| `metrics.channel_strip` | 72 | [mixer-3d.md](mixer-3d.md) |
+| `metrics.fader_knob` | 14 | [mixer-3d.md](mixer-3d.md) |
+| `metrics.welcome_width` | 900 | [onboarding.md](onboarding.md) |
+| `metrics.welcome_height` | 640 | [onboarding.md](onboarding.md) |
+| `colors.scope_red` | `#FF6B62` | [colour.md](colour.md) |
+| `colors.scope_green` | `#4FD58A` | [colour.md](colour.md) |
+| `colors.scope_blue` | `#6BA6FF` | [colour.md](colour.md) |
+| `metrics.mark_bracket` | 6 | [pro-edit.md](pro-edit.md) |
+| `metrics.sync_badge` | 16 | [pro-edit.md](pro-edit.md) |
