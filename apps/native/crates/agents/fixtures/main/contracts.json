@@ -1,0 +1,6008 @@
+{
+  "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "synthetic": true,
+  "sources": [
+    {
+      "file": "apps/desktop/src/main/claude/adapter.ts",
+      "sha256": "94936dbfe6790fd48d7d25cd5edffaadb1da267c12a1b3bec5fccbb35df375b3"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-testing.ts",
+      "sha256": "5c4b96c7d944f3952623e497ebacd7544bec57bbaced5367104b801b65d4d767"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-models.ts",
+      "sha256": "891f5e1d10aab98199cd9c51145ccf65c4f9c5a3be4b39d405020dc69f4ea58e"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/core/memory.ts",
+      "sha256": "f8af5ce132862fb2b7b25cee4f833a97c42626b2df62c0dad3290adfc69f894e"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/core/types/project.ts",
+      "sha256": "b63348d52558889812616d69993a6ed4597b14413cf145fba1383eecd11b56f6"
+    },
+    {
+      "file": "apps/desktop/src/shared/compatible-provider.ts",
+      "sha256": "aa718450dfc13c9828b5578805beace6a77eaf3c42dfb77a33f4622a0b3f57ba"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/work-groups.ts",
+      "sha256": "556c470bca61164e861266da4f0992565814a670cdcdb5d589195fe5cf77d4fd"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/markdown.ts",
+      "sha256": "2d4adf66ca163f690413dfa35788843c296d7997b0bebc13ca1956c1d83d0097"
+    },
+    {
+      "file": "apps/desktop/src/shared/agent-media.ts",
+      "sha256": "81857c2f6213eb4214c843f66cb455b75406e21e9115ff17641678f595c26a39"
+    },
+    {
+      "file": "apps/desktop/src/renderer/src/panels/agent/markdown.test.ts",
+      "sha256": "f9609b8db8b2e0667bbe441190dde111083450612b3e089af6ddba06d9cea6ef"
+    },
+    {
+      "file": "apps/desktop/src/shared/visual-reply.ts",
+      "sha256": "7b0b4588ee04e162bfc532f78ed4a5c11ab02a7745a764f73d816093db827496"
+    },
+    {
+      "file": "apps/desktop/src/main/agent-clients.ts",
+      "sha256": "ff694d33ce3be4e4aef44e37a9840556c0c5d9e3064b90677bc49cea61ce604f"
+    }
+  ],
+  "captureSha256": "fef6f46340cd83a194a6ed5fb9b668c30cd68390d963814e93a2143ffa3a0ac1",
+  "memory": [
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [],
+        "operation": {
+          "operation": "add",
+          "kind": "goal",
+          "text": " Original goal ",
+          "why": " Because intent ",
+          "resolved": true
+        },
+        "now": 1,
+        "uid": "mem-1",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Original goal",
+            "why": "Because intent",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 1,
+            "resolved": true
+          }
+        ],
+        "entry": {
+          "id": "mem-1",
+          "kind": "goal",
+          "text": "Original goal",
+          "why": "Because intent",
+          "author": "agent",
+          "createdAt": 1,
+          "updatedAt": 1,
+          "resolved": true
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Original goal",
+            "why": "Because intent",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 1,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "goal",
+          "text": "Revised goal",
+          "resolved": false
+        },
+        "now": 2,
+        "uid": "mem-2",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          }
+        ],
+        "entry": {
+          "id": "mem-1",
+          "kind": "goal",
+          "text": "Revised goal",
+          "author": "agent",
+          "createdAt": 1,
+          "updatedAt": 2,
+          "why": "Because intent",
+          "resolved": true
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "constraint",
+          "text": "Keep original footage"
+        },
+        "now": 3,
+        "uid": "mem-3",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          }
+        ],
+        "entry": {
+          "id": "mem-3",
+          "kind": "constraint",
+          "text": "Keep original footage",
+          "author": "agent",
+          "createdAt": 3,
+          "updatedAt": 3
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "decision",
+          "text": "Use authored timing",
+          "why": "Review approval"
+        },
+        "now": 4,
+        "uid": "mem-4",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          }
+        ],
+        "entry": {
+          "id": "mem-4",
+          "kind": "decision",
+          "text": "Use authored timing",
+          "why": "Review approval",
+          "author": "agent",
+          "createdAt": 4,
+          "updatedAt": 4
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "open",
+          "text": "Check audio"
+        },
+        "now": 5,
+        "uid": "mem-5",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 5
+          }
+        ],
+        "entry": {
+          "id": "mem-5",
+          "kind": "open",
+          "text": "Check audio",
+          "author": "agent",
+          "createdAt": 5,
+          "updatedAt": 5
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 5
+          }
+        ],
+        "operation": {
+          "operation": "update",
+          "id": "mem-5",
+          "resolved": true,
+          "why": ""
+        },
+        "now": 6,
+        "uid": "mem-6",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "entry": {
+          "id": "mem-5",
+          "kind": "open",
+          "text": "Check audio",
+          "author": "agent",
+          "createdAt": 5,
+          "updatedAt": 6,
+          "resolved": true
+        }
+      }
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "update",
+          "id": "mem-3",
+          "kind": "goal"
+        },
+        "now": 7,
+        "uid": "mem-7",
+        "author": "agent"
+      },
+      "error": "The project already has a goal. Update that entry instead."
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "remove",
+          "id": "missing"
+        },
+        "now": 8,
+        "uid": "mem-8",
+        "author": "agent"
+      },
+      "error": "No memory entry missing. Use project_memory list to see the ids."
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "bad",
+          "text": "Refuse"
+        },
+        "now": 9,
+        "uid": "mem-9",
+        "author": "agent"
+      },
+      "error": "kind must be one of goal, constraint, decision, rejected, feedback, open."
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "feedback",
+          "text": "   "
+        },
+        "now": 10,
+        "uid": "mem-10",
+        "author": "agent"
+      },
+      "error": "Memory text cannot be empty."
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-4",
+            "kind": "decision",
+            "text": "Use authored timing",
+            "why": "Review approval",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "operation": {
+          "operation": "remove",
+          "id": "mem-4"
+        },
+        "now": 11,
+        "uid": "mem-11",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "entry": null
+      }
+    },
+    {
+      "input": {
+        "kind": "sanitize",
+        "entries": null,
+        "now": 100,
+        "filter": {
+          "kind": "constraint",
+          "limit": 2
+        }
+      },
+      "output": []
+    },
+    {
+      "input": {
+        "kind": "sanitize",
+        "entries": [
+          null,
+          {
+            "id": "a",
+            "kind": "goal",
+            "text": " Keep ",
+            "extra": "retained by native archive"
+          },
+          {
+            "id": "a",
+            "kind": "goal",
+            "text": "duplicate"
+          },
+          {
+            "id": "bad",
+            "kind": "unknown",
+            "text": "opaque"
+          },
+          {
+            "id": "empty",
+            "kind": "decision",
+            "text": " "
+          }
+        ],
+        "now": 100,
+        "filter": {
+          "kind": "constraint",
+          "limit": 2
+        }
+      },
+      "output": [
+        {
+          "id": "a",
+          "kind": "goal",
+          "text": "Keep",
+          "author": "agent",
+          "createdAt": 100,
+          "updatedAt": 100
+        }
+      ]
+    },
+    {
+      "input": {
+        "kind": "index",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "now": 100,
+        "filter": {
+          "kind": "constraint",
+          "limit": 2
+        }
+      },
+      "output": {
+        "total": 3,
+        "goal": {
+          "id": "mem-1",
+          "kind": "goal",
+          "text": "Revised goal",
+          "author": "agent",
+          "createdAt": 1,
+          "updatedAt": 2,
+          "why": "Because intent",
+          "resolved": true
+        },
+        "constraints": [
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          }
+        ],
+        "open": [],
+        "recent": []
+      }
+    },
+    {
+      "input": {
+        "kind": "list",
+        "entries": [
+          {
+            "id": "mem-1",
+            "kind": "goal",
+            "text": "Revised goal",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "why": "Because intent",
+            "resolved": true
+          },
+          {
+            "id": "mem-3",
+            "kind": "constraint",
+            "text": "Keep original footage",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "mem-5",
+            "kind": "open",
+            "text": "Check audio",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 6,
+            "resolved": true
+          }
+        ],
+        "now": 100,
+        "filter": {
+          "kind": "constraint",
+          "limit": 2
+        }
+      },
+      "output": [
+        {
+          "id": "mem-3",
+          "kind": "constraint",
+          "text": "Keep original footage",
+          "author": "agent",
+          "createdAt": 3,
+          "updatedAt": 3
+        }
+      ]
+    },
+    {
+      "input": {
+        "kind": "apply",
+        "entries": [
+          {
+            "id": "c0",
+            "kind": "goal",
+            "text": "entry0",
+            "author": "agent",
+            "createdAt": 0,
+            "updatedAt": 0
+          },
+          {
+            "id": "c1",
+            "kind": "decision",
+            "text": "entry1",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 1
+          },
+          {
+            "id": "c2",
+            "kind": "decision",
+            "text": "entry2",
+            "author": "agent",
+            "createdAt": 2,
+            "updatedAt": 2
+          },
+          {
+            "id": "c3",
+            "kind": "decision",
+            "text": "entry3",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "c4",
+            "kind": "decision",
+            "text": "entry4",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "c5",
+            "kind": "decision",
+            "text": "entry5",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 5
+          },
+          {
+            "id": "c6",
+            "kind": "decision",
+            "text": "entry6",
+            "author": "agent",
+            "createdAt": 6,
+            "updatedAt": 6
+          },
+          {
+            "id": "c7",
+            "kind": "decision",
+            "text": "entry7",
+            "author": "agent",
+            "createdAt": 7,
+            "updatedAt": 7
+          },
+          {
+            "id": "c8",
+            "kind": "decision",
+            "text": "entry8",
+            "author": "agent",
+            "createdAt": 8,
+            "updatedAt": 8
+          },
+          {
+            "id": "c9",
+            "kind": "decision",
+            "text": "entry9",
+            "author": "agent",
+            "createdAt": 9,
+            "updatedAt": 9
+          },
+          {
+            "id": "c10",
+            "kind": "decision",
+            "text": "entry10",
+            "author": "agent",
+            "createdAt": 10,
+            "updatedAt": 10,
+            "resolved": true
+          },
+          {
+            "id": "c11",
+            "kind": "decision",
+            "text": "entry11",
+            "author": "agent",
+            "createdAt": 11,
+            "updatedAt": 11
+          },
+          {
+            "id": "c12",
+            "kind": "decision",
+            "text": "entry12",
+            "author": "agent",
+            "createdAt": 12,
+            "updatedAt": 12
+          },
+          {
+            "id": "c13",
+            "kind": "decision",
+            "text": "entry13",
+            "author": "agent",
+            "createdAt": 13,
+            "updatedAt": 13
+          },
+          {
+            "id": "c14",
+            "kind": "decision",
+            "text": "entry14",
+            "author": "agent",
+            "createdAt": 14,
+            "updatedAt": 14
+          },
+          {
+            "id": "c15",
+            "kind": "decision",
+            "text": "entry15",
+            "author": "agent",
+            "createdAt": 15,
+            "updatedAt": 15
+          },
+          {
+            "id": "c16",
+            "kind": "decision",
+            "text": "entry16",
+            "author": "agent",
+            "createdAt": 16,
+            "updatedAt": 16
+          },
+          {
+            "id": "c17",
+            "kind": "decision",
+            "text": "entry17",
+            "author": "agent",
+            "createdAt": 17,
+            "updatedAt": 17
+          },
+          {
+            "id": "c18",
+            "kind": "decision",
+            "text": "entry18",
+            "author": "agent",
+            "createdAt": 18,
+            "updatedAt": 18
+          },
+          {
+            "id": "c19",
+            "kind": "decision",
+            "text": "entry19",
+            "author": "agent",
+            "createdAt": 19,
+            "updatedAt": 19
+          },
+          {
+            "id": "c20",
+            "kind": "decision",
+            "text": "entry20",
+            "author": "agent",
+            "createdAt": 20,
+            "updatedAt": 20
+          },
+          {
+            "id": "c21",
+            "kind": "decision",
+            "text": "entry21",
+            "author": "agent",
+            "createdAt": 21,
+            "updatedAt": 21
+          },
+          {
+            "id": "c22",
+            "kind": "decision",
+            "text": "entry22",
+            "author": "agent",
+            "createdAt": 22,
+            "updatedAt": 22
+          },
+          {
+            "id": "c23",
+            "kind": "decision",
+            "text": "entry23",
+            "author": "agent",
+            "createdAt": 23,
+            "updatedAt": 23
+          },
+          {
+            "id": "c24",
+            "kind": "decision",
+            "text": "entry24",
+            "author": "agent",
+            "createdAt": 24,
+            "updatedAt": 24
+          },
+          {
+            "id": "c25",
+            "kind": "decision",
+            "text": "entry25",
+            "author": "agent",
+            "createdAt": 25,
+            "updatedAt": 25
+          },
+          {
+            "id": "c26",
+            "kind": "decision",
+            "text": "entry26",
+            "author": "agent",
+            "createdAt": 26,
+            "updatedAt": 26
+          },
+          {
+            "id": "c27",
+            "kind": "decision",
+            "text": "entry27",
+            "author": "agent",
+            "createdAt": 27,
+            "updatedAt": 27
+          },
+          {
+            "id": "c28",
+            "kind": "decision",
+            "text": "entry28",
+            "author": "agent",
+            "createdAt": 28,
+            "updatedAt": 28
+          },
+          {
+            "id": "c29",
+            "kind": "decision",
+            "text": "entry29",
+            "author": "agent",
+            "createdAt": 29,
+            "updatedAt": 29
+          },
+          {
+            "id": "c30",
+            "kind": "decision",
+            "text": "entry30",
+            "author": "agent",
+            "createdAt": 30,
+            "updatedAt": 30
+          },
+          {
+            "id": "c31",
+            "kind": "decision",
+            "text": "entry31",
+            "author": "agent",
+            "createdAt": 31,
+            "updatedAt": 31
+          },
+          {
+            "id": "c32",
+            "kind": "decision",
+            "text": "entry32",
+            "author": "agent",
+            "createdAt": 32,
+            "updatedAt": 32
+          },
+          {
+            "id": "c33",
+            "kind": "decision",
+            "text": "entry33",
+            "author": "agent",
+            "createdAt": 33,
+            "updatedAt": 33
+          },
+          {
+            "id": "c34",
+            "kind": "decision",
+            "text": "entry34",
+            "author": "agent",
+            "createdAt": 34,
+            "updatedAt": 34
+          },
+          {
+            "id": "c35",
+            "kind": "decision",
+            "text": "entry35",
+            "author": "agent",
+            "createdAt": 35,
+            "updatedAt": 35
+          },
+          {
+            "id": "c36",
+            "kind": "decision",
+            "text": "entry36",
+            "author": "agent",
+            "createdAt": 36,
+            "updatedAt": 36
+          },
+          {
+            "id": "c37",
+            "kind": "decision",
+            "text": "entry37",
+            "author": "agent",
+            "createdAt": 37,
+            "updatedAt": 37
+          },
+          {
+            "id": "c38",
+            "kind": "decision",
+            "text": "entry38",
+            "author": "agent",
+            "createdAt": 38,
+            "updatedAt": 38
+          },
+          {
+            "id": "c39",
+            "kind": "decision",
+            "text": "entry39",
+            "author": "agent",
+            "createdAt": 39,
+            "updatedAt": 39
+          },
+          {
+            "id": "c40",
+            "kind": "decision",
+            "text": "entry40",
+            "author": "agent",
+            "createdAt": 40,
+            "updatedAt": 40
+          },
+          {
+            "id": "c41",
+            "kind": "decision",
+            "text": "entry41",
+            "author": "agent",
+            "createdAt": 41,
+            "updatedAt": 41
+          },
+          {
+            "id": "c42",
+            "kind": "decision",
+            "text": "entry42",
+            "author": "agent",
+            "createdAt": 42,
+            "updatedAt": 42
+          },
+          {
+            "id": "c43",
+            "kind": "decision",
+            "text": "entry43",
+            "author": "agent",
+            "createdAt": 43,
+            "updatedAt": 43
+          },
+          {
+            "id": "c44",
+            "kind": "decision",
+            "text": "entry44",
+            "author": "agent",
+            "createdAt": 44,
+            "updatedAt": 44
+          },
+          {
+            "id": "c45",
+            "kind": "decision",
+            "text": "entry45",
+            "author": "agent",
+            "createdAt": 45,
+            "updatedAt": 45
+          },
+          {
+            "id": "c46",
+            "kind": "decision",
+            "text": "entry46",
+            "author": "agent",
+            "createdAt": 46,
+            "updatedAt": 46
+          },
+          {
+            "id": "c47",
+            "kind": "decision",
+            "text": "entry47",
+            "author": "agent",
+            "createdAt": 47,
+            "updatedAt": 47
+          },
+          {
+            "id": "c48",
+            "kind": "decision",
+            "text": "entry48",
+            "author": "agent",
+            "createdAt": 48,
+            "updatedAt": 48
+          },
+          {
+            "id": "c49",
+            "kind": "decision",
+            "text": "entry49",
+            "author": "agent",
+            "createdAt": 49,
+            "updatedAt": 49
+          },
+          {
+            "id": "c50",
+            "kind": "decision",
+            "text": "entry50",
+            "author": "agent",
+            "createdAt": 50,
+            "updatedAt": 50
+          },
+          {
+            "id": "c51",
+            "kind": "decision",
+            "text": "entry51",
+            "author": "agent",
+            "createdAt": 51,
+            "updatedAt": 51
+          },
+          {
+            "id": "c52",
+            "kind": "decision",
+            "text": "entry52",
+            "author": "agent",
+            "createdAt": 52,
+            "updatedAt": 52
+          },
+          {
+            "id": "c53",
+            "kind": "decision",
+            "text": "entry53",
+            "author": "agent",
+            "createdAt": 53,
+            "updatedAt": 53
+          },
+          {
+            "id": "c54",
+            "kind": "decision",
+            "text": "entry54",
+            "author": "agent",
+            "createdAt": 54,
+            "updatedAt": 54
+          },
+          {
+            "id": "c55",
+            "kind": "decision",
+            "text": "entry55",
+            "author": "agent",
+            "createdAt": 55,
+            "updatedAt": 55
+          },
+          {
+            "id": "c56",
+            "kind": "decision",
+            "text": "entry56",
+            "author": "agent",
+            "createdAt": 56,
+            "updatedAt": 56
+          },
+          {
+            "id": "c57",
+            "kind": "decision",
+            "text": "entry57",
+            "author": "agent",
+            "createdAt": 57,
+            "updatedAt": 57
+          },
+          {
+            "id": "c58",
+            "kind": "decision",
+            "text": "entry58",
+            "author": "agent",
+            "createdAt": 58,
+            "updatedAt": 58
+          },
+          {
+            "id": "c59",
+            "kind": "decision",
+            "text": "entry59",
+            "author": "agent",
+            "createdAt": 59,
+            "updatedAt": 59
+          },
+          {
+            "id": "c60",
+            "kind": "decision",
+            "text": "entry60",
+            "author": "agent",
+            "createdAt": 60,
+            "updatedAt": 60
+          },
+          {
+            "id": "c61",
+            "kind": "decision",
+            "text": "entry61",
+            "author": "agent",
+            "createdAt": 61,
+            "updatedAt": 61
+          },
+          {
+            "id": "c62",
+            "kind": "decision",
+            "text": "entry62",
+            "author": "agent",
+            "createdAt": 62,
+            "updatedAt": 62
+          },
+          {
+            "id": "c63",
+            "kind": "decision",
+            "text": "entry63",
+            "author": "agent",
+            "createdAt": 63,
+            "updatedAt": 63
+          },
+          {
+            "id": "c64",
+            "kind": "decision",
+            "text": "entry64",
+            "author": "agent",
+            "createdAt": 64,
+            "updatedAt": 64
+          },
+          {
+            "id": "c65",
+            "kind": "decision",
+            "text": "entry65",
+            "author": "agent",
+            "createdAt": 65,
+            "updatedAt": 65
+          },
+          {
+            "id": "c66",
+            "kind": "decision",
+            "text": "entry66",
+            "author": "agent",
+            "createdAt": 66,
+            "updatedAt": 66
+          },
+          {
+            "id": "c67",
+            "kind": "decision",
+            "text": "entry67",
+            "author": "agent",
+            "createdAt": 67,
+            "updatedAt": 67
+          },
+          {
+            "id": "c68",
+            "kind": "decision",
+            "text": "entry68",
+            "author": "agent",
+            "createdAt": 68,
+            "updatedAt": 68
+          },
+          {
+            "id": "c69",
+            "kind": "decision",
+            "text": "entry69",
+            "author": "agent",
+            "createdAt": 69,
+            "updatedAt": 69
+          },
+          {
+            "id": "c70",
+            "kind": "decision",
+            "text": "entry70",
+            "author": "agent",
+            "createdAt": 70,
+            "updatedAt": 70
+          },
+          {
+            "id": "c71",
+            "kind": "decision",
+            "text": "entry71",
+            "author": "agent",
+            "createdAt": 71,
+            "updatedAt": 71
+          },
+          {
+            "id": "c72",
+            "kind": "decision",
+            "text": "entry72",
+            "author": "agent",
+            "createdAt": 72,
+            "updatedAt": 72
+          },
+          {
+            "id": "c73",
+            "kind": "decision",
+            "text": "entry73",
+            "author": "agent",
+            "createdAt": 73,
+            "updatedAt": 73
+          },
+          {
+            "id": "c74",
+            "kind": "decision",
+            "text": "entry74",
+            "author": "agent",
+            "createdAt": 74,
+            "updatedAt": 74
+          },
+          {
+            "id": "c75",
+            "kind": "decision",
+            "text": "entry75",
+            "author": "agent",
+            "createdAt": 75,
+            "updatedAt": 75
+          },
+          {
+            "id": "c76",
+            "kind": "decision",
+            "text": "entry76",
+            "author": "agent",
+            "createdAt": 76,
+            "updatedAt": 76
+          },
+          {
+            "id": "c77",
+            "kind": "decision",
+            "text": "entry77",
+            "author": "agent",
+            "createdAt": 77,
+            "updatedAt": 77
+          },
+          {
+            "id": "c78",
+            "kind": "decision",
+            "text": "entry78",
+            "author": "agent",
+            "createdAt": 78,
+            "updatedAt": 78
+          },
+          {
+            "id": "c79",
+            "kind": "decision",
+            "text": "entry79",
+            "author": "agent",
+            "createdAt": 79,
+            "updatedAt": 79
+          },
+          {
+            "id": "c80",
+            "kind": "decision",
+            "text": "entry80",
+            "author": "agent",
+            "createdAt": 80,
+            "updatedAt": 80
+          },
+          {
+            "id": "c81",
+            "kind": "decision",
+            "text": "entry81",
+            "author": "agent",
+            "createdAt": 81,
+            "updatedAt": 81
+          },
+          {
+            "id": "c82",
+            "kind": "decision",
+            "text": "entry82",
+            "author": "agent",
+            "createdAt": 82,
+            "updatedAt": 82
+          },
+          {
+            "id": "c83",
+            "kind": "decision",
+            "text": "entry83",
+            "author": "agent",
+            "createdAt": 83,
+            "updatedAt": 83
+          },
+          {
+            "id": "c84",
+            "kind": "decision",
+            "text": "entry84",
+            "author": "agent",
+            "createdAt": 84,
+            "updatedAt": 84
+          },
+          {
+            "id": "c85",
+            "kind": "decision",
+            "text": "entry85",
+            "author": "agent",
+            "createdAt": 85,
+            "updatedAt": 85
+          },
+          {
+            "id": "c86",
+            "kind": "decision",
+            "text": "entry86",
+            "author": "agent",
+            "createdAt": 86,
+            "updatedAt": 86
+          },
+          {
+            "id": "c87",
+            "kind": "decision",
+            "text": "entry87",
+            "author": "agent",
+            "createdAt": 87,
+            "updatedAt": 87
+          },
+          {
+            "id": "c88",
+            "kind": "decision",
+            "text": "entry88",
+            "author": "agent",
+            "createdAt": 88,
+            "updatedAt": 88
+          },
+          {
+            "id": "c89",
+            "kind": "decision",
+            "text": "entry89",
+            "author": "agent",
+            "createdAt": 89,
+            "updatedAt": 89
+          },
+          {
+            "id": "c90",
+            "kind": "decision",
+            "text": "entry90",
+            "author": "agent",
+            "createdAt": 90,
+            "updatedAt": 90
+          },
+          {
+            "id": "c91",
+            "kind": "decision",
+            "text": "entry91",
+            "author": "agent",
+            "createdAt": 91,
+            "updatedAt": 91
+          },
+          {
+            "id": "c92",
+            "kind": "decision",
+            "text": "entry92",
+            "author": "agent",
+            "createdAt": 92,
+            "updatedAt": 92
+          },
+          {
+            "id": "c93",
+            "kind": "decision",
+            "text": "entry93",
+            "author": "agent",
+            "createdAt": 93,
+            "updatedAt": 93
+          },
+          {
+            "id": "c94",
+            "kind": "decision",
+            "text": "entry94",
+            "author": "agent",
+            "createdAt": 94,
+            "updatedAt": 94
+          },
+          {
+            "id": "c95",
+            "kind": "decision",
+            "text": "entry95",
+            "author": "agent",
+            "createdAt": 95,
+            "updatedAt": 95
+          },
+          {
+            "id": "c96",
+            "kind": "decision",
+            "text": "entry96",
+            "author": "agent",
+            "createdAt": 96,
+            "updatedAt": 96
+          },
+          {
+            "id": "c97",
+            "kind": "decision",
+            "text": "entry97",
+            "author": "agent",
+            "createdAt": 97,
+            "updatedAt": 97
+          },
+          {
+            "id": "c98",
+            "kind": "decision",
+            "text": "entry98",
+            "author": "agent",
+            "createdAt": 98,
+            "updatedAt": 98
+          },
+          {
+            "id": "c99",
+            "kind": "decision",
+            "text": "entry99",
+            "author": "agent",
+            "createdAt": 99,
+            "updatedAt": 99
+          }
+        ],
+        "operation": {
+          "operation": "add",
+          "kind": "feedback",
+          "text": "new feedback"
+        },
+        "now": 101,
+        "uid": "new",
+        "author": "agent"
+      },
+      "output": {
+        "entries": [
+          {
+            "id": "c0",
+            "kind": "goal",
+            "text": "entry0",
+            "author": "agent",
+            "createdAt": 0,
+            "updatedAt": 0
+          },
+          {
+            "id": "c1",
+            "kind": "decision",
+            "text": "entry1",
+            "author": "agent",
+            "createdAt": 1,
+            "updatedAt": 1
+          },
+          {
+            "id": "c2",
+            "kind": "decision",
+            "text": "entry2",
+            "author": "agent",
+            "createdAt": 2,
+            "updatedAt": 2
+          },
+          {
+            "id": "c3",
+            "kind": "decision",
+            "text": "entry3",
+            "author": "agent",
+            "createdAt": 3,
+            "updatedAt": 3
+          },
+          {
+            "id": "c4",
+            "kind": "decision",
+            "text": "entry4",
+            "author": "agent",
+            "createdAt": 4,
+            "updatedAt": 4
+          },
+          {
+            "id": "c5",
+            "kind": "decision",
+            "text": "entry5",
+            "author": "agent",
+            "createdAt": 5,
+            "updatedAt": 5
+          },
+          {
+            "id": "c6",
+            "kind": "decision",
+            "text": "entry6",
+            "author": "agent",
+            "createdAt": 6,
+            "updatedAt": 6
+          },
+          {
+            "id": "c7",
+            "kind": "decision",
+            "text": "entry7",
+            "author": "agent",
+            "createdAt": 7,
+            "updatedAt": 7
+          },
+          {
+            "id": "c8",
+            "kind": "decision",
+            "text": "entry8",
+            "author": "agent",
+            "createdAt": 8,
+            "updatedAt": 8
+          },
+          {
+            "id": "c9",
+            "kind": "decision",
+            "text": "entry9",
+            "author": "agent",
+            "createdAt": 9,
+            "updatedAt": 9
+          },
+          {
+            "id": "c11",
+            "kind": "decision",
+            "text": "entry11",
+            "author": "agent",
+            "createdAt": 11,
+            "updatedAt": 11
+          },
+          {
+            "id": "c12",
+            "kind": "decision",
+            "text": "entry12",
+            "author": "agent",
+            "createdAt": 12,
+            "updatedAt": 12
+          },
+          {
+            "id": "c13",
+            "kind": "decision",
+            "text": "entry13",
+            "author": "agent",
+            "createdAt": 13,
+            "updatedAt": 13
+          },
+          {
+            "id": "c14",
+            "kind": "decision",
+            "text": "entry14",
+            "author": "agent",
+            "createdAt": 14,
+            "updatedAt": 14
+          },
+          {
+            "id": "c15",
+            "kind": "decision",
+            "text": "entry15",
+            "author": "agent",
+            "createdAt": 15,
+            "updatedAt": 15
+          },
+          {
+            "id": "c16",
+            "kind": "decision",
+            "text": "entry16",
+            "author": "agent",
+            "createdAt": 16,
+            "updatedAt": 16
+          },
+          {
+            "id": "c17",
+            "kind": "decision",
+            "text": "entry17",
+            "author": "agent",
+            "createdAt": 17,
+            "updatedAt": 17
+          },
+          {
+            "id": "c18",
+            "kind": "decision",
+            "text": "entry18",
+            "author": "agent",
+            "createdAt": 18,
+            "updatedAt": 18
+          },
+          {
+            "id": "c19",
+            "kind": "decision",
+            "text": "entry19",
+            "author": "agent",
+            "createdAt": 19,
+            "updatedAt": 19
+          },
+          {
+            "id": "c20",
+            "kind": "decision",
+            "text": "entry20",
+            "author": "agent",
+            "createdAt": 20,
+            "updatedAt": 20
+          },
+          {
+            "id": "c21",
+            "kind": "decision",
+            "text": "entry21",
+            "author": "agent",
+            "createdAt": 21,
+            "updatedAt": 21
+          },
+          {
+            "id": "c22",
+            "kind": "decision",
+            "text": "entry22",
+            "author": "agent",
+            "createdAt": 22,
+            "updatedAt": 22
+          },
+          {
+            "id": "c23",
+            "kind": "decision",
+            "text": "entry23",
+            "author": "agent",
+            "createdAt": 23,
+            "updatedAt": 23
+          },
+          {
+            "id": "c24",
+            "kind": "decision",
+            "text": "entry24",
+            "author": "agent",
+            "createdAt": 24,
+            "updatedAt": 24
+          },
+          {
+            "id": "c25",
+            "kind": "decision",
+            "text": "entry25",
+            "author": "agent",
+            "createdAt": 25,
+            "updatedAt": 25
+          },
+          {
+            "id": "c26",
+            "kind": "decision",
+            "text": "entry26",
+            "author": "agent",
+            "createdAt": 26,
+            "updatedAt": 26
+          },
+          {
+            "id": "c27",
+            "kind": "decision",
+            "text": "entry27",
+            "author": "agent",
+            "createdAt": 27,
+            "updatedAt": 27
+          },
+          {
+            "id": "c28",
+            "kind": "decision",
+            "text": "entry28",
+            "author": "agent",
+            "createdAt": 28,
+            "updatedAt": 28
+          },
+          {
+            "id": "c29",
+            "kind": "decision",
+            "text": "entry29",
+            "author": "agent",
+            "createdAt": 29,
+            "updatedAt": 29
+          },
+          {
+            "id": "c30",
+            "kind": "decision",
+            "text": "entry30",
+            "author": "agent",
+            "createdAt": 30,
+            "updatedAt": 30
+          },
+          {
+            "id": "c31",
+            "kind": "decision",
+            "text": "entry31",
+            "author": "agent",
+            "createdAt": 31,
+            "updatedAt": 31
+          },
+          {
+            "id": "c32",
+            "kind": "decision",
+            "text": "entry32",
+            "author": "agent",
+            "createdAt": 32,
+            "updatedAt": 32
+          },
+          {
+            "id": "c33",
+            "kind": "decision",
+            "text": "entry33",
+            "author": "agent",
+            "createdAt": 33,
+            "updatedAt": 33
+          },
+          {
+            "id": "c34",
+            "kind": "decision",
+            "text": "entry34",
+            "author": "agent",
+            "createdAt": 34,
+            "updatedAt": 34
+          },
+          {
+            "id": "c35",
+            "kind": "decision",
+            "text": "entry35",
+            "author": "agent",
+            "createdAt": 35,
+            "updatedAt": 35
+          },
+          {
+            "id": "c36",
+            "kind": "decision",
+            "text": "entry36",
+            "author": "agent",
+            "createdAt": 36,
+            "updatedAt": 36
+          },
+          {
+            "id": "c37",
+            "kind": "decision",
+            "text": "entry37",
+            "author": "agent",
+            "createdAt": 37,
+            "updatedAt": 37
+          },
+          {
+            "id": "c38",
+            "kind": "decision",
+            "text": "entry38",
+            "author": "agent",
+            "createdAt": 38,
+            "updatedAt": 38
+          },
+          {
+            "id": "c39",
+            "kind": "decision",
+            "text": "entry39",
+            "author": "agent",
+            "createdAt": 39,
+            "updatedAt": 39
+          },
+          {
+            "id": "c40",
+            "kind": "decision",
+            "text": "entry40",
+            "author": "agent",
+            "createdAt": 40,
+            "updatedAt": 40
+          },
+          {
+            "id": "c41",
+            "kind": "decision",
+            "text": "entry41",
+            "author": "agent",
+            "createdAt": 41,
+            "updatedAt": 41
+          },
+          {
+            "id": "c42",
+            "kind": "decision",
+            "text": "entry42",
+            "author": "agent",
+            "createdAt": 42,
+            "updatedAt": 42
+          },
+          {
+            "id": "c43",
+            "kind": "decision",
+            "text": "entry43",
+            "author": "agent",
+            "createdAt": 43,
+            "updatedAt": 43
+          },
+          {
+            "id": "c44",
+            "kind": "decision",
+            "text": "entry44",
+            "author": "agent",
+            "createdAt": 44,
+            "updatedAt": 44
+          },
+          {
+            "id": "c45",
+            "kind": "decision",
+            "text": "entry45",
+            "author": "agent",
+            "createdAt": 45,
+            "updatedAt": 45
+          },
+          {
+            "id": "c46",
+            "kind": "decision",
+            "text": "entry46",
+            "author": "agent",
+            "createdAt": 46,
+            "updatedAt": 46
+          },
+          {
+            "id": "c47",
+            "kind": "decision",
+            "text": "entry47",
+            "author": "agent",
+            "createdAt": 47,
+            "updatedAt": 47
+          },
+          {
+            "id": "c48",
+            "kind": "decision",
+            "text": "entry48",
+            "author": "agent",
+            "createdAt": 48,
+            "updatedAt": 48
+          },
+          {
+            "id": "c49",
+            "kind": "decision",
+            "text": "entry49",
+            "author": "agent",
+            "createdAt": 49,
+            "updatedAt": 49
+          },
+          {
+            "id": "c50",
+            "kind": "decision",
+            "text": "entry50",
+            "author": "agent",
+            "createdAt": 50,
+            "updatedAt": 50
+          },
+          {
+            "id": "c51",
+            "kind": "decision",
+            "text": "entry51",
+            "author": "agent",
+            "createdAt": 51,
+            "updatedAt": 51
+          },
+          {
+            "id": "c52",
+            "kind": "decision",
+            "text": "entry52",
+            "author": "agent",
+            "createdAt": 52,
+            "updatedAt": 52
+          },
+          {
+            "id": "c53",
+            "kind": "decision",
+            "text": "entry53",
+            "author": "agent",
+            "createdAt": 53,
+            "updatedAt": 53
+          },
+          {
+            "id": "c54",
+            "kind": "decision",
+            "text": "entry54",
+            "author": "agent",
+            "createdAt": 54,
+            "updatedAt": 54
+          },
+          {
+            "id": "c55",
+            "kind": "decision",
+            "text": "entry55",
+            "author": "agent",
+            "createdAt": 55,
+            "updatedAt": 55
+          },
+          {
+            "id": "c56",
+            "kind": "decision",
+            "text": "entry56",
+            "author": "agent",
+            "createdAt": 56,
+            "updatedAt": 56
+          },
+          {
+            "id": "c57",
+            "kind": "decision",
+            "text": "entry57",
+            "author": "agent",
+            "createdAt": 57,
+            "updatedAt": 57
+          },
+          {
+            "id": "c58",
+            "kind": "decision",
+            "text": "entry58",
+            "author": "agent",
+            "createdAt": 58,
+            "updatedAt": 58
+          },
+          {
+            "id": "c59",
+            "kind": "decision",
+            "text": "entry59",
+            "author": "agent",
+            "createdAt": 59,
+            "updatedAt": 59
+          },
+          {
+            "id": "c60",
+            "kind": "decision",
+            "text": "entry60",
+            "author": "agent",
+            "createdAt": 60,
+            "updatedAt": 60
+          },
+          {
+            "id": "c61",
+            "kind": "decision",
+            "text": "entry61",
+            "author": "agent",
+            "createdAt": 61,
+            "updatedAt": 61
+          },
+          {
+            "id": "c62",
+            "kind": "decision",
+            "text": "entry62",
+            "author": "agent",
+            "createdAt": 62,
+            "updatedAt": 62
+          },
+          {
+            "id": "c63",
+            "kind": "decision",
+            "text": "entry63",
+            "author": "agent",
+            "createdAt": 63,
+            "updatedAt": 63
+          },
+          {
+            "id": "c64",
+            "kind": "decision",
+            "text": "entry64",
+            "author": "agent",
+            "createdAt": 64,
+            "updatedAt": 64
+          },
+          {
+            "id": "c65",
+            "kind": "decision",
+            "text": "entry65",
+            "author": "agent",
+            "createdAt": 65,
+            "updatedAt": 65
+          },
+          {
+            "id": "c66",
+            "kind": "decision",
+            "text": "entry66",
+            "author": "agent",
+            "createdAt": 66,
+            "updatedAt": 66
+          },
+          {
+            "id": "c67",
+            "kind": "decision",
+            "text": "entry67",
+            "author": "agent",
+            "createdAt": 67,
+            "updatedAt": 67
+          },
+          {
+            "id": "c68",
+            "kind": "decision",
+            "text": "entry68",
+            "author": "agent",
+            "createdAt": 68,
+            "updatedAt": 68
+          },
+          {
+            "id": "c69",
+            "kind": "decision",
+            "text": "entry69",
+            "author": "agent",
+            "createdAt": 69,
+            "updatedAt": 69
+          },
+          {
+            "id": "c70",
+            "kind": "decision",
+            "text": "entry70",
+            "author": "agent",
+            "createdAt": 70,
+            "updatedAt": 70
+          },
+          {
+            "id": "c71",
+            "kind": "decision",
+            "text": "entry71",
+            "author": "agent",
+            "createdAt": 71,
+            "updatedAt": 71
+          },
+          {
+            "id": "c72",
+            "kind": "decision",
+            "text": "entry72",
+            "author": "agent",
+            "createdAt": 72,
+            "updatedAt": 72
+          },
+          {
+            "id": "c73",
+            "kind": "decision",
+            "text": "entry73",
+            "author": "agent",
+            "createdAt": 73,
+            "updatedAt": 73
+          },
+          {
+            "id": "c74",
+            "kind": "decision",
+            "text": "entry74",
+            "author": "agent",
+            "createdAt": 74,
+            "updatedAt": 74
+          },
+          {
+            "id": "c75",
+            "kind": "decision",
+            "text": "entry75",
+            "author": "agent",
+            "createdAt": 75,
+            "updatedAt": 75
+          },
+          {
+            "id": "c76",
+            "kind": "decision",
+            "text": "entry76",
+            "author": "agent",
+            "createdAt": 76,
+            "updatedAt": 76
+          },
+          {
+            "id": "c77",
+            "kind": "decision",
+            "text": "entry77",
+            "author": "agent",
+            "createdAt": 77,
+            "updatedAt": 77
+          },
+          {
+            "id": "c78",
+            "kind": "decision",
+            "text": "entry78",
+            "author": "agent",
+            "createdAt": 78,
+            "updatedAt": 78
+          },
+          {
+            "id": "c79",
+            "kind": "decision",
+            "text": "entry79",
+            "author": "agent",
+            "createdAt": 79,
+            "updatedAt": 79
+          },
+          {
+            "id": "c80",
+            "kind": "decision",
+            "text": "entry80",
+            "author": "agent",
+            "createdAt": 80,
+            "updatedAt": 80
+          },
+          {
+            "id": "c81",
+            "kind": "decision",
+            "text": "entry81",
+            "author": "agent",
+            "createdAt": 81,
+            "updatedAt": 81
+          },
+          {
+            "id": "c82",
+            "kind": "decision",
+            "text": "entry82",
+            "author": "agent",
+            "createdAt": 82,
+            "updatedAt": 82
+          },
+          {
+            "id": "c83",
+            "kind": "decision",
+            "text": "entry83",
+            "author": "agent",
+            "createdAt": 83,
+            "updatedAt": 83
+          },
+          {
+            "id": "c84",
+            "kind": "decision",
+            "text": "entry84",
+            "author": "agent",
+            "createdAt": 84,
+            "updatedAt": 84
+          },
+          {
+            "id": "c85",
+            "kind": "decision",
+            "text": "entry85",
+            "author": "agent",
+            "createdAt": 85,
+            "updatedAt": 85
+          },
+          {
+            "id": "c86",
+            "kind": "decision",
+            "text": "entry86",
+            "author": "agent",
+            "createdAt": 86,
+            "updatedAt": 86
+          },
+          {
+            "id": "c87",
+            "kind": "decision",
+            "text": "entry87",
+            "author": "agent",
+            "createdAt": 87,
+            "updatedAt": 87
+          },
+          {
+            "id": "c88",
+            "kind": "decision",
+            "text": "entry88",
+            "author": "agent",
+            "createdAt": 88,
+            "updatedAt": 88
+          },
+          {
+            "id": "c89",
+            "kind": "decision",
+            "text": "entry89",
+            "author": "agent",
+            "createdAt": 89,
+            "updatedAt": 89
+          },
+          {
+            "id": "c90",
+            "kind": "decision",
+            "text": "entry90",
+            "author": "agent",
+            "createdAt": 90,
+            "updatedAt": 90
+          },
+          {
+            "id": "c91",
+            "kind": "decision",
+            "text": "entry91",
+            "author": "agent",
+            "createdAt": 91,
+            "updatedAt": 91
+          },
+          {
+            "id": "c92",
+            "kind": "decision",
+            "text": "entry92",
+            "author": "agent",
+            "createdAt": 92,
+            "updatedAt": 92
+          },
+          {
+            "id": "c93",
+            "kind": "decision",
+            "text": "entry93",
+            "author": "agent",
+            "createdAt": 93,
+            "updatedAt": 93
+          },
+          {
+            "id": "c94",
+            "kind": "decision",
+            "text": "entry94",
+            "author": "agent",
+            "createdAt": 94,
+            "updatedAt": 94
+          },
+          {
+            "id": "c95",
+            "kind": "decision",
+            "text": "entry95",
+            "author": "agent",
+            "createdAt": 95,
+            "updatedAt": 95
+          },
+          {
+            "id": "c96",
+            "kind": "decision",
+            "text": "entry96",
+            "author": "agent",
+            "createdAt": 96,
+            "updatedAt": 96
+          },
+          {
+            "id": "c97",
+            "kind": "decision",
+            "text": "entry97",
+            "author": "agent",
+            "createdAt": 97,
+            "updatedAt": 97
+          },
+          {
+            "id": "c98",
+            "kind": "decision",
+            "text": "entry98",
+            "author": "agent",
+            "createdAt": 98,
+            "updatedAt": 98
+          },
+          {
+            "id": "c99",
+            "kind": "decision",
+            "text": "entry99",
+            "author": "agent",
+            "createdAt": 99,
+            "updatedAt": 99
+          },
+          {
+            "id": "new",
+            "kind": "feedback",
+            "text": "new feedback",
+            "author": "agent",
+            "createdAt": 101,
+            "updatedAt": 101
+          }
+        ],
+        "entry": {
+          "id": "new",
+          "kind": "feedback",
+          "text": "new feedback",
+          "author": "agent",
+          "createdAt": 101,
+          "updatedAt": 101
+        }
+      }
+    }
+  ],
+  "urls": [
+    {
+      "input": "localhost:11434",
+      "output": "http://localhost:11434/v1"
+    },
+    {
+      "input": "http://127.0.0.1:1234/v1/",
+      "output": "http://127.0.0.1:1234/v1"
+    },
+    {
+      "input": "[::1]:8080/chat/completions",
+      "output": "http://[::1]:8080/v1"
+    },
+    {
+      "input": "https://provider.example/deployment/chat/completions/",
+      "output": "https://provider.example/deployment"
+    },
+    {
+      "input": "provider.example",
+      "output": "https://provider.example/v1"
+    },
+    {
+      "input": "http://provider.example/v1",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://user:pass@provider.example",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://provider.example/v1?key=synthetic",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://provider.example/#fragment",
+      "error": "Use an HTTPS API address, or HTTP for a local model on this Mac."
+    },
+    {
+      "input": "https://PROVIDER.example:443/a//",
+      "output": "https://provider.example/a"
+    }
+  ],
+  "groups": [
+    {
+      "input": {
+        "conversation": [],
+        "liveFrom": null
+      },
+      "output": []
+    },
+    {
+      "input": {
+        "conversation": [],
+        "liveFrom": 0
+      },
+      "output": []
+    },
+    {
+      "input": {
+        "conversation": [],
+        "liveFrom": 2
+      },
+      "output": []
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "notice",
+            "text": "retained"
+          }
+        ],
+        "liveFrom": null
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "notice",
+            "text": "retained"
+          },
+          "key": "notice-0"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "notice",
+            "text": "retained"
+          }
+        ],
+        "liveFrom": 0
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "notice",
+            "text": "retained"
+          },
+          "key": "notice-0"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "notice",
+            "text": "retained"
+          }
+        ],
+        "liveFrom": 2
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "notice",
+            "text": "retained"
+          },
+          "key": "notice-0"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "thinking",
+                "text": "work"
+              },
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          }
+        ],
+        "liveFrom": null
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 2300,
+                "steps": [
+                  {
+                    "kind": "thinking",
+                    "text": "work"
+                  }
+                ]
+              },
+              "key": "trace-1:work"
+            }
+          ],
+          "durationMs": 2300
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          },
+          "key": "trace-1:reply"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "thinking",
+                "text": "work"
+              },
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          }
+        ],
+        "liveFrom": 0
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "thinking",
+                "text": "work"
+              },
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          },
+          "key": "trace-1"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "thinking",
+                "text": "work"
+              },
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          }
+        ],
+        "liveFrom": 2
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 2300,
+                "steps": [
+                  {
+                    "kind": "thinking",
+                    "text": "work"
+                  }
+                ]
+              },
+              "key": "trace-1:work"
+            }
+          ],
+          "durationMs": 2300
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 2300,
+            "steps": [
+              {
+                "kind": "text",
+                "text": "reply"
+              }
+            ]
+          },
+          "key": "trace-1:reply"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 1200,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Read"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "steering": true,
+            "text": "direction"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Write"
+              },
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "text": "notes"
+          }
+        ],
+        "liveFrom": null
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 1200,
+                "steps": [
+                  {
+                    "kind": "tool",
+                    "label": "Read"
+                  }
+                ]
+              },
+              "key": "trace-1"
+            },
+            {
+              "index": 2,
+              "message": {
+                "role": "user",
+                "steering": true,
+                "text": "direction"
+              },
+              "key": "user-2"
+            },
+            {
+              "index": 3,
+              "message": {
+                "role": "trace",
+                "durationMs": 2600,
+                "steps": [
+                  {
+                    "kind": "tool",
+                    "label": "Write"
+                  }
+                ]
+              },
+              "key": "trace-3:work"
+            }
+          ],
+          "durationMs": 2600
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          "key": "trace-3:reply"
+        },
+        {
+          "kind": "message",
+          "index": 4,
+          "message": {
+            "role": "assistant",
+            "text": "notes"
+          },
+          "key": "assistant-4"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 1200,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Read"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "steering": true,
+            "text": "direction"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Write"
+              },
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "text": "notes"
+          }
+        ],
+        "liveFrom": 0
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 1200,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Read"
+              }
+            ]
+          },
+          "key": "trace-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "steering": true,
+            "text": "direction"
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Write"
+              },
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          "key": "trace-3"
+        },
+        {
+          "kind": "message",
+          "index": 4,
+          "message": {
+            "role": "assistant",
+            "text": "notes"
+          },
+          "key": "assistant-4"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "task"
+          },
+          {
+            "role": "trace",
+            "durationMs": 1200,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Read"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "steering": true,
+            "text": "direction"
+          },
+          {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Write"
+              },
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "text": "notes"
+          }
+        ],
+        "liveFrom": 2
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "task"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 1200,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Read"
+              }
+            ]
+          },
+          "key": "trace-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "steering": true,
+            "text": "direction"
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "trace",
+            "durationMs": 2600,
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "Write"
+              },
+              {
+                "kind": "text",
+                "text": "answer"
+              }
+            ]
+          },
+          "key": "trace-3"
+        },
+        {
+          "kind": "message",
+          "index": 4,
+          "message": {
+            "role": "assistant",
+            "text": "notes"
+          },
+          "key": "assistant-4"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "first"
+          },
+          {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "text": "next"
+          },
+          {
+            "role": "assistant",
+            "text": "done"
+          }
+        ],
+        "liveFrom": null
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "first"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          "key": "trace-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "text": "next"
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "assistant",
+            "text": "done"
+          },
+          "key": "assistant-3"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "first"
+          },
+          {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "text": "next"
+          },
+          {
+            "role": "assistant",
+            "text": "done"
+          }
+        ],
+        "liveFrom": 0
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "first"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          "key": "trace-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "text": "next"
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "assistant",
+            "text": "done"
+          },
+          "key": "assistant-3"
+        }
+      ]
+    },
+    {
+      "input": {
+        "conversation": [
+          {
+            "role": "user",
+            "text": "first"
+          },
+          {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "text": "next"
+          },
+          {
+            "role": "assistant",
+            "text": "done"
+          }
+        ],
+        "liveFrom": 2
+      },
+      "output": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "first"
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "tool",
+                "label": "unfinished"
+              }
+            ]
+          },
+          "key": "trace-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "text": "next"
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "assistant",
+            "text": "done"
+          },
+          "key": "assistant-3"
+        }
+      ]
+    }
+  ],
+  "markdown": [
+    {
+      "input": {
+        "text": "# Authored **heading**\n\nParagraph with *emphasis* and `code`."
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 1,
+            "runs": [
+              {
+                "text": "Authored "
+              },
+              {
+                "text": "heading",
+                "b": true
+              }
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Paragraph with "
+              },
+              {
+                "text": "emphasis",
+                "i": true
+              },
+              {
+                "text": " and "
+              },
+              {
+                "text": "code",
+                "c": true
+              },
+              {
+                "text": "."
+              }
+            ]
+          }
+        ],
+        "plain": "Authored heading\nParagraph with emphasis and code."
+      }
+    },
+    {
+      "input": {
+        "text": "- [x] done\n- [ ] pending\n  - child\n\n1. first\n2. second"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ],
+                "checked": true
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "pending"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "start": 1,
+                    "items": [
+                      {
+                        "blocks": [
+                          {
+                            "kind": "p",
+                            "runs": [
+                              {
+                                "text": "child"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "checked": false
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "second"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "done\npending\nchild\nfirst\nsecond"
+      }
+    },
+    {
+      "input": {
+        "text": "> ## Quote\n> body\n>\n> - nested item"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "h",
+                "level": 2,
+                "runs": [
+                  {
+                    "text": "Quote"
+                  }
+                ]
+              },
+              {
+                "kind": "p",
+                "runs": [
+                  {
+                    "text": "body"
+                  }
+                ]
+              },
+              {
+                "kind": "list",
+                "ordered": false,
+                "start": 1,
+                "items": [
+                  {
+                    "blocks": [
+                      {
+                        "kind": "p",
+                        "runs": [
+                          {
+                            "text": "nested item"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Quote\nbody\nnested item"
+      }
+    },
+    {
+      "input": {
+        "text": "Title\n---\n\n---"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "hr"
+          }
+        ],
+        "plain": "Title\n"
+      }
+    },
+    {
+      "input": {
+        "text": "| A | B |\n| :--- | ---: |\n| **one** | two |"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "table",
+            "headers": [
+              [
+                {
+                  "text": "A"
+                }
+              ],
+              [
+                {
+                  "text": "B"
+                }
+              ]
+            ],
+            "align": [
+              "left",
+              "right"
+            ],
+            "rows": [
+              [
+                [
+                  {
+                    "text": "one",
+                    "b": true
+                  }
+                ],
+                [
+                  {
+                    "text": "two"
+                  }
+                ]
+              ]
+            ]
+          }
+        ],
+        "plain": "A | B\none | two"
+      }
+    },
+    {
+      "input": {
+        "text": "```rust\nlet x = 1;\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "let x = 1;",
+            "lang": "rust"
+          }
+        ],
+        "plain": "let x = 1;"
+      }
+    },
+    {
+      "input": {
+        "text": "Before\n```js\nstill streaming"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Before"
+              }
+            ]
+          },
+          {
+            "kind": "code",
+            "text": "still streaming",
+            "lang": "js"
+          }
+        ],
+        "plain": "Before\nstill streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "two  \nlines\\\nhard"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "two\nlines\nhard"
+              }
+            ]
+          }
+        ],
+        "plain": "two\nlines\nhard"
+      }
+    },
+    {
+      "input": {
+        "text": "[safe](https://example.test/a) [unsafe](javascript:alert) <script>bad</script>"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "safe",
+                "href": "https://example.test/a"
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "unsafe"
+              },
+              {
+                "text": " <script>bad</script>"
+              }
+            ]
+          }
+        ],
+        "plain": "safe unsafe <script>bad</script>"
+      }
+    },
+    {
+      "input": {
+        "text": "![local](/tmp/frame.png) `/tmp/clip.mov` /tmp/sound.wav"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": " "
+              },
+              {
+                "text": "/tmp/clip.mov",
+                "c": true
+              },
+              {
+                "text": " /tmp/sound.wav"
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.png",
+                "path": "/tmp/frame.png",
+                "alt": "local"
+              },
+              {
+                "kind": "video",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fclip.mov",
+                "path": "/tmp/clip.mov",
+                "alt": "clip.mov"
+              },
+              {
+                "kind": "audio",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fsound.wav",
+                "path": "/tmp/sound.wav",
+                "alt": "sound.wav"
+              }
+            ]
+          }
+        ],
+        "plain": " /tmp/clip.mov /tmp/sound.wav"
+      }
+    },
+    {
+      "input": {
+        "text": "![remote](https://example.test/image.png)"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [],
+            "media": [
+              {
+                "kind": "image",
+                "src": "https://example.test/image.png",
+                "path": "https://example.test/image.png",
+                "alt": "remote",
+                "remote": true
+              }
+            ]
+          }
+        ],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "<b>bold</b> <em>em</em><br>line <img src=\"/tmp/frame.png\" alt=\"frame\">"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "bold",
+                "b": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "em",
+                "i": true
+              },
+              {
+                "text": "\nline "
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.png",
+                "path": "/tmp/frame.png",
+                "alt": "frame"
+              }
+            ]
+          }
+        ],
+        "plain": "bold em\nline "
+      }
+    },
+    {
+      "input": {
+        "text": "snake_case ***both*** ~~gone~~ <https://example.test>"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "snake_case "
+              },
+              {
+                "text": "both",
+                "b": true,
+                "i": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "gone",
+                "s": true
+              },
+              {
+                "text": " "
+              },
+              {
+                "text": "https://example.test",
+                "href": "https://example.test"
+              }
+            ]
+          }
+        ],
+        "plain": "snake_case both gone https://example.test"
+      }
+    },
+    {
+      "input": {
+        "text": "- first\n\n  paragraph\n  ```txt\n  fenced\n  ```\n- second"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "fenced",
+                    "lang": "txt"
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "second"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "first\nparagraph\nfenced\nsecond"
+      }
+    },
+    {
+      "input": {
+        "text": "**streaming"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "**streaming"
+              }
+            ]
+          }
+        ],
+        "plain": "**streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "**streaming**"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "streaming",
+                "b": true
+              }
+            ]
+          }
+        ],
+        "plain": "streaming"
+      }
+    },
+    {
+      "input": {
+        "text": "```\npartial"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "partial"
+          }
+        ],
+        "plain": "partial"
+      }
+    },
+    {
+      "input": {
+        "text": "```\npartial\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "partial"
+          }
+        ],
+        "plain": "partial"
+      }
+    },
+    {
+      "input": {
+        "text": "## Plan\n\nFirst line\nsame paragraph\n\n- one\n- two\n1. first\n\n> aside\n\n```ts\nconst a = 1;\n```"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "First line same paragraph"
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "one"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "two"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "first"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "p",
+                "runs": [
+                  {
+                    "text": "aside"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "code",
+            "text": "const a = 1;",
+            "lang": "ts"
+          }
+        ],
+        "plain": "Plan\nFirst line same paragraph\none\ntwo\nfirst\naside\nconst a = 1;"
+      }
+    },
+    {
+      "input": {
+        "text": "```\nhalf"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "half"
+          }
+        ],
+        "plain": "half"
+      }
+    },
+    {
+      "input": {
+        "text": ""
+      },
+      "output": {
+        "blocks": [],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": ""
+      },
+      "output": {
+        "blocks": [],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "| Name | Value |\n| :--- | ---: |\n| **Clip** | `ready` |\n| a\\|b |\n\nAfter"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "table",
+            "headers": [
+              [
+                {
+                  "text": "Name"
+                }
+              ],
+              [
+                {
+                  "text": "Value"
+                }
+              ]
+            ],
+            "align": [
+              "left",
+              "right"
+            ],
+            "rows": [
+              [
+                [
+                  {
+                    "text": "Clip",
+                    "b": true
+                  }
+                ],
+                [
+                  {
+                    "text": "ready",
+                    "c": true
+                  }
+                ]
+              ],
+              [
+                [
+                  {
+                    "text": "a|b"
+                  }
+                ],
+                []
+              ]
+            ]
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "After"
+              }
+            ]
+          }
+        ],
+        "plain": "Name | Value\nClip | ready\na|b | \nAfter"
+      }
+    },
+    {
+      "input": {
+        "text": "a | b\nnot | a table"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "a | b not | a table"
+              }
+            ]
+          }
+        ],
+        "plain": "a | b not | a table"
+      }
+    },
+    {
+      "input": {
+        "text": "Before\n\n---\n\nAfter"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Before"
+              }
+            ]
+          },
+          {
+            "kind": "hr"
+          },
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "After"
+              }
+            ]
+          }
+        ],
+        "plain": "Before\n\nAfter"
+      }
+    },
+    {
+      "input": {
+        "text": "- one\n  - inner\n    1. deep\n- two\n\n  more of two\n- three\nlazy line"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "start": 1,
+                    "items": [
+                      {
+                        "blocks": [
+                          {
+                            "kind": "p",
+                            "runs": [
+                              {
+                                "text": "inner"
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "list",
+                            "ordered": true,
+                            "start": 1,
+                            "items": [
+                              {
+                                "blocks": [
+                                  {
+                                    "kind": "p",
+                                    "runs": [
+                                      {
+                                        "text": "deep"
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "two"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "more of two"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "three lazy line"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "one\ninner\ndeep\ntwo\nmore of two\nthree lazy line"
+      }
+    },
+    {
+      "input": {
+        "text": "- [x] shipped\n- [ ] pending"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "shipped"
+                      }
+                    ]
+                  }
+                ],
+                "checked": true
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "pending"
+                      }
+                    ]
+                  }
+                ],
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "plain": "shipped\npending"
+      }
+    },
+    {
+      "input": {
+        "text": "3) c\n4) d"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 3,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "c"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "d"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "c\nd"
+      }
+    },
+    {
+      "input": {
+        "text": "1. run:\n   ```sh\n   bun test\n   ```\n2. done"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "run:"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "bun test",
+                    "lang": "sh"
+                  }
+                ]
+              },
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "run:\nbun test\ndone"
+      }
+    },
+    {
+      "input": {
+        "text": "> # Note\n> - a\n>\n> > deeper\n> lazy"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "quote",
+            "blocks": [
+              {
+                "kind": "h",
+                "level": 1,
+                "runs": [
+                  {
+                    "text": "Note"
+                  }
+                ]
+              },
+              {
+                "kind": "list",
+                "ordered": false,
+                "start": 1,
+                "items": [
+                  {
+                    "blocks": [
+                      {
+                        "kind": "p",
+                        "runs": [
+                          {
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "quote",
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "deeper lazy"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Note\na\ndeeper lazy"
+      }
+    },
+    {
+      "input": {
+        "text": "Title\n=====\n\nSub\n---"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "h",
+            "level": 1,
+            "runs": [
+              {
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "h",
+            "level": 2,
+            "runs": [
+              {
+                "text": "Sub"
+              }
+            ]
+          }
+        ],
+        "plain": "Title\nSub"
+      }
+    },
+    {
+      "input": {
+        "text": "a  \nb\\\nc\nd<br>e"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "a\nb\nc d\ne"
+              }
+            ]
+          }
+        ],
+        "plain": "a\nb\nc d\ne"
+      }
+    },
+    {
+      "input": {
+        "text": "````md\n```\ninner\n```\n````"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "code",
+            "text": "```\ninner\n```",
+            "lang": "md"
+          }
+        ],
+        "plain": "```\ninner\n```"
+      }
+    },
+    {
+      "input": {
+        "text": "Intro\n-"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Intro -"
+              }
+            ]
+          }
+        ],
+        "plain": "Intro -"
+      }
+    },
+    {
+      "input": {
+        "text": "Intro\n- a"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "Intro"
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "Intro\na"
+      }
+    },
+    {
+      "input": {
+        "text": "- a\n  ```\n  half"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "start": 1,
+            "items": [
+              {
+                "blocks": [
+                  {
+                    "kind": "p",
+                    "runs": [
+                      {
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "code",
+                    "text": "half"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "plain": "a\nhalf"
+      }
+    },
+    {
+      "input": {
+        "text": "![shot](/tmp/a.png)"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+                "path": "/tmp/a.png",
+                "alt": "shot"
+              }
+            ]
+          }
+        ],
+        "plain": ""
+      }
+    },
+    {
+      "input": {
+        "text": "/tmp/a.png then `/tmp/a.png`"
+      },
+      "output": {
+        "blocks": [
+          {
+            "kind": "p",
+            "runs": [
+              {
+                "text": "/tmp/a.png"
+              },
+              {
+                "text": " then "
+              },
+              {
+                "text": "/tmp/a.png",
+                "c": true
+              }
+            ],
+            "media": [
+              {
+                "kind": "image",
+                "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+                "path": "/tmp/a.png",
+                "alt": "a.png"
+              }
+            ]
+          }
+        ],
+        "plain": "/tmp/a.png then /tmp/a.png"
+      }
+    }
+  ],
+  "media": [
+    {
+      "input": "/tmp/frame.PNG",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": "/tmp/frame.PNG",
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2Fframe.PNG"
+      }
+    },
+    {
+      "input": "file:///tmp/caf%C3%A9.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": "/tmp/café.png",
+        "url": "app://powermove/_agent-file?path=file%3A%2F%2F%2Ftmp%2Fcaf%25C3%25A9.png"
+      }
+    },
+    {
+      "input": "~/clips/test.mov",
+      "output": {
+        "extension": "mov",
+        "kind": "video",
+        "local": "~/clips/test.mov",
+        "url": "app://powermove/_agent-file?path=~%2Fclips%2Ftest.mov"
+      }
+    },
+    {
+      "input": "/tmp/../escape.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2F..%2Fescape.png"
+      }
+    },
+    {
+      "input": "https://example.test/a.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=https%3A%2F%2Fexample.test%2Fa.png"
+      }
+    },
+    {
+      "input": "/tmp/audio.flac?literal",
+      "output": {
+        "extension": "flac",
+        "kind": "audio",
+        "local": "/tmp/audio.flac?literal",
+        "url": "app://powermove/_agent-file?path=%2Ftmp%2Faudio.flac%3Fliteral"
+      }
+    },
+    {
+      "input": "relative.png",
+      "output": {
+        "extension": "png",
+        "kind": "image",
+        "local": null,
+        "url": "app://powermove/_agent-file?path=relative.png"
+      }
+    }
+  ],
+  "visual": [
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": " Authored ",
+          "html": "<script>document.body.textContent=\"hello\"</script>"
+        }
+      },
+      "output": {
+        "title": "Authored",
+        "html": "<script>document.body.textContent=\"hello\"</script>",
+        "height": 360
+      }
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "",
+          "html": "x"
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "height": 159
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "height": 900
+        }
+      },
+      "output": {
+        "title": "Reply",
+        "html": "x",
+        "height": 900
+      }
+    },
+    {
+      "input": {
+        "kind": "input",
+        "value": {
+          "title": "Reply",
+          "html": "x",
+          "unknown": true
+        }
+      },
+      "error": "Visual reply requires a title (1–120 characters), HTML up to 384 KiB and height from 160 to 900."
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "ready"
+        }
+      },
+      "output": {
+        "type": "ready"
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "size",
+          "height": 160.2
+        }
+      },
+      "output": {
+        "type": "size",
+        "height": 161
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "size",
+          "height": 99999
+        }
+      },
+      "output": {
+        "type": "size",
+        "height": 900
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "error",
+          "message": "frame error"
+        }
+      },
+      "output": {
+        "type": "error",
+        "message": "frame error"
+      }
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "wrong",
+          "type": "ready"
+        }
+      },
+      "output": null
+    },
+    {
+      "input": {
+        "kind": "event",
+        "data": {
+          "channel": "powermove-visual",
+          "token": "fixture",
+          "type": "ready",
+          "extra": true
+        }
+      },
+      "output": null
+    }
+  ],
+  "registration": [
+    {
+      "id": "claude-code",
+      "relative": ".claude.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\"opaque\":{\"keep\":true}}",
+      "calls": [
+        [
+          "mcp",
+          "add",
+          "--scope",
+          "user",
+          "powermove",
+          "--",
+          "/Applications/Powermove.app/Contents/MacOS/Powermove",
+          "--powermove-mcp"
+        ]
+      ]
+    },
+    {
+      "id": "claude-code",
+      "relative": ".claude.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"mcpServers\":{\"powermove\":{\"type\":\"stdio\",\"command\":\"/Applications/Powermove.app/Contents/MacOS/Powermove\",\"args\":[\"--powermove-mcp\"],\"env\":{}}}}",
+      "after": "{\"mcpServers\":{\"powermove\":{\"type\":\"stdio\",\"command\":\"/Applications/Powermove.app/Contents/MacOS/Powermove\",\"args\":[\"--powermove-mcp\"],\"env\":{}}}}",
+      "calls": [
+        [
+          "mcp",
+          "remove",
+          "--scope",
+          "user",
+          "powermove"
+        ]
+      ]
+    },
+    {
+      "id": "codex",
+      "relative": ".codex/config.toml",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "model = \"fixture\"\n\n[mcp_servers.other]\ncommand = \"other\"\n",
+      "after": "model = \"fixture\"\n\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.powermove]\ncommand = \"/Applications/Powermove.app/Contents/MacOS/Powermove\"\nargs = [\"--powermove-mcp\"]\n# The hidden editor takes a while to start the first time.\nstartup_timeout_sec = 60\n",
+      "calls": []
+    },
+    {
+      "id": "codex",
+      "relative": ".codex/config.toml",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "model = \"fixture\"\n\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.powermove]\ncommand = \"/Applications/Powermove.app/Contents/MacOS/Powermove\"\nargs = [\"--powermove-mcp\"]\n# The hidden editor takes a while to start the first time.\nstartup_timeout_sec = 60\n",
+      "after": "model = \"fixture\"\n\n[mcp_servers.other]\ncommand = \"other\"\n",
+      "calls": []
+    },
+    {
+      "id": "claude-desktop",
+      "relative": "Library/Application Support/Claude/claude_desktop_config.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "claude-desktop",
+      "relative": "Library/Application Support/Claude/claude_desktop_config.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "gemini-cli",
+      "relative": ".gemini/settings.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "gemini-cli",
+      "relative": ".gemini/settings.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "cursor",
+      "relative": ".cursor/mcp.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "cursor",
+      "relative": ".cursor/mcp.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "vscode",
+      "relative": "Library/Application Support/Code/User/mcp.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"servers\": {\n    \"powermove\": {\n      \"type\": \"stdio\",\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "vscode",
+      "relative": "Library/Application Support/Code/User/mcp.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"servers\": {\n    \"powermove\": {\n      \"type\": \"stdio\",\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"servers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "windsurf",
+      "relative": ".codeium/windsurf/mcp_config.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "windsurf",
+      "relative": ".codeium/windsurf/mcp_config.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "lm-studio",
+      "relative": ".lmstudio/mcp.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "lm-studio",
+      "relative": ".lmstudio/mcp.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {\n    \"powermove\": {\n      \"command\": \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n      \"args\": [\n        \"--powermove-mcp\"\n      ]\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcpServers\": {}\n}\n",
+      "calls": []
+    },
+    {
+      "id": "opencode",
+      "relative": ".config/opencode/opencode.json",
+      "action": "connect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\"opaque\":{\"keep\":true}}",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcp\": {\n    \"powermove\": {\n      \"type\": \"local\",\n      \"command\": [\n        \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n        \"--powermove-mcp\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+      "calls": []
+    },
+    {
+      "id": "opencode",
+      "relative": ".config/opencode/opencode.json",
+      "action": "disconnect",
+      "executable": "/Applications/Powermove.app/Contents/MacOS/Powermove",
+      "before": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcp\": {\n    \"powermove\": {\n      \"type\": \"local\",\n      \"command\": [\n        \"/Applications/Powermove.app/Contents/MacOS/Powermove\",\n        \"--powermove-mcp\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+      "after": "{\n  \"opaque\": {\n    \"keep\": true\n  },\n  \"mcp\": {}\n}\n",
+      "calls": []
+    }
+  ],
+  "claude": [
+    {
+      "input": {
+        "access": "editor",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": "default",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true
+          }
+        },
+        "allowed": "Read,Glob,Grep,Skill,Agent,Task",
+        "disallowed": "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "editor",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": "default",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true
+          }
+        },
+        "allowed": "Read,Glob,Grep,Skill,Agent,Task",
+        "disallowed": "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "project",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": "auto",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": true,
+            "failIfUnavailable": true,
+            "network": {
+              "allowedDomains": [
+                "*"
+              ],
+              "allowLocalBinding": true
+            }
+          }
+        },
+        "allowed": "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task",
+        "disallowed": null,
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "project",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": "acceptEdits",
+        "settings": {
+          "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": true,
+            "failIfUnavailable": true,
+            "network": {
+              "allowedDomains": [
+                "*"
+              ],
+              "allowLocalBinding": true
+            }
+          }
+        },
+        "allowed": "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task",
+        "disallowed": null,
+        "skip": false
+      }
+    },
+    {
+      "input": {
+        "access": "computer",
+        "approval": "auto"
+      },
+      "output": {
+        "mode": null,
+        "settings": null,
+        "allowed": null,
+        "disallowed": null,
+        "skip": true
+      }
+    },
+    {
+      "input": {
+        "access": "computer",
+        "approval": "supervised"
+      },
+      "output": {
+        "mode": null,
+        "settings": null,
+        "allowed": null,
+        "disallowed": null,
+        "skip": true
+      }
+    }
+  ],
+  "presets": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "baseUrl": "http://localhost:11434/v1",
+      "kind": "local",
+      "downloadUrl": "https://ollama.com/download"
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "baseUrl": "http://localhost:1234/v1",
+      "kind": "local",
+      "downloadUrl": "https://lmstudio.ai"
+    },
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp server",
+      "baseUrl": "http://localhost:8080/v1",
+      "kind": "local",
+      "downloadUrl": "https://github.com/ggml-org/llama.cpp"
+    },
+    {
+      "id": "jan",
+      "name": "Jan",
+      "baseUrl": "http://localhost:1337/v1",
+      "kind": "local",
+      "downloadUrl": "https://jan.ai"
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "kind": "cloud",
+      "keyUrl": "https://openrouter.ai/settings/keys",
+      "keyPrefix": "sk-or-"
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://platform.openai.com/api-keys",
+      "keyPrefix": "sk-"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.anthropic.com/settings/keys",
+      "keyPrefix": "sk-ant-"
+    },
+    {
+      "id": "gemini",
+      "name": "Google Gemini",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "kind": "cloud",
+      "keyUrl": "https://aistudio.google.com/apikey",
+      "keyPrefix": "AIza"
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.groq.com/keys",
+      "keyPrefix": "gsk_"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "kind": "cloud",
+      "keyUrl": "https://platform.deepseek.com/api_keys",
+      "keyPrefix": "sk-"
+    },
+    {
+      "id": "xai",
+      "name": "xAI",
+      "baseUrl": "https://api.x.ai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.x.ai",
+      "keyPrefix": "xai-"
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral",
+      "baseUrl": "https://api.mistral.ai/v1",
+      "kind": "cloud",
+      "keyUrl": "https://console.mistral.ai/api-keys"
+    },
+    {
+      "id": "other",
+      "name": "Other compatible service",
+      "baseUrl": "",
+      "kind": "other"
+    }
+  ],
+  "inline": [
+    {
+      "text": "run `npm test` then **stop**",
+      "flags": {},
+      "output": [
+        {
+          "text": "run "
+        },
+        {
+          "text": "npm test",
+          "c": true
+        },
+        {
+          "text": " then "
+        },
+        {
+          "text": "stop",
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "see [the docs](https://example.com/docs) now",
+      "flags": {},
+      "output": [
+        {
+          "text": "see "
+        },
+        {
+          "text": "the docs",
+          "href": "https://example.com/docs"
+        },
+        {
+          "text": " now"
+        }
+      ]
+    },
+    {
+      "text": "*soft* and _quiet_",
+      "flags": {},
+      "output": [
+        {
+          "text": "soft",
+          "i": true
+        },
+        {
+          "text": " and "
+        },
+        {
+          "text": "quiet",
+          "i": true
+        }
+      ]
+    },
+    {
+      "text": "use file_path here",
+      "flags": {},
+      "output": [
+        {
+          "text": "use file_path here"
+        }
+      ]
+    },
+    {
+      "text": "this is **not closed",
+      "flags": {},
+      "output": [
+        {
+          "text": "this is **not closed"
+        }
+      ]
+    },
+    {
+      "text": "Portrait: https://commons.wikimedia.org/wiki/File:Tim.jpg, CC BY",
+      "flags": {},
+      "output": [
+        {
+          "text": "Portrait: "
+        },
+        {
+          "text": "https://commons.wikimedia.org/wiki/File:Tim.jpg",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim.jpg"
+        },
+        {
+          "text": ", CC BY"
+        }
+      ]
+    },
+    {
+      "text": "[x](javascript:alert(1))",
+      "flags": {},
+      "output": [
+        {
+          "text": "x"
+        }
+      ]
+    },
+    {
+      "text": "[Commons](https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg), CC BY",
+      "flags": {},
+      "output": [
+        {
+          "text": "Commons",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg"
+        },
+        {
+          "text": ", CC BY"
+        }
+      ]
+    },
+    {
+      "text": "See https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg.",
+      "flags": {},
+      "output": [
+        {
+          "text": "See "
+        },
+        {
+          "text": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg",
+          "href": "https://commons.wikimedia.org/wiki/File:Tim_Cook_March_2026_(cropped).jpg"
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "Docs: <https://x.y/a>.",
+      "flags": {},
+      "output": [
+        {
+          "text": "Docs: "
+        },
+        {
+          "text": "https://x.y/a",
+          "href": "https://x.y/a"
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "[Guide](https://x.y/g \"The guide\")",
+      "flags": {},
+      "output": [
+        {
+          "text": "Guide",
+          "href": "https://x.y/g"
+        }
+      ]
+    },
+    {
+      "text": "![Frame 12](https://x.y/f.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "https://x.y/f.png",
+            "path": "https://x.y/f.png",
+            "alt": "Frame 12",
+            "remote": true
+          }
+        }
+      ]
+    },
+    {
+      "text": "![](http://x.y/shots/f.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "f.png",
+          "href": "http://x.y/shots/f.png"
+        }
+      ]
+    },
+    {
+      "text": "[mail](mailto:a@b.c)",
+      "flags": {},
+      "output": [
+        {
+          "text": "mail"
+        }
+      ]
+    },
+    {
+      "text": "[app.ts](/Users/me/app.ts:12)",
+      "flags": {},
+      "output": [
+        {
+          "text": "app.ts"
+        }
+      ]
+    },
+    {
+      "text": "`bun run test`",
+      "flags": {},
+      "output": [
+        {
+          "text": "bun run test",
+          "c": true
+        }
+      ]
+    },
+    {
+      "text": "``a `tick` here``",
+      "flags": {},
+      "output": [
+        {
+          "text": "a `tick` here",
+          "c": true
+        }
+      ]
+    },
+    {
+      "text": "\\*literal\\*",
+      "flags": {},
+      "output": [
+        {
+          "text": "*literal*"
+        }
+      ]
+    },
+    {
+      "text": "~~old~~ and ~~**bold**~~",
+      "flags": {},
+      "output": [
+        {
+          "text": "old",
+          "s": true
+        },
+        {
+          "text": " and "
+        },
+        {
+          "text": "bold",
+          "s": true,
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "***both*** __bold__",
+      "flags": {},
+      "output": [
+        {
+          "text": "both",
+          "b": true,
+          "i": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "bold",
+          "b": true
+        }
+      ]
+    },
+    {
+      "text": "<kbd>⌘K</kbd> <b>bold</b> <img src=\"/tmp/a.png\" alt=\"A\">",
+      "flags": {},
+      "output": [
+        {
+          "text": "⌘K",
+          "c": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "bold",
+          "b": true
+        },
+        {
+          "text": " "
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "A"
+          }
+        }
+      ]
+    },
+    {
+      "text": "<script>x</script>",
+      "flags": {},
+      "output": [
+        {
+          "text": "<script>x</script>"
+        }
+      ]
+    },
+    {
+      "text": "[![shot](/tmp/s.png)](https://x.y)",
+      "flags": {},
+      "output": [
+        {
+          "text": "shot",
+          "href": "https://x.y"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fs.png",
+            "path": "/tmp/s.png",
+            "alt": "shot"
+          }
+        }
+      ]
+    },
+    {
+      "text": "see /tmp/b.gif.",
+      "flags": {},
+      "output": [
+        {
+          "text": "see /tmp/b.gif"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fb.gif",
+            "path": "/tmp/b.gif",
+            "alt": "b.gif"
+          }
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "text": "`/tmp/c.mov`",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/c.mov",
+          "c": true
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "video",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fc.mov",
+            "path": "/tmp/c.mov",
+            "alt": "c.mov"
+          }
+        }
+      ]
+    },
+    {
+      "text": "file:///tmp/d.webp",
+      "flags": {},
+      "output": [
+        {
+          "text": "file:///tmp/d.webp"
+        }
+      ]
+    },
+    {
+      "text": "![d](file:///tmp/d%20e.webp)",
+      "flags": {},
+      "output": [
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fd%20e.webp",
+            "path": "/tmp/d e.webp",
+            "alt": "d"
+          }
+        }
+      ]
+    },
+    {
+      "text": "/etc/passwd",
+      "flags": {},
+      "output": [
+        {
+          "text": "/etc/passwd"
+        }
+      ]
+    },
+    {
+      "text": "shots/a.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "shots/a.png"
+        }
+      ]
+    },
+    {
+      "text": "![x](/tmp/../etc/a.png)",
+      "flags": {},
+      "output": [
+        {
+          "text": "x"
+        }
+      ]
+    },
+    {
+      "text": "a/tmp/x.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "a/tmp/x.png"
+        }
+      ]
+    },
+    {
+      "text": "/tmp/a.pngx",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/a.pngx"
+        }
+      ]
+    },
+    {
+      "text": "see https://x.y/r.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "see "
+        },
+        {
+          "text": "https://x.y/r.png",
+          "href": "https://x.y/r.png"
+        }
+      ]
+    },
+    {
+      "text": "/tmp/a.png",
+      "flags": {},
+      "output": [
+        {
+          "text": "/tmp/a.png"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "a.png"
+          }
+        }
+      ]
+    }
+  ],
+  "words": [
+    {
+      "runs": [
+        {
+          "text": "a b"
+        },
+        {
+          "text": "x y",
+          "href": "https://x.y"
+        }
+      ],
+      "output": [
+        {
+          "text": "a",
+          "key": "0-0"
+        },
+        {
+          "text": " ",
+          "key": "0-1"
+        },
+        {
+          "text": "b",
+          "key": "0-2"
+        },
+        {
+          "text": "x y",
+          "href": "https://x.y",
+          "key": "1"
+        }
+      ]
+    },
+    {
+      "runs": [
+        {
+          "text": "bun run test",
+          "c": true
+        }
+      ],
+      "output": [
+        {
+          "text": "bun run test",
+          "c": true,
+          "key": "0"
+        }
+      ]
+    },
+    {
+      "runs": [
+        {
+          "text": "/tmp/a.png"
+        },
+        {
+          "text": "",
+          "media": {
+            "kind": "image",
+            "src": "app://powermove/_agent-file?path=%2Ftmp%2Fa.png",
+            "path": "/tmp/a.png",
+            "alt": "a.png"
+          }
+        }
+      ],
+      "output": [
+        {
+          "text": "/tmp/a.png",
+          "key": "0-0"
+        }
+      ]
+    }
+  ],
+  "markdownSourceTests": 21,
+  "clients": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "detail": "Your Claude plan, in the terminal or your editor.",
+      "config": ".claude.json",
+      "format": "claude-code",
+      "installed": [
+        ".claude.json",
+        ".claude"
+      ],
+      "restart": "Start a new Claude Code session to use it."
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "detail": "Your ChatGPT plan, in the Codex app or CLI.",
+      "config": ".codex/config.toml",
+      "format": "codex",
+      "installed": [
+        ".codex",
+        "/Applications/Codex.app"
+      ],
+      "restart": "Start a new Codex session to use it."
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude",
+      "detail": "Your Claude plan, in the Claude app.",
+      "config": "Library/Application Support/Claude/claude_desktop_config.json",
+      "format": "mcpServers",
+      "installed": [
+        "/Applications/Claude.app",
+        "Applications/Claude.app",
+        "Library/Application Support/Claude"
+      ],
+      "restart": "Quit and reopen Claude to use it."
+    },
+    {
+      "id": "gemini-cli",
+      "name": "Gemini CLI",
+      "detail": "Your Google account or Gemini plan.",
+      "config": ".gemini/settings.json",
+      "format": "mcpServers",
+      "installed": [
+        ".gemini"
+      ],
+      "restart": "Start a new Gemini CLI session to use it."
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "detail": "Your Cursor plan.",
+      "config": ".cursor/mcp.json",
+      "format": "mcpServers",
+      "installed": [
+        "/Applications/Cursor.app",
+        ".cursor"
+      ],
+      "restart": "Restart Cursor to use it."
+    },
+    {
+      "id": "vscode",
+      "name": "VS Code",
+      "detail": "GitHub Copilot’s agent mode.",
+      "config": "Library/Application Support/Code/User/mcp.json",
+      "format": "vscode",
+      "installed": [
+        "/Applications/Visual Studio Code.app",
+        "Library/Application Support/Code/User"
+      ],
+      "restart": "Reload VS Code to use it."
+    },
+    {
+      "id": "windsurf",
+      "name": "Windsurf",
+      "detail": "Your Windsurf plan.",
+      "config": ".codeium/windsurf/mcp_config.json",
+      "format": "mcpServers",
+      "installed": [
+        "/Applications/Windsurf.app",
+        ".codeium/windsurf"
+      ],
+      "restart": "Restart Windsurf to use it."
+    },
+    {
+      "id": "lm-studio",
+      "name": "LM Studio",
+      "detail": "Models on this Mac, in LM Studio’s chat.",
+      "config": ".lmstudio/mcp.json",
+      "format": "mcpServers",
+      "installed": [
+        "/Applications/LM Studio.app",
+        ".lmstudio"
+      ],
+      "restart": "Turn Powermove on under Integrations in LM Studio’s chat."
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "detail": "Any provider you use in OpenCode.",
+      "config": ".config/opencode/opencode.json",
+      "format": "opencode",
+      "installed": [
+        ".config/opencode"
+      ],
+      "restart": "Start a new OpenCode session to use it."
+    }
+  ]
+}

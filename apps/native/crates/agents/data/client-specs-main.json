@@ -1,0 +1,109 @@
+[
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "detail": "Your Claude plan, in the terminal or your editor.",
+    "config": ".claude.json",
+    "format": "claude-code",
+    "installed": [
+      ".claude.json",
+      ".claude"
+    ],
+    "restart": "Start a new Claude Code session to use it."
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "detail": "Your ChatGPT plan, in the Codex app or CLI.",
+    "config": ".codex/config.toml",
+    "format": "codex",
+    "installed": [
+      ".codex",
+      "/Applications/Codex.app"
+    ],
+    "restart": "Start a new Codex session to use it."
+  },
+  {
+    "id": "claude-desktop",
+    "name": "Claude",
+    "detail": "Your Claude plan, in the Claude app.",
+    "config": "Library/Application Support/Claude/claude_desktop_config.json",
+    "format": "mcpServers",
+    "installed": [
+      "/Applications/Claude.app",
+      "Applications/Claude.app",
+      "Library/Application Support/Claude"
+    ],
+    "restart": "Quit and reopen Claude to use it."
+  },
+  {
+    "id": "gemini-cli",
+    "name": "Gemini CLI",
+    "detail": "Your Google account or Gemini plan.",
+    "config": ".gemini/settings.json",
+    "format": "mcpServers",
+    "installed": [
+      ".gemini"
+    ],
+    "restart": "Start a new Gemini CLI session to use it."
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "detail": "Your Cursor plan.",
+    "config": ".cursor/mcp.json",
+    "format": "mcpServers",
+    "installed": [
+      "/Applications/Cursor.app",
+      ".cursor"
+    ],
+    "restart": "Restart Cursor to use it."
+  },
+  {
+    "id": "vscode",
+    "name": "VS Code",
+    "detail": "GitHub Copilot’s agent mode.",
+    "config": "Library/Application Support/Code/User/mcp.json",
+    "format": "vscode",
+    "installed": [
+      "/Applications/Visual Studio Code.app",
+      "Library/Application Support/Code/User"
+    ],
+    "restart": "Reload VS Code to use it."
+  },
+  {
+    "id": "windsurf",
+    "name": "Windsurf",
+    "detail": "Your Windsurf plan.",
+    "config": ".codeium/windsurf/mcp_config.json",
+    "format": "mcpServers",
+    "installed": [
+      "/Applications/Windsurf.app",
+      ".codeium/windsurf"
+    ],
+    "restart": "Restart Windsurf to use it."
+  },
+  {
+    "id": "lm-studio",
+    "name": "LM Studio",
+    "detail": "Models on this Mac, in LM Studio’s chat.",
+    "config": ".lmstudio/mcp.json",
+    "format": "mcpServers",
+    "installed": [
+      "/Applications/LM Studio.app",
+      ".lmstudio"
+    ],
+    "restart": "Turn Powermove on under Integrations in LM Studio’s chat."
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "detail": "Any provider you use in OpenCode.",
+    "config": ".config/opencode/opencode.json",
+    "format": "opencode",
+    "installed": [
+      ".config/opencode"
+    ],
+    "restart": "Start a new OpenCode session to use it."
+  }
+]
