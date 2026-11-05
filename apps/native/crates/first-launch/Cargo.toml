@@ -27,3 +27,4 @@ zeroize = "1"
 [dev-dependencies]
 crc32c = "0.6"
 tempfile = "3"
+url = "2.5"

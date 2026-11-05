@@ -425,3 +425,37 @@ against main SHA-256 and native BLAKE3; the captured source-link record remains
 unchanged. A proxy link supplies playable stored bytes without supplying an
 original identity. The source/destination overlap guard covers source links too.
 The synthetic source-link coordinator test covers both original and proxy links.
+
+
+## 2026-11-05 — beta3 asynchronous updater preparation
+
+`pm-update-policy::update_distribution::sparkle` now drives a Sparkle-owned
+asynchronous download using the existing signed-policy verifier and append-only
+staging store. Callbacks are fenced by policy id; exact version/URL/length/EdDSA,
+generation and expiry are checked before download. Install intent requires a
+fresh ordinary quit barrier and another readiness/expiry check. Unknown callbacks,
+interrupted dispatch and persisted native state never become successful stages.
+The external-archive API cannot take over the asynchronous transaction.
+
+The optional `macos-sparkle` feature supplies an actual Objective-C public-API
+binding and a bounded callback queue. The application still must enable it, retain
+its custom driver, keep source/import leases, install its normal save/export/quit
+termination guard for the entire session, and supply actual installer recovery
+and signed identity evidence. The Rust atomic permit is the host's revocable
+capability, not proof that those application bindings exist. A full-only reviewed
+Sparkle appcast is required: delta enclosures are refused. The existing synchronous
+bridge remains for its consumers; it still has no public archive-adoption API.
+
+`check-sparkle-binding.sh` verifies the supplied pinned upstream archive, compiles
+and links the actual framework boundary on Mac, then runs a missing-guard refusal
+probe without starting an updater. This probe is unrun on Linux. See the dated
+[distribution](distribution.md) section for exact commands and the signed-candidate
+proof procedure. No source profile, secret, feed, signing identity, release or
+workflow was changed. No reverse migration or Restore UI was added.
+
+Decisions: use Sparkle-owned download and actual public continuations (N3/N4/N8);
+retain old APIs while their consumers remain (prune rule); journal side-effect
+intent before dispatch and retain every interrupted transaction (N4/N7); require
+full identity and normal-quit evidence without an optimistic recovery fallback
+(N1/N4). Item 13 remains blocked on real application bindings and signed Mac proof.
+No new `DESIGN-TODO(opus)` or visual output was introduced.

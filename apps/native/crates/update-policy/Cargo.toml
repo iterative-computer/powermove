@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+macos-sparkle = []
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"
+
 [dependencies]
 anyhow = "1"
 fs2 = "0.4"

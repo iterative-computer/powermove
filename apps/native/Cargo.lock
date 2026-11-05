@@ -4927,6 +4927,7 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
+ "url",
  "zeroize",
 ]
 
@@ -5543,6 +5544,7 @@ name = "pm-update-policy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "fs2",
  "semver",
  "serde",

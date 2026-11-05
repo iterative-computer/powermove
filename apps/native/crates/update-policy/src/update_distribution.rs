@@ -12,6 +12,8 @@ use std::{
 };
 use url::Url;
 
+pub mod sparkle;
+
 const MAX_POLICY: u64 = 128 * 1024;
 const MAX_RECEIPT: u64 = 256 * 1024;
 const RESERVE: u64 = 4 * 1024 * 1024 * 1024;
@@ -274,11 +276,27 @@ pub fn check(
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Stage {
     Downloading,
-    Downloaded { file: String },
-    Staging { file: String },
-    Staged { file: String, ticket: String },
-    InstallRequested { file: String, ticket: String },
+    Downloaded {
+        file: String,
+    },
+    Staging {
+        file: String,
+    },
+    Staged {
+        file: String,
+        ticket: String,
+    },
+    InstallRequested {
+        file: String,
+        ticket: String,
+    },
     Completed,
+    /// Sparkle owns its download; these states never imply external ZIP adoption.
+    SparkleChecking,
+    SparkleDownloading,
+    SparkleExtracting,
+    SparkleReady,
+    SparkleInstallRequested,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -450,6 +468,15 @@ impl StagingStore {
                 return Ok(());
             }
             Some(Stage::Staging { .. }) => bail!("recover interrupted installer before staging"),
+            Some(
+                Stage::SparkleChecking
+                | Stage::SparkleDownloading
+                | Stage::SparkleExtracting
+                | Stage::SparkleReady
+                | Stage::SparkleInstallRequested,
+            ) => {
+                bail!("Sparkle owns this transaction; external download is forbidden");
+            }
             _ => {}
         }
         let required = offer
@@ -617,6 +644,13 @@ impl StagingStore {
                 }
             }
             Stage::Completed => {}
+            Stage::SparkleChecking
+            | Stage::SparkleDownloading
+            | Stage::SparkleExtracting
+            | Stage::SparkleReady
+            | Stage::SparkleInstallRequested => {
+                bail!("use Sparkle session recovery; never restart an unknown installer");
+            }
         }
         Ok(self.status()?.map(|(_, stage)| stage))
     }
