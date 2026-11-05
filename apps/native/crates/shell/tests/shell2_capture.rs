@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! Shell 2 renderer captures: drag-to-dock preview, the docked result and the
 //! mockup tab strip, on the real GPUI tree + P-HEADLESS Metal renderer.
 use gpui::{AppContext, HeadlessAppContext, px, size};

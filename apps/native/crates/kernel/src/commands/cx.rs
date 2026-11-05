@@ -53,6 +53,7 @@ pub fn new_id(prefix: &str) -> String {
 /// The scratch state of one command.
 pub struct Cx<'a> {
     base: &'a Node,
+    pub(super) state: Option<&'a crate::state::StateSnapshot>,
     origin: Origin,
     doc: Document,
     ops: Vec<Op>,
@@ -63,6 +64,7 @@ impl<'a> Cx<'a> {
     pub(crate) fn new(root: &'a Node, origin: Origin) -> Cx<'a> {
         Cx {
             base: root,
+            state: None,
             origin,
             doc: Document::from_root(Some(root.clone()), 0),
             ops: Vec::new(),

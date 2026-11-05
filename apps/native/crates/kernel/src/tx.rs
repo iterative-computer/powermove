@@ -115,6 +115,9 @@ pub struct Request {
     pub caller: Caller,
     /// Optional transaction id for retry dedupe and lost-ack recovery.
     pub txid: Option<u64>,
+    /// Pins all call kinds, including selection and gesture lifecycle, to one
+    /// document lifetime. A reused project/layer ID grants no authority.
+    pub expected_document: Option<u64>,
     pub call: Call,
 }
 
@@ -123,8 +126,14 @@ impl Request {
         Request {
             caller,
             txid: None,
+            expected_document: None,
             call: call.into(),
         }
+    }
+
+    pub fn with_document(mut self, document: u64) -> Request {
+        self.expected_document = Some(document);
+        self
     }
 
     pub fn with_txid(mut self, txid: u64) -> Request {
@@ -694,7 +703,22 @@ impl Project {
 
     /// Runs one call. The single entry point of the transaction layer.
     pub fn handle(&mut self, request: Request) -> Handled {
-        let Request { caller, txid, call } = request;
+        let Request {
+            caller,
+            txid,
+            expected_document,
+            call,
+        } = request;
+        if expected_document.is_some_and(|document| document != self.store.doc_id()) {
+            return Handled::reply(self.ack(
+                None,
+                None,
+                None,
+                Reply::Throw(KernelError::Guard(
+                    "The document was closed or replaced; the request was not applied".into(),
+                )),
+            ));
+        }
         let txid = txid.map(|txid| TxId {
             realm: caller.writer.realm,
             generation: caller.writer.generation,

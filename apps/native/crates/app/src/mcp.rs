@@ -113,8 +113,62 @@ impl Host {
             .kernel
             .published(&session.project)
             .ok_or_else(stopped)?;
-        let doc = document(&p);
-        Ok(json!({"projectId":session.project,"name":doc["name"]}))
+        Ok(identity(&p))
+    }
+    fn export(&self, session: SessionHandle, document: u64) -> Result<Value> {
+        let exports = self.profile.join("exports");
+        std::fs::create_dir_all(&exports)?;
+        let path = exports.join(format!("{}.pmv", pm_kernel::new_id("export")));
+        let plan = self
+            .kernel
+            .prepare_export(session.clone(), document, path.clone())
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        let receipt = plan.run().map_err(Error::kernel)?;
+        if !receipt.unavailable_links.is_empty() {
+            return Err(Error::unavailable(
+                "original media unavailable for complete portable project export",
+            ));
+        }
+        Ok(json!({"projectId":session.project,"path":path}))
+    }
+    fn save_project(&self, session: SessionHandle, document: u64) -> Result<Value> {
+        let published = self
+            .kernel
+            .published(&session.project)
+            .ok_or_else(stopped)?;
+        if published.snapshot.doc_id != document {
+            return Err(Error::invalid("The document was closed or replaced."));
+        }
+        if published.path.is_none() {
+            return self.export(session, document);
+        }
+        let save = self
+            .kernel
+            .prepare_document_save(session.clone(), document)
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        let reply = self
+            .kernel
+            .finish_save(save.run())
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        match reply {
+            ShellReply::Saved {
+                session,
+                recovery_copy: None,
+            } => {
+                let published = self
+                    .kernel
+                    .published(&session.project)
+                    .ok_or_else(stopped)?;
+                Ok(json!({"projectId":session.project,"path":published.path}))
+            }
+            other => Err(Error::kernel(other)),
+        }
     }
     fn save(&self, session: SessionHandle, path: Option<PathBuf>) -> Result<Value> {
         let p = self
@@ -161,6 +215,17 @@ fn model(v: &Value) -> pm_model::Value {
 fn json_value(v: &pm_model::Value) -> Value {
     serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap()
 }
+fn identity(p: &Published) -> Value {
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| root.get("name"))
+        .and_then(|node| match node.kind() {
+            pm_model::NodeKind::String(text) => text.as_str(),
+            _ => None,
+        });
+    json!({"projectId":p.project,"name":name})
+}
 fn document(p: &Published) -> Value {
     let mut v = json_value(&pm_model::canonical::realize_project(
         p.snapshot.document.to_value().unwrap(),
@@ -205,9 +270,19 @@ impl Connection {
         }
     }
     fn call(&self, id: &str, call: impl Into<Call>) -> Result<Ack> {
+        let document = self
+            .run
+            .as_ref()
+            .and_then(|run| run.document)
+            .or_else(|| self.host.kernel.published(id).map(|p| p.snapshot.doc_id))
+            .ok_or_else(|| Error::conflict("Project closed before the request was admitted"))?;
         let ack = self
             .actor
-            .call(id, call)
+            .kernel
+            .call(
+                id,
+                Request::new(self.actor.caller, call).with_document(document),
+            )
             .wait()
             .ok_or_else(stopped)?
             .map_err(Error::kernel)?;
@@ -437,6 +512,11 @@ impl Connection {
         }
         let p = self.published()?;
         let id = &p.project;
+        if name == "save_project" {
+            return self
+                .host
+                .save_project(run.session.clone().unwrap(), p.snapshot.doc_id);
+        }
         let doc = document(&p);
         let time = p
             .ui_state
@@ -492,21 +572,6 @@ impl Connection {
                 Ok(
                     json!({"selection":{"layers":p.selection.layers(),"keys":p.selection.keys(),"chan":p.selection.channel()}}),
                 )
-            }
-            "save_project" => {
-                let session = self.run.as_ref().unwrap().session.clone().unwrap();
-                let path = if p.path.is_none() {
-                    std::fs::create_dir_all(self.host.profile.join("exports"))?;
-                    Some(
-                        self.host
-                            .profile
-                            .join("exports")
-                            .join(format!("{}.pmv", pm_kernel::new_id("export"))),
-                    )
-                } else {
-                    None
-                };
-                self.host.save(session, path)
             }
             "rollback_changes" => {
                 self.rollback()?;
@@ -603,7 +668,7 @@ impl Connection {
             }
             if self.host.current().is_some_and(|s| s.project == id) {
                 let p = self.host.kernel.published(id).ok_or_else(stopped)?;
-                return Ok(json!({"projectId":id,"name":document(&p)["name"]}));
+                return Ok(identity(&p));
             }
             return self.host.open(
                 id.into(),

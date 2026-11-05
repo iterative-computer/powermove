@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! Shell 3 (design review must-fixes): drop zones, tab-menu state, empty
 //! states, Workspace vocabulary, theme patches, document subtitle and SF Symbols.
 use gpui::{AppContext, HeadlessAppContext, px, size};
@@ -48,7 +49,7 @@ fn drop_previews_cover_only_the_drop_zone() {
     for p in [left, right, bottom] {
         assert!(p.rect.w * p.rect.h < BOUNDS.w * BOUNDS.h * 0.3);
     }
-    // Header → the header strip only; body → one half.
+    // Viewer offers only above/below; no tab target.
     let viewer = g
         .panels
         .iter()
@@ -58,8 +59,8 @@ fn drop_previews_cover_only_the_drop_zone() {
     let tab = l
         .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + 4., &t)
         .unwrap();
-    assert!(matches!(tab.target, DropTarget::Tab { .. }));
-    assert_eq!(tab.rect.h, t.metrics.header);
+    assert!(matches!(tab.target, DropTarget::Split { .. }));
+    assert!(tab.rect.h < viewer.h / 2.);
     let half = l
         .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + viewer.h * 0.7, &t)
         .unwrap();

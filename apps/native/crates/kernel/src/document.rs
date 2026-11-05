@@ -220,6 +220,7 @@ type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 /// The single document authority. See the crate documentation for the
 /// threading model.
 pub struct DocumentStore {
+    runtime_state: Option<crate::state::StateSnapshot>,
     doc_id: u64,
     current: Arc<Document>,
     file: ProjectFile,
@@ -300,6 +301,7 @@ impl DocumentStore {
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
+            runtime_state: None,
             doc_id: new_doc_id(),
             current: Arc::new(document),
             file,
@@ -319,6 +321,11 @@ impl DocumentStore {
     }
 
     // ── reading ────────────────────────────────────────────────────────────
+
+    /// Contribution facts for worker-side planning. Never authored or persisted.
+    pub fn set_runtime_state(&mut self, state: crate::state::StateSnapshot) {
+        self.runtime_state = Some(state);
+    }
 
     pub fn doc_id(&self) -> u64 {
         self.doc_id
@@ -999,7 +1006,7 @@ impl DocumentStore {
                 (_, Some(c)) => {
                     crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
                 }
-                (Some(c), None) => c.plan(tree, origin)?,
+                (Some(c), None) => c.plan_with_state(tree, origin, self.runtime_state.as_ref())?,
                 (None, None) => Vec::new(),
             };
             for op in ops {
@@ -1146,6 +1153,34 @@ impl DocumentStore {
         if self.is_saving() {
             return Err(ProjectIoError::SaveInProgress);
         }
+        let plan = self.freeze_save(target, options)?;
+        self.save_ticket = Arc::downgrade(&plan.ticket);
+        Ok(plan)
+    }
+
+    /// A frozen portable snapshot independent of the live Save ticket/path.
+    /// Run it on a worker and never adopt its receipt with finish_save.
+    pub fn prepare_portable_export(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<SavePlan, ProjectIoError> {
+        self.freeze_save(
+            SaveTarget::SaveAs {
+                path,
+                replace: false,
+            },
+            SaveOptions {
+                portable: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn freeze_save(
+        &self,
+        target: SaveTarget,
+        options: SaveOptions,
+    ) -> Result<SavePlan, ProjectIoError> {
         let (destination, publish, replace_existing, reuse_previous) = match target {
             SaveTarget::InPlace => {
                 let path = self
@@ -1242,7 +1277,6 @@ impl DocumentStore {
             extra.insert(key, archived);
         }
         let ticket = Arc::new(());
-        self.save_ticket = Arc::downgrade(&ticket);
         Ok(SavePlan {
             container_index: self.file.envelope.container_index.clone(),
             revision: self.revision(),

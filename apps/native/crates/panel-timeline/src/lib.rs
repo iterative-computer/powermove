@@ -514,5 +514,6 @@ impl TimelineModel {
             },
         )
         .with_txid(txid)
+        .with_document(self.index.doc_id)
     }
 }
