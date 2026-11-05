@@ -214,3 +214,52 @@ insert/overwrite, marks, transport, real transaction gestures, stale work,
 locked downstream clips and retry deduplication. Production tool registration,
 menus/gestures and engine clock delivery are outside this lane's owned paths;
 Linux adapter tests do not claim those app/Mac bindings are complete.
+
+## 2026-11-04 — cloud pro2 render lifecycle
+
+### Render cache and tasks boundary
+
+`pm_kernel::pro_jobs` adds a worker-owned `RenderJobs` lifecycle and
+`RenderJobHost` IO interface. It does not replace the media lane's
+`pm-promedia::{cache,tasks,storage}` or claim to supply a renderer/codec. The host
+bridges those services, observes real kernel publications and supplies its
+monotone media/font/effect/colour resource generation. Relink/proxy/resource
+changes therefore fence work even without a document revision. A complete
+`FrameKey` includes semantic graph/media digests, exact ticks, size,
+representation, renderer version and explicit Originals/Proxy/Optimized
+provenance. An original-only request refuses derivative keys; receipts must
+match the requested key and reserved byte bound. Cache lookup verifies actual
+bytes through the adapter instead of trusting a completed row. Keep Rendered
+requires an existing verified object and delegates durable pins to the cache.
+
+Every queued/running/progress/cancel/cleanup/terminal transition is saved before
+publication. CancelRequested remains visible while a producer owns its output.
+Settlement saves Cleaning, drains/stops/reaps the producer, archives partials,
+then saves the terminal state. A drain/archive/save error remains an error;
+cleanup can be retried. Startup validates the whole retained inventory before
+cleanup IO, drains/archives interrupted work, and invalidates old tickets.
+A crash between archival and terminal save is idempotent. A crash after cache
+publication can retain valid derived bytes while the task remains interrupted;
+that is not reported as successful task completion. Terminal ids are retained,
+never reused. Unknown frame totals remain explicit None, without a percentage.
+
+`RenderJobHost` must own exclusive private roots, validate physical disk space
+plus its safety floor, verify source leases/provenance and actual pixels/output,
+atomically sync job facts, publish immutable no-clobber cache objects, and verify
+and sync archives before retiring active names. Raw durable envelopes/unknown
+fields remain the storage host's responsibility; the serializable JobRecord is
+the known lifecycle projection, not a replacement project/storage format.
+Low-disk cleanup never evicts originals or deletes partials to manufacture
+success. If archival lacks space, staging and a retryable diagnostic remain.
+These are mandatory adapter contracts, not assertions that production backing
+has already been wired.
+
+Decisions and selecting rules:
+
+| Decision | Rule |
+| --- | --- |
+| Reuse existing actor transaction/publication machinery and keep worker IO behind a trait. | N3 one document truth; N8 no decoder, filesystem or JS waits on the UI/kernel actor. |
+| Fence jobs by project, document, revision and native resource generation; include provenance in cache identity. | N1/N3/N7 prevent stale frame attachment and proxy-as-original claims. |
+| Save cancellation/cleanup intent, drain producers, archive partials, then acknowledge completion. | N4 preserves bytes on cancel/crash/low disk; N1/N7 expose failures and live ownership. |
+| Verify cache objects on reads and refuse absent/corrupt pins and mismatched receipts. | N1/N3 choose actual bytes over a success-shaped remembered task. |
+| Keep existing media/cache/task implementations and all live consumers. | N4 and the prune rule; this lane supplies coordination rather than a second media authority. |
