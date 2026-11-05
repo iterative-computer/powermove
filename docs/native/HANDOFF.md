@@ -1,5 +1,88 @@
 # Native rewrite — handoff to Jude
 
+## Update — 2026-11-05: work stopped, read this first
+
+All agents were stopped at the owner's request on 2026-11-05. This section
+supersedes the status below where they differ; the item numbers below still
+apply. Integration head: `feat/native-engine` at `80bc541dd`.
+
+**What changed since the snapshot below**
+
+- The behaviour reference is now `origin/main` at `c7f46a05641b`, not `v1.2.0`
+  ([p0-decisions.md](p0-decisions.md)). [main-delta.md](main-delta.md) is the
+  work list. `v1.2.0` files and extensions must still work.
+- The new 3D system ships with the rewrite and old 3D projects upgrade
+  automatically. No restore UI for archives, no reverse migration, and the old
+  app must refuse a native file it cannot read. Ask the user before adding
+  Powermove to the Claude desktop app's settings.
+- All wave 9, 10 and 12 lanes are integrated, including the former
+  `na-etrack-integrate`, corpus, built-ins and extension inputs.
+
+**Measured at `80bc541dd` (headless)**
+
+| Check | Result |
+| --- | --- |
+| Strict acceptance vs `main` | 1,702 pass / 0 fail / 2,643 blocked |
+| Strict acceptance vs `v1.2.0` | 1,469 pass / 0 fail / 3,135 blocked |
+| Native workspace | 3,018 pass / 0 fail / 2 ignored; three screen-capture targets not run |
+| Headless shell | 50 pass / 0 fail |
+| Engine workspace | 3,223 pass / 5 fail / 79 ignored; failures are known missing references, plus two harness executables that need frozen reference or font files |
+| Perf ratchet | 17 benches within limits on replay |
+| Local projects (86 entries, measured just before `80bc541dd`) | 18 pass every stage; 26 open, edit and save/reopen; 12 fail before kernel parsing on unavailable inputs; the rest blocked on undownloaded inputs or extensions |
+| Raw strict agent replay | 359 retained differences, still failing (28 lifecycle, 331 catalog) |
+| Extension comparisons | 0 of 58 |
+| Opus screen review | No panel reviewed |
+
+Known risk: `text_cold` sits exactly on its limits (11,744 allocations /
+2,575,841 bytes). One run exceeded them by 1 allocation and 128 bytes, and the
+variation is undiagnosed. Audio cold start also needs a quiet Mac: last isolated
+reading 10.734 ms against 10.666667 ms.
+
+**Unmerged branches: merge these first**
+
+Each is pushed but has not passed the full merge gate after its last change.
+
+| Branch | Head | State | Next |
+| --- | --- | --- | --- |
+| `feat/na-mac-fx3` | `d219c3d30` | E05, E06, E07, E10 marked Closed on the branch. Release Pre-comp work in progress; last commit is unverified WIP. | Finish E12, run the gate, merge. |
+| `feat/na-mac-beta3` | `580899dd5` | Media admission, Sparkle binding, recovery proofs, P12 import coordination. Qualification was stopped mid-run. | Adopt the `RetainedAsset` receipt API from `80bc541dd`, run the gate, merge. |
+| `feat/na-mac-w12` | `a4b693e55` | One unverified WIP commit on `80bc541dd`: media refresh and app lifecycle. | Finish, run the gate, merge. |
+| `feat/na-mac-w12-impl-wip` | `ebd39a41e` | Earlier staging, likely superseded by `187b39a10`. | Compare, then discard if nothing is unique. |
+
+**Rows**
+
+- Data P01–P13: core evidence passes for all but P12 (partial). UI halves of
+  P01, P06, P11, P12 are open.
+- Effects E01–E18: none closed on the integration head; four closed on
+  `feat/na-mac-fx3`. E13, E17 and E18 need a physical display.
+- Interface U rows and agent A rows: none fully closed. Panel-side wiring is
+  merged. Remaining: Timeline, Easing and motion-path tools; app relink,
+  pasteboard, point, font, fill, graph and Anchor handlers; agent provider,
+  Settings and native Markdown/media reply presentation; memory-only recovery
+  UX; live renderer media catalog refresh.
+- Extensions: app script, trace and capture wiring plus `tools/extcheck/native.mjs`,
+  non-command Store, view and resource dispatch, and remaining recorder backends.
+
+**Needs a screen or a person**
+
+Opus screenshot review of every panel; 120 Hz crash test and pacing
+(`feat/na-p120b`); formal 30-pair speed gate; audio timing on a quiet Mac; live
+provider credentials; frozen reference and font files; downloading placeholder
+projects and locating missing media; signed build and updater proof; owner
+approval for the transition release and beta. No release, tag or `main` change
+was made.
+
+**Lessons for the next run**
+
+- Giving a lane narrow file ownership makes it stop at app and kernel boundaries.
+  Use one lane with full ownership for connecting code.
+- Disk is the main limit on one Mac. Three lanes sharing one Cargo target folder
+  repeatedly hit the 8 GiB reserve. Run two at most, or free more space first.
+- Do not delete Cargo artifacts between a lane's compile and documentation
+  phases; rustdoc still references them.
+
+## Snapshot from 2026-11-02
+
 Snapshot: 2026-11-02, 03:27 UTC. This covers **all unfinished work**, including engine,
 projects, panels, compatibility, design, performance, migration and release.
 No builds, tests, captures or app launches were run to prepare this document.
