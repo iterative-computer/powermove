@@ -139,8 +139,11 @@ fn until(mut f: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(2));
     }
 }
-fn executable() -> &'static str {
-    env!("CARGO_BIN_EXE_pm-store-helper")
+fn executable() -> std::path::PathBuf {
+    // Verification may run freshly signed private copies of both executables.
+    std::env::var_os("PM_STORE_HELPER")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_pm-store-helper").into())
+        .into()
 }
 #[test]
 fn production_helpers_are_cluster_scoped_confined_and_reaped_without_losing_storage() {
@@ -311,46 +314,116 @@ fn forced_fatal_oom_only_kills_the_confined_helper() {
     parent.close();
     sibling.close();
 }
-#[cfg(target_os = "linux")]
-struct ProbeSandbox;
-#[cfg(target_os = "linux")]
+struct ProbeSandbox {
+    root: std::path::PathBuf,
+    address: std::net::SocketAddr,
+}
+fn require_denied(result: std::io::Result<impl Sized>, operation: &str) {
+    match result {
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {}
+        Err(error) => panic!("{operation}: expected EPERM/EACCES, got {error}"),
+        Ok(_) => panic!("{operation}: confinement allowed the operation"),
+    }
+}
 impl StoreSandbox for ProbeSandbox {
     fn confine(&self) -> Result<Value> {
         let confinement = PlatformStoreSandbox.confine()?;
-        assert_eq!(
-            std::fs::read("/etc/hostname").unwrap_err().raw_os_error(),
-            Some(libc::EPERM)
+        require_denied(std::fs::read(self.root.join("readable")), "file read");
+        require_denied(
+            std::fs::write(self.root.join("forbidden"), b"fixture"),
+            "file write",
         );
-        assert_eq!(
-            std::fs::write("/tmp/pm-store-must-not-exist", b"fixture")
-                .unwrap_err()
-                .raw_os_error(),
-            Some(libc::EPERM)
+        require_denied(
+            std::net::TcpStream::connect(self.address),
+            "network connect",
         );
-        assert_eq!(
-            std::net::TcpStream::connect("127.0.0.1:9")
-                .unwrap_err()
-                .raw_os_error(),
-            Some(libc::EPERM)
+        require_denied(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 77"])
+                .status(),
+            "process spawn",
         );
-        eprintln!("CONFINEMENT {confinement}");
+        // Same pinned optimization bits as S1. Native syntax is enabled only by
+        // the test child before V8 initialization, never the production helper.
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let s, &mut isolate);
+        let context = v8::Context::new(s, Default::default());
+        let s = &mut v8::ContextScope::new(s, context);
+        let source = v8::String::new(
+            s,
+            r#"
+            function optimized(x) { return x * 3 + 1; }
+            %PrepareFunctionForOptimization(optimized);
+            for (let i = 0; i < 100; i++) optimized(i);
+            %OptimizeFunctionOnNextCall(optimized);
+            if (optimized(14) !== 43) throw new Error('wrong JIT value');
+            const status = %GetOptimizationStatus(optimized);
+            if ((status & 8) === 0 || (status & 32) === 0)
+                throw new Error('TurboFan not established: ' + status);
+            status;
+        "#,
+        )
+        .unwrap();
+        let status = v8::Script::compile(s, source, None)
+            .expect("compile JIT probe")
+            .run(s)
+            .expect("confined TurboFan probe")
+            .integer_value(s)
+            .unwrap();
+        eprintln!("CONFINEMENT {confinement} TURBOFAN_STATUS {status}");
         std::process::exit(0)
     }
 }
-#[cfg(target_os = "linux")]
 #[test]
 fn confinement_child() {
     if std::env::var_os("PM_STORE_CONFINEMENT_TEST").is_some() {
-        let _ = run_store_helper(&ProbeSandbox);
+        let root = std::path::PathBuf::from(std::env::var_os("PM_STORE_PROBE_ROOT").unwrap());
+        let address = std::env::var("PM_STORE_PROBE_ADDRESS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        // Prove these operations work before confinement. ENOENT or a closed
+        // port is never accepted as evidence of a sandbox denial.
+        assert_eq!(
+            std::fs::read(root.join("readable")).unwrap(),
+            b"synthetic probe"
+        );
+        std::fs::write(root.join("writable"), b"synthetic probe").unwrap();
+        std::net::TcpStream::connect(address).unwrap();
+        assert_eq!(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 77"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(77)
+        );
+        v8::V8::set_flags_from_string("--allow-natives-syntax");
+        let _ = run_store_helper(&ProbeSandbox { root, address });
         panic!("probe returned");
     }
 }
-#[cfg(target_os = "linux")]
 #[test]
-fn linux_double_denies_files_and_network() {
+fn platform_confinement_denies_files_network_and_spawn_and_preserves_jit() {
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "pm-runtime-denial-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("readable"), b"synthetic probe").unwrap();
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "confinement_child", "--nocapture"])
         .env("PM_STORE_CONFINEMENT_TEST", "1")
+        .env("PM_STORE_PROBE_ROOT", &root)
+        .env(
+            "PM_STORE_PROBE_ADDRESS",
+            listener.local_addr().unwrap().to_string(),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -365,11 +438,21 @@ fn linux_double_denies_files_and_network() {
     input.write_all(&bytes).unwrap();
     drop(input);
     let output = child.wait_with_output().unwrap();
+    let denied_file_exists = root.join("forbidden").exists();
+    std::fs::remove_dir_all(root).unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let evidence = String::from_utf8_lossy(&output.stderr);
+    assert!(evidence.contains("TURBOFAN_STATUS"), "{evidence}");
+    #[cfg(target_os = "macos")]
+    assert!(evidence.contains("\"seatbelt\":true"), "{evidence}");
+    #[cfg(target_os = "linux")]
+    assert!(evidence.contains("\"seccomp\":true"), "{evidence}");
+    assert!(!denied_file_exists, "sandbox allowed file creation");
+    eprintln!("{evidence}");
 }
 
 #[test]

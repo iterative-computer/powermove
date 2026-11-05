@@ -18,13 +18,17 @@ pub(crate) const SVELTE: &str = include_str!("../compiler/svelte-5.56.10.js");
 const WEB: &str = include_str!("web.js");
 const MIB: usize = 1024 * 1024;
 pub(crate) const FLAGS: &str = if cfg!(feature = "macos-sandbox") {
-    "default;sandbox=true"
+    "no-extensible-ro-snapshot;sandbox=true"
 } else {
-    "default;sandbox=false"
+    "no-extensible-ro-snapshot;sandbox=false"
 };
 pub(crate) fn initialize() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // Every kind has its own custom snapshot, but isolates share V8's
+        // read-only heap. Extending it independently per snapshot gives those
+        // snapshots incompatible root offsets when another kind is restored.
+        v8::V8::set_flags_from_string("--no-extensible-ro-snapshot");
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -83,12 +87,33 @@ pub(crate) struct NativeState {
     pub logs: Vec<(String, String)>,
     pub in_flight: usize,
     pub reserved: usize,
+    engine_reserved: usize,
+    sampled_external: usize,
     next_id: u64,
     start: Instant,
     generation: Generation,
     engine: Option<Arc<dyn EngineProxy>>,
     cancellation: Cancellation,
     sync_calls: usize,
+}
+impl NativeState {
+    fn admits_response(&self, bytes: usize) -> bool {
+        self.sampled_external
+            .checked_add(self.reserved)
+            .and_then(|n| n.checked_add(self.engine_reserved))
+            .and_then(|n| n.checked_add(bytes))
+            .is_some_and(|n| n <= self.limits.external_bytes)
+    }
+}
+/// Release on native adapter errors too; no V8 entry occurs under this lock.
+struct EngineReservation {
+    state: Arc<Mutex<NativeState>>,
+    bytes: usize,
+}
+impl Drop for EngineReservation {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().engine_reserved -= self.bytes;
+    }
 }
 #[derive(Clone)]
 struct Native(Arc<Mutex<NativeState>>);
@@ -116,6 +141,7 @@ pub(crate) unsafe extern "C" fn check_external(mut raw: v8::UnsafeRawIsolatePtr,
             .get_heap_statistics()
             .external_memory()
             .saturating_add(native.reserved)
+            .saturating_add(native.engine_reserved)
             > native.limits.external_bytes
         {
             isolate.terminate_execution();
@@ -146,6 +172,9 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         return;
     };
     let state = s.get_slot::<Native>().unwrap().0.clone();
+    // Refresh at the allocation boundary, not only at the next microtask or
+    // watchdog interrupt. JS may have retained buffers earlier in this stack.
+    state.lock().unwrap().sampled_external = s.get_heap_statistics().external_memory();
     if text.length() > state.lock().unwrap().limits.max_op_bytes {
         throw(s, "Host argument quota");
         return;
@@ -177,19 +206,29 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
     }
 }
 fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<Value, String> {
-    let (engine, generation, budget) = {
+    let (engine, generation, budget, _reservation) = {
         let mut n = state.lock().unwrap();
         if n.sync_calls >= n.limits.max_host_ops {
             return Err("Engine operation quota".into());
         }
         n.sync_calls += 1;
+        let engine = n.engine.clone().ok_or("Engine service is not attached")?;
+        let reserve = n.limits.max_response_bytes.min(n.limits.external_bytes);
+        if !n.admits_response(reserve) {
+            return Err("External memory reservation quota".into());
+        }
+        n.engine_reserved += reserve;
         (
-            n.engine.clone().ok_or("Engine service is not attached")?,
+            engine,
             n.generation.clone(),
             HostBudget {
                 cancellation: n.cancellation.clone(),
                 deadline: Instant::now() + n.limits.host_timeout,
-                max_response_bytes: n.limits.max_response_bytes.min(n.limits.external_bytes),
+                max_response_bytes: reserve,
+            },
+            EngineReservation {
+                state: state.clone(),
+                bytes: reserve,
             },
         )
     };
@@ -227,7 +266,7 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                 return Err("Host operation quota".into());
             }
             let reserve = n.limits.max_response_bytes;
-            if n.reserved.saturating_add(reserve) > n.limits.external_bytes {
+            if !n.admits_response(reserve) {
                 return Err("External memory reservation quota".into());
             }
             let url = url::Url::parse(v["url"].as_str().ok_or("Missing URL")?)
@@ -474,6 +513,8 @@ impl Vm {
             logs: vec![],
             in_flight: 0,
             reserved: 0,
+            engine_reserved: 0,
+            sampled_external: 0,
             next_id: 0,
             start: Instant::now(),
             generation,
@@ -533,10 +574,13 @@ impl Vm {
     pub fn memory(&self) -> crate::IsolateMemory {
         let mut isolate = self.isolate.as_ref().unwrap().lock();
         let stats = isolate.get_heap_statistics();
+        let native = self.native.lock().unwrap();
         crate::IsolateMemory {
             used_heap_bytes: stats.used_heap_size(),
             physical_heap_bytes: stats.total_physical_size(),
             external_bytes: stats.external_memory(),
+            fetch_reserved_bytes: native.reserved,
+            engine_reserved_bytes: native.engine_reserved,
             snapshot_bytes: self.blob.len(),
         }
     }
@@ -635,6 +679,7 @@ impl Vm {
         if s.get_heap_statistics()
             .external_memory()
             .saturating_add(n.reserved)
+            .saturating_add(n.engine_reserved)
             > n.limits.external_bytes
         {
             return Err(Error::Quota("external memory"));

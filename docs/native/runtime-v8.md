@@ -390,3 +390,81 @@ remaining kernel/WebKit/Store capture gates are recorded in
 [extcheck-p2.md](extcheck-p2.md). This supersedes only the missing executable
 loader blocker above; it does not certify extension parity or complete the
 production adapters.
+
+## 2026-11-04 — runtime2 allocation boundaries and snapshot regression
+
+Fetch admission now counts the owner-sampled V8 external bytes **at the host
+callback**, including buffers created earlier in that same JS stack, together
+with outstanding response reservations. Synchronous engine calls reserve their
+response ceiling before entering the adapter and release it on success/error.
+`GenerationMemory.memory` exposes `fetch_reserved_bytes` and
+`engine_reserved_bytes` separately from V8 external bytes, heap and snapshots;
+Store status adds `fetch_reserved` and `engine_reserved`. These are capacity
+reservations, not RSS or actual allocator consumption. Native abort cleanup
+cancels/releases queued and active fetches before acknowledging the JS task,
+including a script that aborts and then throws; it no longer depends on a future
+idle tick. Six new unit tests include four quota/abort regressions and a
+subprocess snapshot regression plus its child entry.
+
+That subprocess reproduced a **SIGSEGV** in pinned V8's
+`StringTableInsertionKey` / `SharedHeapDeserializer`: build and retire a compiler
+snapshot isolate, keep an extension-kind isolate alive, then restore the
+compiler snapshot. Independently extended read-only snapshots were incompatible
+with the isolate group's shared read-only heap. Initialization now sets
+`--no-extensible-ro-snapshot` before V8 starts; per-kind contexts/compiler
+snapshots remain separate while using stock read-only roots. The flag identity
+is part of the existing code-cache key. The regression failed before the change;
+the full native-workspace suite passes afterward. No test is serialized or
+excluded to hide this failure. Recheck the same regression against S1 on macOS.
+
+Decisions: N1/N2 bound host response admission and release cancelled work;
+N3/N6 count live buffers rather than admitting against stale statistics;
+N3 keep independently restored snapshots compatible; N7 expose per-generation
+capacity categories; N8 all sampling/callbacks/disposal remain on V8 owners.
+No user files, extension sources, registrations or existing consumers are pruned.
+
+Linux: `cargo test --locked --manifest-path apps/native/Cargo.toml
+-p pm-runtime-v8` passes **69 tests** (61 unit, eight helper integration; no
+ignored tests). All-target package Clippy with `--no-deps -- -D warnings` and
+rustfmt pass. The existing native/isolated lockfiles suffice; no dependency or
+workspace membership changes are needed.
+
+**Hard external allocation remains BLOCKED.** Sampling and response reservations
+cannot cap every allocation by JS, WebAssembly, structured-clone serialization,
+codec/media adapters or recorder tiles. The pinned rusty_v8 Rust allocator API
+is disabled with `v8_enable_sandbox`; substituting malloc/Rust backing stores
+would violate sandbox ownership. A sandbox-aware allocator/page-allocation hook
+and verified matching CI archive/bindings are still needed. ArrayBuffer
+resizable/shared/Wasm growth, transfer/clone, native pixel buffers, allocator
+free/retirement, concurrent allocation and process-level fatal limits must all
+be tested before claiming a hard cap. This patch does not replace that gate
+with a post-allocation check or a Linux-only allocator implementation.
+
+## 2026-11-04 — runtime2 confinement probes and remaining gates
+
+The helper integration probe now runs on Linux **and macOS**. It proves access
+before confinement, then requires EPERM/EACCES for synthetic file read/write,
+loopback networking and spawn, followed by actual TurboFan optimization/value
+checks under the production sandbox policy. Existing helper IPC/restart and
+fatal heap-OOM parent/sibling-survival tests remain enabled. The tests canonicalize
+their fresh temp root, including macOS system temp symlinks; there is no private
+profile or hard-coded Linux fixture path. Linux passes all eight helper tests.
+
+[`runtime-v8/VERIFICATION.md`](../../apps/native/crates/runtime-v8/VERIFICATION.md)
+contains exact locked build/sign/run steps and the unclosed assertion ledger.
+The owned `scripts/verify-macos.sh` validates the S1 artifact/binding hashes,
+signs private copies of the production helper and integration test executable,
+verifies hardened runtime/exact allow-jit entitlements, then runs the probes.
+It reports BLOCKED (exit 2) off macOS/ARM64, never a skipped pass. Python uses
+3.9-compatible syntax. This script has shell/Python syntax checks on Linux;
+**no macOS codesign, seatbelt or shipping-bundle result is claimed**.
+
+Remaining item-5 work is explicitly blocked, not complete: sandbox-aware hard
+external allocation and complete native attribution; real reconciler/cluster
+budgets; full synchronous Canvas/text/paint/encoding; real media/resource and
+remote-DOM/application bindings. The production recorder dispatcher and engine/
+application adapters that must consume these primitives are outside this lane's
+owned paths. Preserve every fail/unsupported case and the extension denominator.
+No visual/UX changes, DESIGN-TODO placeholders or consumer deletions were made.
+Selecting rules: N1/N3 evidence before confinement/performance claims; N4/N6
+preserve synchronous extension intent; N7 inspectable ids; N8 owner-only JS.
