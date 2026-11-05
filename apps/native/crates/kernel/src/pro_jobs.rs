@@ -64,6 +64,9 @@ pub struct RenderPlan {
     /// claim about physical free disk; the host must check its volume too.
     pub reserve_bytes: u64,
     pub require_originals: bool,
+    /// This lifecycle publishes one exact frame key. Range batches belong to
+    /// BackgroundTasks; a single receipt must never complete multiple frames.
+    /// None remains indeterminate for hosts without a reported total.
     pub total_frames: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,7 +278,7 @@ impl RenderJobs {
             || plan.comp_id.is_empty()
             || !plan.key.valid()
             || plan.reserve_bytes == 0
-            || plan.total_frames == Some(0)
+            || plan.total_frames.is_some_and(|n| n != 1)
         {
             return Err(JobError::InvalidPlan);
         }
@@ -334,7 +337,8 @@ impl RenderJobs {
         if self.current.get(&record.plan.version.project) != Some(&record.plan.version) {
             return Err(JobError::StaleVersion);
         }
-        if completed < record.completed_frames
+        if completed > 1
+            || completed < record.completed_frames
             || record
                 .plan
                 .total_frames
@@ -435,9 +439,7 @@ impl RenderJobs {
             )?;
             return Err(JobError::InvalidReceipt);
         }
-        if let Some(total) = record.plan.total_frames {
-            record.completed_frames = total;
-        }
+        record.completed_frames = 1;
         record.state = JobState::Completed(receipt.clone());
         self.save(record, host)?;
         Ok(receipt)
@@ -460,7 +462,8 @@ impl RenderJobs {
                 || record.plan.reserve_bytes == 0
                 || record.plan.comp_id.is_empty()
                 || record.plan.version.project.is_empty()
-                || record.plan.total_frames == Some(0)
+                || record.plan.total_frames.is_some_and(|n| n != 1)
+                || record.completed_frames > 1
                 || record
                     .plan
                     .total_frames

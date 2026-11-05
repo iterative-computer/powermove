@@ -73,6 +73,7 @@ pub mod library;
 pub mod model;
 pub mod pro_editing;
 pub mod pro_jobs;
+pub mod pro_mcp;
 pub mod project_io;
 pub mod queries;
 pub mod selection;

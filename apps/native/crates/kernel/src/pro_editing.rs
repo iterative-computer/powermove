@@ -30,6 +30,8 @@ pub const OPERATIONS: &[&str] = &[
     "unlink",
     "select",
     "inspect",
+    "undo",
+    "redo",
     "sourceMarks",
     "sourceEdit",
     "shuttle",
@@ -49,6 +51,8 @@ pub struct ProRequest {
 #[derive(Clone, Debug)]
 pub enum ProAction {
     Command(Command),
+    Undo,
+    Redo,
     Select {
         ids: Vec<String>,
         bypass: bool,
@@ -67,6 +71,7 @@ pub enum ProAction {
     Shuttle(ShuttleInput),
     /// Native clock host only; intentionally absent from argument decoding.
     ObserveClock {
+        binding: u64,
         time: f64,
     },
 }
@@ -194,6 +199,7 @@ impl ProAction {
             "link" => &["op", "videoId", "audioId", "linkId"],
             "select" => &["op", "layerIds", "bypass", "add"],
             "inspect" => &["op", "layerIds"],
+            "undo" | "redo" => &["op"],
             "sourceMarks" => &[
                 "op",
                 "compId",
@@ -297,6 +303,8 @@ impl ProAction {
                 });
             }
             "inspect" => return Ok(Self::Inspect { ids: ids(v)? }),
+            "undo" => return Ok(Self::Undo),
+            "redo" => return Ok(Self::Redo),
             "sourceMarks" => return Ok(Self::SourceMarks(SourceMonitor::decode(v)?)),
             "sourceEdit" => {
                 let mode = match text(v, "mode")?.as_str() {
@@ -414,8 +422,9 @@ pub(crate) fn prepare(
     kernel: &Kernel,
     project: &str,
     r: ProRequest,
-    clock_available: bool,
+    clock_binding: Option<u64>,
 ) -> Result<Prepared, KernelFailure> {
+    let clock_available = clock_binding.is_some();
     let p = kernel
         .project(project)
         .ok_or_else(|| KernelFailure::NoProject(project.into()))?;
@@ -444,6 +453,16 @@ pub(crate) fn prepare(
     };
     match r.action {
         ProAction::Command(c) => return Ok(transact(c)),
+        ProAction::Undo | ProAction::Redo => {
+            if r.revision != store.revision() {
+                return Err(error("Pro history revision changed"));
+            }
+            return Ok(make_call(if matches!(r.action, ProAction::Undo) {
+                crate::HistoryCall::Undo.into()
+            } else {
+                crate::HistoryCall::Redo.into()
+            }));
+        }
         ProAction::Select { ids, bypass, add } => {
             if r.revision != store.revision() {
                 return Err(error("Pro selection revision changed"));
@@ -453,9 +472,6 @@ pub(crate) fn prepare(
             return Ok(make_call(SelectionCall::Layers { ids, add }.into()));
         }
         _ => (),
-    }
-    if r.revision != store.revision() {
-        return Err(error("Pro edit revision changed"));
     }
     if r.txid.is_some() {
         return Err(error(
@@ -473,9 +489,65 @@ pub(crate) fn prepare(
         );
         result.insert("transport", ui.transport.clone());
         result.insert("clockAvailable", Value::Bool(clock_available));
+        let ids = if ids.is_empty() {
+            let comp = crate::model::open_comp_id(root);
+            crate::model::comp_node(root, comp.as_deref())
+                .map(|c| {
+                    crate::model::layers_of(c)
+                        .filter_map(|l| {
+                            l.get("id")
+                                .and_then(crate::model::str_of)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            ids
+        };
+        let mut layers = Vec::new();
+        for id in &ids {
+            let loc = crate::model::find_layer(root, id)
+                .ok_or_else(|| error(format!("Unknown layer {id}")))?;
+            layers.push(
+                crate::model::layer_at(root, &loc)
+                    .ok_or_else(|| error("Layer disappeared"))?
+                    .to_value(),
+            );
+        }
+        result.insert("layers", Value::Array(layers));
+        result.insert(
+            "assetMetadata",
+            root.get("assets")
+                .map(pm_model::Node::to_value)
+                .unwrap_or(Value::Null),
+        );
+        result.insert(
+            "selection",
+            Value::Array(
+                store
+                    .selection()
+                    .layers()
+                    .iter()
+                    .cloned()
+                    .map(Value::from)
+                    .collect(),
+            ),
+        );
         let mut badges = Vec::new();
+        let mut diagnostics = Vec::new();
         for id in ids {
-            for b in pro_links::sync_badges(root, &id).map_err(|e| error(e.to_string()))? {
+            let found = match pro_links::sync_badges(root, &id) {
+                Ok(b) => b,
+                Err(e) => {
+                    let mut m = Map::new();
+                    m.insert("layerId", Value::from(id.as_str()));
+                    m.insert("error", Value::from(e.to_string()));
+                    diagnostics.push(Value::Object(m));
+                    continue;
+                }
+            };
+            for b in found {
                 if badges
                     .iter()
                     .any(|v: &Value| v.get("layerId").and_then(Value::as_str) == Some(&b.layer_id))
@@ -490,7 +562,11 @@ pub(crate) fn prepare(
             }
         }
         result.insert("syncBadges", Value::Array(badges));
+        result.insert("syncDiagnostics", Value::Array(diagnostics));
         return Ok(Prepared::Inspection(Value::Object(result)));
+    }
+    if r.revision != store.revision() {
+        return Err(error("Pro edit revision changed"));
     }
     if r.state_revision != Some(state.revision) {
         return Err(error("Pro state revision changed; inspect before retrying"));
@@ -532,6 +608,15 @@ pub(crate) fn prepare(
                     return Err(error("Invalid source-monitor marks"));
                 }
             }
+            if ui
+                .session
+                .get("proSource")
+                .is_some_and(|v| !matches!(v, Value::Null) && v.as_object().is_none())
+            {
+                return Err(error(
+                    "Malformed source-monitor facts; preserve and repair explicitly",
+                ));
+            }
             let mut stored = ui
                 .session
                 .get("proSource")
@@ -558,6 +643,9 @@ pub(crate) fn prepare(
                     .ok_or_else(|| error("Set source-monitor marks first"))?,
             )
             .map_err(bad)?;
+            if monitor.comp_id != crate::model::open_comp_id(root) {
+                return Err(error("Source-monitor composition is no longer active"));
+            }
             monitor.points.playhead = num(&ui.transport, "time").map_err(bad)?;
             return Ok(transact(
                 ProSourceCommand {
@@ -591,8 +679,8 @@ pub(crate) fn prepare(
             };
             ui.transport = s.transport_value(&ui.transport).map_err(bad)?;
         }
-        ProAction::ObserveClock { time } => {
-            if !clock_available {
+        ProAction::ObserveClock { binding, time } => {
+            if clock_binding != Some(binding) {
                 return Err(error("Native clock is unavailable"));
             }
             let comp = crate::model::open_comp_id(root);

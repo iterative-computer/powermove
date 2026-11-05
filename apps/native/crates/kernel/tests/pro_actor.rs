@@ -1,3 +1,4 @@
+mod common;
 mod pro_fixture;
 use pm_kernel::pro_editing::{ProAction, ProReply, ProRequest};
 use pm_kernel::{
@@ -275,7 +276,11 @@ fn clock_binding_shuttle_and_observation_are_actor_owned_and_ephemeral() {
         ProReply::Declined
     ));
     let doc = h.published("P").unwrap().snapshot.doc_id;
-    assert!(h.bind_pro_clock("P", doc, true).wait().unwrap());
+    let binding = h
+        .bind_pro_clock("P", doc, Some("C1".into()), true)
+        .wait()
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         send(&h, json!({"op":"shuttle","key":"j"})),
         ProReply::Declined
@@ -287,7 +292,10 @@ fn clock_binding_shuttle_and_observation_are_actor_owned_and_ephemeral() {
         -2.
     );
     let mut r = request(&h, json!({"op":"inspect","layerIds":[]}));
-    r.action = ProAction::ObserveClock { time: -0.1 };
+    r.action = ProAction::ObserveClock {
+        binding,
+        time: -0.1,
+    };
     h.pro_editing("P", r).wait().unwrap().unwrap();
     assert_eq!(
         n(&h.published("P").unwrap().ui_state.transport, &["rate"]),
@@ -298,7 +306,7 @@ fn clock_binding_shuttle_and_observation_are_actor_owned_and_ephemeral() {
         json!({"op":"shuttle","key":"around","before":2.,"after":2.}),
     );
     let mut r = request(&h, json!({"op":"inspect","layerIds":[]}));
-    r.action = ProAction::ObserveClock { time: 2.1 };
+    r.action = ProAction::ObserveClock { binding, time: 2.1 };
     h.pro_editing("P", r).wait().unwrap().unwrap();
     assert_eq!(
         n(&h.published("P").unwrap().ui_state.transport, &["time"]),
@@ -311,7 +319,12 @@ fn clock_binding_shuttle_and_observation_are_actor_owned_and_ephemeral() {
         .wait()
         .unwrap()
         .unwrap();
-    assert!(!h.bind_pro_clock("P", doc, true).wait().unwrap());
+    assert!(
+        h.bind_pro_clock("P", doc, Some("C1".into()), true)
+            .wait()
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
         send(&h, json!({"op":"shuttle","key":"reverse"})),
         ProReply::Declined
@@ -402,4 +415,271 @@ fn actor_gesture_batches_still_cancel_or_commit_as_one_undo_step() {
             assert_eq!(tree(&h), before);
         }
     }
+}
+
+#[test]
+fn clock_tokens_and_composition_binding_refuse_stale_observations() {
+    let a = actor(vec![]);
+    let h = a.handle();
+    let doc = h.published("P").unwrap().snapshot.doc_id;
+    assert!(
+        h.bind_pro_clock("P", doc, Some("missing".into()), true)
+            .wait()
+            .unwrap()
+            .is_none()
+    );
+    let first = h
+        .bind_pro_clock("P", doc, Some("C1".into()), true)
+        .wait()
+        .unwrap()
+        .unwrap();
+    let second = h
+        .bind_pro_clock("P", doc, Some("C1".into()), true)
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    let mut r = request(&h, json!({"op":"inspect","layerIds":[]}));
+    r.action = ProAction::ObserveClock {
+        binding: first,
+        time: 1.,
+    };
+    assert!(h.pro_editing("P", r).wait().unwrap().is_err());
+    let mut r = request(&h, json!({"op":"inspect","layerIds":[]}));
+    r.action = ProAction::ObserveClock {
+        binding: second,
+        time: 1.,
+    };
+    h.pro_editing("P", r).wait().unwrap().unwrap();
+    h.bind_pro_clock("P", doc, Some("C1".into()), false)
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        send(&h, json!({"op":"shuttle","key":"reverse"})),
+        ProReply::Declined
+    ));
+    marks(&h);
+    // Changing the active composition invalidates a former viewer binding.
+    let created = h
+        .call_blocking(
+            "P",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::Command::from(pm_kernel::CompCommand::Create {
+                        comp_id: "other".into(),
+                        settings: Default::default(),
+                    })
+                    .into(),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .unwrap();
+    assert!(
+        !matches!(created.reply, Reply::Throw(_)),
+        "{:?}",
+        created.reply
+    );
+    h.bind_pro_clock("P", doc, Some("C1".into()), true)
+        .wait()
+        .unwrap()
+        .unwrap();
+    h.call_blocking(
+        "P",
+        Request::new(
+            Caller::native(),
+            Call::DirectWrite {
+                ops: vec![
+                    pm_model::patch::Patch::set(vec!["compId".into()], Value::from("other")).into(),
+                ],
+            },
+        ),
+    )
+    .unwrap();
+    let source = request(
+        &h,
+        json!({"op":"sourceEdit","mode":"insert","targets":[{"media":"video","track":{"track":0},"layerId":"wrong-comp"}],"splits":[]}),
+    );
+    assert!(h.pro_editing("P", source).wait().unwrap().is_err());
+    match send(&h, json!({"op":"inspect","layerIds":[]})) {
+        ProReply::Inspection(v) => assert_eq!(
+            v.get("clockAvailable").and_then(Value::as_bool),
+            Some(false)
+        ),
+        _ => panic!(),
+    }
+}
+#[test]
+fn decoded_trim_slip_and_unlink_are_undoable() {
+    let a = actor(vec![clip("v", 0., 4., 0), audio("a", 0., 4., 1)]);
+    let h = a.handle();
+    good(
+        &h,
+        json!({"op":"link","videoId":"v","audioId":"a","linkId":"pair"}),
+    );
+    for op in [
+        json!({"op":"trim","layerIds":["v"],"edge":"out","delta":0.5,"linked":true}),
+        json!({"op":"slip","layerIds":["v"],"delta":0.5,"linked":true}),
+        json!({"op":"unlink","layerIds":["v"]}),
+    ] {
+        let before = tree(&h);
+        good(&h, op);
+        assert_ne!(tree(&h), before);
+        undo(&h);
+        assert_eq!(tree(&h), before);
+    }
+}
+#[test]
+fn actor_source_edit_history_survives_pmv_save_and_reopen() {
+    use pm_kernel::{
+        KernelConfig,
+        persistence::DiskFormat,
+        session::{SessionSource, ShellCall, ShellReply},
+    };
+    let temp = common::TempDir::new("pro-actor-save");
+    let root = temp.0.canonicalize().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(root.join("journals")),
+        ..Default::default()
+    });
+    let h = actor.handle();
+    h.shell(ShellCall::AttachLibrary {
+        profile: root.clone(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .wait()
+    .unwrap()
+    .unwrap();
+    let source = pm_model::canonical::realize_project(pro_fixture::root(&store(vec![clip(
+        "tail", 4., 4., 0,
+    )])));
+    let reply = h
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::New(source),
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let ShellReply::Opened { session, .. } = reply else {
+        panic!("{reply:?}")
+    };
+    let before = tree(&h);
+    marks(&h);
+    good(
+        &h,
+        json!({"op":"sourceEdit","mode":"insert","targets":[{"media":"video","track":{"track":0},"layerId":"new-v"},{"media":"audio","track":{"track":1},"layerId":"new-a"}],"linkId":"pair","splits":[]}),
+    );
+    let after = tree(&h);
+    let path = root.join("source-edit.pmv");
+    let save = h
+        .prepare_save(session.clone(), Some(path.clone()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let completion = std::thread::spawn(move || save.run()).join().unwrap();
+    h.finish_save(completion).wait().unwrap().unwrap();
+    h.shell(ShellCall::Close(session)).wait().unwrap().unwrap();
+    let opened = pm_kernel::open_project(&path, Default::default()).unwrap();
+    h.open("P", OpenSource::File(opened))
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(tree(&h), after);
+    undo(&h);
+    assert_eq!(tree(&h), before);
+    redo(&h);
+    assert_eq!(tree(&h), after);
+}
+
+#[test]
+fn malformed_link_remains_inspectable_but_linked_edit_still_refuses() {
+    let mut orphan = clip("orphan", 0., 4., 0);
+    orphan["editLink"] = json!({"id":"missing-peer","phase":0.});
+    let a = actor(vec![orphan]);
+    let h = a.handle();
+    let before = tree(&h);
+    match send(&h, json!({"op":"inspect","layerIds":[]})) {
+        ProReply::Inspection(v) => {
+            assert_eq!(v.get("layers").unwrap().as_array().unwrap().len(), 1);
+            assert_eq!(
+                v.get("syncDiagnostics").unwrap().as_array().unwrap().len(),
+                1
+            );
+            assert!(v.get("syncBadges").unwrap().as_array().unwrap().is_empty());
+        }
+        _ => panic!(),
+    }
+    assert!(matches!(
+        send(
+            &h,
+            json!({"op":"move","layerIds":["orphan"],"delta":1.,"linked":true})
+        ),
+        ProReply::Document(pm_kernel::Ack {
+            reply: Reply::Throw(_),
+            ..
+        })
+    ));
+    assert_eq!(tree(&h), before);
+}
+
+#[test]
+fn source_mark_updates_preserve_unknown_fields_and_refuse_malformed_existing_payloads() {
+    use pm_kernel::state::{StateOp, StateTransaction};
+    let a = actor(vec![]);
+    let h = a.handle();
+    let mut ui = h.published("P").unwrap().ui_state.clone();
+    ui.session = value(json!({"proSource":"retain-malformed-payload"}));
+    h.state_transaction(StateTransaction {
+        ops: vec![StateOp::Ui {
+            project: "P".into(),
+            next: ui,
+        }],
+        ..Default::default()
+    })
+    .wait()
+    .unwrap()
+    .unwrap();
+    let r = request(
+        &h,
+        json!({"op":"sourceMarks","assetId":"src","sourceIn":1.}),
+    );
+    assert!(h.pro_editing("P", r).wait().unwrap().is_err());
+    assert_eq!(
+        h.published("P")
+            .unwrap()
+            .ui_state
+            .session
+            .get("proSource")
+            .and_then(Value::as_str),
+        Some("retain-malformed-payload")
+    );
+    let mut ui = h.published("P").unwrap().ui_state.clone();
+    ui.session = value(json!({"proSource":{"opaque":{"retain":true}}}));
+    h.state_transaction(StateTransaction {
+        ops: vec![StateOp::Ui {
+            project: "P".into(),
+            next: ui,
+        }],
+        ..Default::default()
+    })
+    .wait()
+    .unwrap()
+    .unwrap();
+    marks(&h);
+    assert_eq!(
+        h.published("P")
+            .unwrap()
+            .ui_state
+            .session
+            .get("proSource")
+            .unwrap()
+            .get("opaque"),
+        value(json!({"opaque":{"retain":true}})).get("opaque")
+    );
 }

@@ -272,8 +272,9 @@ enum Msg {
     ProClock {
         project: String,
         document: u64,
+        comp_id: Option<String>,
         available: bool,
-        reply: Reply<bool>,
+        reply: Reply<Option<u64>>,
     },
     Profile {
         call: crate::profile::ProfileCall,
@@ -394,13 +395,21 @@ impl KernelHandle {
         pending
     }
 
-    /// Native transport adapter reports real availability for this document.
+    /// Native transport adapter reports real availability for this composition.
+    /// Return a fresh token; observations from replaced bindings are refused.
     /// Default is unavailable; close/reopen fences an earlier clock binding.
-    pub fn bind_pro_clock(&self, project: &str, document: u64, available: bool) -> Pending<bool> {
+    pub fn bind_pro_clock(
+        &self,
+        project: &str,
+        document: u64,
+        comp_id: Option<String>,
+        available: bool,
+    ) -> Pending<Option<u64>> {
         let (reply, pending) = oneshot();
         let _ = self.tx.send(Msg::ProClock {
             project: project.into(),
             document,
+            comp_id,
             available,
             reply: Box::new(move |v| reply.resolve(v)),
         });
@@ -681,7 +690,8 @@ fn emit(shared: &Shared, event: KernelEvent) {
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     // Deferred replies (external undo running in another realm).
     let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
-    let mut pro_clocks: HashMap<String, (u64, bool)> = HashMap::new();
+    let mut pro_clocks: HashMap<String, (u64, Option<String>, bool, u64)> = HashMap::new();
+    let mut pro_clock_token = 0u64;
     for msg in rx {
         // Prepare and execute in this same actor turn: no snapshot/read/write
         // race, and all writes retain the ordinary publication/event paths.
@@ -689,16 +699,22 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             Msg::ProClock {
                 project,
                 document,
+                comp_id,
                 available,
                 reply,
             } => {
-                let valid = kernel
-                    .project(&project)
-                    .is_some_and(|p| p.store().doc_id() == document);
-                if valid {
-                    pro_clocks.insert(project, (document, available));
+                let valid = kernel.project(&project).is_some_and(|p| {
+                    p.store().doc_id() == document
+                        && p.store()
+                            .root()
+                            .is_some_and(|root| crate::model::open_comp_id(root) == comp_id)
+                });
+                let token = pro_clock_token.checked_add(1).filter(|_| valid);
+                if let Some(token) = token {
+                    pro_clock_token = token;
+                    pro_clocks.insert(project, (document, comp_id, available, token));
                 }
-                reply(valid);
+                reply(token);
                 continue;
             }
             Msg::ProEditing {
@@ -708,7 +724,14 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             } => {
                 let clock = pro_clocks
                     .get(&project)
-                    .is_some_and(|&(doc, available)| doc == request.document && available);
+                    .and_then(|(doc, comp, available, token)| {
+                        let current_comp = kernel
+                            .project(&project)
+                            .and_then(|p| p.store().root())
+                            .and_then(crate::model::open_comp_id);
+                        (*doc == request.document && *available && *comp == current_comp)
+                            .then_some(*token)
+                    });
                 match crate::pro_editing::prepare(&kernel, &project, request, clock) {
                     Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
                         project,

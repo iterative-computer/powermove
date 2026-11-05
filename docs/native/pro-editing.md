@@ -263,3 +263,86 @@ Decisions and selecting rules:
 | Save cancellation/cleanup intent, drain producers, archive partials, then acknowledge completion. | N4 preserves bytes on cancel/crash/low disk; N1/N7 expose failures and live ownership. |
 | Verify cache objects on reads and refuse absent/corrupt pins and mismatched receipts. | N1/N3 choose actual bytes over a success-shaped remembered task. |
 | Keep existing media/cache/task implementations and all live consumers. | N4 and the prune rule; this lane supplies coordination rather than a second media authority. |
+
+## 2026-11-04 — cloud pro2 runnable native MCP
+
+`pm_kernel::pro_mcp::ProMcp` serves a supplemental
+`powermove_native_pro_edit` tool over MCP JSON-RPC. `tools/list` advertises the
+native operation vocabulary and argument schema. `tools/call` drives the real
+actor, with MCP provenance/hand-edit protection, connection-local read fences,
+inspection, Undo/Redo, notices and explicit declines. Document inspection returns
+selected/all active layers, asset **metadata**, source marks, transport, badges
+and sync diagnostics. Malformed/orphaned links remain inspectable; their linked
+edits still refuse. Reads refresh stale fences; closing/reopening the project
+never rebinds the connection automatically. Kernel shutdown reports an unknown
+outcome requiring inspection rather than an optimistic retry.
+
+The independently runnable stdio transport is:
+
+```sh
+# From apps/native. The explicit input is read-only; this runner edits a
+# disposable in-memory session. It does not save over input or scan a profile.
+cargo run --locked -p pm-kernel --bin pm-pro-edit-mcp -- --project /absolute/project.pmv
+```
+
+For example, after MCP initialize, a client can send:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"powermove_native_pro_edit","arguments":{"op":"inspect","layerIds":[]}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"powermove_native_pro_edit","arguments":{"op":"roll","leftId":"a","rightId":"b","delta":0.25,"linked":true}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"powermove_native_pro_edit","arguments":{"op":"undo"}}}
+```
+
+All blocking file/framing/actor lifecycle work in the runner executes on a
+worker, including on macOS. Input lines are bounded at 2 MiB. Invalid JSON,
+invalid RPC, unknown tools, command refusal and unavailable transport are
+observable. Notifications never cause unacknowledged edits. Production app
+hosting must forward the supplemental tool to a connection's ProMcp bound to
+its existing KernelHandle; the frozen tools/allowlists remain unchanged.
+The standalone runner is not a replacement for the existing application's
+save/library/media/provider MCP tools or their session orchestration.
+
+Additional decisions: N6 keeps every frozen v1–3/MCP schema and key fallthrough;
+N7 supplies a separate discoverable native namespace and a real headless wire
+endpoint; N3/N4 force generated/MCP lock policy and retain notices rather than
+reporting refusals as edits. A clock binding includes document, composition and
+a fresh native token; stale observations after replacement/disposal refuse.
+Persisted source marks bind their composition and source edits refuse if it is
+no longer active, avoiding use of another composition's playhead.
+
+### Evidence and remaining host work
+
+New tests exercise real actor transactions and gestures, source A/V edits with
+actual PMV save/reopen/Undo/Redo, serialized MCP over subprocess stdin/stdout,
+competing clients, protected hand edits and nonmutation of the input file.
+The render-job test double uses actual private staging/cache/archive files and
+synced JSON records, with injected save/drain/archive/disk-full failures. It
+checks retained byte identity, corrupt-cache rejection, crash windows, resource
+relink fencing and explicit proxy-only refusal. These are synthetic lifecycle
+and provenance tests, not rendered pixel, real codec, physical ENOSPC or macOS
+proof. No authored fixture, installed profile or real user media is used.
+
+Out-of-ownership integration remains: native app/menu/pointer presentation;
+forwarding this tool into the existing app MCP server; connecting the token-bound
+clock intent/observations to pm-engine-service; adapting RenderJobHost to the
+integrated cache/tasks/storage and real media leases/resources. On macOS verify
+actual source-frame/audio identity, reverse and ±1×/±2× delivery, frame-aligned
+stop/play-around return and single key fallback, hit testing/modifiers/AX,
+producer cancellation/reaping, real volume ENOSPC/archive interruption, and
+save/reopen with original/proxy provenance. No Linux result closes those gates.
+No visual or UX choices, placeholders, or DESIGN-TODO(opus) additions were made.
+
+The full replay reproduced HANDOFF's pre-existing selection-event setup race:
+Open acknowledges before emitting Opened, so subscribing after the acknowledgement
+could capture that setup event and misidentify it as the selection's Published.
+The test now subscribes before Open and asserts/consumes that exact Opened event.
+All selection publication/order/deduplication assertions remain unchanged;
+no production event order, timing tolerance or skipped case was altered.
+Decision: N3/N7 require a deterministic observer setup for the same selection
+route used by the pro adapter, rather than treating scheduler luck as evidence.
+
+Frame-job admission is deliberately one FrameKey/one verified frame receipt.
+Reported totals can be None or exactly one; progress and restored counters cannot
+exceed one. A receipt never fabricates completion for an entire frame range.
+The host aggregates frame jobs into the existing BackgroundTasks range model.
+Decision: N1/N3 require measured progress to describe the bytes actually verified.

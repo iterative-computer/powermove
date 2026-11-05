@@ -209,7 +209,7 @@ fn plan() -> RenderPlan {
         },
         reserve_bytes: 4096,
         require_originals: true,
-        total_frames: Some(3),
+        total_frames: Some(1),
     }
 }
 fn setup() -> (RenderJobs, DiskHost) {
@@ -232,11 +232,11 @@ fn successful_job_persists_progress_publishes_exact_cache_and_pins_only_existing
         b.cache_state(&key, true, &mut h).unwrap(),
         CacheState::Rendering
     );
-    b.progress(&t, 2, &mut h).unwrap();
-    assert_eq!(b.progress(&t, 1, &mut h), Err(JobError::InvalidProgress));
+    b.progress(&t, 1, &mut h).unwrap();
+    assert_eq!(b.progress(&t, 0, &mut h), Err(JobError::InvalidProgress));
     assert_eq!(b.progress(&t, 4, &mut h), Err(JobError::InvalidProgress));
     let receipt = b.complete(&t, &mut h).unwrap();
-    assert_eq!(b.record("render-1").unwrap().completed_frames, 3);
+    assert_eq!(b.record("render-1").unwrap().completed_frames, 1);
     assert_eq!(
         b.cache_state(&key, true, &mut h).unwrap(),
         CacheState::Available(receipt.clone())
@@ -492,7 +492,7 @@ fn queued_cancel_and_unknown_total_have_explicit_inspectable_states() {
     p.total_frames = None;
     b.enqueue("unknown".into(), p, &mut h).unwrap();
     let t = b.start("unknown", &mut h).unwrap();
-    b.progress(&t, 500, &mut h).unwrap();
+    b.progress(&t, 1, &mut h).unwrap();
     assert_eq!(b.record("unknown").unwrap().plan.total_frames, None);
     b.enqueue("queued".into(), plan(), &mut h).unwrap();
     b.cancel("queued", &mut h).unwrap();
@@ -578,4 +578,29 @@ fn resource_relink_without_document_edit_cancels_old_work_and_rejects_old_catalo
     p.version = relinked;
     p.key.media = [3; 32];
     b.enqueue("current-catalog".into(), p, &mut h).unwrap();
+}
+
+#[test]
+fn one_frame_receipt_never_completes_a_range_or_accepts_an_impossible_counter() {
+    let (mut b, mut h) = setup();
+    let mut p = plan();
+    p.total_frames = Some(30);
+    assert_eq!(
+        b.enqueue("range".into(), p, &mut h),
+        Err(JobError::InvalidPlan)
+    );
+    let mut p = plan();
+    p.total_frames = None;
+    b.enqueue("unknown-one".into(), p, &mut h).unwrap();
+    let ticket = b.start("unknown-one", &mut h).unwrap();
+    assert_eq!(
+        b.progress(&ticket, 2, &mut h),
+        Err(JobError::InvalidProgress)
+    );
+    let mut records = h.load();
+    records[0].completed_frames = 2;
+    assert!(matches!(
+        RenderJobs::recover(records, &mut h),
+        Err(JobError::InvalidPlan)
+    ));
 }
