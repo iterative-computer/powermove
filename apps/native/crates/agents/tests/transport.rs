@@ -194,3 +194,40 @@ fn stalled_stdin_cannot_prevent_cancellation() {
     }
     assert!(cancelled && stopped);
 }
+
+#[test]
+fn typed_process_drain_preserves_lifecycle_separately_from_provider_callbacks() {
+    use pm_agents::delivery::Delivery;
+    let temp = Temp::new();
+    let handle = transport::spawn(
+        spec(&temp, "codex-happy"),
+        Machine::Codex(codex::Client::default()),
+        vec![],
+    );
+    handle.send(Action::Run(Box::new(run()))).ok().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut ready, mut session, mut stopped, mut completed, mut traces) =
+        (false, false, false, 0, 0);
+    while Instant::now() < deadline {
+        match handle.try_delivery() {
+            Ok(Delivery::Inspection(Event::Ready)) => ready = true,
+            Ok(Delivery::Inspection(Event::Session { .. })) => session = true,
+            Ok(Delivery::Inspection(Event::Stopped(_))) => {
+                stopped = true;
+                break;
+            }
+            Ok(Delivery::Callback(Event::Completed {
+                result: RunResult::Success { .. },
+                ..
+            })) => completed += 1,
+            Ok(Delivery::Callback(Event::Trace { .. })) => traces += 1,
+            Ok(Delivery::Callback(Event::Progress { .. })) => {}
+            Ok(other) => panic!("unexpected delivery {other:?}"),
+            Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(2)),
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    assert!(ready && session && stopped);
+    assert_eq!(completed, 1);
+    assert!(traces > 0);
+}

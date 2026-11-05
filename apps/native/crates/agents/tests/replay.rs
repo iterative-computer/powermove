@@ -158,7 +158,9 @@ fn check_surfaces(root: PathBuf, reference: &str, strict: &str, report: &str) {
         serde_json::from_slice(&fs::read(root.join("differences.json")).unwrap()).unwrap();
     let mut reports = vec![];
     for c in &m.cases {
-        let fixture = serde_json::from_slice(&fs::read(root.join(&c.file)).unwrap()).unwrap();
+        let fixture: Value =
+            serde_json::from_slice(&fs::read(root.join(&c.file)).unwrap()).unwrap();
+        assert_eq!(fixture["baseline"], reference, "{} reference", c.name);
         let (expected, actual) = if c.surface == "mcp" {
             mcp(&fixture)
         } else {
@@ -422,7 +424,9 @@ fn pinned_main_provider_callbacks_match_without_replacing_legacy_fixtures() {
     let mut count = 0;
     let mut inspection = 0;
     for case in manifest.cases.iter().filter(|c| c.surface != "mcp") {
-        let fixture = serde_json::from_slice(&fs::read(root.join(&case.file)).unwrap()).unwrap();
+        let fixture: Value =
+            serde_json::from_slice(&fs::read(root.join(&case.file)).unwrap()).unwrap();
+        assert_eq!(fixture["baseline"], replay::MAIN, "{} reference", case.name);
         let (expected, actual, native) = replay::provider_callbacks(case, &fixture);
         assert_eq!(expected, actual, "main case {}", case.name);
         count += 1;

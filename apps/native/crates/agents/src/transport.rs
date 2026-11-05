@@ -132,11 +132,19 @@ pub enum Action {
 pub struct Handle {
     tx: SyncSender<Action>,
     events: Receiver<Event>,
+    surface: Surface,
 }
 impl Handle {
     /// On saturation, returns the original action for a later retry.
     pub fn send(&self, a: Action) -> Result<(), TrySendError<Action>> {
         self.tx.try_send(a)
+    }
+    /// Consume the same mailbox as `try_event`, preserving inspection events as
+    /// typed observations instead of provider callbacks. Choose one drain API.
+    pub fn try_delivery(&self) -> Result<Delivery, mpsc::TryRecvError> {
+        self.events
+            .try_recv()
+            .map(|e| delivery::event(self.surface, e))
     }
     pub fn try_event(&self) -> Result<Event, mpsc::TryRecvError> {
         self.events.try_recv()
@@ -155,6 +163,7 @@ enum Input {
 }
 /// Process startup, signing checks, all IO and shutdown occur off the caller.
 pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Handle {
+    let surface = machine.surface();
     let (tx, rx) = mpsc::sync_channel(128);
     let (etx, events) = mpsc::sync_channel(256);
     thread::spawn(move || {
@@ -183,7 +192,6 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
             }
         });
-        let surface = machine.surface();
         let start = Instant::now();
         let now = || start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut lines = Lines::new(1024 * 1024);
@@ -291,7 +299,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
             }
         }
     });
-    Handle { tx, events }
+    Handle {
+        tx,
+        events,
+        surface,
+    }
 }
 fn read_output(path: &Path) -> io::Result<String> {
     let mut o = OpenOptions::new();
