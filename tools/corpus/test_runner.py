@@ -90,6 +90,58 @@ class CorpusSafety(unittest.TestCase):
         for h in ('../../untrusted', 'a'*63, 'z'*64):
             self.assertEqual(corpus.select_records('clip', {'contentHash':h}, [], Path('.')), [])
 
+    def test_captured_source_link_must_match_the_imported_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'private-copy'
+            path.write_bytes(b'original imported bytes')
+            expected = corpus.digest(path)
+            record = {'key':'synthetic', 'value':{'sourcePath':'/synthetic/original', 'sha256':expected}}
+            selected = corpus.captured_record(record, str(path))
+            self.assertEqual(selected['sha256'], expected)
+            self.assertEqual(selected['value'], record['value'])
+            path.write_bytes(b'externally changed bytes')
+            with self.assertRaisesRegex(corpus.BatchLimit, 'media_record_checksum_mismatch'):
+                corpus.captured_record(record, str(path))
+            for invalid in (expected[:16], 'z'*64, 123, None):
+                with self.assertRaises(corpus.BatchLimit):
+                    corpus.captured_record({'value':{'sha256':invalid}}, str(path))
+
+    def test_changed_source_cannot_reenter_through_another_assets_link(self):
+        import json, hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            profile, target = base/'profile', base/'snapshot'
+            (profile/'store').mkdir(parents=True)
+            index = profile/'Media Store/Index'
+            index.mkdir(parents=True)
+            source = base/'source.png'
+            source.write_bytes(b'changed source bytes')
+            record = {'key':'media:synthetic','sourcePath':str(source),
+                      'sha256':hashlib.sha256(b'imported source bytes').hexdigest()}
+            (index/'synthetic.json').write_text(json.dumps(record))
+            args = SimpleNamespace(profile=profile, projects_only=False, projects=[], extra_files=None,
+                resume_snapshot=False, resume_results=False, report=base/'report.json',
+                retain_for_debug=False, batch_gib=1.5, only_ids=None, binary=base/'worker', compiler=base/'helper', timeout=5)
+            def worker(binary, arguments, log, **kwargs):
+                if arguments[0] == 'inventory':
+                    row = {'id':'synthetic','library':'synthetic','assets':{
+                        'old':{'storageKey':record['key'],'sourcePath':str(source)},
+                        'fresh':{'sourcePath':str(source)}}}
+                    (target/'inventory.json').write_text(json.dumps({'projects':[row], 'associated_files':[]}))
+                elif len(arguments)>1 and arguments[1] == '--clone-one':
+                    corpus.clone(Path(arguments[2]), Path(arguments[3]))
+                else:
+                    self.assertEqual(arguments[0], 'project')
+                    manifest = json.loads((target/'media.json').read_text())
+                    self.assertEqual(manifest, {'records':[], 'linked':{}})
+                    (target/'batch/result.json').write_text(json.dumps({stage:'pass' if stage in ('open','edit','save') else 'blocked' for stage in corpus.STAGES}))
+                return 0
+            with patch.object(corpus, 'ROOT', target), patch.object(corpus, 'freeze_tools', return_value=(args.binary,args.compiler,{'worker_sha256':'w','compiler_sha256':'c'})), patch.object(corpus, 'call', side_effect=worker):
+                corpus.run(args)
+            result = json.loads(args.report.read_text())['projects'][0]
+            self.assertIn('media_record_checksum_mismatch', result['capture_classes'])
+            self.assertEqual(source.read_bytes(), b'changed source bytes')
+
     def test_snapshot_preference_stays_within_the_selected_key_family(self):
         records = [{'key':'media:x','source':'host'}, {'key':'media:x','snapshot':'db'}, {'key':'clip','snapshot':'other'}]
         self.assertEqual(corpus.select_records('clip', {'storageKey':'media:x'}, records, Path('.')), [records[1]])

@@ -38,7 +38,7 @@ mod rotation;
 mod rotation_pixels;
 use media::project_assets;
 
-const FLOOR: u64 = 6 * 1024 * 1024 * 1024;
+const FLOOR: u64 = 8 * 1024 * 1024 * 1024;
 fn space(root: &Path) -> Result<()> {
     ensure!(fs2::available_space(root)? >= FLOOR, "disk_floor");
     Ok(())

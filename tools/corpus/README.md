@@ -51,6 +51,9 @@ A changed source, copy timeout, missing original or oversized project is recorde
 explicitly. Capture limitations block dependent stages; they are not proof of an
 engine defect. Exact captured IndexedDB identities are preferred over stale host paths; host
 records remain available when the snapshot has no matching record.
+Source-link copies must match the full checksum recorded at import. A mismatch
+blocks that media key and its captured fallback paths, including paths shared by
+other assets.
 macOS dataless placeholders are refused before payload reads, so the runner does
 not ask a system daemon to hydrate originals outside the batch's disk controls.
 Their dependency status remains unknown until a local source is available.

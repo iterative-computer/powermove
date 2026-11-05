@@ -179,6 +179,18 @@ def select_records(asset_id, asset, records, profile):
                  'blake3': content_hash}]
     return []
 
+def captured_record(record, path):
+    """A stable copy must also match the imported original's recorded bytes."""
+    actual = digest(Path(path))
+    metadata = record.get('value')
+    if isinstance(metadata, dict) and 'sha256' in metadata:
+        expected = metadata['sha256']
+        if (not isinstance(expected, str) or len(expected) != 64
+                or any(c not in '0123456789abcdef' for c in expected)
+                or expected != actual):
+            raise BatchLimit('media_record_checksum_mismatch')
+    return {**record, 'path': path, 'sha256': actual}
+
 def call(binary, args, log, timeout=180, compiler=None):
     space()
     with log.open('wb') as f:
@@ -415,6 +427,7 @@ def run(args):
             public = {'id': row['id'], 'stages': {s: 'blocked' for s in STAGES}, 'failures': []}
             used = 0
             linked, selected, copied = {}, [], {}
+            rejected_keys, rejected_paths = set(), set()
             capture_errors = []
             def capture(src, size=None, record=None):
                 nonlocal used
@@ -492,9 +505,14 @@ def run(args):
                     for r in matches:
                         try:
                             path = capture(r.get('source'), r.get('size'), r)
-                            selected.append({**r, 'path': path, 'sha256': digest(Path(path))})
+                            selected.append(captured_record(r, path))
                         except BatchLimit as e:
                             capture_errors.append(str(e))
+                            if str(e) == 'media_record_checksum_mismatch':
+                                rejected_keys.add(r['key'])
+                                rejected_paths.update(src for src in (
+                                    r.get('source'), a.get('sourcePath'), a.get('path'),
+                                    (a.get('link') or {}).get('path')) if isinstance(src, str))
                     if len(selected) > selected_before and a.get('storage') != 'linked' and not a.get('link'):
                         continue
                     for src in (a.get('sourcePath'), a.get('path'), (a.get('link') or {}).get('path')):
@@ -504,7 +522,12 @@ def run(args):
                             except BatchLimit as e:
                                 capture_errors.append(str(e))
                 # Detached file associations cannot cause writes to original PMVs.
-                (ROOT / 'media.json').write_text(json.dumps({'records': selected, 'linked': linked}))
+                # A failed recorded identity cannot be bypassed by another
+                # asset's direct-path mapping or a second origin with this key.
+                (ROOT / 'media.json').write_text(json.dumps({
+                    'records': [r for r in selected if r['key'] not in rejected_keys],
+                    'linked': {src: path for src, path in linked.items() if src not in rejected_paths},
+                }))
                 (batch / 'spec.private.json').write_text(json.dumps(row))
                 code = call(args.binary, ['project', ROOT, batch / 'spec.private.json', batch], batch / 'worker.private.log', timeout=args.timeout,compiler=args.compiler)
                 state = json.loads((batch / 'result.json').read_text()) if (batch / 'result.json').exists() else {}
