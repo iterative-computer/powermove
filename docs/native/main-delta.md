@@ -3,6 +3,8 @@
 ## Scope and decisions — 2026-11-04
 
 > **Superseded on scope, 2026-11-04:** the owner moved the parity target to `main` at `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. Every row here is now required work, not an optional delta. See p0-decisions.md.
+>
+> **Design:** the UI rows are specified in [design/surfaces/main-delta-ui.md](design/surfaces/main-delta-ui.md).
 
 This is a source audit, not a change to the parity oracle or an implementation
 plan sign-off. Frozen behavior remains **v1.2.0**
