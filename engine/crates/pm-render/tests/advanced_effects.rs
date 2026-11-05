@@ -53,9 +53,22 @@ fn draw(renderer: &mut Renderer, value: &Value, resolver: &MapResolver, depth: u
     renderer.read_rgba(&frame).unwrap()
 }
 fn check_viewport(renderer: &mut Renderer, value: &Value, full: &[f32]) {
+    check_viewport_precision(renderer, value, full, Precision::Float16);
+}
+fn check_float_viewport(renderer: &mut Renderer, value: &Value, full: &[f32]) {
+    let mut value = value.clone();
+    value["colorDepth"] = json!(32);
+    check_viewport_precision(renderer, &value, full, Precision::Float32);
+}
+fn check_viewport_precision(
+    renderer: &mut Renderer,
+    value: &Value,
+    full: &[f32],
+    precision: Precision,
+) {
     let mut document = load(value);
     document.set_saving_app_version(Some("1.3.0".into()));
-    let mut request = RenderRequest::sized(Size::new(16, 12), Precision::Float16);
+    let mut request = RenderRequest::sized(Size::new(16, 12), precision);
     request.scale = Some((1., 1.));
     request.origin = Some((8., 8.));
     let frame = renderer
@@ -579,4 +592,627 @@ fn metal_saved_stroke_v1_retains_hard_brush_pixels_and_path_identity() {
     assert_eq!(current, historical, "saved hard brush v1 and v2 defaults");
     assert_eq!(&historical[(11 * 32 + 16) * 4..][..4], &[1., 0., 0., 1.]);
     assert_eq!(&historical[(16 * 32 + 16) * 4..][..4], &[0., 0., 0., 0.]);
+}
+
+#[test]
+fn metal_source_owner_effects_precede_opacity_and_transform() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut value = fixture(
+        "shiftChannels",
+        1,
+        json!({"takeAlphaFrom":8}),
+        json!({}),
+        None,
+    );
+    value["layers"][0]["effectSpace"] = json!("source");
+    set(&mut value["layers"][0], "opacity", json!(50));
+    let pixels = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    let expected = [0.5 * 64. / 255., 0.5 * 128. / 255., 0.5 * 192. / 255., 0.5];
+    for p in pixels.chunks_exact(4) {
+        for i in 0..4 {
+            assert!(
+                (p[i] - expected[i]).abs() <= 1. / 1024.,
+                "{p:?} != {expected:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn metal_source_reference_retains_hidden_offscreen_singular_content_and_stages() {
+    let mut renderer = Renderer::headless().unwrap();
+    for (stage, expected) in [
+        ("source", [1., 1.]),
+        ("masks", [1., 0.]),
+        ("effects", [0., 0.]),
+    ] {
+        let mut value = fixture(
+            "setMatte",
+            1,
+            json!({"channel":0,"composite":false}),
+            json!({"map":{"layerId":"hidden","stage":stage,"space":"source"}}),
+            None,
+        );
+        let mut source = layer(
+            "hidden",
+            "solid",
+            json!({"w":16,"h":8,"color":"#FFFFFF"}),
+            10000.,
+            -10000.,
+            1.,
+        );
+        source["on"] = json!(false);
+        set(&mut source, "scale.x", json!(0));
+        set(&mut source, "opacity", json!(0));
+        source["masks"] = json!([{"id":"cut","shape":"rect","mode":"add","on":true,"p":{"x":ch(json!(4)),"y":ch(json!(4)),"w":ch(json!(8)),"h":ch(json!(8)),"rotation":ch(json!(0)),"feather":ch(json!(0))}}]);
+        source["fx"] = json!([{"id":"invert","type":"invert","version":2,"on":true,"p":{}}]);
+        value["layers"].as_array_mut().unwrap().push(source);
+        let pixels = draw(&mut renderer, &value, &MapResolver::default(), 32);
+        assert_eq!(pixels[(16 * 32 + 8) * 4 + 3], expected[0], "{stage} left");
+        assert_eq!(pixels[(16 * 32 + 24) * 4 + 3], expected[1], "{stage} right");
+        check_float_viewport(&mut renderer, &value, &pixels);
+    }
+}
+
+#[test]
+fn metal_source_padding_clips_each_prefix_before_later_spatial_passes() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut value = fixture(
+        "blur",
+        2,
+        json!({"amount":2,"repeatEdgePixels":false}),
+        json!({}),
+        None,
+    );
+    value["layers"][0]["effectSpace"] = json!("source");
+    value["layers"][0]["d"] = json!({"w":8,"h":8,"color":"#FFFFFF"});
+    set(&mut value["layers"][0], "position.x", json!(12));
+    set(&mut value["layers"][0], "position.y", json!(12));
+    let plain = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    let blur = value["layers"][0]["fx"][0].clone();
+    value["layers"][0]["fx"] = json!([
+        {"id":"opaque","type":"shiftChannels","version":1,"on":true,"p":{"takeAlphaFrom":ch(json!(8))}}, blur]);
+    let prefixed = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    assert_eq!(
+        plain, prefixed,
+        "an opaque-making pass must not fill future padding"
+    );
+    assert!(
+        plain[(16 * 32 + 10) * 4 + 3] > 0.,
+        "source blur must grow outside original bounds"
+    );
+    assert_eq!(plain[3], 0.);
+    check_float_viewport(&mut renderer, &value, &prefixed);
+}
+
+#[test]
+fn metal_source_owner_local_ramp_survives_parent_transform_and_vector_bounds() {
+    let mut renderer = Renderer::headless().unwrap();
+    for shape in [false, true] {
+        let mut value = fixture(
+            "gradient",
+            2,
+            json!({"startX":0,"startY":0,"endX":16,"endY":0,"rampScatter":0}),
+            json!({}),
+            None,
+        );
+        let l = &mut value["layers"][0];
+        l["effectSpace"] = json!("source");
+        l["d"] = if shape {
+            json!({"shape":"rect","w":16,"h":16,"color":"#FFFFFF","stroke":0})
+        } else {
+            json!({"w":16,"h":16,"color":"#FFFFFF"})
+        };
+        if shape {
+            l["type"] = json!("shape");
+        }
+        set(l, "position.x", json!(if shape { 16 } else { 8 }));
+        set(l, "position.y", json!(if shape { 16 } else { 8 }));
+        set(l, "opacity", json!(50));
+        let pixels = draw(&mut renderer, &value, &MapResolver::default(), 32);
+        for x in 9..23 {
+            let p = &pixels[(16 * 32 + x) * 4..][..4];
+            // Main's shape content raster includes four transparent pixels
+            // per side; source owners use that full box for layer coordinates.
+            let expected =
+                ((x as f32 + 0.5 - 8. + if shape { 4. } else { 0. }) / 16.).clamp(0., 1.) * 0.5;
+            assert!(
+                (p[0] - expected).abs() <= 1. / 1024.,
+                "shape {shape} at {x}: {p:?} != {expected}"
+            );
+            assert_eq!(p[3], 0.5);
+        }
+        check_float_viewport(&mut renderer, &value, &pixels);
+    }
+}
+
+#[test]
+fn metal_source_raster_budget_and_dimensions_fail_before_allocation() {
+    let mut renderer = Renderer::headless().unwrap();
+    for (size, diagnostic) in [(8192, "memory budget"), (20000, "GPU dimensions")] {
+        let mut value = fixture("invert", 2, json!({}), json!({}), None);
+        value["layers"][0]["effectSpace"] = json!("source");
+        value["layers"][0]["d"]["w"] = json!(size);
+        value["layers"][0]["d"]["h"] = json!(size);
+        let mut doc = load(&value);
+        doc.set_saving_app_version(Some("1.3.0".into()));
+        renderer.set_main_effects_for_document(&doc).unwrap();
+        let error = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                Ticks::ZERO,
+                &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+                &MapResolver::default(),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+    let value = fixture("invert", 2, json!({}), json!({}), None);
+    let recovered = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    assert!(recovered.chunks_exact(4).all(|p| p[3] == 1.));
+}
+
+#[test]
+fn metal_source_precomp_subframes_seek_and_preview_export_are_exact() {
+    let mut value = fixture(
+        "setMatte",
+        1,
+        json!({"channel":0,"composite":false}),
+        json!({"map":{"layerId":"nested","stage":"source","space":"source"}}),
+        None,
+    );
+    let mut nested = layer(
+        "nested",
+        "precomp",
+        json!({"comp":"child","w":16,"h":8,"trim":0,"speed":1}),
+        1000.,
+        1000.,
+        1.,
+    );
+    nested["on"] = json!(false);
+    nested["continuousRaster"] = json!(true);
+    set(&mut nested, "scale.x", json!(500));
+    set(&mut nested, "opacity", json!(0));
+    value["layers"].as_array_mut().unwrap().push(nested);
+    composition(
+        &mut value,
+        "child",
+        16,
+        8,
+        1.,
+        vec![layer(
+            "clock",
+            "shader",
+            json!({"w":16,"h":8,"code":"void main(){fragColor=vec4(iTime,0.,0.,1.);}","uniforms":{}}),
+            0.,
+            0.,
+            1.,
+        )],
+    );
+    value["colorDepth"] = json!(32);
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let mut seen = vec![];
+    for time in [0.125, 0.375, 0.125] {
+        let mut outputs = vec![];
+        for output in [pm_render::OutputKind::Preview, pm_render::OutputKind::Final] {
+            let mut request = RenderRequest::sized(Size::new(32, 32), Precision::Float32);
+            request.output_kind = output;
+            let frame = renderer
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(time),
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let pixels = renderer.read_rgba(&frame).unwrap();
+            assert!(
+                pixels.chunks_exact(4).all(|p| p[3] == time as f32),
+                "{time}: {:?}",
+                &pixels[..4]
+            );
+            outputs.push(pixels);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        seen.push(outputs.remove(0));
+    }
+    assert_eq!(seen[0], seen[2]);
+}
+
+#[test]
+fn metal_source_owner_inherits_parent_rotation_after_local_processing() {
+    let mut value = fixture(
+        "gradient",
+        2,
+        json!({"startX":0,"startY":0,"endX":16,"endY":0,"rampScatter":0}),
+        json!({}),
+        None,
+    );
+    let owner = &mut value["layers"][0];
+    owner["effectSpace"] = json!("source");
+    owner["d"] = json!({"w":16,"h":8,"color":"#FFFFFF"});
+    owner["parent"] = json!("rig");
+    set(owner, "opacity", json!(50));
+    let mut rig = layer("rig", "null", json!({}), 24., 8., 1.);
+    set(&mut rig, "rotation", json!(90));
+    value["layers"].as_array_mut().unwrap().push(rig);
+    let mut renderer = Renderer::headless().unwrap();
+    let pixels = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    for y in 9..23 {
+        let p = &pixels[(y * 32 + 20) * 4..][..4];
+        let expected = (y as f32 + 0.5 - 8.) / 16. * 0.5;
+        assert!(
+            (p[0] - expected).abs() <= 1. / 1024.,
+            "at {y}: {p:?} != {expected}"
+        );
+        assert_eq!(p[3], 0.5);
+    }
+    assert_eq!(pixels[(4 * 32 + 20) * 4 + 3], 0.);
+    check_float_viewport(&mut renderer, &value, &pixels);
+}
+
+#[test]
+fn metal_source_video_subframes_keep_native_frame_selection_and_seek_identity() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/video/h264-709-limited.mp4");
+    assert!(path.is_file(), "required owned video fixture is missing");
+    let video = layer(
+        "video",
+        "video",
+        json!({"asset":"clip","w":32,"h":32,"fit":"fill","trim":0,"speed":1}),
+        16.,
+        16.,
+        1.,
+    );
+    let mut direct = project(32, 32, 1., no_fill(), vec![video.clone()]);
+    direct["colorDepth"] = json!(32);
+    asset(&mut direct, "clip", "video", "mp4", 256, 144, 1.);
+    let mut value = fixture(
+        "setMatte",
+        1,
+        json!({"channel":0,"composite":false}),
+        json!({"map":{"layerId":"video","stage":"source","space":"source"}}),
+        None,
+    );
+    value["colorDepth"] = json!(32);
+    let mut hidden = video;
+    hidden["on"] = json!(false);
+    set(&mut hidden, "opacity", json!(0));
+    set(&mut hidden, "position.x", json!(10000));
+    value["layers"].as_array_mut().unwrap().push(hidden);
+    value["assets"] = direct["assets"].clone();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut seen = vec![];
+    for time in [0.125, 0.375, 0.125] {
+        let mut outputs = vec![];
+        for v in [&direct, &value] {
+            let mut doc = load(v);
+            doc.set_saving_app_version(Some("1.3.0".into()));
+            renderer.set_main_effects_for_document(&doc).unwrap();
+            let frame = renderer
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(time),
+                    &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            outputs.push(renderer.read_rgba(&frame).unwrap());
+        }
+        for (native, reference) in outputs[0].chunks_exact(4).zip(outputs[1].chunks_exact(4)) {
+            assert_eq!(
+                reference[3],
+                native[0].clamp(0., 1.),
+                "at {time}: {reference:?} != {native:?}"
+            );
+        }
+        seen.push(outputs.remove(1));
+    }
+    assert_eq!(seen[0], seen[2]);
+}
+
+#[test]
+fn metal_source_owner_shutter_samples_accumulate_after_effects_and_opacity() {
+    let mut value = fixture(
+        "shiftChannels",
+        1,
+        json!({"takeAlphaFrom":8}),
+        json!({}),
+        None,
+    );
+    value["layers"][0]["effectSpace"] = json!("source");
+    value["layers"][0]["mblur"] = json!(true);
+    set(&mut value["layers"][0], "opacity", json!(50));
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let mut request = RenderRequest::sized(Size::new(32, 32), Precision::Float32);
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(4);
+    let frame = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            support::ticks(0.5),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels.chunks_exact(4).all(|p| p[3] == 0.5),
+        "sample weights must add exactly: {:?}",
+        &pixels[..4]
+    );
+}
+
+#[test]
+fn metal_typed_stroke_reads_provider_geometry_in_the_consuming_owner_space() {
+    let mut value = fixture(
+        "stroke",
+        2,
+        json!({"brushSize":4,"hardness":100,"spacing":0,"start":0,"end":100,"color":"#FF0000","opacity":100,"paintStyle":1}),
+        json!({"path":{"kind":"path","layerId":"geometry","pathId":"outline"}}),
+        None,
+    );
+    value["layers"][0]["d"] = json!({"w":16,"h":16,"color":"#FFFFFF"});
+    set(&mut value["layers"][0], "position.x", json!(8));
+    set(&mut value["layers"][0], "position.y", json!(8));
+    let mut provider = layer(
+        "geometry",
+        "solid",
+        json!({"w":16,"h":16,"color":"#FFFFFF"}),
+        1000.,
+        -1000.,
+        1.,
+    );
+    provider["on"] = json!(false);
+    provider["masks"] = json!([{"id":"outline","shape":"rect","on":true,"mode":"add","p":{"x":ch(json!(8)),"y":ch(json!(8)),"w":ch(json!(8)),"h":ch(json!(8)),"rotation":ch(json!(0)),"feather":ch(json!(0))}}]);
+    value["layers"].as_array_mut().unwrap().push(provider);
+    let mut renderer = Renderer::headless().unwrap();
+    let pixels = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    assert_eq!(&pixels[(12 * 32 + 16) * 4..][..4], &[1., 0., 0., 1.]);
+    assert_eq!(pixels[(4 * 32 + 16) * 4 + 3], 0.);
+    check_float_viewport(&mut renderer, &value, &pixels);
+}
+
+#[test]
+fn metal_source_shape_full_raster_preserves_stroke_coverage() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut value = fixture("invert", 2, json!({}), json!({}), None);
+    value["layers"][0]["type"] = json!("shape");
+    value["layers"][0]["d"] =
+        json!({"shape":"rect","w":16,"h":16,"color":"#FFFFFF","stroke":4,"strokeColor":"#FFFFFF"});
+    value["layers"][0]["effectSpace"] = json!("source");
+    set(&mut value["layers"][0], "position.x", json!(16));
+    set(&mut value["layers"][0], "position.y", json!(16));
+    let with_effect = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    value["layers"][0]["fx"] = json!([]);
+    let base = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    assert!(
+        base[(16 * 32 + 7) * 4 + 3] > 0.,
+        "stroke must extend outside the nominal box"
+    );
+    for (a, b) in with_effect.chunks_exact(4).zip(base.chunks_exact(4)) {
+        assert_eq!(a[3], b[3]);
+    }
+}
+
+#[test]
+fn metal_source_editable_path_bounds_preserve_authored_coverage() {
+    let vertices = [(0,0),(16,0),(0,16)].into_iter().enumerate().map(|(i,(x,y))|
+        json!({"id":format!("v{i}"),"p":{"x":ch(json!(x)),"y":ch(json!(y)),"inX":ch(json!(0)),"inY":ch(json!(0)),"outX":ch(json!(0)),"outY":ch(json!(0))}})).collect::<Vec<_>>();
+    let mut value = fixture("invert", 2, json!({}), json!({}), None);
+    value["layers"][0]["type"] = json!("shape");
+    value["layers"][0]["effectSpace"] = json!("source");
+    value["layers"][0]["d"] = json!({"paths":[{"id":"triangle","name":"Triangle","parent":null,
+        "p":{"x":ch(json!(0)),"y":ch(json!(0)),"rotation":ch(json!(0)),"scaleX":ch(json!(100)),"scaleY":ch(json!(100)),
+            "closed":ch(json!(true)),"fill":ch(json!("#FFFFFF")),"fillEnabled":ch(json!(true)),"fillOpacity":ch(json!(100)),
+            "stroke":ch(json!("#FFFFFF")),"strokeWidth":ch(json!(0)),"strokeOpacity":ch(json!(100)),"trimStart":ch(json!(0)),
+            "trimEnd":ch(json!(100)),"trimOffset":ch(json!(0)),"copies":ch(json!(1)),"repeatX":ch(json!(0)),"repeatY":ch(json!(0)),"repeatRotation":ch(json!(0))},"vertices":vertices}]});
+    set(&mut value["layers"][0], "position.x", json!(8));
+    set(&mut value["layers"][0], "position.y", json!(8));
+    let mut renderer = Renderer::headless().unwrap();
+    let with_effect = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    value["layers"][0]["fx"] = json!([]);
+    let base = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    assert_eq!(base[(12 * 32 + 12) * 4 + 3], 1.);
+    assert_eq!(base[(24 * 32 + 24) * 4 + 3], 0.);
+    for (a, b) in with_effect.chunks_exact(4).zip(base.chunks_exact(4)) {
+        assert_eq!(a[3], b[3]);
+    }
+}
+
+#[test]
+fn metal_inactive_source_video_needs_no_decode_or_full_size_target() {
+    let mut value = fixture(
+        "setMatte",
+        1,
+        json!({"channel":3,"composite":false}),
+        json!({"map":{"layerId":"inactive","stage":"source","space":"source"}}),
+        None,
+    );
+    let mut inactive = layer(
+        "inactive",
+        "video",
+        json!({"asset":"clip","w":8192,"h":8192,"fit":"fill","trim":0,"speed":1}),
+        10000.,
+        10000.,
+        0.25,
+    );
+    inactive["from"] = json!(0.5);
+    inactive["on"] = json!(false);
+    value["layers"].as_array_mut().unwrap().push(inactive);
+    asset(&mut value, "clip", "video", "mp4", 8192, 8192, 1.);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/video/h264-709-limited.mp4");
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path);
+    let mut renderer = Renderer::headless().unwrap();
+    let before = pm_perf::snapshot();
+    let pixels = draw(&mut renderer, &value, &resolver, 32);
+    assert!(pixels.iter().all(|v| *v == 0.));
+    let counters = pm_perf::snapshot().since(&before);
+    assert_eq!(counters.get(pm_perf::Counter::MediaCacheMisses), 0);
+}
+
+#[test]
+fn metal_reference_cache_keeps_each_precomp_density_independent() {
+    let mut consumer = layer(
+        "consumer",
+        "solid",
+        json!({"w":8,"h":8,"color":"#FFFFFF"}),
+        0.,
+        0.,
+        1.,
+    );
+    consumer["fx"] = json!([{"id":"matte","type":"setMatte","version":1,"on":true,"p":{"channel":ch(json!(0)),"composite":ch(json!(false))},"inputs":{"map":{"layerId":"provider","stage":"source"}}}]);
+    let mut provider = layer(
+        "provider",
+        "shader",
+        json!({"w":8,"h":8,"code":"void main(){fragColor=vec4(mod(floor(gl_FragCoord.x),2.),0.,0.,1.);}","uniforms":{}}),
+        0.,
+        0.,
+        1.,
+    );
+    provider["on"] = json!(false);
+    let mut first = layer(
+        "small",
+        "precomp",
+        json!({"comp":"child","w":8,"h":8}),
+        0.,
+        0.,
+        1.,
+    );
+    first["continuousRaster"] = json!(true);
+    let mut second = layer(
+        "large",
+        "precomp",
+        json!({"comp":"child","w":8,"h":8}),
+        16.,
+        0.,
+        1.,
+    );
+    second["continuousRaster"] = json!(true);
+    set(&mut second, "scale.x", json!(200));
+    set(&mut second, "scale.y", json!(200));
+    let mut value = project(32, 32, 1., no_fill(), vec![first, second]);
+    composition(&mut value, "child", 8, 8, 1., vec![consumer, provider]);
+    value["comps"]["child"]["backgroundFill"] = no_fill();
+    let mut renderer = Renderer::headless().unwrap();
+    let together = draw(&mut renderer, &value, &MapResolver::default(), 32);
+    let layers = value["layers"].as_array().unwrap().clone();
+    for (index, x0, size) in [(0, 0, 8), (1, 16, 16)] {
+        value["layers"] = json!([layers[index].clone()]);
+        let alone = draw(&mut renderer, &value, &MapResolver::default(), 32);
+        for y in 0..size {
+            for x in x0..x0 + size {
+                let i = (y * 32 + x) * 4;
+                assert_eq!(
+                    &together[i..i + 4],
+                    &alone[i..i + 4],
+                    "density {index} at {x},{y}"
+                );
+            }
+        }
+        assert!(alone.chunks_exact(4).any(|p| p[3] > 0.));
+    }
+}
+
+#[test]
+fn metal_source_atlas_passes_are_charged_before_allocating_them() {
+    let mut value = fixture(
+        "pixelate",
+        2,
+        json!({"horizontalBlocks":2048,"verticalBlocks":2048,"sharpColors":false}),
+        json!({}),
+        None,
+    );
+    value["layers"][0]["effectSpace"] = json!("source");
+    let fx = value["layers"][0]["fx"][0].clone();
+    value["layers"][0]["fx"] = json!(
+        (0..7)
+            .map(|i| {
+                let mut fx = fx.clone();
+                fx["id"] = json!(format!("atlas{i}"));
+                fx
+            })
+            .collect::<Vec<_>>()
+    );
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let error = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            Ticks::ZERO,
+            &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+            &MapResolver::default(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("memory budget"), "{error}");
+}
+
+#[test]
+fn metal_source_shared_plan_replays_each_count_toward_admission() {
+    let mut value = fixture(
+        "setMatte",
+        1,
+        json!({}),
+        json!({"map":{"layerId":"shared","stage":"source","space":"source"}}),
+        None,
+    );
+    let owner = value["layers"][0].clone();
+    value["layers"] = json!(
+        (0..3)
+            .map(|i| {
+                let mut l = owner.clone();
+                l["id"] = json!(format!("consumer{i}"));
+                l
+            })
+            .collect::<Vec<_>>()
+    );
+    let mut source = layer(
+        "shared",
+        "solid",
+        json!({"w":1280,"h":1280,"color":"#FFFFFF"}),
+        0.,
+        0.,
+        1.,
+    );
+    source["on"] = json!(false);
+    value["layers"].as_array_mut().unwrap().push(source);
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let error = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            Ticks::ZERO,
+            &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+            &MapResolver::default(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("memory budget"), "{error}");
 }

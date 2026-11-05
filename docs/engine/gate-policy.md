@@ -173,3 +173,25 @@ deletes the today-equality test it replaces.
 
 Removed with this policy: `tests/half_store.rs` (G-C1), the FONTS-R ratchet (G-T3) and
 `level1_keeps_todays_sampling` (G-C5).
+
+## Source-owner effect qualification
+
+A source-space effect must be evaluated before the owner's transform and opacity,
+on the complete unclipped content raster. The local source domain and every
+prefix's padded domain are part of the proof. A crop must equal the same pixels
+of a full frame at the same working and output precision. Hidden or singularly
+transformed providers retain their local content; inactive providers remain
+transparent without requiring a video frame or a full-size target.
+
+`pm-render/tests/advanced_effects.rs` contains focused source-owner checks for
+ramp coordinates, inherited transforms, source/masks/effects stages, padding,
+shutter accumulation, exact precomp/video subframes, reverse seeking and resource
+refusal/recovery. These witnesses do not replace the frozen corpus or qualify
+source temporal/brush expansion, general group/matte/backdrop policy, source text,
+all historical families, or physical HDR/presentation gates. Gate E remains open
+until its named requirements pass; no numeric bound changes for source processing.
+
+Source admission must account for intermediate passes, pyramids, cell atlases,
+asset targets and every retained consumer replay. Cached planning does not prove
+a shared GPU allocation. The source budget tests require an error before the
+large targets allocate; neither the budget nor a pixel tolerance is increased.

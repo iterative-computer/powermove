@@ -36,6 +36,7 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectStep {
     pub owner: Option<std::sync::Arc<Owner>>,
+    pub source_domain: Option<(pm_fx_defs::spatial::Extent, pm_fx_defs::spatial::Extent)>,
     pub spatial: Option<Spatial>,
     pub temporal: bool,
     pub references: Vec<super::resources::Reference>,
@@ -206,6 +207,7 @@ pub fn effect_step(
         .sum();
     EffectStep {
         owner: None,
+        source_domain: None,
         spatial: None,
         temporal: false,
         references: vec![],
@@ -290,6 +292,19 @@ pub(crate) fn effect_steps_prefix<'d>(
     scale: (f64, f64),
     prefix: Option<usize>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
+    effect_steps_raster(scope, effects, layer, time, scale, prefix, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn effect_steps_raster<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    prefix: Option<usize>,
+    raster: Option<crate::composite::effects::SourceRaster>,
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
     for (fx_index, fx) in node::array_or_empty(node::member(Some(layer), "fx"))?
@@ -347,21 +362,24 @@ pub(crate) fn effect_steps_prefix<'d>(
             values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
         let mut step = effect_step(def, &fx_id, &values);
+        if raster.is_some() && super::versions::main_definition(&step.definition).is_none() {
+            return Ok(Err(Feature::Definition(
+                "Effect has no source processing contract".into(),
+            )));
+        }
         if effects.versioned_builtins
             && def.glsl.as_ref().is_some_and(|g| {
                 g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
             })
         {
-            if node::is_str(node::member(Some(layer), "effectSpace"), "source")
-                || node::truthy(node::member(Some(layer), "threeD"))
-            {
+            if node::truthy(node::member(Some(layer), "threeD")) {
                 refused.get_or_insert(Feature::Definition(format!(
                     "effect {}: source/3D owner binding unavailable",
                     step.definition
                 )));
                 continue;
             }
-            match owner(scope, layer, time, scale)? {
+            match raster.map_or_else(|| owner(scope, layer, time, scale), |r| Ok(Ok(r.owner())))? {
                 Ok(owner) => step.owner = Some(std::sync::Arc::new(owner)),
                 Err(f) => {
                     refused.get_or_insert(f);
@@ -454,6 +472,7 @@ pub(crate) fn effect_steps_prefix<'d>(
                             match super::brush::raster(
                                 scope,
                                 provider,
+                                layer,
                                 p.path_id.as_ref().unwrap(),
                                 time,
                                 &step,

@@ -663,6 +663,7 @@ impl Exec<'_> {
             let target = self.take_rect(Region::full(producer.plan.width, producer.plan.height));
             self.render_comp_nodes(encoder, &producer.plan, None, &target);
             ready.push(crate::effects::resources::Ready {
+                source_extent: producer.source_extent,
                 request: producer.request.clone(),
                 target,
                 owner: producer.owner,
@@ -692,6 +693,7 @@ impl Exec<'_> {
             };
             self.render_comp_nodes(encoder, &plan, None, &target);
             ready.push(crate::effects::resources::Ready {
+                source_extent: None,
                 request: asset.request(),
                 target,
                 owner: crate::effects::plan::Owner {
