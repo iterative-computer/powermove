@@ -18,7 +18,7 @@ pub struct Enclosure {
 }
 impl Enclosure {
     fn matches(&self, release: &Release) -> bool {
-        self.version == release.version
+        self.version == release.sparkle_version()
             && self.archive_url == release.archive_url
             && self.size == release.size
             && self.signature == release.sparkle_signature

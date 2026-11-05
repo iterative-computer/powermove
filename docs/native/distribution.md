@@ -162,7 +162,8 @@ Unknown or duplicate structured fields are errors. Payload fields are:
 | --- | --- |
 | `schema` | Exactly 1. |
 | `channel` | `cutover` or `beta`, matched to bundled config. |
-| `version` | SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `version` | Display SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `sparkleVersion` | Optional signed numeric `CFBundleVersion` / appcast `sparkle:version`, independent of display SemVer. New packaging uses this build number; absent legacy fields fall back to `version`. |
 | `architecture` | `arm64` or `x86_64`, matched to the running app. |
 | `bundleId` | Exact production or beta id for the channel. |
 | `minimumMacos` | At least 14 and no newer than this host for an offer. |

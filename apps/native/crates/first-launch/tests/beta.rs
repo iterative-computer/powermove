@@ -169,6 +169,7 @@ fn release() -> Release {
         schema: 1,
         channel: Channel::Beta,
         version: "2.0.0-beta.2".into(),
+        sparkle_version: None,
         architecture: Architecture::Arm64,
         bundle_id: pm_first_launch::BETA_BUNDLE_ID.into(),
         minimum_macos: 14,

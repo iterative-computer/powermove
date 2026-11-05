@@ -6,7 +6,8 @@
 #import <mach/machine.h>
 
 static BOOL pmMatches(NSDictionary *release, NSDictionary *actual) {
-    return [actual[@"version"] isEqualToString:release[@"version"]]
+    NSString *build = [release[@"sparkleVersion"] isKindOfClass:NSString.class] ? release[@"sparkleVersion"] : release[@"version"];
+    return [actual[@"version"] isEqualToString:build]
         && [actual[@"url"] isEqualToString:release[@"archiveUrl"]]
         && [actual[@"size"] unsignedLongLongValue] == [release[@"size"] unsignedLongLongValue]
         && [actual[@"signature"] isEqualToString:release[@"sparkleSignature"]]
@@ -145,13 +146,14 @@ int pm_sparkle_poll(void *context) {
 // The Rust owner retains it for the application's lifetime once armed.
 void pm_sparkle_release(void *context) { if (NSThread.isMainThread && context) { PMPolicyDriver *value = CFBridgingRelease(context); value.updater = nil; } }
 
-int pm_sparkle_installed(const char *path, const char *version, const char *identifier, const char *architecture, const char *requirement) {
+int pm_sparkle_installed(const char *path, const char *version, const char *displayVersion, const char *identifier, const char *architecture, const char *requirement) {
     @autoreleasepool {
-        if (!path || !version || !identifier || !architecture || !requirement) return 0;
+        if (!path || !version || !displayVersion || !identifier || !architecture || !requirement) return 0;
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
         NSBundle *bundle = [NSBundle bundleWithURL:url];
         if (![bundle.bundleIdentifier isEqualToString:[NSString stringWithUTF8String:identifier]]
-            || ![bundle.infoDictionary[@"CFBundleVersion"] isEqualToString:[NSString stringWithUTF8String:version]]) return 0;
+            || ![bundle.infoDictionary[@"CFBundleVersion"] isEqualToString:[NSString stringWithUTF8String:version]]
+            || ![bundle.infoDictionary[@"CFBundleShortVersionString"] isEqualToString:[NSString stringWithUTF8String:displayVersion]]) return 0;
         NSString *arch = [NSString stringWithUTF8String:architecture];
         NSNumber *cpu = [arch isEqualToString:@"arm64"] ? @(CPU_TYPE_ARM64) : [arch isEqualToString:@"x86_64"] ? @(CPU_TYPE_X86_64) : nil;
         if (!cpu || ![bundle.executableArchitectures containsObject:cpu]) return 0;

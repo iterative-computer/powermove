@@ -72,6 +72,7 @@ impl Fixture {
                 schema: 1,
                 channel: Channel::Cutover,
                 version: "2.0.0".into(),
+                sparkle_version: None,
                 architecture: Architecture::Arm64,
                 bundle_id: PRODUCTION_ID.into(),
                 minimum_macos: 14,
@@ -1487,4 +1488,31 @@ fn asynchronous_cancel_keeps_termination_veto_until_native_confirmation() {
             .unwrap()
     );
     assert!(!binding.calls.contains(&"install"));
+}
+
+#[test]
+fn sparkle_build_number_is_independent_of_display_semver_and_legacy_policies_stay_readable() {
+    let mut f = Fixture::new();
+    assert_eq!(f.offer().release().sparkle_version(), "2.0.0");
+    f.release.sparkle_version = Some("42.3".into());
+    let offer = f.offer();
+    assert_eq!(offer.release().version, "2.0.0");
+    assert_eq!(offer.release().sparkle_version(), "42.3");
+    for build in ["", "0", "01", "2.0.0-beta.1", "1.2.3.4", "1..2"] {
+        f.release.sparkle_version = Some(build.into());
+        let mut feed = LocalFeed::new([f.policy()]);
+        assert!(
+            check(
+                &f.config,
+                ready(),
+                "1.2.0",
+                Architecture::Arm64,
+                NOW,
+                &mut feed,
+                &f.verifier()
+            )
+            .is_err(),
+            "{build}"
+        );
+    }
 }

@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn pm_sparkle_installed(
         path: *const c_char,
         version: *const c_char,
+        display_version: *const c_char,
         identifier: *const c_char,
         architecture: *const c_char,
         requirement: *const c_char,
@@ -107,7 +108,8 @@ pub struct SignedInstalledBundle {
 impl InstalledProof for SignedInstalledBundle {
     fn matches(&mut self, release: &Release) -> Result<bool> {
         let path = CString::new(self.bundle.as_os_str().as_encoded_bytes())?;
-        let version = CString::new(release.version.as_bytes())?;
+        let version = CString::new(release.sparkle_version().as_bytes())?;
+        let display_version = CString::new(release.version.as_bytes())?;
         let id = CString::new(release.bundle_id.as_bytes())?;
         let arch = CString::new(match release.architecture {
             crate::update_distribution::Architecture::Arm64 => "arm64",
@@ -122,6 +124,7 @@ impl InstalledProof for SignedInstalledBundle {
             pm_sparkle_installed(
                 path.as_ptr(),
                 version.as_ptr(),
+                display_version.as_ptr(),
                 id.as_ptr(),
                 arch.as_ptr(),
                 dr.as_ptr(),
@@ -223,8 +226,8 @@ mod tests {
         unsafe extern "C" {
             fn pm_sparkle_matches(policy: *const c_char, enclosure: *const c_char) -> c_int;
         }
-        let release = serde_json::json!({"version":"2.0.0","archiveUrl":"https://updates.invalid/app.zip","size":42,"sparkleSignature":"synthetic-signature"});
-        let actual = serde_json::json!({"version":"2.0.0","url":"https://updates.invalid/app.zip","size":42,"signature":"synthetic-signature","delta":false,"informationOnly":false,"installationType":"application"});
+        let release = serde_json::json!({"version":"2.0.0","sparkleVersion":"42","archiveUrl":"https://updates.invalid/app.zip","size":42,"sparkleSignature":"synthetic-signature"});
+        let actual = serde_json::json!({"version":"42","url":"https://updates.invalid/app.zip","size":42,"signature":"synthetic-signature","delta":false,"informationOnly":false,"installationType":"application"});
         let matches = |a: &serde_json::Value| {
             let r = CString::new(release.to_string()).unwrap();
             let a = CString::new(a.to_string()).unwrap();
@@ -266,7 +269,7 @@ mod tests {
         let contents = app.join("Contents");
         std::fs::create_dir_all(contents.join("MacOS")).unwrap();
         let plist = contents.join("Info.plist");
-        std::fs::write(&plist, r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.powermove.signature-proof</string><key>CFBundleExecutable</key><string>proof</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>2.0.0</string></dict></plist>"#).unwrap();
+        std::fs::write(&plist, r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.powermove.signature-proof</string><key>CFBundleExecutable</key><string>proof</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>42</string><key>CFBundleShortVersionString</key><string>2.0.0</string></dict></plist>"#).unwrap();
         let source = root.join("proof.c");
         std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
         let binary = contents.join("MacOS/proof");
@@ -302,6 +305,7 @@ mod tests {
             schema: 1,
             channel: Channel::Beta,
             version: "2.0.0".into(),
+            sparkle_version: Some("42".into()),
             architecture: Architecture::Arm64,
             bundle_id: "com.powermove.signature-proof".into(),
             minimum_macos: 14,

@@ -134,6 +134,9 @@ pub struct Release {
     pub schema: u32,
     pub channel: Channel,
     pub version: String,
+    /// CFBundleVersion / sparkle:version, independent of display SemVer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparkle_version: Option<String>,
     pub architecture: Architecture,
     pub bundle_id: String,
     pub minimum_macos: u32,
@@ -145,6 +148,13 @@ pub struct Release {
     pub sparkle_signature: String,
     pub expires_unix: u64,
 }
+impl Release {
+    /// Old policies used one version; preserve their signed wire shape.
+    pub fn sparkle_version(&self) -> &str {
+        self.sparkle_version.as_deref().unwrap_or(&self.version)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Offer {
@@ -221,6 +231,19 @@ fn verify_policy(bytes: &[u8], verifier: &impl SignatureVerifier) -> Result<Offe
         "invalid Sparkle Ed25519 signature encoding"
     );
     validate_https(&Url::parse(&release.archive_url)?)?;
+    if let Some(build) = &release.sparkle_version {
+        let components = build.split('.').collect::<Vec<_>>();
+        ensure!(
+            !build.is_empty()
+                && build.len() <= 128
+                && matches!(build.as_bytes()[0], b'1'..=b'9')
+                && components.len() <= 3
+                && components
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "invalid Sparkle bundle build number"
+        );
+    }
     Version::parse(&release.version)?;
     Ok(Offer {
         release,
