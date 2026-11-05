@@ -149,6 +149,8 @@ pub enum Call {
     Edit(EditCall),
     Gesture(GestureCall),
     Workspace(WorkspaceCall),
+    Memory(crate::MemoryCall),
+    AdmitMedia(crate::MediaAdmission),
     Selection(SelectionCall),
     /// Validated whole-document restore; never folds across an open entry.
     Restore {
@@ -380,6 +382,11 @@ pub enum Reply {
     /// The caller's realm runs the closure inline, then reports.
     Continuation(Continuation),
     Workspace(Value),
+    Memory {
+        entry: Option<Value>,
+        total: usize,
+        sequence: u64,
+    },
     /// A gesture opened.
     Gesture(u64),
     /// `QueryTx`.
@@ -565,6 +572,7 @@ struct OpenEntry {
     /// `null`, as a scoped pending entry had no snapshot).
     scoped: bool,
     before: Arc<Document>,
+    base_token: u64,
     ops: Vec<EntryOp>,
     leases: Vec<Lease>,
     rebased: bool,
@@ -743,7 +751,10 @@ impl Project {
         }
         let tracks_mutation = !matches!(
             &call,
-            Call::Selection(_) | Call::Workspace(_) | Call::History(HistoryCall::Mark)
+            Call::Selection(_)
+                | Call::Workspace(_)
+                | Call::Memory(_)
+                | Call::History(HistoryCall::Mark)
         );
         let before_revision = self.revision();
         let before_mark = self.store.history_mark();
@@ -785,6 +796,32 @@ impl Project {
             Call::Edit(e) => Handled::reply(self.edit(caller, txid, e)),
             Call::Gesture(g) => Handled::reply(self.gesture(caller, txid, g)),
             Call::Workspace(w) => Handled::reply(self.workspace_call(txid, w)),
+            Call::AdmitMedia(admission) => {
+                let reply = if expected_document.is_none() || self.entry.is_some() {
+                    Reply::Throw(KernelError::Guard(
+                        "Media admission requires its document identity and a closed edit".into(),
+                    ))
+                } else {
+                    match self.store.admit_media(admission, caller.origin) {
+                        Ok(commit) => Reply::Applied {
+                            revision: self.revision(),
+                            changed: commit.is_some(),
+                        },
+                        Err(error) => Reply::Throw(error.into()),
+                    }
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
+            Call::Memory(call) => {
+                let reply = if expected_document.is_none() {
+                    Reply::Throw(KernelError::Guard(
+                        "Memory metadata requires its document identity".into(),
+                    ))
+                } else {
+                    self.memory(caller, call)
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::Transact {
                 label,
                 body,
@@ -830,6 +867,71 @@ impl Project {
         handled
     }
 
+    fn memory(&mut self, caller: Caller, call: crate::MemoryCall) -> Reply {
+        use crate::MemoryCall;
+        let Some(root) = self.store.root() else {
+            return Reply::Throw(TransactionError::NoDocument.into());
+        };
+        let fields = crate::memory_metadata::fields(root);
+        let planned: Result<(Value, Option<Value>), String> = (|| match call {
+            MemoryCall::Mutate {
+                expected,
+                operation,
+                now,
+                id,
+            } => {
+                if root.get("memory").map(Node::to_value) != expected {
+                    return Err("Project notes changed; read them again before editing".into());
+                }
+                let author = if caller.origin == Origin::Interface {
+                    "user"
+                } else {
+                    "agent"
+                };
+                pm_model::memory::apply(
+                    &fields,
+                    &operation,
+                    &pm_model::memory::Context { now, id, author },
+                )
+                .map_err(str::to_owned)
+            }
+            MemoryCall::SetEnabled { expected, enabled } => {
+                if caller.origin != Origin::Interface {
+                    return Err("Only the user can change project memory access".into());
+                }
+                if root.get("memoryEnabled").map(Node::to_value) != expected {
+                    return Err("Project memory access changed; read it again".into());
+                }
+                let mut next = fields;
+                if enabled {
+                    next.as_object_mut().unwrap().remove("memoryEnabled");
+                } else {
+                    next.as_object_mut()
+                        .unwrap()
+                        .insert("memoryEnabled", Value::Bool(false));
+                }
+                Ok((next, None))
+            }
+        })();
+        match planned {
+            Err(message) => Reply::Throw(KernelError::Guard(message)),
+            Ok((next, entry)) => {
+                let total = next
+                    .get("memory")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                match self.store.publish_memory(next) {
+                    Ok(()) => Reply::Memory {
+                        entry,
+                        total,
+                        sequence: self.store.metadata_revision(),
+                    },
+                    Err(error) => Reply::Throw(error.into()),
+                }
+            }
+        }
+    }
+
     fn select(&mut self, call: SelectionCall) -> Reply {
         let ids = match &call {
             SelectionCall::Layers { ids, .. } => ids.clone(),
@@ -864,6 +966,22 @@ impl Project {
                 },
                 handle: retired.handle,
             });
+        }
+    }
+
+    /// The kernel adds storage notices after transaction planning. Lost-ack
+    /// queries and retries must retain that final outcome as well.
+    pub(crate) fn retain_final_acks(&mut self, handled: &Handled) {
+        for ack in handled
+            .reply
+            .iter()
+            .chain(handled.resolved.iter().map(|(_, ack)| ack))
+        {
+            if let Some(key) = ack.txid
+                && let Some(retained) = self.acks.get_mut(&key)
+            {
+                *retained = ack.clone();
+            }
         }
     }
 
@@ -972,6 +1090,7 @@ impl Project {
             holders: vec![owner],
             scoped,
             before: self.store.current().clone(),
+            base_token: self.store.kernel_state_token(),
             ops: Vec::new(),
             leases: Vec::new(),
             rebased: false,
@@ -989,6 +1108,10 @@ impl Project {
         ops: Vec<EntryOp>,
         rebased: bool,
     ) -> bool {
+        let preserved = self.store.root().and_then(|current| {
+            crate::memory_metadata::preserve(before, current).expect("valid owned metadata")
+        });
+        let before = preserved.as_ref().unwrap_or(before);
         if rebased {
             let after = self.store.current();
             let forward = pm_model::ops::diff_node_ops(before.root(), after.root());
@@ -1033,8 +1156,21 @@ impl Project {
         let Some(entry) = self.entry.take() else {
             return false;
         };
+        let has_navigation = entry.ops.iter().any(|op| op.navigation);
         let label = label.unwrap_or(entry.label);
-        self.record_ops(label, entry.origin, &entry.before, entry.ops, entry.rebased)
+        let recorded =
+            self.record_ops(label, entry.origin, &entry.before, entry.ops, entry.rebased);
+        if !recorded
+            && !has_navigation
+            && crate::memory_metadata::same_composition(
+                entry.before.root(),
+                self.store.root(),
+                same_node,
+            )
+        {
+            self.store.kernel_restore_state_token(entry.base_token);
+        }
+        recorded
     }
 
     /// Reverts `owner`'s operations at `ops[start..]` if every inverse still
@@ -1150,9 +1286,19 @@ impl Project {
                     return None;
                 }
                 let entry = self.entry.take().expect("open entry");
+                let has_navigation = entry.ops.iter().any(|op| op.navigation);
                 let kept: Vec<EntryOp> = entry.ops.into_iter().filter(|o| !o.navigation).collect();
                 let writes = kept.len();
                 if writes == 0 {
+                    if !has_navigation
+                        && crate::memory_metadata::same_composition(
+                            entry.before.root(),
+                            self.store.root(),
+                            same_node,
+                        )
+                    {
+                        self.store.kernel_restore_state_token(entry.base_token);
+                    }
                     return None;
                 }
                 let split_label = kept
@@ -2305,6 +2451,20 @@ fn probes(root: Option<&Node>, forward: &[Op], scopes: &[Vec<PathPart>]) -> Vec<
 
 fn probe_holds(root: Option<&Node>, probe: &Probe) -> bool {
     match probe {
+        Probe::Path { path, node } if path.is_empty() => {
+            crate::memory_metadata::same_composition(root, node.as_ref(), same_node)
+        }
+        Probe::Path { path, .. }
+            if path
+                .first()
+                .and_then(|p| match p {
+                    PathPart::Key(k) => k.as_str(),
+                    _ => None,
+                })
+                .is_some_and(|key| crate::memory_metadata::ALL_FIELDS.contains(&key)) =>
+        {
+            true
+        }
         Probe::Path { path, node } => same(root.and_then(|r| r.lookup(path)), node.as_ref()),
         Probe::Element { array, id, node } => same(element(root, array, id), node.as_ref()),
         Probe::Order { array, ids } => &array_ids(root, array) == ids,

@@ -345,12 +345,6 @@ pub(crate) fn make_layer(
     {
         return result;
     }
-    if matches!(layer_type, "extension" | "shader") {
-        return Err(CommandError::NotImplemented(match layer_type {
-            "extension" => "add_layer (extension layers need their definition)",
-            _ => "add_layer (shader layers need the shader template)",
-        }));
-    }
     let mut p = Map::new();
     if transformable(layer_type) {
         for (k, v) in CHANNELS_3D {
@@ -398,6 +392,20 @@ pub(crate) fn make_layer(
         }
     };
     let d = match layer_type {
+        "shader" => obj(&[
+            ("code", values::s(super::shader::TEMPLATE)),
+            ("w", n(w)),
+            ("h", n(h)),
+            ("uniforms", Value::Object(Map::new())),
+        ]),
+        "extension" => obj(&[
+            ("definition", values::s("")),
+            ("version", n(1.)),
+            ("w", n(w)),
+            ("h", n(h)),
+            ("params", Value::Object(Map::new())),
+            ("data", Value::Object(Map::new())),
+        ]),
         "captions" => super::captions::initial_content(content, h)?,
         "solid" => obj(&[
             ("color", values::s("#1b1b1f")),
@@ -493,13 +501,20 @@ pub(crate) fn make_layer(
             ch.insert("v", v.clone());
         }
     }
-    if matches!(layer_type, "solid" | "adjustment" | "precomp") {
+    if matches!(
+        layer_type,
+        "solid" | "adjustment" | "shader" | "extension" | "precomp"
+    ) {
         set_p(&mut p, "position.x", 0.0);
         set_p(&mut p, "position.y", 0.0);
     }
     l.insert("p", Value::Object(p));
     l.insert("d", d);
-    Ok(Value::Object(l))
+    let mut layer = Value::Object(l);
+    if layer_type == "shader" {
+        super::shader::sync(&mut layer);
+    }
+    Ok(layer)
 }
 
 pub(crate) fn make_caption_layer(
@@ -966,6 +981,36 @@ fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
     )?;
     if c.layer_type == "audio" {
         content_audio(&mut layer)?;
+    }
+    if c.layer_type == "extension" && !super::scene3d::is_known_layer(&layer) {
+        let id = c
+            .content
+            .get("definition")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let definition = cx
+            .state
+            .and_then(|state| state.provider("layerTypes", id))
+            .map(|r| &r.definition)
+            .ok_or_else(|| {
+                CommandError::Invalid(format!(
+                    "Unknown extension layer definition: {}",
+                    if id.is_empty() { "(missing)" } else { id }
+                ))
+            })?;
+        let d = super::content::extension_initial(id, &c.content, definition, dims)?;
+        let m = values::obj(&mut layer);
+        m.insert("d", d);
+        if c.name.as_ref().is_none_or(|s| s.is_empty())
+            && let Some(label) = definition.get("label").filter(|v| v.is_truthy())
+        {
+            m.insert("name", label.clone());
+        }
+        if c.color.as_ref().is_none_or(|s| s.is_empty())
+            && let Some(color) = definition.get("color").filter(|v| v.is_truthy())
+        {
+            m.insert("color", color.clone());
+        }
     }
     let from = match c.from {
         Some(f) => values::finite(f, "layer start")?,

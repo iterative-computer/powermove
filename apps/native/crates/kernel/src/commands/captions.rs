@@ -142,6 +142,214 @@ fn model(value: &impl serde::Serialize) -> Result<Value, CommandError> {
     let text = serde_json::to_string(value).map_err(|e| CommandError::Invalid(e.to_string()))?;
     pm_model::json::parse(&text).map_err(|e| CommandError::Invalid(e.to_string()))
 }
+const CUE_FIELDS: &[&str] = &["id", "start", "end", "text", "words"];
+const WORD_FIELDS: &[&str] = &["text", "start", "end"];
+fn owned_fields(raw: &Value, keys: &[&str]) -> Value {
+    let Some(raw) = raw.as_object() else {
+        return raw.clone();
+    };
+    Value::Object(
+        raw.iter()
+            .filter(|(key, _)| key.as_str().is_some_and(|key| keys.contains(&key)))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+fn style_fields() -> &'static [String] {
+    static FIELDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FIELDS.get_or_init(|| {
+        serde_json::to_value(pm_captions::CaptionStyle::default())
+            .expect("shipped caption style")
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    })
+}
+fn style_input(raw: &Value) -> Value {
+    let Some(raw) = raw.as_object() else {
+        return raw.clone();
+    };
+    Value::Object(
+        raw.iter()
+            .filter(|(key, _)| {
+                key.as_str()
+                    .is_some_and(|key| style_fields().iter().any(|owned| owned == key))
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+fn cue_inputs(raw: &Value) -> Value {
+    let Some(cues) = raw.as_array() else {
+        return raw.clone();
+    };
+    Value::Array(
+        cues.iter()
+            .map(|raw| {
+                let mut cue = owned_fields(raw, CUE_FIELDS);
+                if let Some(words) = raw.get("words").and_then(Value::as_array) {
+                    values::obj(&mut cue).insert(
+                        "words",
+                        Value::Array(
+                            words
+                                .iter()
+                                .map(|word| owned_fields(word, WORD_FIELDS))
+                                .collect(),
+                        ),
+                    );
+                }
+                cue
+            })
+            .collect(),
+    )
+}
+fn preserve_extras(target: &mut Value, old: &Value, owned: impl Fn(&pm_model::JsString) -> bool) {
+    if let Some(old) = old.as_object() {
+        for (key, value) in old.iter() {
+            if !owned(key) {
+                values::obj(target).insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+fn extra_fields(raw: &Value, keys: &[&str]) -> bool {
+    raw.as_object().is_some_and(|m| {
+        m.keys()
+            .any(|key| !key.as_str().is_some_and(|key| keys.contains(&key)))
+    })
+}
+fn cue_extras(raw: &Value) -> bool {
+    extra_fields(raw, CUE_FIELDS)
+        || raw
+            .get("words")
+            .and_then(Value::as_array)
+            .is_some_and(|words| words.iter().any(|word| extra_fields(word, WORD_FIELDS)))
+}
+/// Keep opaque data on identities the service understands. When a merge,
+/// replacement or text edit retires an opaque word/cue, retain its full raw
+/// record instead of discarding fields a future reader may understand.
+fn preserve_content_extras(next: &mut Map, normalized: &mut Value) -> Result<(), CommandError> {
+    if let Some(old) = next.get("style")
+        && let Some(style) = values::obj(normalized).get_mut("style")
+    {
+        preserve_extras(style, old, |key| {
+            key.as_str()
+                .is_some_and(|key| style_fields().iter().any(|owned| owned == key))
+        });
+    }
+    let old = next
+        .get("cues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut used = std::collections::HashSet::new();
+    let mut retired = Vec::new();
+    if let Some(cues) = values::obj(normalized)
+        .get_mut("cues")
+        .and_then(Value::as_array_mut)
+    {
+        for cue in cues {
+            let Some((index, before)) = old.iter().enumerate().find(|(i, old)| {
+                !used.contains(i) && old.get("id").is_some() && old.get("id") == cue.get("id")
+            }) else {
+                continue;
+            };
+            used.insert(index);
+            preserve_extras(cue, before, |key| {
+                key.as_str().is_some_and(|key| CUE_FIELDS.contains(&key))
+            });
+            let before_words = before
+                .get("words")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut used_words = std::collections::HashSet::new();
+            let mut lost = false;
+            for word in before_words
+                .iter()
+                .filter(|word| extra_fields(word, WORD_FIELDS))
+            {
+                let matched = values::obj(cue)
+                    .get_mut("words")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|words| {
+                        let same_text = |index: usize, new: &Value| {
+                            !used_words.contains(&index) && new.get("text") == word.get("text")
+                        };
+                        let index = words
+                            .iter()
+                            .enumerate()
+                            .find(|(i, new)| {
+                                same_text(*i, new)
+                                    && new.get("start") == word.get("start")
+                                    && new.get("end") == word.get("end")
+                            })
+                            .map(|(i, _)| i)
+                            .or_else(|| {
+                                words
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(i, new)| same_text(*i, new))
+                                    .map(|(i, _)| i)
+                            })?;
+                        preserve_extras(&mut words[index], word, |key| {
+                            key.as_str().is_some_and(|key| WORD_FIELDS.contains(&key))
+                        });
+                        Some(index)
+                    });
+                if let Some(index) = matched {
+                    used_words.insert(index);
+                } else {
+                    lost = true;
+                }
+            }
+            if lost {
+                retired.push(before.clone());
+            }
+        }
+    }
+    retired.extend(
+        old.into_iter()
+            .enumerate()
+            .filter(|(i, cue)| !used.contains(i) && cue_extras(cue))
+            .map(|(_, cue)| cue),
+    );
+    if !retired.is_empty() {
+        let mut archive = match next.get("nativeCaptionArchive") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items.clone(),
+            Some(_) => {
+                return Err(CommandError::Invalid(
+                    "A newer caption archive must be preserved before this edit".into(),
+                ));
+            }
+        };
+        for cue in retired {
+            if !archive.iter().any(|old| old.identical(&cue)) {
+                archive.push(cue);
+            }
+        }
+        next.insert("nativeCaptionArchive", Value::Array(archive));
+    }
+    Ok(())
+}
+fn retain_cue_input(layer: &mut Value, input: &Value) {
+    let Some(input) = input.as_array() else {
+        return;
+    };
+    let d = values::obj(layer).get_mut("d").expect("caption content");
+    let d = values::obj(d);
+    let mut pool = input.clone();
+    pool.extend(
+        d.get("cues")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    d.insert("cues", Value::Array(pool));
+}
 fn cue_id() -> String {
     super::new_id("cue")
 }
@@ -154,7 +362,7 @@ fn height(cx: &Cx<'_>, comp: Option<&str>) -> f64 {
         .unwrap_or(1080.)
 }
 fn shifted(raw: &Value, shift: f64) -> Result<Json, CommandError> {
-    let mut raw = json(raw)?;
+    let mut raw = json(&cue_inputs(raw))?;
     for cue in raw.as_array_mut().into_iter().flatten() {
         for key in ["start", "end"] {
             if let Some(value) = cue.get_mut(key) {
@@ -218,7 +426,14 @@ fn content(layer: &Value) -> Result<pm_captions::CaptionsContent, CommandError> 
     let mut known = Map::new();
     for key in ["cues", "style", "language"] {
         if let Some(value) = d.and_then(|d| d.get(key)) {
-            known.insert(key, value.clone());
+            known.insert(
+                key,
+                match key {
+                    "cues" => cue_inputs(value),
+                    "style" => style_input(value),
+                    _ => value.clone(),
+                },
+            );
         }
     }
     Ok(pm_captions::normalize_captions_content(
@@ -235,7 +450,8 @@ fn write_content(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let normalized = model(content)?;
+    let mut normalized = model(content)?;
+    preserve_content_extras(&mut next, &mut normalized)?;
     for key in ["cues", "style", "language"] {
         if let Some(value) = normalized.get(key) {
             next.insert(key, value.clone());
@@ -316,7 +532,12 @@ fn add(cx: &mut Cx<'_>, c: &AddCaptions) -> Result<(), CommandError> {
         .and_then(crate::model::number_of)
         .unwrap_or(1920.);
     let dur = cx.duration(comp);
-    let style = c.style.as_ref().map(json).transpose()?.unwrap_or(json!({}));
+    let style = c
+        .style
+        .as_ref()
+        .map(|raw| json(&style_input(raw)))
+        .transpose()?
+        .unwrap_or(json!({}));
     let preset = style["preset"].as_str().unwrap_or("classic");
     let mut content = pm_captions::normalize_captions_content(
         &json!({"cues":source(&c.source, from)?,"style":pm_captions::patch_style(&pm_captions::preset_style(preset,h),&style,h),"language":c.language}),
@@ -327,6 +548,13 @@ fn add(cx: &mut Cx<'_>, c: &AddCaptions) -> Result<(), CommandError> {
         c.name.as_deref().filter(|name| !name.is_empty()),
         (w, h, dur),
     )?;
+    if let CueSource::Cues(raw) = &c.source {
+        retain_cue_input(&mut layer, raw);
+    }
+    if let Some(style) = &c.style {
+        let d = values::obj(&mut layer).get_mut("d").unwrap();
+        values::obj(d).insert("style", style.clone());
+    }
     values::obj(&mut layer).insert("from", Value::Number(from));
     let duration = match c.duration {
         Some(v) => values::finite(v, "Caption duration")?.max(1. / cx.fps(comp)),
@@ -430,7 +658,16 @@ fn edit_layer(cx: &mut Cx<'_>, id: &str, edit: &CaptionEdit) -> Result<(), Comma
             replace = *replacing;
         }
         CaptionEdit::Style { style, language } => {
-            let patch = json(style)?;
+            let patch = json(&style_input(style))?;
+            let d = values::obj(&mut layer).get_mut("d").unwrap();
+            let d = values::obj(d);
+            let mut raw = d.get("style").cloned().unwrap_or_default();
+            if let Some(style) = style.as_object() {
+                for (key, value) in style.iter() {
+                    values::obj(&mut raw).insert(key.clone(), value.clone());
+                }
+            }
+            d.insert("style", raw);
             let old = content.style.placement.clone();
             content.style = pm_captions::patch_style(
                 &content.style,
@@ -445,6 +682,34 @@ fn edit_layer(cx: &mut Cx<'_>, id: &str, edit: &CaptionEdit) -> Result<(), Comma
                 stack_placement(cx, loc.comp_id.as_deref(), &layer, &mut content);
             }
         }
+    }
+    match edit {
+        CaptionEdit::Replace(CueSource::Cues(raw))
+        | CaptionEdit::Import {
+            source: CueSource::Cues(raw),
+            ..
+        }
+        | CaptionEdit::Insert(raw) => retain_cue_input(&mut layer, raw),
+        CaptionEdit::Update(raw) => {
+            if let Some(patches) = raw.as_array() {
+                let d = values::obj(&mut layer).get_mut("d").unwrap();
+                if let Some(cues) = values::obj(d).get_mut("cues").and_then(Value::as_array_mut) {
+                    for patch in patches {
+                        if let Some(cue) =
+                            cues.iter_mut().find(|cue| cue.get("id") == patch.get("id"))
+                        {
+                            preserve_extras(cue, patch, |key| {
+                                key.as_str().is_some_and(|key| CUE_FIELDS.contains(&key))
+                            });
+                            if let Some(words) = patch.get("words") {
+                                values::obj(cue).insert("words", words.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     let end = content
         .cues
@@ -506,7 +771,11 @@ pub(super) fn set_content(layer: &mut Value, patch: &Map) -> Result<(), CommandE
 pub(super) fn initial_content(raw: &Map, height: f64) -> Result<Value, CommandError> {
     let mut layer = Value::Object(Map::new());
     values::obj(&mut layer).insert("d", Value::Object(raw.clone()));
-    let style = raw.get("style").map(json).transpose()?.unwrap_or(json!({}));
+    let style = raw
+        .get("style")
+        .map(|raw| json(&style_input(raw)))
+        .transpose()?
+        .unwrap_or(json!({}));
     let preset = style
         .get("preset")
         .and_then(Json::as_str)
@@ -519,7 +788,7 @@ pub(super) fn initial_content(raw: &Map, height: f64) -> Result<Value, CommandEr
         }
     }
     let normalized = pm_captions::normalize_captions_content(
-        &json!({"cues":raw.get("cues").map(json).transpose()?.unwrap_or(json!([])),"style":merged,"language":raw.get("language").map(json).transpose()?.unwrap_or(Json::Null)}),
+        &json!({"cues":raw.get("cues").map(|raw|json(&cue_inputs(raw))).transpose()?.unwrap_or(json!([])),"style":merged,"language":raw.get("language").map(json).transpose()?.unwrap_or(Json::Null)}),
         &mut cue_id,
     );
     write_content(&mut layer, &normalized)?;

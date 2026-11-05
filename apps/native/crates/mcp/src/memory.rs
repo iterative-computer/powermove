@@ -261,18 +261,56 @@ fn missing(args: &Value) -> Error {
 /// Generated agent inputs obey the same disabled-note policy as tool reads.
 /// This never mutates the kernel document, PMV, or an authored source file.
 pub fn agent_snapshot(project: &Value) -> Value {
-    fn redact(comp: &mut Value, hidden: bool) {
-        let hidden = hidden || comp["memoryEnabled"] == false;
-        if hidden && let Some(object) = comp.as_object_mut() {
+    crate::json_value(&agent_snapshot_model(&crate::model(project)))
+}
+
+/// Redact before a Unicode JSON projection. Authored UTF-16 is retained in
+/// generated JSON files, while disabled and retired notes stay in the project.
+pub fn agent_snapshot_model(project: &pm_model::Value) -> pm_model::Value {
+    fn redact(comp: &mut pm_model::Value, hidden: bool) {
+        let hidden = hidden || comp.get("memoryEnabled") == Some(&pm_model::Value::Bool(false));
+        let Some(object) = comp.as_object_mut() else {
+            return;
+        };
+        object.remove("nativeMemoryArchive");
+        object.remove("nativeMediaVersions");
+        if hidden {
             object.remove("memory");
         }
-        if let Some(comps) = comp.get_mut("comps").and_then(Value::as_object_mut) {
-            for child in comps.values_mut() {
+        if let Some(comps) = object
+            .get_mut("comps")
+            .and_then(pm_model::Value::as_object_mut)
+        {
+            for (_, child) in comps.iter_mut() {
                 redact(child, hidden);
             }
         }
     }
+    fn strip_retired_captions(value: &mut pm_model::Value) {
+        if value.get("type").and_then(pm_model::Value::as_str) == Some("captions")
+            && let Some(d) = value
+                .as_object_mut()
+                .and_then(|m| m.get_mut("d"))
+                .and_then(pm_model::Value::as_object_mut)
+        {
+            d.remove("nativeCaptionArchive");
+        }
+        match value {
+            pm_model::Value::Object(m) => {
+                for (_, child) in m.iter_mut() {
+                    strip_retired_captions(child);
+                }
+            }
+            pm_model::Value::Array(items) => {
+                for child in items {
+                    strip_retired_captions(child);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut snapshot = project.clone();
     redact(&mut snapshot, false);
+    strip_retired_captions(&mut snapshot);
     snapshot
 }

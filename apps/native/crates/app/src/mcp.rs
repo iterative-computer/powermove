@@ -355,9 +355,19 @@ impl Connection {
             std::fs::write(
                 root.join("inputs/powermove-project.json"),
                 p.as_ref()
-                    .map(|p| document(p))
-                    .unwrap_or(json!({}))
-                    .to_string(),
+                    .map(|p| {
+                        let mut value = pm_model::canonical::realize_project(
+                            p.snapshot.document.to_value().unwrap(),
+                        );
+                        value
+                            .as_object_mut()
+                            .unwrap()
+                            .insert("revision", pm_model::Value::Number(p.revision() as f64));
+                        pm_model::json::to_canonical_string(&pm_mcp::memory::agent_snapshot_model(
+                            &value,
+                        ))
+                    })
+                    .unwrap_or_else(|| "{}".into()),
             )?;
             std::fs::write(
                 root.join("api/mcp-tools.json"),
@@ -460,7 +470,45 @@ impl Connection {
         }
         result
     }
+    fn project_memory(&mut self, a: &Value) -> Result<pm_model::Value> {
+        catalog::validate("project_memory", a)?;
+        let _operation = self.host.try_operation().ok_or_else(|| {
+            Error::conflict("A project operation is in progress. Inspect and retry.")
+        })?;
+        if self.host.closing.load(Ordering::Acquire) {
+            return Err(Error::conflict(
+                "The app is closing. Finish or cancel the close first.",
+            ));
+        }
+        let run = self
+            .run
+            .as_ref()
+            .ok_or_else(|| Error::invalid("Start an MCP session first."))?;
+        if run.editor && !catalog::permits("inspection", "project_memory") {
+            return Err(Error::invalid("Editor access is inspection-only."));
+        }
+        if run.session.is_none() {
+            return Err(Error::invalid("This tool requires an attached project."));
+        }
+        let p = self.published()?;
+        match pm_mcp::memory_admission::prepare(
+            p.snapshot
+                .root()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+            a,
+        )? {
+            pm_mcp::memory_admission::Prepared::Read(value) => Ok(value),
+            pm_mcp::memory_admission::Prepared::Write(call) => {
+                pm_mcp::memory_admission::result(self.call(&p.project, call)?)
+            }
+        }
+    }
     pub fn dispatch(&mut self, name: &str, a: &Value) -> Result<Value> {
+        if name == "project_memory" {
+            return self
+                .project_memory(a)
+                .and_then(pm_mcp::memory_admission::unicode);
+        }
         catalog::validate(name, a)?;
         // UI open/close and MCP requests fence session identity without blocking
         // the main thread. Ordinary UI edits/gestures never acquire this fence.
@@ -836,6 +884,12 @@ impl ToolConnection for Connection {
         Ok(json!(catalog::tools()))
     }
     fn invoke(&mut self, name: &str, a: Value) -> Result<Value> {
+        if name == "project_memory" {
+            return Ok(match self.project_memory(&a) {
+                Ok(value) => pm_mcp::success_model(&value),
+                Err(error) => pm_mcp::failure(error),
+            });
+        }
         Ok(match self.dispatch(name, &a) {
             Ok(v) => pm_mcp::success(v),
             Err(e) => pm_mcp::failure(e),

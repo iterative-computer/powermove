@@ -325,3 +325,121 @@ fn generic_caption_layer_uses_visible_base_transform_and_height_scaled_content()
     );
     assert!(data(&l).get("future").is_some());
 }
+
+#[test]
+fn nested_future_caption_fields_survive_timing_style_word_retirement_and_undo() {
+    let mut base = store();
+    base.execute(add("caption"), Origin::Interface).unwrap();
+    let mut l = layer(&base);
+    let d = l
+        .as_object_mut()
+        .unwrap()
+        .get_mut("d")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    d.get_mut("style")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("future", parse(r#"{"\ud800":"\udfff"}"#).unwrap());
+    let cue = &mut d.get_mut("cues").unwrap().as_array_mut().unwrap()[0];
+    let cue = cue.as_object_mut().unwrap();
+    cue.insert("future", parse(r#""\ud800""#).unwrap());
+    cue.insert(
+        "words",
+        parse(r#"[{"text":"First","start":1,"end":2,"future":{"raw":"\udfff"}}]"#).unwrap(),
+    );
+    let mut project = store().snapshot().document.to_value().unwrap();
+    project
+        .as_object_mut()
+        .unwrap()
+        .insert("layers", Value::Array(vec![l]));
+    let mut s = DocumentStore::new_untitled(project);
+    let before = layer(&s);
+    edit(
+        &mut s,
+        CaptionEdit::Style {
+            style: parse(r#"{"size":64}"#).unwrap(),
+            language: None,
+        },
+    );
+    assert_eq!(
+        data(&layer(&s)).get("style").unwrap().get("future"),
+        data(&before).get("style").unwrap().get("future")
+    );
+    edit(
+        &mut s,
+        CaptionEdit::Move {
+            ids: vec!["a".into()],
+            by: 0.2,
+        },
+    );
+    let moved = layer(&s);
+    assert_eq!(
+        cues(&moved)[0].get("future"),
+        cues(&before)[0].get("future")
+    );
+    assert_eq!(
+        cues(&moved)[0].get("words").unwrap().as_array().unwrap()[0].get("future"),
+        cues(&before)[0].get("words").unwrap().as_array().unwrap()[0].get("future")
+    );
+    edit(
+        &mut s,
+        CaptionEdit::Update(parse(r#"[{"id":"a","text":"Edited"}]"#).unwrap()),
+    );
+    let edited = layer(&s);
+    assert!(cues(&edited)[0].get("words").is_none());
+    let archive = data(&edited)
+        .get("nativeCaptionArchive")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(archive.iter().any(
+        |cue| cue.get("id").and_then(Value::as_str) == Some("a") && cue.get("words").is_some()
+    ));
+    assert!(pm_model::json::to_canonical_string(&edited).contains("\\udfff"));
+    s.undo().unwrap();
+    assert_eq!(layer(&s), moved);
+    s.redo().unwrap();
+    assert_eq!(layer(&s), edited);
+}
+
+#[test]
+fn new_caption_input_keeps_future_cue_word_and_style_members_without_json_projection_loss() {
+    let mut s = store();
+    let source=parse(r#"[{"id":"new-cue","start":0,"end":1,"text":"Synthetic","future":"\ud800","words":[{"text":"Synthetic","start":0,"end":1,"future":"\udfff"}]}]"#).unwrap();
+    s.execute(
+        CaptionCommand::Add(Box::new(AddCaptions {
+            id: "caption".into(),
+            name: None,
+            source: CueSource::Cues(source.clone()),
+            style: Some(parse(r#"{"future":"\ud800"}"#).unwrap()),
+            language: None,
+            from: None,
+            duration: None,
+            index: None,
+            comp: None,
+        }))
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let after = layer(&s);
+    assert_eq!(
+        cues(&after)[0].get("future"),
+        source.as_array().unwrap()[0].get("future")
+    );
+    assert_eq!(
+        cues(&after)[0].get("words").unwrap().as_array().unwrap()[0].get("future"),
+        parse(r#""\udfff""#).ok().as_ref()
+    );
+    assert_eq!(
+        data(&after).get("style").unwrap().get("future"),
+        parse(r#""\ud800""#).ok().as_ref()
+    );
+    s.undo().unwrap();
+    assert!(s.layers().is_empty());
+    s.redo().unwrap();
+    assert_eq!(layer(&s), after);
+}

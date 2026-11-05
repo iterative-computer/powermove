@@ -151,9 +151,7 @@ fn set_content(
         properties::resize_video_for_speed(&mut layer, speed_before, fps);
     }
     if layer_type == "shader" && patch.contains_key("code") {
-        return Err(CommandError::NotImplemented(
-            "set_content (shader code: uniforms are synced by the shader host)",
-        ));
+        super::shader::sync(&mut layer);
     }
     cx.put_layer(&loc, layer)
 }
@@ -306,40 +304,11 @@ fn extension_content(
                 });
             let value = match parameter {
                 None => value.clone(),
-                Some(parameter) => {
-                    let label = values::text(parameter, "label")
-                        .unwrap_or_else(|| key.as_str().unwrap_or("Parameter"));
-                    match values::text(parameter, "type") {
-                        Some("color") => {
-                            let text = value
-                                .as_str()
-                                .filter(|s| {
-                                    (s.len() == 7 || s.len() == 9)
-                                        && s.starts_with('#')
-                                        && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
-                                })
-                                .ok_or_else(|| {
-                                    CommandError::Invalid(format!("{label} must be a hex color"))
-                                })?;
-                            Value::from(text.to_ascii_uppercase())
-                        }
-                        Some("toggle") => Value::Bool(value.as_bool().ok_or_else(|| {
-                            CommandError::Invalid(format!("{label} must be on or off"))
-                        })?),
-                        _ => {
-                            let n = values::finite(track::js_number(value), label)?;
-                            let min = parameter
-                                .get("min")
-                                .and_then(Value::as_f64)
-                                .unwrap_or(f64::NEG_INFINITY);
-                            let max = parameter
-                                .get("max")
-                                .and_then(Value::as_f64)
-                                .unwrap_or(f64::INFINITY);
-                            Value::Number(n.max(min).min(max))
-                        }
-                    }
-                }
+                Some(parameter) => extension_parameter(
+                    parameter,
+                    Some(value),
+                    key.as_str().unwrap_or("Parameter"),
+                )?,
             };
             channel.insert("v", value);
         }
@@ -347,4 +316,147 @@ fn extension_content(
     }
     values::obj(layer).insert("d", Value::Object(d));
     Ok(())
+}
+
+fn extension_parameter(
+    parameter: &Value,
+    value: Option<&Value>,
+    key: &str,
+) -> Result<Value, CommandError> {
+    let label = values::text(parameter, "label").unwrap_or(key);
+    match values::text(parameter, "type") {
+        Some("color") => {
+            let text = value
+                .and_then(Value::as_str)
+                .filter(|s| {
+                    (s.len() == 7 || s.len() == 9)
+                        && s.starts_with('#')
+                        && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| CommandError::Invalid(format!("{label} must be a hex color")))?;
+            Ok(Value::from(text.to_ascii_uppercase()))
+        }
+        Some("toggle") => Ok(Value::Bool(value.and_then(Value::as_bool).ok_or_else(
+            || CommandError::Invalid(format!("{label} must be on or off")),
+        )?)),
+        _ => {
+            let n = values::finite(value.map(track::js_number).unwrap_or(f64::NAN), label)?;
+            let min = parameter
+                .get("min")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::NEG_INFINITY);
+            let max = parameter
+                .get("max")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::INFINITY);
+            Ok(Value::Number(n.max(min).min(max)))
+        }
+    }
+}
+
+pub(crate) fn extension_initial(
+    id: &str,
+    content: &Map,
+    definition: &Value,
+    comp: (f64, f64, f64),
+) -> Result<Value, CommandError> {
+    let supplied = content
+        .get("parameters")
+        .filter(|v| v.is_truthy())
+        .or_else(|| content.get("params").filter(|v| v.is_truthy()));
+    let empty = Map::new();
+    let supplied = match supplied {
+        Some(v) => v.as_object().ok_or_else(|| {
+            CommandError::Invalid("extension parameters must be an object".into())
+        })?,
+        None => &empty,
+    };
+    layers::safe_patch(supplied, "extension parameters")?;
+    let mut parameters = Map::new();
+    for parameter in definition
+        .get("params")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let key = values::text(parameter, "k").ok_or_else(|| {
+            CommandError::Invalid("Invalid extension parameter definition".into())
+        })?;
+        let input = supplied.get(key).or_else(|| parameter.get("def"));
+        let mut channel = if input
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.contains_key("v"))
+        {
+            input.unwrap().clone()
+        } else {
+            values::property(extension_parameter(parameter, input, key)?)
+        };
+        let mut value = channel.get("v").cloned();
+        let validated = extension_parameter(parameter, value.as_ref(), key)?;
+        let keys = channel
+            .get("kf")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut item| {
+                value = item.get("v").cloned();
+                let validated = extension_parameter(parameter, value.as_ref(), key)?;
+                let m = values::obj(&mut item);
+                m.insert("i", Value::from(super::new_id("k")));
+                m.insert("v", validated);
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, CommandError>>()?;
+        let expression = channel
+            .get("expr")
+            .filter(|v| v.as_js_string().is_some())
+            .cloned()
+            .unwrap_or_default();
+        let m = values::obj(&mut channel);
+        m.insert("v", validated);
+        m.insert("kf", Value::Array(keys));
+        m.insert("expr", expression);
+        parameters.insert(key, channel);
+    }
+    let data = content.get("data").filter(|v| v.is_truthy());
+    let data = match data {
+        Some(v) => v
+            .as_object()
+            .ok_or_else(|| CommandError::Invalid("extension data must be an object".into()))?,
+        None => &empty,
+    };
+    layers::safe_patch(data, "extension data")?;
+    let mut merged = definition
+        .get("defaults")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in data.iter() {
+        merged.insert(key.clone(), value.clone());
+    }
+    let mut d = Map::new();
+    d.insert("definition", Value::from(id));
+    d.insert(
+        "version",
+        definition
+            .get("version")
+            .cloned()
+            .unwrap_or(Value::Number(1.)),
+    );
+    for (key, defkey, fallback, label) in [
+        ("w", "width", comp.0, "width"),
+        ("h", "height", comp.1, "height"),
+    ] {
+        let raw = content
+            .get(key)
+            .filter(|v| !matches!(v, Value::Null))
+            .or_else(|| definition.get(defkey).filter(|v| !matches!(v, Value::Null)));
+        let n =
+            values::finite(raw.map(track::js_number).unwrap_or(fallback), label)?.clamp(1., 16384.);
+        d.insert(key, Value::Number(n));
+    }
+    d.insert("params", Value::Object(parameters));
+    d.insert("data", Value::Object(merged));
+    Ok(Value::Object(d))
 }

@@ -633,9 +633,13 @@ export function SecureField(props: SecureProps) {
   );
 }
 export function FormGroup(
-  props: Omit<Common, "label" | "title"> & { title?: string; label?: string },
+  props: Omit<Common, "label" | "title"> & {
+    title?: string;
+    label?: string;
+    muted?: boolean;
+  },
 ) {
-  const { title, children, ...rest } = props;
+  const { title, children, muted, ...rest } = props;
   return h("div", { role: "group", label: props.label ?? title }, [
     title
       ? h(
@@ -643,7 +647,7 @@ export function FormGroup(
           {
             role: "heading",
             style: {
-              color: token("colors.text"),
+              color: token(muted ? "colors.muted" : "colors.text"),
               fontSize: token("typography.title"),
               fontWeight: token("typography.semibold_weight"),
               marginBottom: token("metrics.gap"),

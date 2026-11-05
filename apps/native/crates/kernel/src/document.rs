@@ -23,7 +23,7 @@ use std::sync::{Arc, Weak};
 
 use pm_model::ops::diff_node_ops;
 use pm_model::patch::{Patch, PathPart};
-use pm_model::{Document, Node, NodeKind, Op, Value};
+use pm_model::{Document, Map, Node, NodeKind, Op, Value};
 
 use crate::commands::{Command, Origin};
 use crate::error::{ProjectIoError, TransactionError};
@@ -126,6 +126,10 @@ pub enum StoreEvent {
     /// A new revision is published (the query mirror already follows it).
     Changed(Arc<Change>),
     SelectionChanged,
+    /// Same composition revision, a new immutable notes publication.
+    MetadataChanged {
+        sequence: u64,
+    },
     /// The undo stack changed (labels, can-undo, can-redo).
     HistoryChanged,
     /// The unsaved-changes state flipped.
@@ -210,6 +214,9 @@ pub(crate) enum Tap {
         record: crate::history::HistoryRecord,
     },
     Clear,
+    Metadata {
+        ops: Arc<[Op]>,
+    },
 }
 
 /// Most changes kept for [`DocumentStore::changes_since`].
@@ -232,6 +239,9 @@ pub struct DocumentStore {
     gesture: Option<Gesture>,
     state_token: u64,
     saved_token: u64,
+    metadata_token: u64,
+    saved_metadata_token: u64,
+    save_metadata_token: u64,
     log: VecDeque<Arc<Change>>,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
@@ -280,7 +290,7 @@ impl DocumentStore {
     }
 
     fn from_parts(
-        file: ProjectFile,
+        mut file: ProjectFile,
         document: Document,
         history: History,
         history_owned: bool,
@@ -298,6 +308,9 @@ impl DocumentStore {
             Value::String(v) => v.as_str().map(str::to_owned),
             _ => None,
         }));
+        if let Some(root) = document.root() {
+            crate::media_versions::hydrate_embedded(root, &mut file.media);
+        }
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
@@ -312,6 +325,9 @@ impl DocumentStore {
             gesture: None,
             state_token: token,
             saved_token: token,
+            metadata_token: 0,
+            saved_metadata_token: 0,
+            save_metadata_token: 0,
             log: VecDeque::new(),
             listeners: Vec::new(),
             next_listener: 1,
@@ -623,7 +639,10 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        let canonical = model::to_canonical(project);
+        let mut canonical = model::to_canonical(project);
+        if let Some(current) = self.root() {
+            crate::memory_metadata::preserve_value(&mut canonical, current);
+        }
         project_io::validate_stored_project(&pm_model::canonical::realize_project(
             canonical.clone(),
         ))
@@ -1076,6 +1095,36 @@ impl DocumentStore {
         ops: &[Op],
         capture: bool,
     ) -> Result<Staged, TransactionError> {
+        let admitted = if capture
+            && ops.iter().any(|op| {
+                op.path().is_empty()
+                    || op.path().first().is_some_and(|part| {
+                        crate::memory_metadata::ALL_FIELDS
+                            .contains(&part.property_key().as_str().unwrap_or(""))
+                    })
+            }) {
+            let mut admitted = ops.to_vec();
+            for op in &mut admitted {
+                if op.path().first().is_some_and(|part| {
+                    crate::memory_metadata::ALL_FIELDS
+                        .contains(&part.property_key().as_str().unwrap_or(""))
+                }) {
+                    return Err(TransactionError::Invalid(
+                        "Project notes require metadata admission".into(),
+                    ));
+                }
+                if let Op::Leaf(patch) = op
+                    && patch.path.is_empty()
+                    && let (Some(value), Some(current)) = (&mut patch.value, self.root())
+                {
+                    crate::memory_metadata::preserve_value(value, current);
+                }
+            }
+            Some(admitted)
+        } else {
+            None
+        };
+        let ops = admitted.as_deref().unwrap_or(ops);
         let revision = self.revision() + 1;
         let mut root = root;
         let mut inverse = Vec::new();
@@ -1111,7 +1160,21 @@ impl DocumentStore {
         })
     }
 
-    fn publish(&mut self, mut document: Document, ops: Arc<[Op]>, cause: ChangeCause) {
+    fn publish(&mut self, mut document: Document, mut ops: Arc<[Op]>, cause: ChangeCause) {
+        if matches!(
+            cause,
+            ChangeCause::Undo { .. }
+                | ChangeCause::Redo { .. }
+                | ChangeCause::Revert { .. }
+                | ChangeCause::GestureCancel { .. }
+                | ChangeCause::GestureStep { .. }
+        ) && let Some(current) = self.root()
+            && let Some(preserved) = crate::memory_metadata::preserve(&document, current)
+                .expect("valid metadata patches")
+        {
+            document = preserved;
+            ops = diff_node_ops(self.root(), document.root()).into();
+        }
         let base_revision = self.revision();
         document.set_saving_app_version(self.current.saving_app_version().map(str::to_owned));
         let document = Arc::new(document);
@@ -1120,6 +1183,9 @@ impl DocumentStore {
         // The mirror follows before anyone hears about the revision.
         self.queries.apply(&ops, base_revision, revision, &document);
         self.current = document;
+        if let Some(root) = self.current.root() {
+            crate::media_versions::retarget(root, &mut self.file.media);
+        }
         let change = Arc::new(Change {
             doc_id: self.doc_id,
             base_revision,
@@ -1170,6 +1236,7 @@ impl DocumentStore {
         }
         let plan = self.freeze_save(target, options)?;
         self.save_ticket = Arc::downgrade(&plan.ticket);
+        self.save_metadata_token = self.metadata_token;
         Ok(plan)
     }
 
@@ -1224,6 +1291,11 @@ impl DocumentStore {
             .media
             .iter()
             .filter(|m| {
+                if self.root().is_some_and(|root| {
+                    crate::media_versions::redundant_active_original(root, &self.file.media, m)
+                }) {
+                    return false;
+                }
                 // Omit linked bytes only when the saved document retains a
                 // reference to that source. An incomplete admission must never
                 // silently lose its sole remaining payload.
@@ -1340,8 +1412,12 @@ impl DocumentStore {
                 self.file.media.insert(entry.clone());
             }
         }
+        if let Some(root) = self.root().cloned() {
+            crate::media_versions::hydrate_embedded(&root, &mut self.file.media);
+        }
         let was = self.is_dirty();
         self.saved_token = receipt.state_token;
+        self.saved_metadata_token = self.save_metadata_token;
         let revision = receipt.revision;
         drop(receipt);
         self.emit(StoreEvent::Saved { revision });
@@ -1458,6 +1534,96 @@ impl From<Vec<Command>> for WriteBody {
 /// stand-alone [`DocumentStore::execute`]/gesture API above stays for
 /// single-owner callers and tests.
 impl DocumentStore {
+    /// Recovery/save work independent of the composition Edited indicator.
+    pub fn has_pending_metadata(&self) -> bool {
+        self.metadata_token != self.saved_metadata_token
+    }
+
+    pub fn metadata_revision(&self) -> u64 {
+        self.metadata_token
+    }
+
+    pub(crate) fn publish_memory(&mut self, next: Value) -> Result<(), TransactionError> {
+        self.publish_metadata(next, crate::memory_metadata::FIELDS)
+    }
+    fn publish_metadata(&mut self, next: Value, fields: &[&str]) -> Result<(), TransactionError> {
+        let root = self.root().ok_or(TransactionError::NoDocument)?;
+        let ops = crate::memory_metadata::patches_for(root, &next, fields);
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let document = crate::memory_metadata::apply(&self.current, &ops)
+            .map_err(TransactionError::Invalid)?;
+        self.current = Arc::new(document);
+        self.queries = QueryContext::new(&self.current);
+        self.metadata_token = next_token();
+        if let Some(tap) = &mut self.tap {
+            tap.push(Tap::Metadata { ops: ops.into() });
+        }
+        self.emit(StoreEvent::MetadataChanged {
+            sequence: self.metadata_token,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn hydrate_originals(&mut self, archive: &crate::media_archive::Archive) {
+        if let Some(root) = self.root().cloned() {
+            crate::media_versions::hydrate_archive(&root, &mut self.file.media, archive);
+        }
+    }
+
+    pub(crate) fn admit_media(
+        &mut self,
+        admission: crate::MediaAdmission,
+        origin: Origin,
+    ) -> Result<Option<Committed>, TransactionError> {
+        if self.gesture.is_some() {
+            return Err(TransactionError::GestureInProgress);
+        }
+        if self.revision() != admission.expected_revision {
+            return Err(TransactionError::Stale {
+                expected: admission.expected_revision,
+                current: self.revision(),
+            });
+        }
+        let mut canonical = model::to_canonical(admission.project);
+        let root = self.root().ok_or(TransactionError::NoDocument)?;
+        crate::memory_metadata::preserve_value(&mut canonical, root);
+        project_io::validate_stored_project(&pm_model::canonical::realize_project(
+            canonical.clone(),
+        ))
+        .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+        let after = Node::from_value(canonical, self.revision() + 1);
+        let plan = crate::media_versions::plan(root, &after, &self.file.media, &admission.bindings)
+            .map_err(TransactionError::Invalid)?;
+        let ops = diff_node_ops(self.current.root(), Some(&after));
+        let mut staged = self.stage_ops(&ops, true)?;
+        if !staged.changed {
+            return Ok(None);
+        }
+        // Validate everything before publishing ownership. The metadata tap is
+        // first: a torn journal can leave unused originals, never an asset
+        // admitted without the immutable ownership record for its bytes.
+        let mut fields = Map::new();
+        fields.insert(crate::media_versions::FIELD, plan.manifest);
+        self.publish_metadata(Value::Object(fields), &[crate::media_versions::FIELD])?;
+        if let Some(document) =
+            crate::memory_metadata::preserve(&staged.document, self.root().unwrap())
+                .map_err(TransactionError::Invalid)?
+        {
+            staged.document = document;
+        }
+        staged.forward = diff_node_ops(self.current.root(), staged.document.root());
+        staged.media.extend(plan.entries);
+        let label = admission.label;
+        Ok(self.commit_staged(
+            staged,
+            label.clone(),
+            origin,
+            ChangeCause::Edit { label, origin },
+        ))
+    }
+
     /// Starts recording durable changes for the journal.
     pub(crate) fn enable_tap(&mut self) {
         self.tap.get_or_insert_with(Vec::new);
@@ -1505,6 +1671,13 @@ impl DocumentStore {
     /// External entries with a cleanup that retired.
     pub(crate) fn take_retired(&mut self) -> Vec<crate::history::ExternalRef> {
         self.history.take_retired()
+    }
+
+    pub(crate) fn kernel_state_token(&self) -> u64 {
+        self.state_token
+    }
+    pub(crate) fn kernel_restore_state_token(&mut self, token: u64) {
+        self.set_state_token(token);
     }
 
     /// The current document (shared, immutable).
@@ -1559,7 +1732,7 @@ impl DocumentStore {
         for op in prev_inverse {
             root = apply_one(root, op, revision)?.0;
         }
-        let staged = match body {
+        let mut staged = match body {
             WriteBody::Commands(commands) => {
                 self.stage_commands_on(root.as_ref(), commands, origin)?
             }
@@ -1567,6 +1740,13 @@ impl DocumentStore {
         };
         let mut ops = prev_inverse.to_vec();
         ops.extend(staged.forward.iter().cloned());
+        if let Some(current) = self.root()
+            && let Some(preserved) = crate::memory_metadata::preserve(&staged.document, current)
+                .map_err(TransactionError::Invalid)?
+        {
+            staged.document = preserved;
+            ops = diff_node_ops(self.root(), staged.document.root());
+        }
         validate(&staged.document, &ops)?;
         if ops.is_empty() {
             return Ok(None);
@@ -1762,6 +1942,7 @@ impl DocumentStore {
     }
     pub(crate) fn mark_library_saved(&mut self) {
         self.saved_token = self.state_token;
+        self.saved_metadata_token = self.metadata_token;
         self.emit(StoreEvent::Saved {
             revision: self.revision(),
         });
