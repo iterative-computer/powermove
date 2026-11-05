@@ -9,6 +9,11 @@ globalThis.__storeCheck = {
     const call = async (method, ...args) => {
       if (closed) throw Error("Store RPC is closed");
       const reply = runtime.engine("store.rpc", { method, args });
+      if (reply.callback) {
+        const {run, when, args} = reply.callback;
+        if (when != null && !(await rpc.invokeHandle(when))) return false;
+        return rpc.invokeHandle(run, ...args);
+      }
       return reply.value;
     };
     const rpc = {

@@ -11,9 +11,11 @@ mod kernel;
 mod recorder;
 mod store_kernel;
 mod store_runtime;
+mod store_dispatch;
+pub use store_dispatch::KernelStoreDispatch;
 mod transport;
 pub use recorder::NativeHost;
-pub use store_kernel::KernelStoreAdapter;
+pub use store_kernel::{KernelStoreAdapter, StoreArchive};
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
 
 pub struct CompatRunner {

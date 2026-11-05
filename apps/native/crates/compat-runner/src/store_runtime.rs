@@ -489,6 +489,7 @@ pub fn store_method_policy() -> pm_store_host::Result<MethodPolicy> {
         "storage.get",
         "storage.set",
         "storage.delete",
+        "commands.run",
         "panels.open",
         "panels.close",
         "panels.refresh",
@@ -725,6 +726,95 @@ mod tests {
             Err(Error::Quota("Store reports"))
         ));
         assert_eq!(host.private_reports().len(), 1);
+    }
+    #[test]
+    fn real_store_commands_publish_native_provider_stacks_and_invoke_the_confined_callback() {
+        let (kernel, original, _, init) = fixture();
+        let dispatch = Arc::new(
+            crate::KernelStoreDispatch::new(
+                pm_kernel::tx::Writer {
+                    realm: 71,
+                    generation: 1,
+                },
+                original.session.clone(),
+            )
+            .unwrap(),
+        );
+        let host = Arc::new(StoreRuntimeHost::new(
+            kernel.clone(),
+            "synthetic-project".into(),
+            original.session.clone(),
+            store_method_policy().unwrap(),
+            dispatch.clone(),
+        ));
+        let entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/store-bundle.ts");
+        let built = std::process::Command::new("bun")
+            .args([
+                "build",
+                entry.to_str().unwrap(),
+                "--target=browser",
+                "--format=iife",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let executable = std::env::var_os("PM_STORE_HELPER_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("pm-store-helper")
+            });
+        let runner = StoreCompatRunner::new(
+            &executable,
+            host.clone(),
+            std::str::from_utf8(&built.stdout).unwrap(),
+            &init,
+        )
+        .unwrap();
+        let result=runner.activate("var ExtCheckModule={async default(api){api.commands.register({id:'calculate',label:'Synthetic calculate',run:(n)=>n+7});globalThis.result=await api.commands.run('calculate',35);}}").unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(runner.json("result").unwrap(), 42);
+        assert!(
+            kernel
+                .lock()
+                .unwrap()
+                .state()
+                .provider("commands", "synthetic-store.calculate")
+                .is_some()
+        );
+        assert!(
+            runner
+                .eval("__storeCheck.api.commands.run('another-owner.command')")
+                .is_err()
+        );
+        assert!(runner.eval("runtime.engine('store.rpc',{method:'register',args:['commands','bad',{id:'bad',label:'Bad',run:1,priority:0}]})").is_err());
+        assert!(
+            kernel
+                .lock()
+                .unwrap()
+                .state()
+                .provider("commands", "synthetic-store.bad")
+                .is_none()
+        );
+        runner.dispose().unwrap();
+        assert!(
+            kernel
+                .lock()
+                .unwrap()
+                .state()
+                .provider("commands", "synthetic-store.calculate")
+                .is_none()
+        );
+        assert!(dispatch.failures().is_empty());
     }
     #[test]
     fn frozen_store_facade_runs_in_confined_helper_and_private_storage_survives_helper_replacement()
