@@ -141,19 +141,42 @@ export interface Option {
   v: Json;
   label: string;
   disabled?: boolean;
+  separator?: boolean;
+  keyEquivalent?: string;
+  detail?: string;
 }
 export function PopUpButton(
   props: Omit<Bound<Json>, "options"> & {
     label?: string;
-    options: (string | Option)[];
+    options: (string | Option | { separator: true })[];
+    widthSample?: string;
   },
 ) {
   // Inside an InspectorRow a pop-up is a `field`-high value well; standalone
   // it is a `control`-high button (language.md §9).
   const inRow = useContext(Label) !== undefined;
+  const { widthSample, options, ...rest } = props;
   return field("pop-up-button", "select", "button", {
-    ...props,
-    options: json(props.options) as Json[],
+    ...rest,
+    // Keep the frozen primitive option shape. Native NSMenu presentation lives
+    // in additive metadata; values including null/false remain exact.
+    options: json(
+      options.flatMap<Json>((o) => {
+        if (typeof o === "string") return [o];
+        if (o.separator || !("v" in o)) return [];
+        return [
+          {
+            v: o.v,
+            label: o.label,
+            ...(o.disabled === undefined ? {} : { disabled: o.disabled }),
+          },
+        ];
+      }),
+    ) as Json[],
+    metadata: kitMetadata(props, {
+      menu: json(options),
+      ...(widthSample === undefined ? {} : { widthSample }),
+    }),
     style: {
       height: token(inRow ? "metrics.field" : "metrics.control"),
       ...props.style,
@@ -187,13 +210,15 @@ export function Toggle(props: Bound<boolean>) {
     { ...text, ...target },
   );
 }
-export function ColourWell(props: Bound<string>) {
+export function ColourWell(props: Bound<string> & { minimal?: boolean }) {
+  const { minimal, ...rest } = props;
   return field(
     "colour-well",
     "color",
     "button",
     {
-      ...props,
+      ...rest,
+      metadata: kitMetadata(props, { minimal: !!minimal }),
       "aria-haspopup": "dialog",
     },
     {
@@ -484,9 +509,13 @@ export function ProgressRow(props: Common & { value?: number }) {
   );
 }
 export function EmptyState(
-  props: Common & { explanation: string; action: ComponentChildren },
+  props: Common & {
+    explanation: string;
+    action?: ComponentChildren;
+    symbol?: string;
+  },
 ) {
-  const { explanation, action, ...rest } = props;
+  const { explanation, action, symbol, ...rest } = props;
   return kit(
     "empty-state",
     "div",
@@ -494,6 +523,12 @@ export function EmptyState(
       ...rest,
       role: "group",
       children: [
+        symbol
+          ? h("div", {
+              "data-pm-slot": "symbol",
+              metadata: { pmKit: { symbol, decorative: true } },
+            })
+          : null,
         h(
           "text",
           {
@@ -542,3 +577,256 @@ export {
 // specified in panels/inspector.md §7 (host-provided popover); Toggle and Checkbox
 // sit at the leading edge of the value column; tree indentation follows the
 // system outline default until pm-design adds metrics.tree_indent (follow-up F2).
+
+/** Additive metadata uses the frozen six-op contract; primitive schemas stay unchanged. */
+function kitMetadata(
+  props: { metadata?: Record<string, Json> },
+  value: Record<string, Json>,
+): Record<string, Json> {
+  const previous = props.metadata?.pmKit;
+  return {
+    ...props.metadata,
+    pmKit: {
+      ...(previous && typeof previous === "object" && !Array.isArray(previous)
+        ? previous
+        : {}),
+      ...value,
+    },
+  };
+}
+/** The shell verifies this declaration against its actual Settings window. */
+export function SettingsRoot(props: Common) {
+  return h("div", {
+    ...props,
+    role: "group",
+    metadata: { ...props.metadata, hostWindow: "settings" },
+  });
+}
+export function Switch(props: Bound<boolean>) {
+  return field(
+    "switch",
+    "toggle",
+    "button",
+    {
+      ...props,
+      role: "switch",
+      "aria-checked": props.value,
+    },
+    { ...text, ...target },
+  );
+}
+type SecureProps = Omit<
+  Common,
+  "value" | "control" | "onInput" | "onChange" | "children"
+> & { binding: string };
+export function SecureField(props: SecureProps) {
+  for (const key of ["value", "control", "onInput", "onChange", "children"])
+    if (key in props)
+      throw new TypeError(
+        "SecureField accepts only a native binding, never secret text or input callbacks",
+      );
+  return kit(
+    "secure-field",
+    "div",
+    { ...props, tabIndex: props.tabIndex ?? 0 },
+    well,
+  );
+}
+export function FormGroup(
+  props: Omit<Common, "label" | "title"> & { title?: string; label?: string },
+) {
+  const { title, children, ...rest } = props;
+  return h("div", { role: "group", label: props.label ?? title }, [
+    title
+      ? h(
+          "text",
+          {
+            role: "heading",
+            style: {
+              color: token("colors.text"),
+              fontSize: token("typography.title"),
+              fontWeight: token("typography.semibold_weight"),
+              marginBottom: token("metrics.gap"),
+            },
+          },
+          title,
+        )
+      : null,
+    kit("form-group", "div", {
+      ...rest,
+      role: "group",
+      label: props.label ?? title,
+      children,
+    }),
+  ]);
+}
+export function FormRow(
+  props: Omit<Common, "control"> & {
+    detail?: string;
+    control: ComponentChildren;
+  },
+) {
+  const { label, detail, control, ...rest } = props;
+  return kit(
+    "form-row",
+    "div",
+    {
+      ...rest,
+      role: "group",
+      label,
+      children: [
+        h("div", { "data-pm-slot": "label" }, [
+          h("text", { style: text }, label),
+          detail
+            ? h(
+                "text",
+                {
+                  style: {
+                    color: token("colors.muted"),
+                    fontSize: token("typography.minimum"),
+                  },
+                },
+                detail,
+              )
+            : null,
+        ]),
+        h("div", { "data-pm-slot": "control" }, control),
+      ],
+    },
+    {
+      display: "flex",
+      flexDirection: "row",
+      justifyContent: "space-between",
+      padding: token("metrics.inset"),
+    },
+  );
+}
+export function PushButton(
+  props: Omit<Common, "role"> & { role?: "normal" | "default" | "destructive" },
+) {
+  const { role, ...rest } = props;
+  return kit(
+    "push-button",
+    "button",
+    {
+      ...rest,
+      metadata: kitMetadata(props, { buttonRole: role ?? "normal" }),
+      children: props.children ?? props.label,
+    },
+    { ...text, ...target, height: token("metrics.control") },
+  );
+}
+export function ColourPopover(
+  props: Common & {
+    anchor: number;
+    binding: string;
+    open: boolean;
+    fill?: boolean;
+    onClose: (cancel: boolean) => void;
+  },
+) {
+  const { open, fill, onClose, ...rest } = props;
+  if (!open) return null;
+  return kit(
+    "colour-popover",
+    "anchored",
+    {
+      ...rest,
+      role: "dialog",
+      focusScope: true,
+      "data-pm-dismiss-outside": true,
+      "data-pm-live-edit": true,
+      metadata: kitMetadata(props, { fill: !!fill, nativeColourPicker: true }),
+      preventDefault: { keydown: ["Escape"] },
+      onKeyDown: (event: SurfaceEvent) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onClose(true);
+        } else props.onKeyDown?.(event);
+      },
+    },
+    {
+      width: token("metrics.popover_width"),
+      background: token("colors.floating"),
+    },
+  );
+}
+export type GizmoKind =
+  | "transform"
+  | "rotation"
+  | "anchor"
+  | "path-vertex"
+  | "tangent";
+export function ViewerGizmo(
+  props: Omit<Common, "selected"> & {
+    kind: GizmoKind;
+    selected?: boolean;
+    position: { x: number; y: number };
+  },
+) {
+  const { kind, selected, position, ...rest } = props;
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.y))
+    throw new RangeError("Gizmo position must be finite");
+  return kit(
+    "viewer-gizmo",
+    "button",
+    {
+      ...rest,
+      metadata: kitMetadata(props, { kind, selected: !!selected, position }),
+    },
+    target,
+  );
+}
+export function ViewerOverlay(props: Common) {
+  return kit("viewer-overlay", "div", { ...props, role: "group" });
+}
+export function Banner(
+  props: Common & {
+    severity?: "info" | "warning" | "error";
+    placement?: "viewer" | "inline";
+    symbol: string;
+    action?: ComponentChildren;
+    onDismiss?: () => void;
+  },
+) {
+  const {
+    severity = "info",
+    placement = "viewer",
+    symbol,
+    action,
+    onDismiss,
+    ...rest
+  } = props;
+  return kit("banner", "div", {
+    ...rest,
+    role: "status",
+    metadata: kitMetadata(props, {
+      severity,
+      placement,
+      symbol,
+      hasAction: !!action,
+    }),
+    children: [
+      h("div", {
+        "data-pm-slot": "symbol",
+        metadata: { pmKit: { symbol, decorative: true } },
+      }),
+      h("text", { style: text }, props.label),
+      action,
+      action && onDismiss
+        ? h("button", {
+            label: "Dismiss",
+            title: "Dismiss",
+            onClick: onDismiss,
+            metadata: { pmKit: { symbol: "xmark" } },
+            style: {
+              ...target,
+              color: token("colors.secondary"),
+              symbolSize: token("metrics.symbol_inline"),
+            },
+          })
+        : null,
+    ],
+  });
+}
+export { ColourWell as ColorWell, ColourPopover as ColorPopover };

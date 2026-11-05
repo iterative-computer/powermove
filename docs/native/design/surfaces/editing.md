@@ -43,7 +43,7 @@ grammar; this adds the states the row list lacked.
 |---|---|
 | Section heading | `Text Animators` + trailing `plus` borderless, tooltip `Add Text Animator` (menu of the shipped animator presets, labels in Title Case) |
 | Animator header row | disclosure chevron · checkbox (enable, AX `{name} enabled`) · name (`t.body`, double-click renames in place) · trailing `ellipsis.circle` menu: `Rename…`, `Duplicate`, `Move Up`, `Move Down`, separator, `Remove` (danger text) |
-| Selector group | sub-heading `Range` with rows `Start`, `End`, `Offset` (`%` or characters per `Unit` pop-up), `Shape` pop-up, `Softness`, `Direction`, `Order` (incl. `Shuffle`), `Stagger`, `Mode` |
+| Selector group | sub-heading `Range` with rows `Start`, `End`, `Offset` (`%` or characters per `Unit` pop-up), `Shape` pop-up, `Softness`, `Direction`, `Order` (incl. `Shuffle`; with `Random`, a trailing borderless `shuffle` button, `m.hit` square, tooltip/AX `Shuffle Order`), `Stagger`, `Mode` |
 | Properties group | sub-heading `Properties` + trailing `plus` (`Add Animator Property`, menu of animatable properties not yet added); each property row has a trailing `minus.circle` (`Remove {property}`) on hover |
 | Collapsed animator | header row only; keyframe diamond column shows a half-filled diamond if anything inside is animated |
 | Disabled animator | header text `c.muted`; content rows stay editable (shipped behaviour) |

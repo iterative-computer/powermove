@@ -41,7 +41,18 @@ registry graph and PM-backed facade factories from the pinned commit.
 3.6.2. The regression checks regeneration against the tag. App imports for
 Svelte mounting/subscriptions, haptics and optional profiling are dependency
 injections; elapsed-time diagnostics fall back to Date.now when no performance
-clock is attached. Runtime code has no Node/Bun imports or eval.
+clock is attached. Runtime code has no Node/Bun imports or eval. The Store
+facade extraction additionally includes the pinned `sandbox/shim-api.ts`,
+`shared/sandbox-rpc.ts` and legacy easing runtime. Only their relative import
+paths are adapted. Its asynchronous API remains separate from `CompatRealm`;
+the native confined helper/core integration and its remaining capture/resource
+limits are documented in [the P2 evidence](extcheck-p2.md).
+
+The extension-check embedder compiles seven unchanged frozen shared controls
+with one physical Svelte runtime. `connectControlState` publishes authoritative
+project, selection and transport facts into their frozen read stores and
+releases its subscriptions/styles on teardown. Other controls remain explicit
+unavailable capabilities.
 
 Pure model factories keep unknown authored data when cloning; IDs are issued in
 the realm/generation namespace. Native evaluation, composition/group operations,

@@ -1,8 +1,9 @@
 // Build tool only. The resulting scripts run without Bun/Node in pm-runtime-v8.
 import path from "node:path";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { initial } from "./initial";
+import { controlImports, controlPlugin } from "./shared-controls";
 const [reference, input, output] = process.argv.slice(2);
 await writeFile(path.join(output!, "initial.json"), JSON.stringify(initial()));
 const rawManifest = JSON.parse(
@@ -75,7 +76,9 @@ const dom = path.resolve(
   import.meta.dir,
   "../../apps/native/js/remote-dom/src/shim.ts",
 );
-const svelteRoot = path.join(reference!, "apps/desktop/node_modules/svelte");
+const svelteRoot = await realpath(
+  path.join(reference!, "apps/desktop/node_modules/svelte"),
+);
 const sveltePackage = JSON.parse(
   await readFile(path.join(svelteRoot, "package.json"), "utf8"),
 );
@@ -89,10 +92,19 @@ const browserModule = (name: string) => {
     throw Error("Unsupported shared Svelte module");
   return path.resolve(svelteRoot, target);
 };
+const sharedSveltePlugin: Bun.BunPlugin = {
+  name: "one-host-svelte-runtime",
+  setup(build) {
+    build.onResolve({ filter: /^svelte(?:\/.*)?$/ }, ({ path: name }) => ({
+      path: browserModule(name),
+    }));
+  },
+};
 const code = `import * as compat from ${JSON.stringify(compat)};
 import {RemoteDOM} from ${JSON.stringify(dom)};
+${controlImports(reference!)}
 ${modules.map((name, index) => `import * as m${index} from ${JSON.stringify(browserModule(name))};`).join("\n")}
-globalThis.PowermoveCompat={...compat,RemoteDOM,runtimeModules:{${modules.map((name, index) => `${JSON.stringify(name)}:m${index}`).join(",")}}};`;
+globalThis.PowermoveCompat={...compat,RemoteDOM,controls,controlStores,controlStyles:styles,runtimeModules:{${modules.map((name, index) => `${JSON.stringify(name)}:m${index}`).join(",")}}};`;
 const bundle = await Bun.build({
   entrypoints: ["extcheck:entry"],
   target: "browser",
@@ -100,6 +112,8 @@ const bundle = await Bun.build({
   conditions: ["browser", "production"],
   define: { "process.env.NODE_ENV": '"production"' },
   plugins: [
+    sharedSveltePlugin,
+    await controlPlugin(reference!),
     {
       name: "compat-runner-entry",
       setup(build) {
@@ -121,6 +135,82 @@ if (!bundle.success)
 await writeFile(
   path.join(output!, "compat.js"),
   await bundle.outputs[0]!.text(),
+);
+// Store gets the frozen asynchronous sandbox facade, not CompatRealm or PM.
+const storeShim = path.resolve(
+  import.meta.dir,
+  "../../apps/native/js/compat/src/frozen/host/store-api.js",
+);
+const helpers = path.resolve(
+  import.meta.dir,
+  "../../apps/native/js/compat/src/frozen/kernel/editor-helpers.ts",
+);
+const helperExports = path.resolve(
+  reference!,
+  "apps/desktop/src/shared/extension-runtime.ts",
+);
+const pureStoreHelpers = [
+  "isProperty",
+  "canAnimateContent",
+  "contentLabel",
+  "structuredProperties",
+  "pathTargets",
+  "validMatteSource",
+  "MATTE_MODES",
+  "expressionDiagnostic",
+  "EXPRESSION_NAMES",
+  "axisContentKey",
+  "axisPath",
+  "isAxisTag",
+  "CHANNELS_3D",
+  "projectPoint",
+  "inversePlane",
+  "propertyShortcuts",
+  "TEXT_ANIMATOR_PROPERTIES",
+  "animatorMode",
+  "countTextUnits",
+  "staggerLength",
+  "staggerWindow",
+];
+const storeCode = `import {createSandboxAPI,sandboxControl,sandboxReporter} from ${JSON.stringify(storeShim)};
+import * as helpers from ${JSON.stringify(helpers)};
+import {EDITOR_HELPER_EXPORTS} from ${JSON.stringify(helperExports)};
+${modules.map((name, index) => `import * as m${index} from ${JSON.stringify(browserModule(name))};`).join("\n")}
+const pure=new Set(${JSON.stringify(pureStoreHelpers)});
+const powermove=Object.fromEntries(EDITOR_HELPER_EXPORTS.map(name=>[name,pure.has(name)?helpers[name]:(...args)=>{
+  StoreCompat.report?.('permission','powermove.'+name);
+  const error=new Error(name+' requires full access. Use project.apply or commands in a sandboxed extension.');
+  error.name='PermissionError';error.code='full-access';throw error;
+}]));
+globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,runtimeModules:{powermove,${modules.map((name, index) => `${JSON.stringify(name)}:m${index}`).join(",")}}};`;
+const storeBundle = await Bun.build({
+  entrypoints: ["extcheck:store"],
+  target: "browser",
+  format: "iife",
+  conditions: ["browser", "production"],
+  define: { "process.env.NODE_ENV": '"production"' },
+  plugins: [
+    sharedSveltePlugin,
+    {
+      name: "frozen-store-facade",
+      setup(build) {
+        build.onResolve({ filter: /^extcheck:store$/ }, () => ({
+          path: "store",
+          namespace: "store-entry",
+        }));
+        build.onLoad({ filter: /.*/, namespace: "store-entry" }, () => ({
+          contents: storeCode,
+          loader: "ts",
+          resolveDir: path.join(reference!, "apps/desktop"),
+        }));
+      },
+    },
+  ],
+});
+if (!storeBundle.success) throw Error("Frozen Store facade build failed");
+await writeFile(
+  path.join(output!, "store.js"),
+  await storeBundle.outputs[0]!.text(),
 );
 const page = await Bun.build({
   entrypoints: [

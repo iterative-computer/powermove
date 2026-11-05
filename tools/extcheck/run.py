@@ -345,7 +345,7 @@ def capture_unlocked(command, request, output, timeout):
         if reason not in ("reference-not-ready", "reference-extension-not-active", "unsupported-script-step",
                           "reference-store-profile-adapter-unavailable",
                           "reference-capture-failed", "native-integrated-runner-unavailable",
-                          "native-extension-compile-failed", "native-store-facade-unavailable", "native-runner-failed",
+                          "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
                           "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
             reason = "capture-driver-blocked"
         raise Blocked(reason)
@@ -424,6 +424,7 @@ def main():
                 reasons[str(error)] += 1
         for source in SOURCES:
             rows = populations.get(source, [])
+            source_reasons = Counter()
             counts = {"total": len(rows), "match": 0, "mismatch": 0, "cant_run": 0,
                       "reference_captured": 0, "native_captured": 0, "native_logic_executed": 0, "native_activated": 0,
                       "enumerated": source in populations}
@@ -444,6 +445,8 @@ def main():
                     validate_script(script)
                     request = {"version": 1, "case": case, "extension": str(extension), "input_sha256": sha,
                                "script_sha256": digest(json.dumps(script, sort_keys=True).encode()), "script": script}
+                    if source == "store":
+                        request["store"] = {"repoId": item["repoId"], "releaseId": item["latest"]["id"]}
                     ref = case_root / "reference"
                     failures=[]
                     for role, command in (("reference",["node", str(Path(__file__).with_name("reference.mjs")), str(args.reference_root)]),
@@ -459,6 +462,7 @@ def main():
                         except Blocked as error:
                             failures.append(str(error))
                             reasons[str(error)]+=1
+                            source_reasons[str(error)]+=1
                         if role=="native" and (case_root/role/"capture.json").is_file():
                             status=json.loads((case_root/role/"capture.json").read_text())
                             counts["native_logic_executed"]+=status.get("logic_executed") is True
@@ -484,12 +488,15 @@ def main():
                 except Blocked as error:
                     counts["cant_run"] += 1
                     reasons[str(error)] += 1
+                    source_reasons[str(error)] += 1
                 except (OSError, ValueError, KeyError, TypeError, tarfile.TarError):
                     counts["cant_run"] += 1
                     reasons["input-or-artifact-invalid"] += 1
+                    source_reasons["input-or-artifact-invalid"] += 1
                 finally:
                     shutil.rmtree(case_root)
                     print(f"{case}: completed", flush=True)
+            counts["reasons"] = dict(source_reasons)
         if store and "store" in populations:
             try:
                 if store.catalog() != initial:

@@ -289,6 +289,64 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -401,6 +459,28 @@ exports[`wire tree / AX: empty-composition (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -617,6 +697,64 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -729,6 +867,28 @@ exports[`wire tree / AX: loading-first-frame (placeholders do not certify render
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -945,6 +1105,64 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -1057,6 +1275,28 @@ exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify 
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -1273,6 +1513,64 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -1385,6 +1683,28 @@ exports[`wire tree / AX: selected (placeholders do not certify rendering): selec
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -1601,6 +1921,64 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -1713,6 +2091,28 @@ exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -1929,6 +2329,64 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -2041,6 +2499,28 @@ exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -2432,6 +2912,64 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -2544,6 +3082,28 @@ exports[`wire tree / AX: error-last-good (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -2760,6 +3320,64 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -2872,6 +3490,28 @@ exports[`wire tree / AX: drag-media (placeholders do not certify rendering): dra
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -3088,6 +3728,64 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -3200,6 +3898,28 @@ exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): dr
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -3416,6 +4136,64 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -3528,6 +4306,28 @@ exports[`wire tree / AX: multi-select (placeholders do not certify rendering): m
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -3712,6 +4512,64 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -3824,6 +4682,28 @@ exports[`wire tree / AX: source-image (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -4190,6 +5070,64 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -4302,6 +5240,28 @@ exports[`wire tree / AX: source-video (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -4668,6 +5628,64 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -4780,6 +5798,28 @@ exports[`wire tree / AX: source-audio (placeholders do not certify rendering): s
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -5178,6 +6218,64 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -5290,6 +6388,28 @@ exports[`wire tree / AX: playing-auto-half (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -5506,6 +6626,64 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -5618,6 +6796,28 @@ exports[`wire tree / AX: playing-auto-full (placeholders do not certify renderin
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Full",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -5854,6 +7054,64 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -5966,6 +7224,28 @@ exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -6158,6 +7438,64 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -6270,6 +7608,28 @@ exports[`wire tree / AX: full-screen (placeholders do not certify rendering): fu
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -6453,6 +7813,64 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -6565,6 +7983,28 @@ exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lo
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -6822,6 +8262,64 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -6934,6 +8432,28 @@ exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering)
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -7150,6 +8670,64 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -7262,6 +8840,28 @@ exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): cu
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",
@@ -7478,6 +9078,64 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
       "data-pm-component": "pop-up-button",
       "id": "viewer.zoom",
       "label": "Zoom, Fit, 54 percent",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Fit",
+              "v": "fit",
+            },
+            {
+              "label": "5 %",
+              "v": 0.05,
+            },
+            {
+              "label": "12.5 %",
+              "v": 0.125,
+            },
+            {
+              "label": "25 %",
+              "v": 0.25,
+            },
+            {
+              "label": "50 %",
+              "v": 0.5,
+            },
+            {
+              "label": "100 %",
+              "v": 1,
+            },
+            {
+              "label": "200 %",
+              "v": 2,
+            },
+            {
+              "label": "400 %",
+              "v": 4,
+            },
+            {
+              "label": "800 %",
+              "v": 8,
+            },
+            {
+              "label": "Zoom In",
+              "v": "viewer.zoom.in",
+            },
+            {
+              "label": "Zoom Out",
+              "v": "viewer.zoom.out",
+            },
+            {
+              "label": "Actual Size",
+              "v": "actual",
+            },
+            {
+              "label": "Fit Composition",
+              "v": "viewer.fit",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Fit",
@@ -7590,6 +9248,28 @@ exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify
       "data-pm-component": "pop-up-button",
       "id": "viewer.quality",
       "label": "Preview resolution, Auto, currently Half",
+      "metadata": {
+        "pmKit": {
+          "menu": [
+            {
+              "label": "Auto",
+              "v": "auto",
+            },
+            {
+              "label": "Full",
+              "v": "1",
+            },
+            {
+              "label": "Half",
+              "v": "0.5",
+            },
+            {
+              "label": "Quarter",
+              "v": "0.25",
+            },
+          ],
+        },
+      },
       "options": [
         {
           "label": "Auto",

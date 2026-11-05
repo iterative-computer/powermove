@@ -1,5 +1,12 @@
 mod diag;
+#[path = "surfaces/dialogs.rs"]
+pub mod dialogs;
+
+#[path = "surfaces/editing.rs"]
+pub mod editing;
 mod lifecycle;
+#[path = "surfaces/library.rs"]
+pub mod library_surface;
 mod mcp;
 mod media;
 mod panels;
@@ -9,6 +16,7 @@ mod playback;
 mod rows;
 mod session;
 mod smoke;
+mod surfaces;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

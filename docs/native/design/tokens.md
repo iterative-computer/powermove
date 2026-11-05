@@ -104,6 +104,7 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.labels.teal` | Label: video and image media | `#C2E2E3` | `#1F4B52` | `#C2E2E3` | `#1F4B52` |
 | `colors.labels.violet` | Label: adjustment and effect layers | `#D8CFF0` | `#4A3B6B` | `#D8CFF0` | `#4A3B6B` |
 | `colors.labels.yellow` | Label: user colour | `#EFE0B2` | `#5C4A17` | `#EFE0B2` | `#5C4A17` |
+| `colors.media_badge` | Badge fill over media (duration, offline); always dark | `#000000` | `#000000` | `#000000` | `#000000` |
 | `colors.muted` | Captions, metadata, placeholder, units | `#62646A` | `#949494` | `#414148` | `#BFBFBF` |
 | `colors.panel` | Panel material: every docked work surface and sheet content | `#FDFDFE` | `#1A1A1A` | `#FDFDFE` | `#1A1A1A` |
 | `colors.panel_secondary` | Recessed band inside a panel: timeline layer column, ruler | `#F5F5F7` | `#161616` | `#F5F5F7` | `#161616` |
@@ -113,26 +114,37 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `colors.separator` | Hairline separators and panel edges | `#D4D4D8` | `#303030` | `#686868` | `#888888` |
 | `colors.success` | Completed, online, rendered | `#117A52` | `#3FCF8E` | `#117A52` | `#3FCF8E` |
 | `colors.text` | Primary text and glyphs | `#1B1D23` | `#F2F2F2` | `#1B1D23` | `#F2F2F2` |
-| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E6E6EA` | `#0E0E0E` | `#E6E6EA` | `#0E0E0E` |
+| `colors.viewer` | Viewer surround; the darkest neutral so footage reads true | `#E4E4E4` | `#0E0E0E` | `#E4E4E4` | `#0E0E0E` |
 | `colors.warning` | Warnings, missing-but-recoverable states | `#A15C00` | `#F59E0B` | `#A15C00` | `#F59E0B` |
 | `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#111111` | `#EEEEF1` | `#111111` |
 | `metrics.agent_width` | Default agent panel width | 360 | 360 | 360 | 360 |
+| `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
 | `metrics.border` | Separator thickness (Increase Contrast doubles it) | 1 | 1 | 2 | 2 |
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
+| `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
+| `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 6 | 6 | 6 | 6 |
+| `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
+| `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
 | `metrics.field_menu_width` | Field menu width | 300 | 300 | 300 | 300 |
+| `metrics.form_row` | Minimum Settings row height | 40 | 40 | 40 | 40 |
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
+| `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
+| `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
+| `metrics.group_radius` | Settings grouped-form card corner | 10 | 10 | 10 | 10 |
 | `metrics.header` | Panel header, viewer bar and timeline header height | 32 | 32 | 32 | 32 |
 | `metrics.hit` | Minimum pointer target | 24 | 24 | 24 | 24 |
 | `metrics.inner_radius` | Control nested in a control (segment in a track) | 4 | 4 | 4 | 4 |
 | `metrics.inset` | Content inset inside a panel | 12 | 12 | 12 | 12 |
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
+| `metrics.kind_badge` | Layer-kind badge square in the timeline and Project list | 18 | 18 | 18 | 18 |
 | `metrics.layer_column` | Timeline layer list column width | 266 | 266 | 266 | 266 |
+| `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |
 | `metrics.min_center` | Smallest viewer extent | 180 | 180 | 180 | 180 |
@@ -142,23 +154,34 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.palette_height` | Command palette maximum height | 360 | 360 | 360 | 360 |
 | `metrics.palette_width` | Command palette width | 520 | 520 | 520 | 520 |
 | `metrics.panel_radius` | Panel corner radius | 12 | 12 | 12 | 12 |
+| `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
 | `metrics.playhead` | Playhead line width | 1.5 | 1.5 | 1.5 | 1.5 |
 | `metrics.popover_width` | Default popover width | 260 | 260 | 260 | 260 |
 | `metrics.property_row` | Timeline property sub-row | 22 | 22 | 22 | 22 |
+| `metrics.rotation_stem` | Rotation handle stem length | 18 | 18 | 18 | 18 |
 | `metrics.row` | Inspector and list row height | 28 | 28 | 28 | 28 |
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |
+| `metrics.section_gap` | Space above each Settings section after the first | 40 | 40 | 40 | 40 |
 | `metrics.settings_height` | Settings window height | 520 | 520 | 520 | 520 |
 | `metrics.settings_sidebar` | Settings sidebar width | 180 | 180 | 180 | 180 |
 | `metrics.settings_width` | Settings window width | 760 | 760 | 760 | 760 |
+| `metrics.sheet_inset` | Content inset inside sheets and Settings panes | 20 | 20 | 20 | 20 |
+| `metrics.sheet_value_column` | Shared value column in sheets | 240 | 240 | 240 | 240 |
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
+| `metrics.sheet_width_wide` | Width of wide sheets: Export, Expression | 600 | 600 | 600 | 600 |
 | `metrics.status` | Status bar height | 30 | 30 | 30 | 30 |
+| `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
 | `metrics.symbol_inline` | SF Symbol size inside rows | 11 | 11 | 11 | 11 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 13 | 13 | 13 | 13 |
 | `metrics.symbol_toolbar` | SF Symbol size in toolbar items | 15 | 15 | 15 | 15 |
+| `metrics.tangent_end` | Bézier tangent end circle | 6 | 6 | 6 | 6 |
+| `metrics.text_padding` | Vertical text padding in bubbles, the composer and code blocks | 8 | 8 | 8 | 8 |
+| `metrics.thumbnail_min` | Minimum Project grid thumbnail width | 120 | 120 | 120 | 120 |
 | `metrics.toolbar` | Unified toolbar height | 52 | 52 | 52 | 52 |
 | `metrics.toolbar_title_line` | Document title line height | 14 | 14 | 14 | 14 |
 | `metrics.toolbar_title_width` | Document title slot width | 160 | 160 | 160 | 160 |
 | `metrics.track_row` | Timeline layer row | 28 | 28 | 28 | 28 |
+| `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Inspector value column width shared by every row | 128 | 128 | 128 | 128 |
 | `metrics.window_height` | Default window height | 900 | 900 | 900 | 900 |
 | `metrics.window_width` | Default window width | 1440 | 1440 | 1440 | 1440 |
@@ -181,6 +204,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.enter` | Spring response for appearing surfaces (s) | 0.32 | 0.32 | 0.32 | 0.32 |
 | `motion.exit` | Fade-out for dismissed surfaces (s) | 0.12 | 0.12 | 0.12 | 0.12 |
 | `motion.interaction` | Hover, press and selection feedback (s) | 0.075 | 0.075 | 0.075 | 0.075 |
+| `motion.overlay_idle` | Still time before the Focus overlay capsule fades (s) | 2 | 2 | 2 | 2 |
 | `motion.reduced` | Cross-fade used under Reduce Motion (s) | 0.15 | 0.15 | 0.15 | 0.15 |
 | `motion.start_scale` | Scale an appearing surface starts from | 0.96 | 0.96 | 0.96 | 0.96 |
+| `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 <!-- tokens:end -->
