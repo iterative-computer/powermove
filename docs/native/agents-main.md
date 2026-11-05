@@ -142,3 +142,47 @@ races through process loss/restart. With credentials run pinned Codex and Claude
 questions, approvals/classifier, cancellation/timeout, concurrent runs,
 reconnect, history/compaction, orchestration/watch delivery and source-edit
 review. Linux fixture success certifies none of these live/platform behaviors.
+
+### Post-merge S070 policy (2026-11-05)
+
+Upstream `d7a0b01d430d7ec9977f52d784f047c027801b14` supplies the revised
+S070 spec in `design/surfaces/agent-auth.md`. `launch_consent` now implements its
+portable eligibility decisions: wait for installed/editor readiness, never ask
+in a hidden host, defer unreadable config without consuming the question,
+distinguish original-app switching, and skip current/custom/intentionally
+removed entries or a previously recorded answer. The host persists `skipped`;
+quitting an unanswered alert records nothing.
+
+`registration::answer` persists the explicit added/declined answer through the
+profile host before returning a write permit; `apply` also requires durable
+answer storage before either connect or disconnect changes settings. Failure to
+record prevents the settings write. A stored answer suppresses repeat alerts
+and never grants a future write. Decline changes only the profile answer. This
+implements Opus's stated semantics without selecting new alert copy or layout
+(**owner decision, N3/N4**). The actual eligibility probes, archived profile
+store, native alert/button action and settings transaction remain host bindings.
+
+### Final post-merge Linux evidence (2026-11-05)
+
+Merged native base: `d7a0b01d430d7ec9977f52d784f047c027801b14`, with no
+conflicts. `crates/agents/scripts/check.sh` from `apps/native` runs exactly:
+
+```sh
+cargo test --locked -p pm-agents
+cargo clippy --locked -p pm-agents --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-agents --check
+```
+
+**163 tests passed, zero failed, zero ignored; clippy and fmt passed.** The three
+main recorder `--check` commands listed above also passed after the merge. An
+ASCII-digit ordered-list regression covers a Rust regex Unicode difference that
+would otherwise parse non-ASCII numerals incorrectly; source JavaScript and
+CommonMark use ASCII ordered markers (**N3**, no panic on authored Unicode).
+
+The separately executed strict command above reports **zero passed, one failed,
+ten filtered** and 336 unchanged measured differences across 23 cases. Five
+complete observations are identical; all 23 public-event streams and all 21
+provider callback cases match. This failure is outside the 163 passing count.
+No tolerance was widened, failure removed, capability invented or Mac/live case
+silently counted as passed. Branch status is **BLOCKED**, pending the concrete
+host/MCP/kernel integrations and platform/provider evidence listed above.

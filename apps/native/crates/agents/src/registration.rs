@@ -436,7 +436,94 @@ impl ConsentGate {
         Ok(())
     }
 }
+/// S070's durable answer suppresses a repeated alert; it never authorizes a
+/// future write. Each actual Connect still requires a fresh plan-bound permit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Answer {
+    Added,
+    Declined,
+    Skipped,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    Absent,
+    Original,
+    Current,
+    IntentionallyRemoved,
+    Custom,
+    Unreadable,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchConsent {
+    Wait,
+    Done,
+    Skip,
+    Ask,
+    AskSwitch,
+}
+/// `ready` means S070's first-launch/onboarding, key-window, sheet, playback
+/// and text-editing gates all permit presentation. Hidden hosts never ask.
+pub fn launch_consent(
+    recorded: Option<Answer>,
+    found: Found,
+    installed: bool,
+    ready: bool,
+    hidden: bool,
+) -> LaunchConsent {
+    if recorded.is_some() {
+        return LaunchConsent::Done;
+    }
+    if hidden || !installed || found == Found::Unreadable {
+        return LaunchConsent::Wait;
+    }
+    if matches!(
+        found,
+        Found::Current | Found::IntentionallyRemoved | Found::Custom
+    ) {
+        return LaunchConsent::Skip;
+    }
+    if !ready {
+        return LaunchConsent::Wait;
+    }
+    if found == Found::Original {
+        LaunchConsent::AskSwitch
+    } else {
+        LaunchConsent::Ask
+    }
+}
+/// Persist an explicit alert/button answer before allowing the settings write.
+/// Failure returns no permit. Decline changes only the profile answer.
+pub fn answer(
+    host: &mut impl Host,
+    gate: &mut ConsentGate,
+    plan: &Plan,
+    request: &ConsentRequest,
+    accepted: bool,
+) -> io::Result<Option<Permit>> {
+    if plan.client != Client::ClaudeDesktop
+        || plan.action != Action::Connect
+        || request.plan != plan.fingerprint
+    {
+        return Err(error("Consent plan changed"));
+    }
+    let permit = gate.decide(request, accepted)?;
+    if let Err(err) = host.record_answer(if accepted {
+        Answer::Added
+    } else {
+        Answer::Declined
+    }) {
+        if let Some(permit) = permit {
+            gate.approved.remove(&permit.id);
+        }
+        return Err(err);
+    }
+    Ok(permit)
+}
 pub trait Host {
+    /// Durably publish `externalClients.claudeDesktop` before any settings write.
+    /// Archive the previous profile value; this record is not a reusable grant.
+    fn record_answer(&mut self, answer: Answer) -> io::Result<()>;
     /// Compare reviewed bytes, archive the complete prior config/receipt, publish
     /// atomically with no symlink traversal, fsync, and re-read the result.
     /// Claude Code must use the native CLI, never rewrite its live config file.
@@ -455,6 +542,10 @@ pub fn apply(
     }
     if plan.client == Client::ClaudeDesktop && plan.action == Action::Connect {
         gate.consume(plan, permit)?;
+        host.record_answer(Answer::Added)?;
+    }
+    if plan.client == Client::ClaudeDesktop && plan.action == Action::Disconnect {
+        host.record_answer(Answer::Declined)?;
     }
     host.commit(plan)?;
     Ok(())

@@ -187,8 +187,17 @@ struct RegistrationHost {
     archives: Vec<Option<Vec<u8>>>,
     commits: usize,
     removed: bool,
+    answers: Vec<registration::Answer>,
+    fail_answer: bool,
 }
 impl registration::Host for RegistrationHost {
+    fn record_answer(&mut self, answer: registration::Answer) -> io::Result<()> {
+        if self.fail_answer {
+            return Err(io::Error::other("profile publication failed"));
+        }
+        self.answers.push(answer);
+        Ok(())
+    }
     fn commit(&mut self, plan: &Plan) -> io::Result<()> {
         if self.bytes.as_deref() != plan.original() {
             return Err(io::Error::other("configuration changed"));
@@ -847,4 +856,89 @@ fn already_identical_desktop_registration_does_not_write_or_request_consent() {
     registration::apply(&mut host, &mut ConsentGate::default(), &same, None).unwrap();
     assert_eq!(host.commits, 0);
     assert!(host.archives.is_empty());
+}
+
+#[test]
+fn s070_launch_policy_never_registers_implicitly_or_repeats_a_recorded_answer() {
+    use registration::{Answer, Found, LaunchConsent as L, launch_consent};
+    for answer in [Answer::Added, Answer::Declined, Answer::Skipped] {
+        assert_eq!(
+            launch_consent(Some(answer), Found::Absent, true, true, false),
+            L::Done
+        );
+    }
+    for found in [Found::Current, Found::IntentionallyRemoved, Found::Custom] {
+        assert_eq!(launch_consent(None, found, true, true, false), L::Skip);
+    }
+    assert_eq!(
+        launch_consent(None, Found::Unreadable, true, true, false),
+        L::Wait
+    );
+    assert_eq!(
+        launch_consent(None, Found::Absent, false, true, false),
+        L::Wait
+    );
+    assert_eq!(
+        launch_consent(None, Found::Absent, true, false, false),
+        L::Wait
+    );
+    assert_eq!(
+        launch_consent(None, Found::Absent, true, true, true),
+        L::Wait
+    );
+    assert_eq!(
+        launch_consent(None, Found::Absent, true, true, false),
+        L::Ask
+    );
+    assert_eq!(
+        launch_consent(None, Found::Original, true, true, false),
+        L::AskSwitch
+    );
+}
+
+#[test]
+fn s070_persists_answer_before_write_and_decline_never_changes_client_settings() {
+    let plan = registration::prepare(
+        Client::ClaudeDesktop,
+        Action::Connect,
+        None,
+        "/Applications/Powermove.app/Contents/MacOS/Powermove",
+    )
+    .unwrap();
+    let mut gate = ConsentGate::default();
+    let mut host = RegistrationHost::default();
+    let request = gate.request(&plan).unwrap();
+    assert!(
+        registration::answer(&mut host, &mut gate, &plan, &request, false)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(host.answers, vec![registration::Answer::Declined]);
+    assert_eq!(host.commits, 0);
+    assert!(host.bytes.is_none());
+    host.fail_answer = true;
+    let request = gate.request(&plan).unwrap();
+    assert!(registration::answer(&mut host, &mut gate, &plan, &request, true).is_err());
+    assert_eq!(host.commits, 0);
+    let request = gate.request(&plan).unwrap();
+    let permit = gate.decide(&request, true).unwrap();
+    assert!(registration::apply(&mut host, &mut gate, &plan, permit).is_err());
+    assert_eq!(host.commits, 0);
+    host.fail_answer = false;
+    let request = gate.request(&plan).unwrap();
+    let permit = registration::answer(&mut host, &mut gate, &plan, &request, true).unwrap();
+    assert_eq!(host.answers.last(), Some(&registration::Answer::Added));
+    registration::apply(&mut host, &mut gate, &plan, permit).unwrap();
+    assert_eq!(host.commits, 1);
+}
+
+#[test]
+fn markdown_ordered_markers_use_ascii_digits_like_the_main_reference() {
+    for marker in ["١", "１", "𝟙", "१२", "9999999999"] {
+        let blocks = pm_agents::markdown::blocks(&format!("{marker}. authored text")).unwrap();
+        assert_ne!(blocks[0]["kind"], "list", "{marker}");
+        assert!(pm_agents::markdown::plain(&blocks).contains(marker));
+    }
+    let blocks = pm_agents::markdown::blocks("999999999. item").unwrap();
+    assert_eq!(blocks[0]["start"], 999999999);
 }
