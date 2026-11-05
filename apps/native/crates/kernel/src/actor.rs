@@ -264,6 +264,17 @@ struct Shared {
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
 
 enum Msg {
+    ProEditing {
+        project: String,
+        request: crate::pro_editing::ProRequest,
+        reply: Reply<Result<crate::pro_editing::ProReply, KernelFailure>>,
+    },
+    ProClock {
+        project: String,
+        document: u64,
+        available: bool,
+        reply: Reply<bool>,
+    },
     Profile {
         call: crate::profile::ProfileCall,
         reply: Reply<Result<crate::profile::ProfileReply, KernelFailure>>,
@@ -368,6 +379,34 @@ impl Drop for KernelActor {
 
 impl KernelHandle {
     /// Bind an immutable actor identity; cloned handles never change another caller's origin.
+    /// Queue native UI/MCP pro actions. Never waits on the caller thread.
+    pub fn pro_editing(
+        &self,
+        project: &str,
+        request: crate::pro_editing::ProRequest,
+    ) -> Pending<Result<crate::pro_editing::ProReply, KernelFailure>> {
+        let (reply, pending) = oneshot();
+        let _ = self.tx.send(Msg::ProEditing {
+            project: project.into(),
+            request,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
+    }
+
+    /// Native transport adapter reports real availability for this document.
+    /// Default is unavailable; close/reopen fences an earlier clock binding.
+    pub fn bind_pro_clock(&self, project: &str, document: u64, available: bool) -> Pending<bool> {
+        let (reply, pending) = oneshot();
+        let _ = self.tx.send(Msg::ProClock {
+            project: project.into(),
+            document,
+            available,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
+    }
+
     pub fn for_actor(&self, caller: crate::Caller) -> ActorHandle {
         ActorHandle {
             kernel: self.clone(),
@@ -642,8 +681,64 @@ fn emit(shared: &Shared, event: KernelEvent) {
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     // Deferred replies (external undo running in another realm).
     let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
+    let mut pro_clocks: HashMap<String, (u64, bool)> = HashMap::new();
     for msg in rx {
+        // Prepare and execute in this same actor turn: no snapshot/read/write
+        // race, and all writes retain the ordinary publication/event paths.
+        let msg = match msg {
+            Msg::ProClock {
+                project,
+                document,
+                available,
+                reply,
+            } => {
+                let valid = kernel
+                    .project(&project)
+                    .is_some_and(|p| p.store().doc_id() == document);
+                if valid {
+                    pro_clocks.insert(project, (document, available));
+                }
+                reply(valid);
+                continue;
+            }
+            Msg::ProEditing {
+                project,
+                request,
+                reply,
+            } => {
+                let clock = pro_clocks
+                    .get(&project)
+                    .is_some_and(|&(doc, available)| doc == request.document && available);
+                match crate::pro_editing::prepare(&kernel, &project, request, clock) {
+                    Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
+                        project,
+                        request,
+                        reply: Box::new(move |v| {
+                            reply(v.map(crate::pro_editing::ProReply::Document))
+                        }),
+                    },
+                    Ok(crate::pro_editing::Prepared::State(tx)) => Msg::State {
+                        tx,
+                        reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::State))),
+                    },
+                    Ok(crate::pro_editing::Prepared::Inspection(v)) => {
+                        reply(Ok(crate::pro_editing::ProReply::Inspection(v)));
+                        continue;
+                    }
+                    Ok(crate::pro_editing::Prepared::Declined) => {
+                        reply(Ok(crate::pro_editing::ProReply::Declined));
+                        continue;
+                    }
+                    Err(e) => {
+                        reply(Err(e));
+                        continue;
+                    }
+                }
+            }
+            other => other,
+        };
         match msg {
+            Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
             Msg::Profile { call, reply } => reply(kernel.profile(call)),
             Msg::PrepareSave {
                 session,

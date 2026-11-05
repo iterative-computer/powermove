@@ -176,3 +176,41 @@ files; existing warnings remain in out-of-lane files. Repository hook and staged
 each logical commit. The environment initially lacked the activation/tooling
 and required parity tags; local tools were installed outside Git and the public
 v1.2.0/v1.3.0 tag objects were fetched for the existing parity tests.
+
+## 2026-11-04 — cloud pro2 actor and automation adapter
+
+`KernelHandle::pro_editing` now queues structured native pro actions on the
+existing actor. `ProAction::decode` accepts strict argument objects for all
+pro timing/link operations, linked selection, sync inspection, source marks,
+source insert/overwrite and shuttle. This is an adapter for native UI/MCP hosts,
+not an alteration of the frozen MCP tool schemas. The authenticated caller,
+observed document-open identity and revisions come from the host, never tool
+arguments. A native host must explicitly bind a real clock using
+`bind_pro_clock`; persisted transport cannot assert availability, and bindings
+from a prior document lifetime cannot drive a reopened project.
+
+Document actions become ordinary guarded `Transact` calls, preserving locks,
+provenance, journal notices, lost-ack txid deduplication and Undo. Linked selection
+uses the ordinary selection route. Source marks are partial session facts under
+`session.proSource`, bound to an explicit composition and preserving opaque
+session/monitor members. Marks and transport require the observed state revision;
+source edits resolve the current marks on the actor in the same turn as applying
+the command. State-dependent actions deliberately reject txids and require fresh
+inspection on retry. Inspection returns exact document/state identifiers as
+strings, transport, source marks, clock availability and deduplicated sync badges.
+Marks and transport do not create document history. Clock observation is a typed
+native-host operation and cannot be supplied by decoded automation arguments.
+
+Decisions: N1/N2 complete the missing native workflows through the existing
+catalog; N3/N7 use stable ids, strict arguments, lifetime/revision fencing and
+actor-time mark resolution; N4 keeps all existing history, opaque fields and
+journal warnings; N6 leaves legacy command/key/MCP contracts intact; N8 routes
+through asynchronous actor messages with no JS, engine or UI waits. No visual
+output or new UX is introduced; there are no DESIGN-TODO(opus) additions.
+
+The existing domain tests remain, with additional actor workflows covering
+ripple/roll/slide, linked selection/bypass/split/delete, sync badges, source A/V
+insert/overwrite, marks, transport, real transaction gestures, stale work,
+locked downstream clips and retry deduplication. Production tool registration,
+menus/gestures and engine clock delivery are outside this lane's owned paths;
+Linux adapter tests do not claim those app/Mac bindings are complete.
