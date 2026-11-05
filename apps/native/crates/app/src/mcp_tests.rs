@@ -354,13 +354,8 @@ fn implemented_edits_keep_mcp_origin_in_durable_history() {
 }
 
 #[test]
-fn live_app_mcp_exports_unique_packed_files_without_adopting_or_overwriting_source() {
+fn live_app_mcp_exports_unique_packed_library_files_without_adopting_a_destination() {
     let f = Fixture::new();
-    let source = f._root.path().join("working.pmv");
-    f.host
-        .save(f.host.current().unwrap(), Some(source.clone()))
-        .unwrap();
-    let original = std::fs::read(&source).unwrap();
     let mut connection = f.connection();
     start(&mut connection);
     add(&mut connection, "changed");
@@ -387,7 +382,7 @@ fn live_app_mcp_exports_unique_packed_files_without_adopting_or_overwriting_sour
         assert_eq!(after.saving, before.saving);
     }
     assert_ne!(paths[0], paths[1]);
-    assert_eq!(std::fs::read(source).unwrap(), original);
+    assert!(f.host.kernel.published("test").unwrap().path.is_none());
     connection
         .dispatch("finish_session", &json!({"commit":true}))
         .unwrap();
@@ -449,4 +444,47 @@ fn queued_app_mcp_call_cannot_edit_a_reopened_document_with_the_same_project_id(
         after.snapshot.document.to_value(),
         before.snapshot.document.to_value()
     );
+}
+
+#[test]
+fn live_app_named_mcp_save_is_in_place_and_stale_document_saves_are_refused() {
+    let f = Fixture::new();
+    let source = f._root.path().join("working.pmv");
+    f.host
+        .save(f.host.current().unwrap(), Some(source.clone()))
+        .unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let mut connection = f.connection();
+    start(&mut connection);
+    add(&mut connection, "named-edit");
+    let before = f.host.kernel.published("test").unwrap();
+    assert!(before.dirty);
+    for _ in 0..2 {
+        let response = connection.dispatch("save_project", &json!({})).unwrap();
+        assert_eq!(response["path"], json!(source));
+        let after = f.host.kernel.published("test").unwrap();
+        assert_eq!(after.path.as_ref(), Some(&source));
+        assert_eq!(after.revision(), before.revision());
+        assert!(!after.dirty);
+        let opened = pm_kernel::open_project(&source, Default::default()).unwrap();
+        assert_eq!(
+            opened.document.to_value(),
+            before.snapshot.document.to_value()
+        );
+    }
+    assert_ne!(std::fs::read(&source).unwrap(), original);
+    assert!(!f.host.profile.join("exports").exists());
+    let bytes = std::fs::read(&source).unwrap();
+    let refused = f
+        .host
+        .kernel
+        .prepare_document_save(f.host.current().unwrap(), before.snapshot.doc_id + 1)
+        .wait()
+        .unwrap();
+    assert!(refused.is_err());
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
+    assert!(!f.host.kernel.published("test").unwrap().saving);
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
 }

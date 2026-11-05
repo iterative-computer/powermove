@@ -133,6 +133,43 @@ impl Host {
         }
         Ok(json!({"projectId":session.project,"path":path}))
     }
+    fn save_project(&self, session: SessionHandle, document: u64) -> Result<Value> {
+        let published = self
+            .kernel
+            .published(&session.project)
+            .ok_or_else(stopped)?;
+        if published.snapshot.doc_id != document {
+            return Err(Error::invalid("The document was closed or replaced."));
+        }
+        if published.path.is_none() {
+            return self.export(session, document);
+        }
+        let save = self
+            .kernel
+            .prepare_document_save(session.clone(), document)
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        let reply = self
+            .kernel
+            .finish_save(save.run())
+            .wait()
+            .ok_or_else(stopped)?
+            .map_err(Error::kernel)?;
+        match reply {
+            ShellReply::Saved {
+                session,
+                recovery_copy: None,
+            } => {
+                let published = self
+                    .kernel
+                    .published(&session.project)
+                    .ok_or_else(stopped)?;
+                Ok(json!({"projectId":session.project,"path":published.path}))
+            }
+            other => Err(Error::kernel(other)),
+        }
+    }
     fn save(&self, session: SessionHandle, path: Option<PathBuf>) -> Result<Value> {
         let p = self
             .kernel
@@ -478,7 +515,7 @@ impl Connection {
         if name == "save_project" {
             return self
                 .host
-                .export(run.session.clone().unwrap(), p.snapshot.doc_id);
+                .save_project(run.session.clone().unwrap(), p.snapshot.doc_id);
         }
         let doc = document(&p);
         let time = p
