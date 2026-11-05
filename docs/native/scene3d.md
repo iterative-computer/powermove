@@ -229,7 +229,17 @@ instance transforms at exact requested time, retain fit normalization and source
 material records, and expose bounded decoded embedded map layers. Geometry hashes
 cover positions, normals, UVs and indices independently of animated transforms.
 `pm-engine-service::studio::DocumentSource` consumes it for preview and the same
-export-child reconstruction. CAD's converted GLB goes through the same decoder;
-this is not evidence of an installed/signed Mac CAD helper or real CAD fixtures.
+export-child reconstruction. Owned `.bin` caches use the retained asset format
+or historical import name for decoder selection, with bytes still read only
+from the approved media path.
 Splats retain the existing core decoder and normalization and use the renderer's
 separate Gaussian rasterizer, as required by the Studio spec.
+
+Mac follow-up uses native OCCT 7.9.3 with a built, development-signed helper and
+independent STEP/IGES/BREP fixture generator. All four `native_cad` decoder tests
+and all three kernel `scene3d_native_import` tests pass. The real converted STEP
+also passes `metal_imported_step_keeps_xde_parts_preview_final_and_child_export`
+in the six-test Studio Metal suite (feature `pm-engine-service/native-cad-tests`),
+including exact repeated Final and decoded windowless child exports. This closes
+the imported-resource headless rendering boundary; signed distribution/helper
+packaging, complete Studio presentation and physical/visual gates remain open.

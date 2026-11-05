@@ -99,11 +99,34 @@ impl DocumentSource {
             .take(pm_scene3d::import::MAX_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        let resource = pm_scene3d::render::Resource::load(
-            path.to_str().ok_or("Invalid model resource path")?,
-            &bytes,
-        )
-        .map_err(|e| e.to_string())?;
+        // Owned imports are copied to content-addressed or `.bin` caches.
+        // Their saved format/name describes the decoder; it never grants a
+        // file read. The approved media path remains the only byte source.
+        let asset = self
+            .snapshot
+            .document
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(id));
+        let name = asset
+            .and_then(|asset| asset.get("format"))
+            .and_then(|format| {
+                format
+                    .to_value()
+                    .as_str()
+                    .map(|format| format!("resource.{format}"))
+            })
+            .or_else(|| {
+                asset
+                    .and_then(|asset| asset.get("name"))
+                    .and_then(|name| name.to_value().as_str().map(str::to_owned))
+            });
+        let name = name
+            .as_deref()
+            .or_else(|| path.to_str())
+            .ok_or("Invalid model resource path")?;
+        let resource =
+            pm_scene3d::render::Resource::load(name, &bytes).map_err(|e| e.to_string())?;
         resources.insert(id.into(), resource.clone());
         Ok(resource)
     }

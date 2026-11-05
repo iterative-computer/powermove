@@ -178,6 +178,21 @@ fn final_shutter_composition_encodes_deterministically_in_the_windowless_child()
     encoded_repeat(document(true, 100.), Default::default());
 }
 fn encoded_repeat(doc: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) {
+    encoded_repeat_with_witness(doc, media, |pixels| {
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[0] > 20 && p[1] == 0 && p[2] == 0)
+                .count()
+                > 100
+        );
+    });
+}
+fn encoded_repeat_with_witness(
+    doc: Arc<pm_model::Document>,
+    media: pm_export::render::MediaPaths,
+    witness: impl Fn(&[u8]),
+) {
     use pm_engine_service::jobs::{ExportHandle, ExportRequest};
     use pm_protocol::{
         color::OutputColor,
@@ -254,14 +269,7 @@ fn encoded_repeat(doc: Arc<pm_model::Document>, media: pm_export::render::MediaP
                     let bytes = std::fs::read(path).unwrap();
                     let image = pm_render::scene3d::gltf::asset::decode(&bytes).unwrap();
                     assert_eq!((image.width, image.height), (64, 64));
-                    assert!(
-                        image
-                            .rgba
-                            .chunks_exact(4)
-                            .filter(|p| p[0] > 20 && p[1] == 0 && p[2] == 0)
-                            .count()
-                            > 100
-                    );
+                    witness(&image.rgba);
                     image.rgba
                 })
                 .collect::<Vec<_>>(),
@@ -346,6 +354,8 @@ fn imported_document() -> Arc<pm_model::Document> {
     }
     // The imported physical material must win over this authored override.
     object["d"]["data"]["object"]["material"]["p"]["color"]["v"] = json!("#000000");
+    project["assets"]["imported"] =
+        json!({"id":"imported","kind":"model","format":"glb","name":"Renamed model"});
     pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap())
         .snapshot()
         .document
@@ -354,7 +364,7 @@ fn imported_document() -> Arc<pm_model::Document> {
 fn metal_imported_multi_object_reflection_preview_final_and_export() {
     use studio::SceneSource;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assembly.glb");
+    let path = dir.path().join("asset-0.bin");
     std::fs::write(&path, imported_glb()).unwrap();
     let mut media = pm_export::render::MediaPaths::default();
     media.paths.insert("imported".into(), path);
@@ -458,10 +468,144 @@ fn metal_imported_multi_object_reflection_preview_final_and_export() {
     encoded_repeat(doc, media);
 }
 
+#[cfg(feature = "native-cad-tests")]
+#[test]
+fn metal_imported_step_keeps_xde_parts_preview_final_and_child_export() {
+    use pm_scene3d::import::cad::{Format, OpenCascade, Settings, Tessellator};
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        std::process::Command::new(
+            std::env::var_os("PM_SCENE3D_CAD_FIXTURES").expect("native CAD fixture generator")
+        )
+        .arg(dir.path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    );
+    let cad = OpenCascade {
+        helper: std::env::var_os("PM_SCENE3D_CAD_HELPER")
+            .expect("native OpenCascade helper")
+            .into(),
+        scratch_root: dir.path().canonicalize().unwrap(),
+    };
+    let step = std::fs::read(dir.path().join("product.step")).unwrap();
+    let glb = cad
+        .convert(Format::Step, &step, Settings::default())
+        .unwrap();
+    let path = dir.path().join("cad-cache.bin");
+    std::fs::write(&path, glb).unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.paths.insert("imported".into(), path);
+    let mut value: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &imported_document().to_value().unwrap(),
+    ))
+    .unwrap();
+    value["assets"]["imported"]["name"] = json!("product.glb");
+    value["assets"]["imported"]["format"] = json!("glb");
+    let layers = value["comps"]["test"]["layers"].as_array_mut().unwrap();
+    layers.retain(|layer| layer["id"] != "card");
+    let camera = layers
+        .iter_mut()
+        .find(|layer| layer["id"] == "camera")
+        .unwrap();
+    camera["d"]["data"]["environment"]["p"]["ambient"]["v"] = json!(0.5);
+    let doc =
+        pm_kernel::DocumentStore::new_untitled(pm_model::json::parse(&value.to_string()).unwrap())
+            .snapshot()
+            .document;
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+    assert!(input.instances.len() >= 2, "real CAD assembly parts");
+    let materials = input.materials.as_ref().unwrap();
+    assert!(materials.len() >= 3, "CAD face colors reach the renderer");
+    assert!(materials.iter().any(|m| m.base[2] > m.base[0]));
+    let gpu = pm_gpu::Gpu::new("native CAD Studio").unwrap();
+    assert_eq!(gpu.info.backend, wgpu::Backend::Metal);
+    let mut renderer = Renderer::new(gpu.device, gpu.queue);
+    let mut output = vec![];
+    for _ in 0..2 {
+        studio::attach(&mut renderer, doc.clone(), &media);
+        let frame = renderer
+            .render(
+                &doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0. && p[..3].iter().any(|v| *v > 0.08))
+                .count()
+                > 100
+        );
+        output.push(pixels);
+    }
+    assert_eq!(output[0], output[1], "fixed-seed CAD Final");
+    let mut preview = request();
+    preview.export = false;
+    preview.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &preview,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty());
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[..3].iter().any(|v| *v > 0.08))
+    );
+    let mut host = Headless::new().unwrap();
+    assert_eq!(
+        output[0],
+        host.export_reference(
+            &Scene {
+                doc: doc.clone(),
+                comp: "test".into(),
+                media: media.clone(),
+                content: 1
+            },
+            Ticks::ZERO,
+            Size::new(64, 64)
+        )
+        .unwrap()
+    );
+    encoded_repeat_with_witness(doc, media, |pixels| {
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0 && p[..3].iter().any(|v| *v > 20))
+                .count()
+                > 100
+        );
+    });
+}
+
 #[test]
 fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("capture.splat");
+    let path = dir.path().join("asset-0.bin");
     let mut bytes = vec![];
     for x in [-1f32, 0., 1.] {
         for v in [x, 0., 0., 0.15, 0.15, 0.15] {
@@ -477,6 +621,8 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
         &source.to_value().unwrap(),
     ))
     .unwrap();
+    value["assets"]["imported"]["name"] = json!("capture.splat");
+    value["assets"]["imported"]["format"] = json!("splat");
     value["comps"]["test"]["w"] = json!(65);
     value["comps"]["test"]["h"] = json!(65);
     let layers = value["comps"]["test"]["layers"].as_array_mut().unwrap();
@@ -524,14 +670,33 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
         0,
         "splats never enter the surface tracer"
     );
+    request.export = false;
+    request.output_kind = OutputKind::Preview;
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty());
+    assert!(
+        renderer
+            .read_rgba(&frame)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[1] > 0. && p[3] > 0.)
+    );
     let mut host = Headless::new().unwrap();
     assert_eq!(
         output[0],
         host.export_reference(
             &Scene {
-                doc,
+                doc: doc.clone(),
                 comp: "test".into(),
-                media,
+                media: media.clone(),
                 content: 1
             },
             Ticks::ZERO,
@@ -539,4 +704,13 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
         )
         .unwrap()
     );
+    encoded_repeat_with_witness(doc, media, |pixels| {
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .filter(|p| p[1] > 20 && p[3] > 0)
+                .count()
+                > 100
+        );
+    });
 }

@@ -8,6 +8,7 @@ publish = false
 default = ["kernel"]
 kernel = ["dep:pm-kernel", "dep:pm-scene3d"]
 studio-oidn = ["pm-studio/oidn"]
+native-cad-tests = ["kernel", "pm-scene3d/native-cad-tests"]
 
 [dependencies]
 pm-studio = { path = "../../../../engine/crates/pm-studio" }

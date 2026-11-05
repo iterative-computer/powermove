@@ -272,6 +272,9 @@ part transforms, shared meshes, source physical materials, and embedded maps.
 The native CAD importer's converted GLB uses this same resource path. Geometry
 identity hashes complete mesh data, so replacing a document source does not
 invalidate an unchanged mesh's BLAS. Material extraction is linear in part count.
+Owned content-addressed/`.bin` cache paths select their decoder from the saved
+asset format (historical name as fallback), not the renamed display label. Only
+the approved media path supplies bytes; saved names never grant file access.
 
 Gaussian PLY/.splat resources take a separate native EWA raster pass: projected
 covariance, stable depth sorting, source Gaussian cutoff and premultiplied layer
@@ -284,10 +287,22 @@ Headless Metal tests in engine-service `tests/studio.rs`:
   reflection, exact fixed-seed repeat, preview, service output and two matching
   decoded shutter-enabled PNG exports from the windowless child.
 - `metal_imported_splats_keep_gaussian_pixels_layer_order_and_export` verifies
-  Gaussian center/falloff, exact repeat, service export parity and zero surface
-  traces for a splat-only composition.
+  Gaussian center/falloff, exact repeat, preview, service parity, two matching
+  decoded child PNG exports and zero surface traces for a splat-only composition.
+- `metal_imported_step_keeps_xde_parts_preview_final_and_child_export`, enabled
+  by `pm-engine-service/native-cad-tests`, generates actual STEP with the native
+  OCCT writer, converts it through XDE, and verifies part/face materials,
+  nonempty Metal pixels, preview, fixed-seed Final repeat, service parity and
+  two matching decoded child PNG exports. It requires the real helper and
+  fixture generator; absent tools fail the test.
 
-This does not close the remaining Studio gates. Real native OpenCascade build
-and end-to-end CAD import qualification, authored material-map slots and live
+**The imported model/CAD/splat headless preview/export gate is closed by these
+passing tests.** All six Studio tests pass on Metal, including `.bin` cache
+resources. Native OCCT 7.9.3 additionally passes all four decoder tests and the
+three kernel STEP/IGES/BREP import/Undo/save/reopen tests. The helper and fixture
+generator were built and development-signed on Mac; distribution packaging and
+release signing remain separate gates.
+
+This does not close full Studio acceptance. Authored material-map slots and live
 screens, complete depth/barrier/catcher handling, Fast, cancellation between GPU
 slices, float/HDR presentation and physical/visual acceptance remain open.
