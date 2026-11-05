@@ -207,6 +207,25 @@ fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
             .join(entry["index"].as_str().unwrap()),
         &record,
     );
+    let mut proxy = records[1]["record"].clone();
+    let proxy_source = root.join("external-proxy.mov");
+    fs::rename(
+        config
+            .electron_profile
+            .join("Media Store")
+            .join(proxy["file"].as_str().unwrap()),
+        &proxy_source,
+    )
+    .unwrap();
+    proxy.as_object_mut().unwrap().remove("file");
+    proxy["sourcePath"] = json!(proxy_source);
+    write(
+        &config
+            .electron_profile
+            .join("Media Store/Index")
+            .join(records[1]["index"].as_str().unwrap()),
+        &proxy,
+    );
     let project_path = config.electron_profile.join("store/project.p.json");
     let mut project: Value = read(&project_path);
     project["proj"]["assets"]["clip"]
@@ -238,4 +257,9 @@ fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
     );
     assert_eq!(before, files(&config.electron_profile));
     assert_eq!(fs::read(source).unwrap(), b"synthetic original");
+    assert_eq!(fs::read(proxy_source).unwrap(), b"synthetic playback proxy");
+    assert_eq!(
+        pass["diskRecords"]["media:proxy"]["source"],
+        "main-source-link"
+    );
 }

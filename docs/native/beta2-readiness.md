@@ -418,3 +418,10 @@ Decisions: full digest verification even for unchanged mtime (N2/N3); descriptor
 range reads and no main-thread I/O in Rust (N1/N8); explicit source/owned
 provenance and proxy refusal (N3/N4); retain raw metadata and all original inputs
 (N4/N6/prune rule). No visual or interaction choice was introduced.
+
+Resident main source links, including linked playback renditions, also enter the
+existing additive native media-object importer. The copied object is verified
+against main SHA-256 and native BLAKE3; the captured source-link record remains
+unchanged. A proxy link supplies playable stored bytes without supplying an
+original identity. The source/destination overlap guard covers source links too.
+The synthetic source-link coordinator test covers both original and proxy links.

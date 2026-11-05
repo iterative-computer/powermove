@@ -229,9 +229,19 @@ pub fn migrate_many_with_disk(
         "unsafe migration destination"
     );
     for record in disk_records {
-        if let Some(path) = &record.owned_path {
+        if let Some(path) = record.owned_path.as_ref().or(record.source_path.as_ref()) {
+            let source = match path.canonicalize() {
+                Ok(source) => source,
+                Err(error)
+                    if record.source_path.is_some()
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             ensure!(
-                !path.canonicalize()?.starts_with(root.canonicalize()?),
+                !source.starts_with(root.canonicalize()?),
                 "migration destination overlaps disk media input"
             );
         }
@@ -364,10 +374,16 @@ pub fn migrate_many_with_disk(
         }
     }
     for r in disk_records {
-        let Some(path) = &r.owned_path else {
+        // A source-linked proxy still needs playable bytes. Retain a verified
+        // native copy without granting original provenance to that rendition.
+        let Some(_verified) = r.open_verified(&mut crate::library_media::ResidentSources)? else {
             continue;
         };
-        r.verify_owned()?;
+        let path = r
+            .owned_path
+            .as_ref()
+            .or(r.source_path.as_ref())
+            .context("disk media has no path")?;
         let mut key = import_file(
             root,
             path,
@@ -385,7 +401,12 @@ pub fn migrate_many_with_disk(
         let mut copied = r.clone();
         copied.owned_path = Some(object_path(root, &key.hash)?);
         copied.verify_owned()?;
-        key.source = "main-disk".into();
+        key.source = if r.source_path.is_some() {
+            "main-source-link"
+        } else {
+            "main-disk"
+        }
+        .into();
         pass.disk_records.insert(r.key.clone(), key.clone());
         save(&mut state, &id, &pass, &state_file)?;
         hook(Checkpoint::ObjectPublished)?;

@@ -130,7 +130,7 @@ pub(crate) fn inventory(
                     .is_none_or(|revision| revision == &d.revision)
         });
         if let Some(disk) = disk {
-            if r.source_path.is_none() {
+            if r.source_path.is_none() && !r.is_proxy() {
                 r.source_path = disk.source_path.clone();
             }
             if let Some(path) = &disk.owned_path {
