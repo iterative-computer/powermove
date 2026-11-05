@@ -362,3 +362,16 @@ with durable history, nested child cancellation/draining, watch/unwatch and
 exactly-once accepted continuation delivery. Test actor/file durability and
 runtime-owned auth/session preservation under process kill. Linux doubles and
 source-derived recordings do not certify these behaviors, native UI or signing.
+
+## 2026-11-05 — main A01–A10 portable services
+
+The current behavior reference is main at
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; legacy v1.2.0 remains a
+compatibility requirement. See [agents-main.md](agents-main.md) for the portable
+A01–A10 service implementation, source-derived evidence, decisions by rule and
+explicit missing application/MCP/kernel hosts. Claude Project Auto now selects
+main's `auto` classifier flag; historical text describing both modes asking is
+superseded for that flag only, pending live runtime proof. Claude Desktop
+registration has a mandatory explicit, single-use, reviewed-plan consent gate;
+no client settings were modified. Full strict replay and platform/live gates
+remain open. No visual design was chosen by this lane.
