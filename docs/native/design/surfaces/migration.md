@@ -132,11 +132,31 @@ stays enabled.
 **Conflict review.** Three-way merge isn't built, so conflicts are reported and both
 sides kept. No merge UI ships. The row's action stays `Show in Finder`.
 
-**Going back.** Native keeps rollback-compatible saves and never touches the original
-library. Report footer adds `How to Go Back…`, an alert: `Your original app still has
-everything from before.` / `Work you did in Powermove Native stays here. Save a project
-as a .pmv file to open it in the original app.` / `OK`. Reverse migration isn't designed:
-see [README §6](README.md#6-owner-questions-raised-by-these-specs).
+**Going back.** There is no reverse migration (owner decision, 2026-11-04), and no copy
+may suggest one. Native never touches the original library, so the original app keeps
+everything as it was at the copy. Work done in Native doesn't move back. Native's external
+`.pmv` saves stay rollback-compatible by default, but a file using something the original
+app can't read (new 3D, for one) won't open there.
+
+Report footer adds `About Going Back…`, an alert:
+
+| Part | Copy |
+|---|---|
+| Message | `Your original app still has everything from before.` |
+| Informative | `Work you do in Powermove Native doesn’t move back to it. It can open a .pmv saved here only if it can read everything in the file. If it can’t, it refuses the file, and the file isn’t changed.` |
+| Button | `OK` |
+
+**Refusal in the original app.** This alert belongs to the Electron transition release, not
+to Native. The original app checks a `.pmv` before opening it and refuses a file it can't
+read fully; it never opens part of one, never migrates it and never writes to it.
+
+| Part | Copy |
+|---|---|
+| Message | `“{file}” needs a newer version of Powermove.` |
+| Informative | `This version can’t read it, so it wasn’t opened. The file wasn’t changed.` |
+| Button | `OK` |
+
+Project-library rows are unaffected, because Native's library is a separate copy.
 
 ## Don't
 
@@ -144,3 +164,5 @@ see [README §6](README.md#6-owner-questions-raised-by-these-specs).
 - Don't imitate the Keychain alert, or read Keychain without a fresh click.
 - Don't show names or paths on the gate.
 - Don't describe the copy as a move.
+- Don't promise that work can go back, or that every `.pmv` from Native opens in the
+  original app.

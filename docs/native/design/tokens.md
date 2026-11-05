@@ -190,6 +190,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.track_row` | Timeline layer row | 28 | 28 | 28 | 28 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Inspector value column width shared by every row | 128 | 128 | 128 | 128 |
+| `metrics.viewer_3d_collapse` | Viewer width below which the 3D toolbar becomes one pull-down | 560 | 560 | 560 | 560 |
+| `metrics.viewer_3d_labels` | Minimum viewer width for labels in the 3D toolbar | 860 | 860 | 860 | 860 |
 | `metrics.welcome_height` | Welcome window height | 640 | 640 | 640 | 640 |
 | `metrics.welcome_width` | Welcome window width | 900 | 900 | 900 | 900 |
 | `metrics.window_height` | Default window height | 900 | 900 | 900 | 900 |
@@ -216,6 +218,8 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `motion.overlay_idle` | Still time before the Focus overlay capsule fades (s) | 2 | 2 | 2 | 2 |
 | `motion.reduced` | Cross-fade used under Reduce Motion (s) | 0.15 | 0.15 | 0.15 | 0.15 |
 | `motion.start_scale` | Scale an appearing surface starts from | 0.96 | 0.96 | 0.96 | 0.96 |
+| `motion.tooltip_delay` | Delay before a tooltip appears for hover or keyboard focus (s) | 0.38 | 0.38 | 0.38 | 0.38 |
+| `motion.tooltip_warm` | Time window for an immediate tooltip swap to a neighbouring control (s) | 0.6 | 0.6 | 0.6 | 0.6 |
 | `motion.wheel_rest` | Pointer rest before the scroll wheel edits a hovered value (s) | 0.5 | 0.5 | 0.5 | 0.5 |
 <!-- tokens:end -->
 
@@ -232,3 +236,17 @@ unchanged. Existing values and consumers remain in place (prune rule).
 This adds tokens for the approved surface specs; it does not implement those
 surfaces or establish macOS visual acceptance. Actual Mac output remains
 provisional until Opus design review.
+
+## Additional surface tokens — 2026-11-04
+
+Added `metrics.viewer_3d_labels` (860 pt), `metrics.viewer_3d_collapse` (560 pt),
+`motion.tooltip_delay` (0.38 s), and `motion.tooltip_warm` (0.6 s) from the
+updated [surface token requests](surfaces/README.md#7-new-tokens-requested-by-these-specs).
+Decision (N3): preserve Opus's exact thresholds and timings from
+[3D Studio §2](surfaces/3d-studio.md#2-viewer-3d-toolbar) and
+[Tooltips §6](surfaces/main-delta-ui.md#6-tooltips-u09), including under Reduce
+Motion; these are geometry and interaction delays, not animation durations.
+Decision (N3, N6): keep these native tokens outside the theme patch contract.
+The spec test now covers all thirteen requests across both appearances and
+every accessibility combination. Mac presentation and interaction still need
+verification and Opus review.

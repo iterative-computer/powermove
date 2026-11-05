@@ -150,6 +150,14 @@ const ROLES: &[(&str, &str)] = &[
         "Width of In and Out brackets on rulers and scrubbers",
     ),
     ("metrics.sync_badge", "Linked-clip sync badge height"),
+    (
+        "metrics.viewer_3d_labels",
+        "Minimum viewer width for labels in the 3D toolbar",
+    ),
+    (
+        "metrics.viewer_3d_collapse",
+        "Viewer width below which the 3D toolbar becomes one pull-down",
+    ),
     ("metrics.min_width", "Minimum window width"),
     ("metrics.min_height", "Minimum window height"),
     ("metrics.palette_width", "Command palette width"),
@@ -304,6 +312,14 @@ const ROLES: &[(&str, &str)] = &[
     (
         "motion.overlay_idle",
         "Still time before the Focus overlay capsule fades (s)",
+    ),
+    (
+        "motion.tooltip_delay",
+        "Delay before a tooltip appears for hover or keyboard focus (s)",
+    ),
+    (
+        "motion.tooltip_warm",
+        "Time window for an immediate tooltip swap to a neighbouring control (s)",
     ),
 ];
 
@@ -655,7 +671,7 @@ fn surface_tokens_match_opus_spec_in_every_appearance() {
             (name, value)
         })
         .collect();
-    assert_eq!(requested.len(), 9, "review new surface token requests");
+    assert_eq!(requested.len(), 13, "review new surface token requests");
     for scheme in [Scheme::Light, Scheme::Dark] {
         for increase_contrast in [false, true] {
             for reduce_transparency in [false, true] {
@@ -678,7 +694,7 @@ fn surface_tokens_match_opus_spec_in_every_appearance() {
                         let before = t.clone();
                         assert!(
                             t.apply_patch([(*name, 0.)]).is_err(),
-                            "surface data colours and geometry are not theme-patchable: {name}"
+                            "surface tokens are not theme-patchable: {name}"
                         );
                         assert_eq!(t, before, "a rejected patch changes nothing");
                     }

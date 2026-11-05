@@ -214,6 +214,10 @@ pub struct Metrics {
     pub mark_bracket: f32,
     /// Linked-clip sync badge height.
     pub sync_badge: f32,
+    /// Minimum viewer width for labels in the 3D toolbar.
+    pub viewer_3d_labels: f32,
+    /// Viewer width below which the 3D toolbar becomes one pull-down.
+    pub viewer_3d_collapse: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -228,6 +232,10 @@ pub struct Motion {
     pub wheel_rest: f64,
     /// Still time before the Focus overlay capsule fades (s).
     pub overlay_idle: f64,
+    /// Delay before a tooltip appears for hover or keyboard focus (s).
+    pub tooltip_delay: f64,
+    /// Time window for an immediate tooltip swap to a neighbouring control (s).
+    pub tooltip_warm: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -482,6 +490,8 @@ impl Tokens {
                 welcome_height: 640.,
                 mark_bracket: 6.,
                 sync_badge: 16.,
+                viewer_3d_labels: 860.,
+                viewer_3d_collapse: 560.,
             },
             typography: TypeScale {
                 minimum: 11.,
@@ -509,6 +519,8 @@ impl Tokens {
                 interaction: 0.075,
                 wheel_rest: 0.5,
                 overlay_idle: 2.,
+                tooltip_delay: 0.38,
+                tooltip_warm: 0.6,
             },
         };
         tokens.enforce_accessibility();
