@@ -1,0 +1,217 @@
+{
+  "note": "These cases assert explicit missing backing, not completed tool-body conformance. No capability is injected.",
+  "cases": [
+    {
+      "tool": "publish_extensions",
+      "arguments": {
+        "extensions": []
+      }
+    },
+    {
+      "tool": "import_media_to_timeline",
+      "arguments": {
+        "path": "/synthetic/native/input.wav"
+      }
+    },
+    {
+      "tool": "orchestrator_capabilities",
+      "arguments": {}
+    },
+    {
+      "tool": "delegate_task",
+      "arguments": {
+        "task": "Synthetic"
+      }
+    },
+    {
+      "tool": "task_status",
+      "arguments": {
+        "taskId": "Synthetic"
+      }
+    },
+    {
+      "tool": "task_cancel",
+      "arguments": {
+        "taskId": "Synthetic"
+      }
+    },
+    {
+      "tool": "task_send",
+      "arguments": {
+        "taskId": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_launch",
+      "arguments": {
+        "title": "Synthetic",
+        "message": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_list",
+      "arguments": {}
+    },
+    {
+      "tool": "thread_read",
+      "arguments": {
+        "threadId": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_send",
+      "arguments": {
+        "threadId": "Synthetic",
+        "message": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_watch",
+      "arguments": {
+        "threadId": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_unwatch",
+      "arguments": {
+        "threadId": "Synthetic"
+      }
+    },
+    {
+      "tool": "thread_cancel",
+      "arguments": {
+        "threadId": "Synthetic"
+      }
+    },
+    {
+      "tool": "publish_visual_reply",
+      "arguments": {
+        "title": "Synthetic",
+        "html": "Synthetic"
+      }
+    },
+    {
+      "tool": "edit_3d",
+      "arguments": {
+        "operation": "create"
+      }
+    },
+    {
+      "tool": "replace_media",
+      "arguments": {
+        "assetId": "Synthetic",
+        "path": "/synthetic/native/input.wav"
+      }
+    },
+    {
+      "tool": "import_media",
+      "arguments": {
+        "path": "/synthetic/native/input.wav"
+      }
+    },
+    {
+      "tool": "set_panel_layout",
+      "arguments": {
+        "name": "Synthetic",
+        "docks": [
+          {
+            "id": "left",
+            "panels": []
+          }
+        ]
+      }
+    },
+    {
+      "tool": "open_panel",
+      "arguments": {
+        "panelId": "Synthetic"
+      }
+    },
+    {
+      "tool": "get_panel_state",
+      "arguments": {
+        "panelId": "Synthetic"
+      }
+    },
+    {
+      "tool": "interact_panel",
+      "arguments": {
+        "panelId": "Synthetic",
+        "ref": "Synthetic",
+        "action": "click"
+      }
+    },
+    {
+      "tool": "capture_panel",
+      "arguments": {
+        "panelId": "Synthetic"
+      }
+    },
+    {
+      "tool": "computer_use_panel",
+      "arguments": {
+        "panelId": "Synthetic",
+        "action": "click",
+        "points": [
+          {
+            "x": 1,
+            "y": 1
+          }
+        ]
+      }
+    },
+    {
+      "tool": "get_workspace_state",
+      "arguments": {}
+    },
+    {
+      "tool": "stage_fork_rebase",
+      "arguments": {
+        "id": "synthetic-native"
+      }
+    },
+    {
+      "tool": "transcribe_media",
+      "arguments": {}
+    },
+    {
+      "tool": "store_library",
+      "arguments": {}
+    },
+    {
+      "tool": "store_install",
+      "arguments": {
+        "handle": "synthetic-native",
+        "slug": "synthetic-native"
+      }
+    },
+    {
+      "tool": "store_update",
+      "arguments": {
+        "localId": "synthetic-native"
+      }
+    },
+    {
+      "tool": "store_uninstall",
+      "arguments": {
+        "localId": "synthetic-native"
+      }
+    },
+    {
+      "tool": "store_publish_prepare",
+      "arguments": {
+        "localId": "synthetic-native"
+      }
+    },
+    {
+      "tool": "store_publish",
+      "arguments": {
+        "localId": "synthetic-native"
+      }
+    },
+    {
+      "tool": "generate_captions",
+      "arguments": {}
+    }
+  ]
+}

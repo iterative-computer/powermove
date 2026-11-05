@@ -638,3 +638,87 @@ Decisions and selecting rules:
   provenance, and preserve opaque memory data without inventing a shipped API.
 - **N4/N7:** expose explicit working-file ingress through kernel sessions,
   retaining original bytes and history rather than creating another packer.
+
+## 2026-11-04 — Native creative inspection and remaining backing
+
+**Current status, superseding the historical opening/table: 67 frozen tools /
+67 schema-identical / 23 concrete bodies + 10 existing host adapters /
+34 pending bodies.** The two new concrete bodies are
+`inspect_creative_workspace` and `inspect_creative_extension`. The 34 pending
+calls remain explicit failures; the new tests do not convert their absence into
+body-conformance passes.
+
+The worker-only `CreativeInspection` trait binds `creative::CreativeReader`, which reads actual saved After Effects preference/layout,
+script-panel, CEP and compiled-plugin inventories. It ports the frozen bounded
+Adobe property-map parser, normalized bounds/tab groups/visibility/windows,
+newest numeric preference version, current/named selection, modified-layout
+precedence and parse warnings. It does not guess a missing workspace or execute
+Adobe code. Tool IDs are opaque SHA-256-derived identities; responses omit local
+inventory roots. Script sources follow only bounded literal local includes;
+CEP file lists apply the frozen source allowlist, traversal/private-file rules,
+file/depth/count limits and explicit per-file reads. Compiled/protected sources
+remain metadata-only. All response copy comes from the tagged implementation.
+
+On macOS the default reader uses the tagged platform locations. Linux's default
+returns the tagged unsupported-platform result/error. Portable tests inject
+`CreativePaths { home, applications, system_cep }` rooted in canonicalized
+synthetic temporary directories. Kernel documents and edit observations are not
+refreshed by these main-host read tools. Planning sessions retain the frozen
+inspection allowlist (which excludes these tools); project-access and app
+sessions can use them.
+
+Inventory enumeration and reads use descriptor-relative `openat`,
+`O_NOFOLLOW` and `fstatat`, including every ancestor component, without `/proc`
+or GNU paths. Final file reads are capped again after opening and are nonblocking
+for special files. Authored source is never executed, copied into an extension,
+modified or removed. In addition to the tagged per-tool limits, a single
+inventory directory exceeding 65,536 entries returns a visible budget error.
+Source-tree ordering uses native ICU root Unicode collation rather than ASCII
+sorting or an inherited process locale; cross-locale Electron ordering is not
+claimed. Tests compare the source listings directly to the tagged reader under
+the recorded oracle locale, including uppercase names and Unicode content.
+
+`libc` supplies portable Darwin/Linux descriptor APIs; `icu_collator` supplies
+native Unicode collation. The root native lockfile adds only the MCP dependency
+edges and four required collation packages, with no version upgrades. The owned
+backend lockfile is also reconciled with the real dependency graph (including
+its previously absent pm-promedia→pm-protocol edges); no dependency was bulk-upgraded.
+No new crate/workspace member, Node runtime, Chromium dependency or visual
+surface was introduced. **No DESIGN-TODO(opus) was added:** no design choice or
+provisional UI was made.
+
+### Remaining 34 tool bodies — not completed by this lane
+
+| Tools | Required backing still absent on this base |
+| --- | --- |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_list`, `thread_read`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
+| `publish_extensions`, `stage_fork_rebase` | Complete API pack, provenance/base inventory, compiler/scanner/isolated activation admission and atomic promotion/reload/rebase coordinator. |
+| `import_media_to_timeline`, `import_media`, `replace_media` | Durable original-byte/fingerprint/probe admission, retained runtime versions and native media Undo coordinated with the kernel. File-open ingress does not implement media import. |
+| `edit_3d` | Complete scene edit/validation admission: `kernel/src/commands/scene3d.rs` still returns `NotImplemented`. |
+| `set_panel_layout`, `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel`, `computer_use_panel`, `get_workspace_state` | Workspace editing + external history continuations; registered live native/remote-DOM panel/input/capture/semantic-reference and renderer/workspace diagnostics hosts. Saved layout facts are insufficient. |
+| `transcribe_media`, `generate_captions` | Speech model/download/job/cache/original-PCM service and caption command admission; `kernel/src/commands/captions.rs` still returns `NotImplemented`. |
+| `store_library`, `store_install`, `store_update`, `store_uninstall`, `store_publish_prepare`, `store_publish` | Durable StoreKernel + permission/trust/provenance/local-tree/activation/publish-confirmation coordinator. `store-host/src/install.rs` supplies an in-memory StoreKernel test implementation and primitives, not this production coordinator. |
+
+`fixtures/unavailable-wave4.json` and its regression exercise all 34 names with
+schema-valid requests, require inspectable unavailable errors, and verify no
+project or history changes. **These are 34 missing-capability refusal cases,
+not 34 implemented tool bodies.** No optimistic flags, placeholder jobs, metadata
+imports, fake pixel outputs or success-shaped catalogs replace the missing
+services. Existing ten worker adapters also still require real application
+injection. Broader per-tool error/body identity beyond the source-paired cases
+remains an integration gate.
+
+Decisions and selecting rules:
+
+- **N3/N6/N7:** use the actual bounded native filesystem reader and frozen result
+  adapter, opaque IDs and explicit roots, rather than a catalog-only claim.
+- **N1/N3/N4:** refuse linked ancestors and unbounded directories even where the
+  tag's pathname reader could follow them; such filesystem exposure is not
+  authored creative intent. Preserve all source/configuration bytes. Digest truncation does not split a Unicode scalar: a
+  boundary-crossing emoji is omitted from the bounded label rather than producing
+  the tag’s lone surrogate; the original XML/source remains byte-identical. This
+  JS string-slicing artifact is not authored naming intent (N3 quirk policy).
+- **N7/N8:** use deterministic native Unicode collation and worker-only I/O;
+  Node executes tagged code only in tests, never in the application.
+- **N1/N3/N4/N6:** keep each absent coordinator/body visible. The overall request
+  to complete every remaining MCP tool is **BLOCKED**, not merge-ready completion.

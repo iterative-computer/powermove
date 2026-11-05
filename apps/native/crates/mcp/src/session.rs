@@ -138,6 +138,12 @@ impl McpSession {
             }
             return self.manage(&mut host, args);
         }
+        if name == "inspect_creative_workspace" {
+            return host.creative.workspace(args);
+        }
+        if name == "inspect_creative_extension" {
+            return host.creative.extension(args);
+        }
         if name == "get_panel_layout" {
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;

@@ -137,6 +137,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "edit_layer_strips",
     "rollback_changes",
     "get_panel_layout",
+    "inspect_creative_workspace",
+    "inspect_creative_extension",
     "get_3d_scene",
     "check_project",
     "list_media",

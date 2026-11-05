@@ -381,3 +381,49 @@ fn selection_body_errors_deduplication_and_extra_fields_match_tag() {
         }
     }
 }
+
+#[test]
+fn remaining_34_bodies_remain_explicit_blockers_without_mutating_the_project() {
+    let evidence: Value =
+        serde_json::from_str(include_str!("../fixtures/unavailable-wave4.json")).unwrap();
+    let pending: std::collections::HashSet<_> = catalog::tools()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .filter(|n| !catalog::IMPLEMENTED.contains(n))
+        .collect();
+    assert_eq!(pending.len(), 34);
+    let cases = evidence["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), pending.len());
+    let f = Fixture::new();
+    let mut session = f.session();
+    session
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Explicit backing failures"}),
+        )
+        .unwrap();
+    let host = f.host.lock().unwrap();
+    let id = host.active.as_ref().unwrap().clone();
+    let before = host.read_document(&id).unwrap();
+    let history = host.store(&id).unwrap().history().len();
+    drop(host);
+    let mut covered = std::collections::HashSet::new();
+    for case in cases {
+        let name = case["tool"].as_str().unwrap();
+        assert!(pending.contains(name));
+        assert!(covered.insert(name));
+        catalog::validate(name, &case["arguments"])
+            .unwrap_or_else(|e| panic!("invalid synthetic case {name}: {e}"));
+        let error = session
+            .dispatch(name, &case["arguments"])
+            .expect_err("an absent capability cannot report success");
+        assert_eq!(error.code, "not_available_in_this_build", "{name}: {error}");
+        assert!(
+            error.backing.is_some(),
+            "missing backing must remain inspectable"
+        );
+        let host = f.host.lock().unwrap();
+        assert_eq!(host.read_document(&id).unwrap(), before, "{name}");
+        assert_eq!(host.store(&id).unwrap().history().len(), history, "{name}");
+    }
+}

@@ -101,6 +101,7 @@ pub struct Automation {
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
     pub export_child: Arc<dyn crate::services::ExportChild>,
     pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
+    pub creative: Arc<dyn crate::creative::CreativeInspection>,
     pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
 }
 impl Automation {
@@ -141,6 +142,7 @@ impl Automation {
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
             extension_sources: None,
+            creative: Arc::new(crate::creative::CreativeReader::default()),
         })
     }
     pub fn kernel(&self) -> &Kernel {

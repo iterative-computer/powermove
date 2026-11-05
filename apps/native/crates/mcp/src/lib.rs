@@ -6,6 +6,7 @@
 pub mod automation;
 pub mod catalog;
 pub mod commands;
+pub mod creative;
 pub mod effect;
 pub mod extensions;
 pub mod inspection;
