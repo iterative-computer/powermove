@@ -147,4 +147,130 @@ Process exception: this second merge auto-committed before the staged secret
 scan. A direct first-parent merge-commit scan subsequently inspected one commit
 and 269,758 bytes with zero findings. Subsequent merges use `--no-commit` so
 the staged scan precedes the commit. This exception does not represent the
-required pre-commit scan having run retroactively.
+required pre-commit scan having run retroactively. That automatic merge also omitted the requested
+co-author trailer; the already-pushed merge history was retained.
+
+## 2026-11-04 — final Linux validation
+
+All commands below were repeated after merging native-engine
+`711f44ba0667f81ce8388c4ec57565d1d0378630`. Rust is pinned to 1.96.1. The
+portable codec checks used FFmpeg/ffprobe 7.1.5; their explicit capability
+checks reported no skips. These are Linux software-encoding checks, not Mac
+VideoToolbox or shipped-library equivalence. No dependency edges or versions
+changed, so neither workspace lockfile needs a new update for this lane.
+
+| Replay | Result |
+| --- | --- |
+| Full 15-package engine replay, unfiltered, `--no-fail-fast` | **BLOCKED**, exit 101 before any tests: pm-media requires its Mac FFmpeg dylib build |
+| pm-node + pm-vector replay | **BLOCKED**, exit 101 before any tests: same Mac media dependency (the earlier missing Linux ALSA development metadata was supplied in the task environment) |
+| TIFF `additional_integer_decoder_classes_are_drawn` | **BLOCKED**, exit 101 before execution: Apple-only objc2 dependency; no successful TIFF integration rerun is claimed |
+| Cold distinct-voice playback | **BLOCKED**, exit 101 before execution: Mac media dependency; historical 11.053 ms failure remains open |
+| All-target clippy, 18 packages, `-D warnings` | **BLOCKED**, exit 101: Mac media/Apple dependencies; not an all-green clippy claim |
+| Available 12-package CPU replay, unfiltered, `--no-fail-fast` | **661 passed / 0 ordinary test failures / 3 inherited ignored; 1 failed executable target** (`pm-eval --test corpus`, explicit CoreText/frozen-witness blocker). Command exits 101 |
+| pm-proxy without native generation | **9 passed / 0 failed / 0 ignored** |
+| pm-export without engine integration | **67 passed / 0 failed / 0 ignored**, including 14 software-delivery tests; no codec skips |
+| All-target clippy for the 12 portable packages and separate generation-disabled proxy | **Passed**, both with `-D warnings` |
+| Node coordinate-witness helper | **4 passed / 0 failed / 0 skipped** |
+| Gate inventory and audio campaign Python helpers | **5 + 5 passed** |
+| Standalone actual device-policy module | **5 passed**; policy arithmetic only, no stream or physical-device proof |
+| Formatting | `pm-eval`, `pm-stretch`, `pm-vector` clean |
+
+The 661 total includes the 21 passing pm-stretch tests (plus its inherited
+ignored measurement), the 47 passing geometry/vector tests, and default
+portable export tests. Counts from overlapping commands must not be added as
+independent coverage. `color_ink` and several platform-gated export binaries
+execute no Mac assertions on Linux; their zero-test exits do not qualify them.
+
+The initial available replay had one actual coordinate-digest failure in
+addition to the corpus blocker. The final six-test geometry replay and the
+full 661-pass repeat supersede that failure without changing fixture bytes.
+The preceding missing-CoreText compile failure was replaced with the explicit
+failed target, not an ignored case or a substitute font.
+
+Exact commands (Cargo commands from `engine/`; arrays only abbreviate the
+repeated literal package flags):
+
+```bash
+engine_full_args=(-p pm-audio -p pm-cache -p pm-color -p pm-eval -p pm-export -p pm-expr -p pm-geom3d -p pm-glsl -p pm-gpu -p pm-media -p pm-protocol -p pm-proxy -p pm-reference -p pm-render -p pm-wasm)
+engine_portable_args=(-p pm-cache -p pm-color -p pm-eval -p pm-expr -p pm-geom3d -p pm-glsl -p pm-protocol -p pm-reference -p pm-wasm -p pm-vector -p pm-stretch -p pm-export)
+cargo test --locked --no-fail-fast "${engine_full_args[@]}"
+cargo test --locked --no-fail-fast -p pm-node -p pm-vector
+cargo test --locked -p pm-render --test stills additional_integer_decoder_classes_are_drawn -- --exact
+cargo test --locked -p pm-audio --test playback cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous -- --exact
+cargo clippy --locked --all-targets "${engine_full_args[@]}" -p pm-node -p pm-vector -p pm-stretch -- -D warnings
+cargo test --locked --no-fail-fast "${engine_portable_args[@]}"
+cargo test --locked --no-fail-fast -p pm-proxy --no-default-features -- --nocapture
+cargo test --locked --no-fail-fast -p pm-export --no-default-features -- --nocapture
+cargo clippy --locked --all-targets "${engine_portable_args[@]}" -- -D warnings
+cargo clippy --locked --all-targets -p pm-proxy --no-default-features -- -D warnings
+cargo fmt -p pm-eval -p pm-stretch -p pm-vector --check
+mkdir -p ../work
+rustc --edition=2024 --test crates/pm-audio/src/device_policy.rs -o ../work/device-policy-tests
+../work/device-policy-tests
+```
+
+Additional commands from the repository root:
+
+```bash
+node --test engine/crates/pm-vector/tests/vectors/point-digest.test.mjs
+python3 -m unittest discover -s engine/tools -p 'test_gate_e_inventory.py'
+python3 -m unittest discover -s engine/crates/pm-audio/tools -p 'test_temp_root.py'
+python3 engine/tools/gate_e_inventory.py
+python3 engine/tools/gate_e_inventory.py --require-green
+```
+
+The inventory audit succeeds at 17 categories / 74 references. Its strict
+`--require-green` command deliberately exits 1: **15 unqualified categories /
+9 open work items**. Existing verification flags remain unchanged. The newer
+latest-main/3D requirements are additional unqualified work, not automatic
+coverage from this static inventory.
+
+### Required Mac follow-up
+
+Use the configured native SDK/FFmpeg/Python environment and same-checkout GLSL
+helper from the original handoff. Run the full engine, node/vector and all-target
+clippy commands above, plus the exact TIFF integration target. The new corpus
+entrypoint's moved implementation must also be built/run on Mac.
+
+For AUDIO-2, first measure with profiling/native diagnostics disabled. From
+`engine/`, on the quiet Mac:
+
+```bash
+unset PM_AUDIO_PROFILE PM_STRETCH_DSP_DIAGNOSTICS PM_AUDIO_PLAYBACK_STRESS
+cargo test --locked -p pm-audio --test playback cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous -- --exact --nocapture --test-threads=1
+PM_AUDIO_PLAYBACK_STRESS=1 cargo test --locked -p pm-audio --test playback cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous -- --exact --nocapture --test-threads=1
+```
+
+Retain every raw miss against **10.666667 ms**, every complete 8,192-frame PCM
+comparison, sixteen simultaneous voice starts, zero omitted prefix/A3 fires/
+underruns, and the existing scheduling/restore/readback assertions. Repeat the
+required plain/stress campaign and physical-device/A7/A8 rows. If a miss needs
+attribution, collect a separate opt-in profile, then repeat qualification with
+profiling off. Do not use the portable work probe as the deadline gate.
+
+Original frozen evaluation/render/own-layer/text/reused-draw, font/layout,
+mask/Canvas/SVG/WebGL and export/project witnesses remain necessary as detailed
+above; latest-main adds its effect/version/resource and new-3D acceptance.
+Native resource/sequence/host bindings, Chromium audio replacement and authored
+export retiming, CHROMA-420-1, physical output/listening, 60/120 Hz and long-run
+memory/cadence work remain open. These are not all explained by missing corpus.
+
+### Portable native-work observation
+
+Final quiet Linux probe (30 counterbalanced pairs, 16 independent stereo
+histories per sequential cohort; all rendered PCM bits identical):
+
+| Native work spans | p50 ms | p95 ms | max ms |
+| --- | ---: | ---: | ---: |
+| Original scalar output | 154.787 | 169.632 | 180.394 |
+| Batched output | 152.026 | 154.102 | 166.410 |
+
+These are sums of construction/seek/process spans on one thread across all
+sixteen histories, **not parallel Play-to-first-buffer latency**. Input synthesis
+and PCM collection are outside the spans. They show a work reduction in this
+probe; they do not attribute the earlier Mac miss or qualify AUDIO-2.
+
+```bash
+# From engine/; optional diagnostic, no platform deadline assertion.
+CARGO_TARGET_DIR=../work/stretch-target cargo run --locked -p pm-stretch --example cold_work -- 30
+```

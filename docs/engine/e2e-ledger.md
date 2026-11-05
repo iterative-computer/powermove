@@ -435,3 +435,36 @@ and projects. The exact failure register, verified subsets, environment and
 next steps are in [the Mac engine handoff](../native/handoff/engine-macos.md).
 The branch is not all green; Gate E and the cold distinct-voice AUDIO-2 gate
 remain open. The last TIFF palette integration repair also needs a full replay.
+
+
+## 2026-11-04 — cloud etrack2 Linux replay and qualification limits
+
+Current native-engine base `711f44ba0667f81ce8388c4ec57565d1d0378630` merges
+cleanly into the engine integration lane. See
+[cloud-etrack2.md](cloud-etrack2.md) for every capability/work-item dependency,
+exact commands, raw failure dispositions and decisions under N1/N3/N7.
+
+The final available unfiltered replay with `--no-fail-fast` records **661
+ordinary passing tests, zero ordinary failures, three inherited ignores, and
+one failed executable target** (the explicit CoreText/frozen-corpus blocker).
+Proxy policy/manifest tests pass **9/9** without generation; portable export
+passes **67/67** without engine integration, with no codec skips. Portable
+all-target clippy is clean. Mac-only targets that execute zero assertions on
+Linux are not qualification evidence.
+
+Vocoder output-only batching reduces measured native work while retaining
+canonical source reads and PCM bits. The historical strict AUDIO-2 miss remains
+open; the full engine replay, exact TIFF integration and cold playback targets,
+and full all-target clippy still cannot execute here because of Mac media/Apple
+dependencies. Geometry fixture hash portability was corrected only for NaN
+payload/sign bits absent from the JSON witness; finite bits, signed zero,
+fixture hashes, native/WASM production digest and all numerical bounds remain
+unchanged. Missing evaluator corpus data now explicitly fails instead of
+returning successful unmeasured proof.
+
+The static audit still accounts for **17 categories / 74 references**; strict
+Gate E deliberately fails with **15 unqualified categories / 9 open work items**.
+No verification flag is promoted. Corpus availability does not implement native
+resource/sequence/service bindings, replace Chromium audio/legacy export timing,
+fix CHROMA-420-1 or prove physical A/V and 60/120 Hz performance. Latest-main and
+new-3D acceptance from the incoming P0 decisions are additional required work.

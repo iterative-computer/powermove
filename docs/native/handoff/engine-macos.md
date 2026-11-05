@@ -287,3 +287,47 @@ nice -n 20 flock /tmp/pm-build.lock flock /tmp/pm-electron.lock \
 
 No new builds, tests, captures or app launches should be inferred from this
 handoff. The implementation lane stopped its jobs and is handing off the WIP.
+
+
+## 2026-11-04 — cloud etrack2 follow-up (Linux; still BLOCKED)
+
+Integration and current native-engine histories merge without conflicts. The
+latest merged base is `711f44ba0667f81ce8388c4ec57565d1d0378630`. Exact commands,
+counts, picking rules, process exceptions and per-item corpus dependencies are
+in [cloud-etrack2.md](../../engine/cloud-etrack2.md).
+
+- Guarded vocoder calls now batch output-only spans between synthesis intervals.
+  Original scalar processing remains the bitwise reference. Pre-roll, DSP calls,
+  source positions, head/lead sizes and the 10.666667 ms deadline are unchanged.
+  A portable harness exercises the actual canonical run with explicit scheduling/
+  profiling test doubles. Its source reads and every sample bit match for sixteen
+  distinct trims and both directions. This is not simultaneous device playback.
+- The available, unfiltered 12-package replay with `--no-fail-fast` finished
+  **661 ordinary tests passed / 0 ordinary tests failed / 3 inherited ignored**, plus
+  **one failed executable target**: `pm-eval --test corpus`, now explicitly blocked
+  by macOS CoreText/frozen witnesses rather than a Linux compile failure or a
+  successful missing-capture return. Geometry's actual digest failure was repaired
+  by canonicalizing only unrecorded NaN payload/sign bits in the test/generator.
+  Finite coordinates, signed zero, fixture bytes/hashes and all bounds stay exact.
+- Generation-disabled proxy: **9 passed**. Engine-disabled export: **67 passed**,
+  including 14 software-delivery cases; no codec skips. Coordinate-generator
+  helper: **4 passed**. All-target clippy passes for all 12 portable packages and
+  generation-disabled proxy; the three touched crates are format-clean.
+- The requested full 15-crate engine replay, node/vector replay, exact TIFF target,
+  exact cold playback target and full 18-package all-target clippy were attempted
+  again after the final base merge. They stop before execution at Mac media/Apple
+  dependencies. **No successful TIFF integration rerun or AUDIO-2 pass is claimed.**
+
+The original **11.053 ms versus 10.666667 ms** failure remains open. Run plain
+and stressed Mac playback campaigns with profiling disabled, preserving complete
+PCM, simultaneous starts, scheduling and zero-underrun assertions. Separately
+rerun the TIFF integration target after the historical palette repair, then the
+complete engine replay and all-target clippy with the native SDK/library setup.
+
+Gate E stays **OPEN: 15 unqualified categories / 9 open work items**. Original
+frozen evaluation/render/text/own-layer/reused-draw, font/layout, mask/Canvas/SVG,
+WebGL and project/export witnesses remain required. Missing native bindings,
+resource/sequence support, audio decoder/export semantics, CHROMA-420-1 and
+physical/performance gates are independent remaining work. The newly merged P0
+owner decisions also require latest-main acceptance and the separate new-3D port;
+existing witnesses are not relabelled as proof for those requirements.
