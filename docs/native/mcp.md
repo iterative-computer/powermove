@@ -830,10 +830,16 @@ memory admission must be bound there by its owner. Do not replace the app actor
 with a second `Automation` kernel. Both host adapters and that binding require
 actual application acceptance; Linux standalone tests alone cannot prove them.
 
-**DESIGN-TODO(opus): S070 consent.** Provide the approved Settings consent
-presentation, copy, focus/accessibility and confirmation interaction for Claude
-Desktop registration, then bind its explicit decision to `RegistrationConsent`.
-No provisional visual surface or new design language was created in this lane.
+**S070 update consumed from the final native-engine merge.** Opus has now supplied
+[the consent and Other Agent Apps spec](design/surfaces/agent-auth.md#s070-subscriptions-and-external-clients).
+The earlier design dependency is resolved; there is no remaining missing-design
+placeholder in this lane. The app owner must still bind its specified alert and
+Settings button to `RegistrationConsent`, persist `externalClients.claudeDesktop`
+(`added`/`declined`/`skipped`) before any client-setting write, and implement the
+specified installed/legacy/customized/intentional-removal skip rules. The native
+registration API is explicit-action-only and does not implement that first-window
+presentation or per-profile prompt scheduler. No provisional visual surface or
+new copy/design choice was created in this lane.
 
 Decisions and selecting rules:
 
