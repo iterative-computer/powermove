@@ -391,3 +391,108 @@ fn e06_wide_saved_gaussian_and_mosaic_kernels_keep_hdr_alpha_and_crop_zoom() {
         }
     }
 }
+
+#[test]
+fn e06_mosaic_cells_follow_translated_rotated_scaled_owner_and_partial_alpha_hdr() {
+    let mut renderer = Renderer::headless().unwrap();
+    let code = "void main(){float a=gl_FragCoord.x<iResolution.x*.5?.5:1.;fragColor=vec4((gl_FragCoord.x<iResolution.x*.5?-.25:.75)*a,.5*a,2.*a,a);}";
+    for depth in [8, 16, 32] {
+        for source in [false, true] {
+            for rotated in [false, true] {
+                for scale in [1f64, 2.] {
+                    for sharp in [false, true] {
+                        let mut value = fixture(
+                            "pixelate",
+                            2,
+                            json!({"horizontalBlocks":3,"verticalBlocks":5,"sharpColors":sharp}),
+                            json!({}),
+                            Some(code),
+                        );
+                        value["w"] = json!(128);
+                        value["h"] = json!(128);
+                        value["colorDepth"] = json!(depth);
+                        let owner = &mut value["layers"][0];
+                        owner["parent"] = json!("rig");
+                        if source {
+                            owner["effectSpace"] = json!("source");
+                        }
+                        set(owner, "position.x", json!(32));
+                        set(owner, "position.y", json!(32));
+                        set(owner, "scale.x", json!(scale * 100.));
+                        set(owner, "scale.y", json!(scale * 100.));
+                        let mut rig = layer(
+                            "rig",
+                            "null",
+                            json!({}),
+                            if rotated { 128. } else { 0. },
+                            0.,
+                            1.,
+                        );
+                        set(&mut rig, "rotation", json!(if rotated { 90 } else { 0 }));
+                        value["layers"].as_array_mut().unwrap().push(rig);
+                        let mut document = load(&value);
+                        document.set_saving_app_version(Some("1.3.0".into()));
+                        renderer.set_main_effects_for_document(&document).unwrap();
+                        let request = RenderRequest::sized(Size::new(128, 128), Precision::Float32);
+                        let frame = renderer
+                            .render(
+                                &document,
+                                "Ptest-root",
+                                Ticks::ZERO,
+                                &request,
+                                &MapResolver::default(),
+                            )
+                            .unwrap();
+                        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+                        let full = renderer.read_rgba(&frame).unwrap();
+                        for (x, expected) in [
+                            (5., [-0.125, 0.25, 1., 0.5]),
+                            (16., [0.3125, 0.375, 1.5, 0.75]),
+                            (26., [0.75, 0.5, 2., 1.]),
+                        ] {
+                            let (px, py) = if rotated {
+                                (96. - 16. * scale, 32. + x * scale)
+                            } else {
+                                (32. + x * scale, 32. + 16. * scale)
+                            };
+                            let p = &full[((py as usize) * 128 + px as usize) * 4..][..4];
+                            for k in 0..4 {
+                                assert!(
+                                    (f64::from(p[k]) - expected[k]).abs() <= 1. / 1024.,
+                                    "owner-local Mosaic cell at {x},depth {depth},source {source},rotated {rotated},scale {scale},sharp {sharp},channel {k}: {} != {}",
+                                    p[k],
+                                    expected[k]
+                                );
+                            }
+                        }
+                        let mut crop = RenderRequest::sized(Size::new(16, 16), Precision::Float32);
+                        crop.scale = Some((1., 1.));
+                        crop.origin = Some((48., 40.));
+                        let frame = renderer
+                            .render(
+                                &document,
+                                "Ptest-root",
+                                Ticks::ZERO,
+                                &crop,
+                                &MapResolver::default(),
+                            )
+                            .unwrap();
+                        assert!(frame.failures.is_empty());
+                        for (index, p) in renderer
+                            .read_rgba(&frame)
+                            .unwrap()
+                            .chunks_exact(4)
+                            .enumerate()
+                        {
+                            assert_eq!(
+                                p,
+                                &full[((40 + index / 16) * 128 + 48 + index % 16) * 4..][..4],
+                                "transformed Mosaic crop"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
