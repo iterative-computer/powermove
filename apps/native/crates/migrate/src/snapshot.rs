@@ -502,12 +502,25 @@ fn check_capacity_above(free: u64, floor: u64, needed: u64) -> Result<()> {
 }
 
 pub(crate) fn open_regular(path: &Path) -> Result<File> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        // Check before opening or clonefile: either can hydrate cloud data.
+        require_local_flags(fs::symlink_metadata(path)?.st_flags())?;
+    }
     let f = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     ensure!(f.metadata()?.is_file(), "not a regular file");
     Ok(f)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn require_local_flags(flags: u32) -> Result<()> {
+    // Darwin SF_DATALESS. Availability is an explicit migration prerequisite.
+    ensure!(flags & 0x40000000 == 0, "source_not_local: dataless file");
+    Ok(())
 }
 pub(crate) fn hash_file(path: &Path) -> Result<(String, u64)> {
     let mut file = open_regular(path)?;
@@ -623,6 +636,20 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
+
+    #[test]
+    fn dataless_sources_are_unavailable_even_with_other_file_flags() {
+        require_local_flags(0).unwrap();
+        require_local_flags(0x20).unwrap();
+        for flags in [0x40000000, 0x40000020] {
+            assert!(
+                require_local_flags(flags)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("source_not_local")
+            );
+        }
+    }
 
     #[test]
     fn reserve_and_payload_capacity_fail_with_explicit_enospc() {
