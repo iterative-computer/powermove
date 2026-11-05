@@ -132,7 +132,7 @@ export type NativeRequest =
  * JS on the UI thread. Implemented by a Linux recorder in tests, AppKit in app.
  */
 export interface NativeServices {
-  request(request: NativeRequest): Promise<void>;
+  request(request: NativeRequest): Promise<Json | void>;
 }
 export interface ReadoutClock {
   schedule(callback: () => void): () => void;

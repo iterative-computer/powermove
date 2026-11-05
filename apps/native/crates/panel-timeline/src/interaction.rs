@@ -735,6 +735,8 @@ impl Draft {
 
 #[derive(Clone, Debug)]
 pub enum DragKind {
+    /// Scoped pro-media edits use the same actor replacement gesture lifecycle.
+    ProEdit(pm_kernel::commands::pro_edit::ProEditCommand),
     Layers {
         ids: Vec<String>,
     },
@@ -805,6 +807,20 @@ impl Drag {
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;
         match &mut kind {
+            DragKind::ProEdit(command) => {
+                use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
+                if !matches!(
+                    command,
+                    Pro::Move { .. }
+                        | Pro::Trim { .. }
+                        | Pro::Slip { .. }
+                        | Pro::RippleTrim { .. }
+                        | Pro::Roll { .. }
+                        | Pro::Slide { .. }
+                ) {
+                    return Err(ModelError::InvalidGesture);
+                }
+            }
             DragKind::Layers { ids }
             | DragKind::TrimIn { ids }
             | DragKind::TrimOut { ids }
@@ -937,6 +953,18 @@ impl Drag {
     }
     pub fn label(&self) -> &'static str {
         match self.kind {
+            DragKind::ProEdit(ref command) => {
+                use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
+                match command {
+                    Pro::Move { .. } => "Move Linked Clips",
+                    Pro::Trim { .. } => "Trim Clips",
+                    Pro::Slip { .. } => "Slip Edit",
+                    Pro::RippleTrim { .. } => "Ripple Trim",
+                    Pro::Roll { .. } => "Roll Edit",
+                    Pro::Slide { .. } => "Slide Edit",
+                    _ => "Edit Clips",
+                }
+            }
             DragKind::Layers { .. } => "Move clip",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
@@ -1015,6 +1043,21 @@ impl Drag {
         };
         let mut out = Vec::new();
         match &self.kind {
+            DragKind::ProEdit(command) => {
+                use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
+                let mut command = command.clone();
+                match &mut command {
+                    Pro::Move { delta, .. }
+                    | Pro::Trim { delta, .. }
+                    | Pro::Slip { delta, .. }
+                    | Pro::RippleTrim { delta, .. }
+                    | Pro::Roll { delta, .. }
+                    | Pro::Slide { delta, .. } => *delta = sample.time_delta,
+                    _ => return Err(ModelError::InvalidGesture),
+                }
+                out.push(command.into());
+            }
+
             DragKind::Layers { ids } => {
                 for id in ids {
                     let l = self.start.layer(id).unwrap();

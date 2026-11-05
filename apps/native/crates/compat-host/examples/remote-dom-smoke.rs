@@ -124,6 +124,8 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let mut ready = false;
     let mut pending = None;
+    let mut inspection = None;
+    let mut snapshot = None;
     let result = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
         while started.elapsed() < Duration::from_secs(15) {
             let event = app.nextEventMatchingMask_untilDate_inMode_dequeue(
@@ -163,8 +165,29 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             while let Ok(message) = received.try_recv() {
                 if matches!(message, PageMessage::Applied { seq: 1, .. }) {
                     println!("remote_dom_webkit_applied=1");
-                    return Ok(());
+                    inspection = Some(host.inspect_capture(1, "output", false)?);
                 }
+            }
+            if let Some(result) = inspection.as_ref().and_then(CaptureTicket::try_take) {
+                inspection = None;
+                if result? != "Synthetic WebKit remote DOM" {
+                    return Err("WebKit rendered-node inspection differs".into());
+                }
+                snapshot = Some(host.capture_png(1)?);
+            }
+            if let Some(result) = snapshot.as_ref().and_then(CaptureTicket::try_take) {
+                let png = result?;
+                if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    return Err("WebKit did not return a PNG".into());
+                }
+                if let Some(path) = std::env::args_os().nth(2) {
+                    std::fs::write(path, &png)?;
+                }
+                println!(
+                    "remote_dom_webkit_inspected=1 snapshot_png_bytes={}",
+                    png.len()
+                );
+                return Ok(());
             }
         }
         Err("WebKit acknowledgement timeout".into())

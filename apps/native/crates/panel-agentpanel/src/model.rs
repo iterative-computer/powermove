@@ -361,6 +361,7 @@ pub enum Update {
     Plan(Value),
     Result(Value),
 }
+#[derive(Clone)]
 pub struct Panel {
     project: String,
     archive: Threads,
@@ -381,6 +382,29 @@ impl Panel {
             .is_some_and(Vec::is_empty)
         {
             archive.create(blank, now).map_err(host)?;
+        }
+        if archive.raw()["threads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                matches!(
+                    r["lastRunStatus"].as_str(),
+                    Some("queued" | "running" | "waiting")
+                )
+            })
+        {
+            archive.update(store, |value| {
+                for record in value["threads"].as_array_mut().expect("validated threads") {
+                    if !matches!(record["lastRunStatus"].as_str(), Some("queued" | "running" | "waiting")) { continue; }
+                    if record.get("nativeInterruptedRuns").is_none() { record["nativeInterruptedRuns"] = json!([]); }
+                    let previous = json!({"run":record["lastRunId"],"status":record["lastRunStatus"],"observedAt":now});
+                    record["nativeInterruptedRuns"].as_array_mut()
+                        .ok_or_else(|| io::Error::other("Unknown interrupted-run archive shape"))?.push(previous);
+                    record["lastRunStatus"] = json!("interrupted");
+                }
+                Ok(())
+            }).map_err(host)?;
         }
         let hydrated = archive.hydrated(store).map_err(host)?;
         let mut sessions = HashMap::new();
@@ -518,6 +542,127 @@ impl Panel {
                 Err(host(e))
             }
         }
+    }
+    /// Publish the provider observation and its panel projection together. This
+    /// runs on the storage owner's serial worker, never on a UI callback.
+    /// Failed publication leaves the original model intact for an exact retry.
+    pub fn provider_event(
+        &mut self,
+        store: &mut impl Store,
+        thread: &str,
+        receipt: &pm_agents::history::Receipt,
+        now: u64,
+    ) -> Result<bool> {
+        // A process may finish reaping after its conversation was archived.
+        // Retain those observations on that exact archived run, never a new thread.
+        if self.archive.thread(thread).is_none() {
+            let mut next = self.clone();
+            next.archive
+                .update(store, |archive| {
+                    let record = archive["archivedThreads"]
+                        .as_array_mut()
+                        .and_then(|threads| {
+                            threads
+                                .iter_mut()
+                                .find(|r| r["id"] == thread && r["lastRunId"] == receipt.source)
+                        })
+                        .ok_or_else(|| io::Error::other("Unknown archived provider run"))?;
+                    pm_agents::history::append(record, std::slice::from_ref(receipt))
+                })
+                .map_err(host)?;
+            *self = next;
+            return Ok(true);
+        }
+        let record = self.archive.thread(thread).ok_or(Error::Stale)?;
+        let old = record["nativeRunEvents"].as_array();
+        if let Some(previous) = old
+            .into_iter()
+            .flatten()
+            .find(|v| v["source"] == receipt.source && v["sequence"] == receipt.sequence)
+        {
+            if *previous != serde_json::to_value(receipt).map_err(|e| host(e.into()))? {
+                return Err(Error::Invalid("provider receipt conflict"));
+            }
+            return Ok(false);
+        }
+        let mut next = self.clone();
+        let run = next.session(thread)?.run.as_ref();
+        let current = run.is_some_and(|r| r.id == receipt.source);
+        let settled = record["nativeRunEvents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["source"] == receipt.source
+                    && matches!(r["event"]["kind"].as_str(), Some("completed" | "stopped"))
+            });
+        if !current
+            && !settled
+            && next.session(thread)?.last_run.as_deref() != Some(&receipt.source)
+        {
+            return Err(Error::Stale);
+        }
+        // Cleanup from a retired worker can arrive after the next turn starts.
+        // Preserve it as inspection; never apply it to the new run's projection.
+        let update = if !current {
+            None
+        } else {
+            match &receipt.event {
+                pm_agents::Event::Trace { value, .. } => Some(Update::Trace(value.clone())),
+                pm_agents::Event::Progress { text, .. } => Some(Update::Progress(text.clone())),
+                pm_agents::Event::Completed { result, .. } => Some(match result {
+                    pm_agents::RunResult::Success { text, .. } => Update::Complete {
+                        text: text.clone(),
+                        error: false,
+                        cancelled: false,
+                    },
+                    pm_agents::RunResult::Failure {
+                        error, cancelled, ..
+                    } => Update::Complete {
+                        text: error.clone(),
+                        error: true,
+                        cancelled: *cancelled,
+                    },
+                }),
+                pm_agents::Event::Stopped(reason) if run.is_some() => Some(Update::Complete {
+                    text: reason.clone(),
+                    error: true,
+                    cancelled: false,
+                }),
+                _ => None,
+            }
+        };
+        let archive_after = next.archives_after_stop.remove(thread);
+        if let Some(update) = update {
+            let sequence = next
+                .session(thread)?
+                .run
+                .as_ref()
+                .ok_or(Error::Stale)?
+                .sequence
+                + 1;
+            next.receive(thread, &receipt.source, sequence, update, now)?;
+        }
+        next.capture(thread, now)?;
+        pm_agents::history::append(
+            next.archive.thread_mut(thread).ok_or(Error::Stale)?,
+            std::slice::from_ref(receipt),
+        )
+        .map_err(host)?;
+        // Archive only after retaining the terminal receipt in the full record.
+        if let Some(replacement) = archive_after {
+            if next.session(thread)?.run.is_none() {
+                next.archive_thread(thread, &replacement, true, now)?;
+            } else {
+                next.archives_after_stop.insert(thread.into(), replacement);
+            }
+        }
+        if let Err(error) = next.save(store, now) {
+            self.save_error = next.save_error;
+            return Err(error);
+        }
+        *self = next;
+        Ok(true)
     }
     pub fn raw_archive(&self) -> &Value {
         self.archive.raw()

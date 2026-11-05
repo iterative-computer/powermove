@@ -12,12 +12,47 @@ use pm_store_host::{
 
 const SLOT: &str = "storeHostV1";
 
+pub struct StoreArchive<'a> {
+    pub profile: &'a str,
+    pub release: &'a pm_store_host::artifact::SignedRelease,
+    pub archive: &'a [u8],
+    pub trust: &'a pm_store_host::artifact::TrustStore,
+    pub expected: Option<u64>,
+}
+
 pub struct KernelStoreAdapter<'a> {
     kernel: &'a mut Kernel,
 }
 impl<'a> KernelStoreAdapter<'a> {
     pub fn new(kernel: &'a mut Kernel) -> Self {
         Self { kernel }
+    }
+    /// Worker-only release admission. Pins come from the native Store registry;
+    /// catalog checksums and extension input JSON cannot provision trust. Return
+    /// the exact verified virtual files for the compiler after durable install.
+    /// Permission prompts/grants remain the separate reviewed native flow.
+    pub fn install_archive(
+        &mut self,
+        artifacts: &mut impl pm_store_host::artifact::ArtifactStore,
+        input: StoreArchive<'_>,
+    ) -> Result<(
+        pm_store_host::install::InstallOutcome,
+        pm_store_host::artifact::VerifiedRelease,
+    )> {
+        let verified = pm_store_host::artifact::verify(
+            input.release,
+            input.archive,
+            input.trust,
+            pm_store_host::artifact::Limits::default(),
+        )?;
+        let outcome = pm_store_host::install::install(
+            self,
+            artifacts,
+            input.profile,
+            &verified,
+            input.expected,
+        )?;
+        Ok((outcome, verified))
     }
 }
 impl StoreKernel for KernelStoreAdapter<'_> {
@@ -186,5 +221,123 @@ mod tests {
             store.compare_exchange(&id, None, &state(&id, "synthetic-profile")),
             Err(Error::Conflict)
         );
+    }
+    #[test]
+    fn signed_archive_installs_through_native_kernel_and_tampering_never_publishes() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use pm_store_host::adapter::StoreSession;
+        use pm_store_host::artifact::{
+            FileArtifacts, FileSeal, ReleaseStatement, SignedRelease, TrustStore,
+        };
+        use sha2::{Digest, Sha256};
+        fn hash(bytes: &[u8]) -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+        let id = ExtensionId::new("synthetic-signed-store").unwrap();
+        let entries=[("manifest.json",serde_json::to_vec(&serde_json::json!({"id":id,"name":"Synthetic signed fixture","version":"1.0.0","apiVersion":3,"permissions":[]})).unwrap()),("index.js",b"export default () => {}".to_vec())];
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut files = BTreeMap::new();
+        for (path, bytes) in &entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, path, bytes.as_slice())
+                .unwrap();
+            files.insert(
+                path.to_string(),
+                FileSeal {
+                    sha256: hash(bytes),
+                    bytes: bytes.len() as u64,
+                },
+            );
+        }
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+        // Public synthetic seed; never a publisher credential.
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let statement = ReleaseStatement {
+            format: 1,
+            key_id: "synthetic-key".into(),
+            publisher: "synthetic-publisher".into(),
+            extension: id.clone(),
+            release_id: "synthetic-release".into(),
+            archive_sha256: hash(&archive),
+            files,
+        };
+        let mut release = SignedRelease {
+            signature: key
+                .sign(&statement.signing_bytes().unwrap())
+                .to_bytes()
+                .to_vec(),
+            statement,
+        };
+        let mut trust = TrustStore::default();
+        trust
+            .trust(
+                "synthetic-publisher".into(),
+                "synthetic-key".into(),
+                key.verifying_key(),
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut artifacts = FileArtifacts::new(root.path().canonicalize().unwrap()).unwrap();
+        let mut kernel = Kernel::new(KernelConfig::default());
+        let mut store = KernelStoreAdapter::new(&mut kernel);
+        release.signature[0] ^= 1;
+        assert!(
+            store
+                .install_archive(
+                    &mut artifacts,
+                    StoreArchive {
+                        profile: "synthetic-profile",
+                        release: &release,
+                        archive: &archive,
+                        trust: &trust,
+                        expected: None
+                    }
+                )
+                .is_err()
+        );
+        assert!(store.load(&id).unwrap().is_none());
+        release.signature[0] ^= 1;
+        let (outcome, verified) = store
+            .install_archive(
+                &mut artifacts,
+                StoreArchive {
+                    profile: "synthetic-profile",
+                    release: &release,
+                    archive: &archive,
+                    trust: &trust,
+                    expected: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            pm_store_host::install::InstallOutcome::Activated { revision: 1 }
+        );
+        assert_eq!(verified.file("index.js").unwrap(), entries[1].1);
+        assert!(StoreSession::admit(&store, &id).is_ok());
+        assert!(
+            store
+                .install_archive(
+                    &mut artifacts,
+                    StoreArchive {
+                        profile: "synthetic-profile",
+                        release: &release,
+                        archive: &archive,
+                        trust: &trust,
+                        expected: None
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(store.load(&id).unwrap().unwrap().revision, 1);
     }
 }
