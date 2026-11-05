@@ -443,10 +443,10 @@ impl Session {
     pub async fn end(&mut self, cancel: bool) -> Result<()> {
         let gesture = self.gesture.ok_or_else(|| invalid("No Studio gesture"))?;
         let document = self.gesture_scope.as_ref().map(|scope| scope.0);
-        if !self
+        if self
             .kernel
             .published(&self.project)
-            .is_some_and(|p| Some(p.snapshot.doc_id) == document)
+            .is_none_or(|p| Some(p.snapshot.doc_id) != document)
         {
             // Closing/reopening already retires the old actor lease. Its local
             // owner must never cancel an edit in a replacement document.

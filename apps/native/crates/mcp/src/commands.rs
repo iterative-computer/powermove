@@ -611,10 +611,10 @@ pub(crate) fn plan_cleaned_with_definitions(
                 let id = text(&c, "id").unwrap_or_else(|| pm_kernel::new_id("L"));
                 let from = number(&c, "from", 0.)?;
                 c["from"] = json!(from);
-                if c["layerType"] == "captions" {
-                    if let Some(content) = c.get_mut("content") {
-                        caption_ids(content);
-                    }
+                if c["layerType"] == "captions"
+                    && let Some(content) = c.get_mut("content")
+                {
+                    caption_ids(content);
                 }
                 data = json!({"id":id});
                 LayerCommand::Add(Box::new(AddLayer {
