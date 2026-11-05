@@ -163,3 +163,127 @@ This native-suite result precedes the unfinished P1 worker-diagnostic edits. Re-
 4. Use the private asset descriptors to reduce each of the five media failures. Fix selection/binding defects with synthetic fixtures; keep genuinely unavailable originals blocked. Do not download dataless files or relabel proxy bytes as originals.
 5. Run the local project folder through every stage using one stable worker/helper pair. A fresh full run is required for certification; no subset, mixed tooling or incomplete discovery can close P1.
 6. Re-run the native suites with default TMPDIR, update the anonymized aggregate report, remove owned private copies, stage by path, inspect the diff and run `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow`. Push only `git push origin HEAD:refs/heads/feat/na-corpus`; commit messages end with the required co-author trailer.
+
+## 2026-11-04 — cloud corpus2 synthetic reductions
+
+This dated section supersedes only the WIP tooling/diagnosis notes above.
+**P1 remains open. No private project was available or replayed. Historical
+counts and all seven shader, five media and one rotation entries remain open.**
+
+Implemented on `feat/na-cloud-corpus2`, starting from corpus
+`4aa346755f7dd6b127eec7521e7c1ac8044978b5` and merging native-engine
+`ed5482622f41c533199a724dcb8c8738dd4dcc93`:
+
+- Tool freezing now uses a bounded independent stream when `clonefile` is absent,
+  verifies existing frozen bytes/executable permissions and refuses symlink tools.
+  A real relocated pair (portable inspection worker plus production compiler)
+  translates **20/20 public builtin shaders to naga and MSL after both original
+  executable copies are removed**. This establishes helper IPC/translation,
+  **not Metal compilation, native-worker pixels or encoded output**.
+- Seven shader-family reductions cover glow, shadow, gradient, blur, displacement,
+  colour and crossfade. A malformed shader produces the real `es-validate`
+  diagnostic at the authored line; an absent helper produces `compiler-process`.
+  These seven synthetic inputs are not substitutes for the seven private entries.
+- Five media reductions use **actual LibraryStore journal replay and Kernel
+  document publication**, followed by the same selection/binding module imported
+  by the native worker. Fixes include material-map references, ordered content-key
+  versus bare-ID fallback, matching revisions, content objects without key
+  manifests, record-level proxy provenance and complete duplicate checksums.
+  Wrong content hashes and paths escaping the private snapshot are refused.
+  Missing originals remain offline. Embedded payloads retain asset proxy flags.
+  No app-wide Media Store integration or real-entry resolution is claimed.
+- Each blob attempt now keeps a distinct private log; a later successful capture
+  cannot overwrite the earlier failure's diagnostic.
+- The generated 90/180/270-degree reference is an exact FFmpeg autorotate/luma
+  permutation. It detects the supported display-matrix syntax. A build unable
+  to generate/probe that fixture reports a clear skip in the Python test and a
+  blocker in the synthetic command. All three angles ran here without skips.
+- `rotation-proof` adds exact native default-path preview/final pixel comparison
+  against the unrotated frame's permutation, with no interpretation override.
+  **The production rotation guard was not lifted.** The qualification command
+  must still fail at that guard until a Mac proves the pixels and the narrow
+  guard change is qualified. Non-quarter-turn and other media guards are intact.
+- Generated glow/shadow runs now compare nonblank captured preview and decoded
+  MP4/ProRes pixels against an otherwise identical effect-free baseline, in
+  addition to all nine stages. `--synthetic-preflight` executes these checks and
+  current-production shader diagnostics with the frozen pair before source capture.
+  These native paths were added but could not be built/run on Linux: the native
+  example check fails at `objc2`'s explicit Apple-platform requirement.
+
+### One-command Mac folder rerun after building the tools
+
+Use the pinned Mac environment, build lock, free-space/pause rules and matching
+worker/compiler builds described above. Then run this single driver command;
+`--projects-only` prevents reading the default user's library/media stores, so
+there is no temporary input-profile setup:
+
+```sh
+python3 tools/corpus/run.py \
+  --binary "$CARGO_TARGET_DIR/debug/examples/pm-corpus" \
+  --compiler "$CARGO_TARGET_DIR/debug/pm-glsl-compiler" \
+  --projects-only --projects "/ABSOLUTE/PROJECT_FOLDER" \
+  --synthetic-preflight --batch-gib 1.5 --timeout 240 \
+  --retain-for-debug --report /tmp/pm-corpus-folder-summary.json
+```
+
+Both binaries are frozen before preflight or any source capture. A shader/effect
+preflight failure stops the run and remains visible in the report and private
+root diagnostics. Resume with the same options plus
+`--resume-snapshot --resume-results`; changing library/folder-only mode is refused.
+Use the same frozen tool pair for all entries; changing tool provenance cannot
+certify P1. Folder-only mode cannot resolve a library-only payload; intentionally
+select the read-only profile instead when that source is required.
+
+Separately qualify rotation (expected to remain blocked at the production guard):
+
+```sh
+python3 tools/corpus/synthetic.py \
+  --binary "$CARGO_TARGET_DIR/debug/examples/pm-corpus" \
+  --compiler "$CARGO_TARGET_DIR/debug/pm-glsl-compiler" --rotated
+```
+
+`--rotated --expect-refusal` checks only the retained refusal. It is never a
+rotation qualification pass. Native glow/shadow, rotation, Metal compilation,
+export children, and the Mac app/example test and clippy suites remain required.
+
+### Linux validation and decisions
+
+Rust 1.96.1, Python 3.12, system FFmpeg/ffprobe. All executable test commands use
+`--locked`; the standalone tooling workspace owns `tools/corpus/checks/Cargo.lock`.
+No production workspace dependency/lockfile change was needed.
+
+```sh
+(cd engine && cargo build --locked -p pm-glsl --bin pm-glsl-compiler)
+export POWERMOVE_GLSL_COMPILER="$CARGO_TARGET_DIR/debug/pm-glsl-compiler"
+cargo test --locked --manifest-path tools/corpus/checks/Cargo.toml
+cargo build --locked --manifest-path tools/corpus/checks/Cargo.toml
+export PM_CORPUS_CHECKS="$CARGO_TARGET_DIR/debug/pm-corpus-checks"
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_runner.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_real_tools.py
+(cd engine && cargo test --locked -p pm-glsl)
+(cd apps/native && cargo test --locked -p pm-kernel --test library --test library_roundtrip)
+cargo clippy --locked --manifest-path tools/corpus/checks/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path tools/corpus/checks/Cargo.toml -- --check
+rustfmt --edition 2024 --check tools/corpus/main.rs tools/corpus/media.rs tools/corpus/rotation.rs
+```
+
+Results: corpus Rust **10 passed** (8 media + 2 compiler tests, including seven
+shader families); Python driver **22 passed**; real frozen tools **1 passed**
+(20 definitions); pm-glsl **65 passed**; kernel library/roundtrip **10 passed,
+1 existing private-store manual test ignored**. The initial tagged-reader run
+failed because the fresh checkout lacked v1.2.0/v1.3.0 refs; fetching those existing
+reference tags fixed setup and the unchanged test passed. Native example check
+is **blocked**, not passed: `objc2 only works on Apple platforms`.
+
+Decisions:
+
+| Decision | Selecting rule |
+|---|---|
+| Diagnose helper/ES/translation stages with the real compiler; keep the historical seven cases unresolved | N1/N3/N7: measured, inspectable evidence; no inferred success |
+| Select journal-applied current references and ordered storage identities; verify originals and retain proxy roles | N3/N4: authored state/byte identity exact; no proxy promotion or source loss |
+| Keep dataless/unavailable sources refused and every capture diagnostic visible | N4: no implicit hydration; evidence must not hide missing inputs |
+| Keep the rotation guard until Mac default-path pixel proof | N3: correctness before capability claims; FFmpeg-only evidence is insufficient |
+| Keep new reductions in an owned standalone tooling workspace with frozen public shader fixtures | Ownership boundary/N7/N8: headless tests, no app runtime or shared dependency upgrades |
+| Replace only the corpus selection/binding consumers and retain production/UI/compat implementations | Prune rule/N4/N6: no consumer or extension contract removed |
+
+No product design or UX changes; no `DESIGN-TODO(opus)` additions.

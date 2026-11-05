@@ -1,6 +1,6 @@
 # Native corpus P1 runner
 
-**WIP handoff:** compiler bundling and private asset diagnostics are unfinished integration work. See [current status and exact folder-run commands](../../docs/native/handoff/corpus-p1.md). The changed effect/rotation synthetic expectations are not yet end-to-end validated.
+**Cloud follow-up:** portable compiler/selection reductions are validated. Native glow/shadow pixel/export and default-path rotation qualification remain pending on Mac. See the [dated handoff](../../docs/native/handoff/corpus-p1.md#2026-11-04--cloud-corpus2-synthetic-reductions) for exact one-command folder rerun and limits. P1 remains open.
 
 Run on the owner's Mac, never in CI with real data. Sources are read-only.
 
@@ -8,7 +8,7 @@ Run on the owner's Mac, never in CI with real data. Sources are read-only.
 source engine/env.sh
 export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 cd apps/native
-flock /tmp/pm-build.lock cargo build -p pm-native-app --example pm-corpus --offline
+flock /tmp/pm-build.lock cargo build --locked -p pm-native-app --example pm-corpus
 cd ../..
 cd engine
 flock /tmp/pm-build.lock cargo build --locked -p pm-glsl --bin pm-glsl-compiler
@@ -141,5 +141,32 @@ python3 tools/corpus/synthetic.py --effect glow
 python3 tools/corpus/synthetic.py --effect shadow
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_runner.py
 # From apps/native, with engine/env.sh sourced and the shared target set:
-flock /tmp/pm-build.lock cargo test -p pm-native-migrate -p pm-first-launch -p pm-kernel --offline
+flock /tmp/pm-build.lock cargo test --locked -p pm-native-migrate -p pm-first-launch -p pm-kernel
 ```
+
+
+The driver accepts `--projects-only --projects DIRECTORY` for folder-only runs
+without inspecting the default library or its media stores. Add
+`--synthetic-preflight` to prove current builtin shader translation and generated
+glow/shadow preview + MP4/ProRes pixels using the frozen worker/compiler before
+capturing projects. Failed preflights stop setup and retain private diagnostics
+with `--retain-for-debug`. Rotation qualification remains a separate explicit
+`synthetic.py --rotated` check; the production guard is intentionally unchanged.
+
+Portable checks live in the standalone workspace `tools/corpus/checks` (own
+lockfile). Build `pm-glsl-compiler` with `--locked` from `engine`, export its
+absolute path as `POWERMOVE_GLSL_COMPILER`, then run:
+
+```sh
+cargo +1.96.1 test --locked --manifest-path tools/corpus/checks/Cargo.toml
+cargo +1.96.1 build --locked --manifest-path tools/corpus/checks/Cargo.toml
+export PM_CORPUS_CHECKS="$CARGO_TARGET_DIR/debug/pm-corpus-checks"
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_runner.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_real_tools.py
+```
+
+The real-tool test freezes this portable inspection worker and the production
+compiler, removes their original copies, and translates all 20 vendored public
+builtin shaders through naga/MSL. It does not render or encode native pixels.
+The five media reductions apply real library journal patches and inspect the
+kernel's canonical document before exercising the worker's shared binding code.

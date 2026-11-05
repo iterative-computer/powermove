@@ -127,3 +127,36 @@ Deferred to P2 (confirmed runtime extension requirements):
 `aa5512613386b7db` `af75efc409da84b4` `b376238707965c44` `b402422bfe1a534a`
 `b5077b4cf81c35b3` `b5260deb7dbf1c0c` `b732924ad02e30cd` `f739fcc18243c21c`
 `f776aad5619ac3f7` `f897aceddf1d277b`
+
+## 2026-11-04 — cloud synthetic follow-up (no new private-project results)
+
+The cloud lane adds portable compiler and journal/media reductions, plus a
+one-command frozen-pair Mac preflight/rerun. See the [dated handoff](handoff/corpus-p1.md#2026-11-04--cloud-corpus2-synthetic-reductions)
+for exact commands, decisions and limits. **The historical tables above are
+unchanged; P1 remains open.**
+
+Measured here: **20/20 public builtin shaders** translate through a real
+relocated helper and emit MSL after the original executable copies are removed;
+seven representative shader families and real compiler-error attribution pass.
+This corrects the historical assumption that every GLSL failure necessarily
+requires a WebGL host; it does not resolve any private entry or prove Metal output.
+
+Journal-applied synthetic media reductions expose and fix corpus selection/binding
+errors: missed 3D texture-map references, unordered content/bare-ID candidates,
+unselected direct content objects, ignored record proxy flags and partial-checksum
+ambiguity. Missing originals, changed content and ambiguous provenance are refused.
+No private-entry media repair or app-wide Media Store binding is claimed.
+
+Generated FFmpeg rotation references pass exact permutations for all three quarter
+turns. Native default-path pixel qualification is prepared, but **the rotation
+guard remains** pending Mac proof. Native glow/shadow preflight requires nonblank
+preview and decoded MP4/ProRes pixel changes against an effect-free baseline;
+it is **not executed or compiled here**, because the native worker requires Apple
+frameworks. A Linux example check explicitly fails at `objc2` platform admission.
+
+Linux checks: **108 passed, 0 failed, 1 existing manual private-store test ignored**
+across Python driver/frozen-tool tests, Rust corpus reductions, pm-glsl and targeted
+kernel library compatibility tests. Portable corpus clippy (`-D warnings`) and
+format checks pass. These are synthetic/component results, not additional corpus
+passes or a macOS behavior certification. No real projects, paths or media entered
+Git; no product design decisions were made.
