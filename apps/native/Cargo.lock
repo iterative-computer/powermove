@@ -4601,6 +4601,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-captions"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-color"
 version = "0.1.0"
 dependencies = [
@@ -5287,11 +5297,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fs2",
+ "pm-captions",
  "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml_edit",
  "url",
 ]
 
@@ -7147,6 +7159,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -7158,6 +7171,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tower"

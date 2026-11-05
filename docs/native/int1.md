@@ -15,3 +15,4 @@ existing Opus specifications remain authoritative.
 | Merge | Incoming head | Conflicts / resolution | Affected locked test result |
 | --- | --- | --- | --- |
 | tokens6 | `e8a2f10f7282eb48208237f82d2789c9666cdc36` | None | `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-design`: 12 passed |
+| surfa | `4f0743569b3e5690def2321f050f0f84503db5a7` | None | `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-services`: 195 passed, 0 failed, 0 ignored |
