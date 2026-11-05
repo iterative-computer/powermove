@@ -878,22 +878,47 @@ fn surface_unknown_ids() -> Check {
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 67);
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 68);
+    assert_eq!(
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        67
+    );
     Ok(())
 }
 fn pending_tools_are_explicit() -> Check {
     let mut f = Fixture::new()?;
     let before = f.document()?;
+    let revision = f.revision();
     for spec in pm_mcp::catalog::tools() {
         let name = spec["name"].as_str().unwrap();
         if pm_mcp::catalog::IMPLEMENTED.contains(&name) {
             continue;
         }
         let args = pm_acceptance::scenarios::pending_arguments(&spec["inputSchema"])?;
+        if name == "project_memory" {
+            assert_eq!(f.call(name, args)?, json!({"memory":[],"total":0}));
+            let error = tool_error(
+                &mut f.session,
+                name,
+                json!({
+                    "operation":"add", "kind":"goal", "text":"Synthetic durable goal"
+                }),
+            )?;
+            assert_eq!(error["code"], "not_available_in_this_build");
+            assert_eq!(
+                error["backing"],
+                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback"
+            );
+            continue;
+        }
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(error["code"], "not_available_in_this_build");
         assert_eq!(error["backing"], pm_mcp::catalog::backing(name));
     }
     assert_eq!(f.document()?, before);
+    assert_eq!(f.revision(), revision);
     Ok(())
 }

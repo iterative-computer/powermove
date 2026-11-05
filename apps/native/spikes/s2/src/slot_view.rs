@@ -48,6 +48,7 @@ impl SlotView {
         };
         match clip {
             Clip::Rect(r) => add_rect(r),
+            #[cfg(test)]
             Clip::Polygon(p) => add_polygon(&path, p, h),
             Clip::Union(rs) => {
                 for r in rs {
@@ -72,8 +73,6 @@ fn add_polygon(path: &CGMutablePath, points: &[[f64; 2]], h: f64) {
                 CGMutablePath::add_line_to_point(Some(path), std::ptr::null(), p[0], h - p[1]);
             }
         }
-        unsafe {
-            CGMutablePath::close_subpath(Some(path));
-        }
+        CGMutablePath::close_subpath(Some(path));
     }
 }

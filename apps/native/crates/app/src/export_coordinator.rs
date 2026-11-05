@@ -222,7 +222,16 @@ async fn execute(
                 Ok(started) => {
                     ticket = Some(started);
                     execute_inner(
-                        &frozen, &job, activity, &runtime, &executor, &tasks, started, &planned,
+                        &frozen,
+                        &job,
+                        activity,
+                        &runtime,
+                        &executor,
+                        TaskAdmission {
+                            tasks: &tasks,
+                            ticket: started,
+                        },
+                        &planned,
                     )
                     .await
                 }
@@ -268,16 +277,21 @@ async fn execute(
     }
     result.map(|_| ())
 }
+struct TaskAdmission<'a> {
+    tasks: &'a Arc<Mutex<BackgroundTasks>>,
+    ticket: pm_promedia::tasks::Ticket,
+}
+
 async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
     activity: Arc<AtomicBool>,
     runtime: &pm_builtins::Builtins,
     executor: &gpui::BackgroundExecutor,
-    tasks: &Arc<Mutex<BackgroundTasks>>,
-    ticket: pm_promedia::tasks::Ticket,
+    task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
 ) -> Result<String, String> {
+    let TaskAdmission { tasks, ticket } = task;
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }

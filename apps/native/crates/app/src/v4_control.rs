@@ -92,20 +92,35 @@ pub struct NativeControl {
     height: f32,
 }
 impl EventEmitter<Value> for NativeControl {}
+
+pub struct ControlSpec<'a> {
+    pub kind: Kind,
+    pub label: &'a str,
+    pub identifier: &'a str,
+    pub value: &'a Value,
+    pub options: Vec<Value>,
+    pub disabled: bool,
+    pub default: bool,
+    pub destructive: bool,
+}
+
 impl NativeControl {
     pub fn new(
-        kind: Kind,
-        label: &str,
-        identifier: &str,
-        value: &Value,
-        options: Vec<Value>,
-        disabled: bool,
-        default: bool,
-        destructive: bool,
+        spec: ControlSpec<'_>,
         t: &pm_design::Tokens,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let ControlSpec {
+            kind,
+            label,
+            identifier,
+            value,
+            options,
+            disabled,
+            default,
+            destructive,
+        } = spec;
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let RawWindowHandle::AppKit(handle) =
             HasWindowHandle::window_handle(window).unwrap().as_raw()

@@ -604,7 +604,8 @@ fn open_at(parent: &fs::File, name: &str, flags: i32, mode: u32) -> Result<fs::F
             parent.as_raw_fd(),
             name.as_ptr(),
             flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode as libc::mode_t,
+            // Keep the u32 argument promoted: Darwin's mode_t is only u16.
+            mode,
         )
     };
     if fd < 0 {

@@ -1,6 +1,6 @@
 //! AppKit slot host. Placement runs only from the patched GPUI present callback.
 use crate::contract::{Band, Clip, Frame, Rect, Slot, Target, Transform};
-use foreign_types::{ForeignType, ForeignTypeRef};
+use foreign_types::ForeignType;
 use metal::{MTLClearColor, MTLLoadAction, MTLPixelFormat, MTLStoreAction};
 use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
@@ -264,10 +264,8 @@ impl Host {
                     }
                     self.web.clip(&s.clip);
                 }
-                3 => {
-                    if self.field.frame() != nsrect(r, height) {
-                        self.field.setFrame(nsrect(r, height));
-                    }
+                3 if self.field.frame() != nsrect(r, height) => {
+                    self.field.setFrame(nsrect(r, height));
                 }
                 _ => {}
             }

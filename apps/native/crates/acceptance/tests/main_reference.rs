@@ -54,7 +54,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         retired.blocked_by.as_deref(),
         Some("delta-data:archived-web-export-preferences")
     );
-    assert_eq!(r.counts(), (1651, 32, 2661));
+    assert_eq!(r.counts(), (1655, 28, 2661));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
     assert_eq!(r.specs.iter().filter(|s| s.in_370_roster).count(), 370);
@@ -74,16 +74,26 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         83
     );
     for id in [
-        "MAIN.MCP.export_video.catalog",
-        "MAIN.MCP.get_project_state.catalog",
-        "MAIN.MCP.project_memory.catalog",
-        "MAIN.A07.project-memory-call",
-        "MAIN.A07.memory-index",
+        "MAIN.MCP.edit_3d.catalog",
+        "MAIN.MCP.tools.identity",
         "MAIN.curve.set",
     ] {
         assert_eq!(
             r.cases.iter().find(|c| c.id == id).unwrap().status,
             Status::Fail,
+            "{id}"
+        );
+    }
+    for id in [
+        "MAIN.MCP.export_video.catalog",
+        "MAIN.MCP.get_project_state.catalog",
+        "MAIN.MCP.project_memory.catalog",
+        "MAIN.A07.project-memory-call",
+        "MAIN.A07.memory-index",
+    ] {
+        assert_eq!(
+            r.cases.iter().find(|case| case.id == id).unwrap().status,
+            Status::Pass,
             "{id}"
         );
     }
@@ -161,7 +171,7 @@ fn cli_defaults_to_main_and_requires_explicit_legacy_selection() {
         .args(["--case", "MAIN.MCP.project_memory.catalog", "--strict"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["reference"], REFERENCE);
     let output = std::process::Command::new(binary)

@@ -342,9 +342,7 @@ impl Controller {
         // Ensure the accepted header and body refer to the same native publication.
         let _ = self.builtin_panel(id, bounds, window, cx);
         let view = self.builtins.views.get(id)?.clone();
-        if view.read(cx).header_id().is_none() {
-            return None;
-        }
+        view.read(cx).header_id()?;
         let header = self
             .builtins
             .headers
@@ -357,10 +355,10 @@ impl Controller {
         if self.builtins.opening_windows.contains(id) {
             return;
         }
-        if let Some(existing) = self.builtins.windows.get(id).copied() {
-            if existing.update(cx, |_, w, _| w.activate()).is_ok() {
-                return;
-            }
+        if let Some(existing) = self.builtins.windows.get(id).copied()
+            && existing.update(cx, |_, w, _| w.activate()).is_ok()
+        {
+            return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
@@ -577,10 +575,10 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "focus" => {
-                    if let Some(id) = request.input.as_str() {
-                        if let Some(view) = self.builtins.views.get(&request.panel) {
-                            view.update(cx, |v, cx| v.focus_semantic(id, window, cx));
-                        }
+                    if let Some(id) = request.input.as_str()
+                        && let Some(view) = self.builtins.views.get(&request.panel)
+                    {
+                        view.update(cx, |v, cx| v.focus_semantic(id, window, cx));
                     }
                     Ok(Value::Null)
                 }
@@ -631,12 +629,12 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "settings.scroll" => {
-                    if let Some(section) = request.input["section"].as_str() {
-                        if let Some(view) = self.builtins.views.get("settings") {
-                            view.update(cx, |v, cx| {
-                                v.scroll_semantic(&format!("settings.section.{section}"), cx)
-                            });
-                        }
+                    if let Some(section) = request.input["section"].as_str()
+                        && let Some(view) = self.builtins.views.get("settings")
+                    {
+                        view.update(cx, |v, cx| {
+                            v.scroll_semantic(&format!("settings.section.{section}"), cx)
+                        });
                     }
                     Ok(Value::Null)
                 }

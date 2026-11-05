@@ -10,7 +10,7 @@ pub fn expected(i: usize) -> u8 {
     }
 }
 pub fn frame() -> Vec<u8> {
-    (0..BYTES).map(|i| expected(i)).collect()
+    (0..BYTES).map(expected).collect()
 }
 pub fn valid(bytes: &[u8]) -> bool {
     bytes.len() == BYTES && bytes.iter().enumerate().all(|(i, b)| *b == expected(i))
@@ -36,11 +36,11 @@ impl Renders {
         if rgba.len() != 16 * 16 * 4 || !rgba.chunks_exact(4).all(|p| p == [35, 180, 90, 255]) {
             return false;
         }
-        if let Some((r, pixels)) = self.pending.get_mut(&id) {
-            if *r == revision {
-                *pixels = Some(rgba.to_vec());
-                return true;
-            }
+        if let Some((r, pixels)) = self.pending.get_mut(&id)
+            && *r == revision
+        {
+            *pixels = Some(rgba.to_vec());
+            return true;
         }
         false
     }

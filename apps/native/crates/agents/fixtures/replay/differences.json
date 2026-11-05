@@ -402,47 +402,5 @@
         }
       }
     ]
-  },
-  "mcp-tool-errors": {
-    "rule": "N3/N4/N7 — pending compatibility fix outside replay ownership",
-    "reason": "Native MCP changes shipped plain-text tool errors to JSON text, replaces the shipped Zod diagnostic, and validates an unknown tool before the no-session error. This is a recorded gap, not an approved identical result. MCP owner must preserve frozen content text/precedence or resolve authored intent explicitly.",
-    "differences": [
-      {
-        "path": "/wire/1/value/result/content/0/text",
-        "expected": {
-          "Present": "Call start_session before using Powermove tools."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Call start_session before using Powermove tools.\"}"
-        }
-      },
-      {
-        "path": "/wire/2/value/result/content/0/text",
-        "expected": {
-          "Present": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Missing arguments.commit\"}"
-        }
-      },
-      {
-        "path": "/wire/3/value/result/content/0/text",
-        "expected": {
-          "Present": "Call start_session before using Powermove tools."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Unknown tool: synthetic_unknown_tool\"}"
-        }
-      },
-      {
-        "path": "/wire/4/value/result/content/0/text",
-        "expected": {
-          "Present": "No MCP session is active."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"No MCP session is active.\"}"
-        }
-      }
-    ]
   }
 }

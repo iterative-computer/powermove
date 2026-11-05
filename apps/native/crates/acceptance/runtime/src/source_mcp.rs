@@ -83,11 +83,12 @@ pub fn fork() -> Check {
         );
         assert_eq!(checked(fs::read(destination.join("index.ts")))?, bytes);
         f.call("finish_session", json!({"commit":commit}))?;
-        let archive = checked(fs::read_dir(f.scratch.0.join("profile/mcp-archives")))?
-            .next()
-            .ok_or("missing archived run")?
-            .map_err(|e| e.to_string())?
-            .path();
+        let run_id = stage
+            .parent()
+            .and_then(|root| root.file_name())
+            .ok_or("missing run identity")?;
+        let archive = f.scratch.0.join("profile/mcp-archives").join(run_id);
+        assert!(archive.is_dir(), "the exact fork run must be archived");
         let retained = archive.join(if commit {
             "extensions/synthetic-fork"
         } else {

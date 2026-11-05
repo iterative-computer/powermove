@@ -62,13 +62,13 @@ impl Render for Demo {
                                 design::TIMELINE,
                             ),
                         ] {
-                            window.paint_quad(fill(
-                                Bounds::new(
+                            window.paint_quad(
+                                PaintQuad::new(Bounds::new(
                                     point(px(r.x as f32), px(r.y as f32)),
                                     size(px(r.w as f32), px(r.h as f32)),
-                                ),
-                                rgb(c),
-                            ));
+                                ))
+                                .background(rgb(c)),
+                            );
                         }
                         let _ = cx;
                     },

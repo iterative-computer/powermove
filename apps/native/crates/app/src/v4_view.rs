@@ -113,9 +113,7 @@ impl SurfaceView {
                 self.option_sets.insert(node.id, options);
             }
             if matches!(node.r#type.as_str(), "scroll" | "virtual-list") {
-                self.scrolls
-                    .entry(node.id)
-                    .or_insert_with(ScrollHandle::new);
+                self.scrolls.entry(node.id).or_default();
             }
             let kind = match Component::of(&node) {
                 Some(Component::PopUpButton) => Some(crate::v4_control::Kind::Popup),
@@ -181,14 +179,16 @@ impl SurfaceView {
                             == Some(&Value::Bool(true));
                     let control = cx.new(|cx| {
                         crate::v4_control::NativeControl::new(
-                            kind,
-                            label,
-                            &identifier,
-                            &value,
-                            options,
-                            disabled,
-                            primary,
-                            button_role == Some("destructive"),
+                            crate::v4_control::ControlSpec {
+                                kind,
+                                label,
+                                identifier: &identifier,
+                                value: &value,
+                                options,
+                                disabled,
+                                default: primary,
+                                destructive: button_role == Some("destructive"),
+                            },
                             &self.tokens,
                             window,
                             cx,
@@ -351,15 +351,12 @@ impl SurfaceView {
             .nodes()
             .values()
             .find(|n| n.props.get("id").and_then(Value::as_str) == Some(semantic))
+            && let Some(parent) = node.parent.and_then(|id| self.publication.surface.node(id))
+            && let Some(scroll) = self.scrolls.get(&parent.id)
+            && let Some(index) = parent.children.iter().position(|id| *id == node.id)
         {
-            if let Some(parent) = node.parent.and_then(|id| self.publication.surface.node(id)) {
-                if let Some(scroll) = self.scrolls.get(&parent.id) {
-                    if let Some(index) = parent.children.iter().position(|id| *id == node.id) {
-                        scroll.scroll_to_top_of_item(index);
-                        cx.notify();
-                    }
-                }
-            }
+            scroll.scroll_to_top_of_item(index);
+            cx.notify();
         }
     }
     pub fn focus_semantic(&self, semantic: &str, window: &mut Window, cx: &mut App) {
@@ -472,11 +469,11 @@ impl SurfaceView {
                     .unwrap_or_default();
                 let owner = cx.entity().downgrade();
                 crate::v4_native::menu(window, &options.clone(), cx, move |index, cx| {
-                    if let Some(index) = index {
-                        if let Some(option) = options.get(index) {
-                            let value = option.get("v").unwrap_or(option).clone();
-                            let _ = owner.update(cx, |v, cx| v.change(id, value, cx));
-                        }
+                    if let Some(index) = index
+                        && let Some(option) = options.get(index)
+                    {
+                        let value = option.get("v").unwrap_or(option).clone();
+                        let _ = owner.update(cx, |v, cx| v.change(id, value, cx));
                     }
                 });
             }
@@ -704,10 +701,10 @@ impl SurfaceView {
             }
             _ => {}
         }
-        if let Some(header) = self.header_id() {
-            if id == header {
-                element = element.flex_none().w_full();
-            }
+        if let Some(header) = self.header_id()
+            && id == header
+        {
+            element = element.flex_none().w_full();
         }
         if let Some(scroll) = self.scrolls.get(&id) {
             element = element
@@ -1325,10 +1322,8 @@ fn styled(mut e: Stateful<Div>, style: &pm_surface::Props, t: &pm_design::Tokens
                     e = e.overflow_hidden();
                 }
             }
-            "whiteSpace" => {
-                if s == Some("nowrap") {
-                    e = e.whitespace_nowrap();
-                }
+            "whiteSpace" if s == Some("nowrap") => {
+                e = e.whitespace_nowrap();
             }
             _ => {}
         }

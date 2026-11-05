@@ -28,14 +28,12 @@ pub struct Controller {
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
-    pub project_scroll: gpui::UniformListScrollHandle,
     pub output_mode: crate::viewer2::OutputMode,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
-    pub timeline_scroll: gpui::UniformListScrollHandle,
     pub selected: Option<String>,
     pub message: String,
     pub path: Option<PathBuf>,
@@ -226,13 +224,11 @@ impl Controller {
             opening: false,
             rows: Default::default(),
             saving_note: false,
-            project_scroll: Default::default(),
             output_mode: crate::viewer2::OutputMode::from_env(),
             safe_areas: false,
             guides: false,
             popout: None,
             main_output: Default::default(),
-            timeline_scroll: Default::default(),
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
@@ -404,26 +400,6 @@ impl Controller {
             });
         })
         .detach();
-    }
-    pub fn edit(&mut self, command: pm_kernel::Command, cx: &mut Context<Self>) {
-        self.call(
-            Call::Transact {
-                label: None,
-                body: WriteBody::Commands(vec![command]),
-                expected_revision: None,
-            },
-            cx,
-        );
-    }
-    pub fn select(&mut self, id: String, cx: &mut Context<Self>) {
-        self.call(
-            SelectionCall::Layers {
-                ids: vec![id],
-                add: false,
-            }
-            .into(),
-            cx,
-        );
     }
     pub fn time(&self) -> f64 {
         self.viewer

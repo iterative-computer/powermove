@@ -19,6 +19,7 @@ impl Rect {
 pub enum Clip {
     Rect(Rect),
     Union(Vec<Rect>),
+    #[cfg(test)]
     Polygon(Vec<[f64; 2]>),
 }
 impl Clip {
@@ -26,6 +27,7 @@ impl Clip {
         match self {
             Self::Rect(r) => r.contains(p),
             Self::Union(rs) => rs.iter().any(|r| r.contains(p)),
+            #[cfg(test)]
             Self::Polygon(v) => {
                 if v.len() < 3 {
                     return false;
@@ -129,10 +131,12 @@ impl Frame {
             .map_or(Target::None, |s| Target::Slot(s.id))
     }
 }
+#[cfg(test)]
 #[derive(Default)]
 pub struct Pointer {
     captured: Option<Target>,
 }
+#[cfg(test)]
 impl Pointer {
     pub fn down(&mut self, frame: &Frame, p: [f64; 2]) -> Target {
         let t = frame.hit(p);

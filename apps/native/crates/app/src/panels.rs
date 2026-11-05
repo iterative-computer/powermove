@@ -52,11 +52,11 @@ impl Controller {
     }
 }
 /// Compatibility formatting retained by the native geometry checks.
+#[cfg(test)]
 const CHANNELS: [&str; 3] = ["opacity", "position.x", "position.y"];
 
-/// Viewer zoom pop-up choices; `None` is Fit.
-
 /// Title Case label without its unit (units belong to values).
+#[cfg(test)]
 pub fn channel_label(channel: &str) -> &'static str {
     match channel {
         "opacity" => "Opacity",
@@ -68,6 +68,7 @@ pub fn channel_label(channel: &str) -> &'static str {
 
 /// Value with its unit at the property's display precision: percentages to
 /// one decimal, pixels to two, trailing zeros trimmed (`100 %`, `12.5 px`).
+#[cfg(test)]
 pub fn display_value(channel: &str, value: f64) -> String {
     let (decimals, unit) = match channel {
         "opacity" => (1, "%"),
@@ -84,11 +85,13 @@ pub fn display_value(channel: &str, value: f64) -> String {
 }
 
 /// Zoom as a whole percentage (`54 %`).
+#[cfg(test)]
 pub fn percent(zoom: f64) -> String {
     format!("{} %", (zoom * 100.).round() as i64)
 }
 
 /// The zoom pop-up title: `Fit (54 %)` or `100 %`.
+#[cfg(test)]
 pub fn zoom_title(zoom: Option<f64>, fit: f64) -> String {
     match zoom {
         None => format!("Fit ({})", percent(fit)),
@@ -117,6 +120,7 @@ pub fn label_color(kind: &str, labels: &pm_design::Labels) -> u32 {
 }
 
 /// Display name of a layer kind (`Video`, `Text`, …).
+#[cfg(test)]
 pub fn kind_name(kind: &str) -> String {
     match kind {
         "precomp" => "Composition".into(),

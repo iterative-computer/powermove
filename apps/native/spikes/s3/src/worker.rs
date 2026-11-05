@@ -1,7 +1,7 @@
 use crate::{
     color,
     policy::{Output, Policy, Stamp, percentile},
-    render::{Engine, Scene},
+    render::{Engine, Presentation, Scene},
 };
 use pm_protocol::common::{Size, Ticks};
 use serde_json::json;
@@ -82,9 +82,11 @@ impl Host {
                     clock,
                     &c,
                     &tx,
-                    &redraws,
-                    &commits,
-                    &layer_updates,
+                    Counters {
+                        redraws: &redraws,
+                        gpui_commits: &commits,
+                        layer_updates: &layer_updates,
+                    },
                     options,
                 );
                 done.store(true, Ordering::Release);
@@ -132,9 +134,11 @@ fn accuracy(
             scene,
             t,
             output,
-            layer,
-            [0.; 4],
-            0,
+            Presentation {
+                layer,
+                rect: [0.; 4],
+                overlay: 0,
+            },
             true,
             Arc::new(Mutex::new(Default::default())),
         )?
@@ -160,17 +164,26 @@ fn accuracy(
     let report = json!({"pixels":pixels.len(),"deltaE2000_p50":percentile(&errors,0.5),"deltaE2000_p99":percentile(&errors,0.99),"deltaE2000_max":percentile(&errors,1.),"export_peak_linear_P3":maximum_linear,"passes_deltaE_gate":percentile(&errors,0.99)<=1. && percentile(&errors,1.)<=2.,"overlays":false,"readback":if layer.is_some() { "drawable blit; independent export render" } else { "offscreen texture blit; independent export render; NOT display accuracy" }});
     Ok(report)
 }
+struct Counters<'a> {
+    redraws: &'a std::sync::atomic::AtomicU64,
+    gpui_commits: &'a std::sync::atomic::AtomicU64,
+    layer_updates: &'a std::sync::atomic::AtomicU64,
+}
+
 fn run(
     gpu: pm_gpu::Gpu,
     layer: Option<metal::MetalLayer>,
     clock: crate::mailbox::Clock,
     c: &Arc<Mutex<Control>>,
     tx: &async_channel::Sender<Update>,
-    redraws: &std::sync::atomic::AtomicU64,
-    gpui_commits: &std::sync::atomic::AtomicU64,
-    layer_updates: &std::sync::atomic::AtomicU64,
+    counters: Counters<'_>,
     options: Options,
 ) -> anyhow::Result<()> {
+    let Counters {
+        redraws,
+        gpui_commits,
+        layer_updates,
+    } = counters;
     set_interactive();
     let mut engine = Engine::new(gpu)?;
     engine.legacy_sync = options.legacy_sync;
@@ -309,9 +322,11 @@ fn run(
             &options.scene,
             ticks(time),
             output,
-            layer.as_ref(),
-            rect,
-            1,
+            Presentation {
+                layer: layer.as_ref(),
+                rect,
+                overlay: 1,
+            },
             options.measure_overlays,
             trace.clone(),
         )?;
@@ -472,9 +487,11 @@ fn edr_probe(
             scene,
             ticks(0.),
             output,
-            layer,
-            [0.; 4],
-            2,
+            Presentation {
+                layer,
+                rect: [0.; 4],
+                overlay: 2,
+            },
             true,
             Arc::new(Mutex::new(Default::default())),
         )?
@@ -524,7 +541,17 @@ pub fn offscreen(gpu: pm_gpu::Gpu, options: Options) -> anyhow::Result<()> {
     let (tx, _) = async_channel::bounded(1);
     let counter = std::sync::atomic::AtomicU64::new(0);
     let result = run(
-        gpu, None, clock, &c, &tx, &counter, &counter, &counter, options,
+        gpu,
+        None,
+        clock,
+        &c,
+        &tx,
+        Counters {
+            redraws: &counter,
+            gpui_commits: &counter,
+            layer_updates: &counter,
+        },
+        options,
     );
     done.store(true, Ordering::Release);
     thread.join().unwrap();
