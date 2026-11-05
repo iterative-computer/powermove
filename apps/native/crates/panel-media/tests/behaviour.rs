@@ -266,12 +266,12 @@ fn nested_buttons_and_secondary_press_do_not_select() {
 #[test]
 fn arrows_wrap_and_home_end_work_with_ranges() {
     let (c, mut p, r) = setup();
+    // N2 / media-browser §5: navigation includes folders/compositions in grid order.
     for (k, from, to) in [
-        (Key::Left, "a", "d"),
-        (Key::Up, "a", "d"),
-        (Key::Right, "d", "a"),
-        (Key::Down, "d", "a"),
-        (Key::Home, "c", "a"),
+        (Key::Left, "b", "a"),
+        (Key::Up, "b", "a"),
+        (Key::Right, "a", "b"),
+        (Key::Down, "a", "b"),
         (Key::End, "b", "d"),
     ] {
         key(&mut p, &c, &r, from, k, Modifiers::default());
@@ -279,7 +279,8 @@ fn arrows_wrap_and_home_end_work_with_ranges() {
         assert_eq!(p.focused(), Some(&asset(to)));
     }
     key(&mut p, &c, &r, "d", Key::Home, shift());
-    assert_eq!(p.selected_assets().len(), 4);
+    assert_eq!(p.focused(), Some(&ItemId::Folder("f1".into())));
+    assert!(p.selected_assets().is_empty());
 }
 #[test]
 fn select_all_only_current_bin_assets() {
@@ -368,7 +369,13 @@ fn loading_and_unknown_are_not_declared_offline() {
                 .effects
                 .is_empty()
         );
-        assert!(p.menu(&c, &r, Some(asset("a"))).unwrap().entries.is_empty());
+        assert_eq!(
+            p.menu(&c, &r, Some(asset("a"))).unwrap().entries,
+            vec![MenuEntry {
+                command: MenuCommand::DeleteAssets,
+                enabled: true
+            }]
+        );
     }
 }
 #[test]
@@ -810,6 +817,7 @@ fn proxy_ready_never_promotes_offline_original() {
                 version: "proxy-v1".into(),
             },
             poster: Some("poster-v1".into()),
+            progress: None,
         },
     );
     let o = key(&mut p, &c, &r, "a", Key::Enter, Modifiers::default());
@@ -1243,7 +1251,7 @@ fn bounded_virtual_pages_and_id_navigation_over_sixty_thousand_rows() {
     assert_eq!(page.total, 60_005);
     assert_eq!(page.next, Some(60_002));
     key(&mut p, &c, &r, "a60000", Key::Right, Modifiers::default());
-    assert_eq!(p.selected_assets(), ["a00000"]);
+    assert_eq!(p.focused(), Some(&ItemId::Folder("f1".into())));
     assert!(p.page(&c, &r, usize::MAX, 50).unwrap().rows.is_empty());
     assert!(p.page(&c, &r, 0, 0).unwrap().next.is_none());
 }
@@ -1799,4 +1807,182 @@ fn empty_direct_asset_field_falls_through_to_extension_source() {
     );
     history(&h, HistoryCall::Undo);
     assert_eq!(project(&h), before);
+}
+
+#[test]
+fn descendant_search_preserves_scope_paths_and_source() {
+    let (c, mut p, r) = setup();
+    p.dispatch(
+        &c,
+        &r,
+        Input::Filter(Filter {
+            query: "Nested".into(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let page = p.page(&c, &r, 0, 20).unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].id, asset("e"));
+    assert_eq!(page.rows[0].folder_path, ["Bin 2", "Inner"]);
+    p.dispatch(&c, &r, Input::OpenFolder(Some("f3".into())))
+        .unwrap();
+    p.dispatch(
+        &c,
+        &r,
+        Input::Filter(Filter {
+            query: "Nested".into(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert_eq!(p.total(), 0);
+    assert_eq!(c.assets["e"].folder.as_deref(), Some("f2"));
+}
+#[test]
+fn native_grid_columns_drive_rows_wrap_and_shift_ranges() {
+    let (c, mut p, r) = setup();
+    p.dispatch(&c, &r, Input::GridColumns(3)).unwrap();
+    key(&mut p, &c, &r, "a", Key::Down, Modifiers::default());
+    assert_eq!(p.focused(), Some(&asset("d")));
+    key(&mut p, &c, &r, "d", Key::Up, shift());
+    assert_eq!(p.selected_assets(), ["a", "b", "c", "d"]);
+    key(&mut p, &c, &r, "d", Key::Down, Modifiers::default());
+    assert_eq!(p.focused(), Some(&ItemId::Folder("f3".into())));
+    assert_eq!(
+        p.dispatch(&c, &r, Input::GridColumns(0)).unwrap_err(),
+        Error::InvalidTarget
+    );
+}
+#[test]
+fn select_all_uses_sparse_exceptions_for_pages_commands_and_refresh() {
+    let (c, mut p, r) = setup();
+    key(&mut p, &c, &r, "a", Key::A, primary());
+    assert_eq!(p.selected_count(), 4);
+    pointer(&mut p, &c, &r, "b", primary());
+    assert_eq!(p.selected_count(), 3);
+    assert!(!p.is_selected("b"));
+    assert_eq!(p.selected_assets(), ["a", "c", "d"]);
+    p.refresh(&c, &r);
+    assert_eq!(p.selected_assets(), ["a", "c", "d"]);
+    assert_eq!(
+        p.page(&c, &r, 0, 20)
+            .unwrap()
+            .rows
+            .iter()
+            .filter(|r| r.selected)
+            .count(),
+        3
+    );
+    pointer(&mut p, &c, &r, "b", primary());
+    assert_eq!(p.selected_count(), 4);
+    let plan = key(&mut p, &c, &r, "a", Key::Delete, Modifiers::default());
+    assert!(matches!(&plan.effects[..], [Effect::ConfirmDelete { assets,.. }] if assets.len()==4));
+}
+
+#[test]
+fn approved_undo_names_are_title_case() {
+    let c = catalog();
+    for (edit, label) in [
+        (
+            Edit::CreateFolder {
+                id: "new".into(),
+                name: "Fixture".into(),
+                parent: None,
+            },
+            "New Folder",
+        ),
+        (
+            Edit::RenameFolder {
+                id: "f1".into(),
+                name: "Renamed".into(),
+            },
+            "Rename Folder",
+        ),
+        (Edit::DeleteFolder { id: "f1".into() }, "Delete Folder"),
+        (
+            Edit::Move {
+                assets: vec!["a".into()],
+                folders: vec![],
+                target: Some("f1".into()),
+            },
+            "Move to Folder",
+        ),
+        (
+            Edit::DeleteAssets {
+                ids: vec!["c".into()],
+                confirmed: false,
+            },
+            "Delete Media",
+        ),
+    ] {
+        assert_eq!(c.prepare(edit).unwrap().label, label);
+    }
+}
+#[test]
+fn changed_progress_and_composition_poster_remain_observed_facts() {
+    struct Observed;
+    impl MediaRuntime for Observed {
+        fn state(&self, _: &Stamp, _: &str) -> RuntimeState {
+            RuntimeState {
+                availability: Availability::Changed {
+                    source: "/synthetic/changed.mov".into(),
+                },
+                progress: Some(DownloadProgress {
+                    completed: 25,
+                    total: 100,
+                }),
+                ..Default::default()
+            }
+        }
+        fn composition_poster(&self, _: &Stamp, id: &str) -> Option<String> {
+            Some(format!("poster:{id}"))
+        }
+    }
+    let mut value = parse(PROJECT).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("bg", Value::from("#112233"));
+    let c = Catalog::new("P".into(), DocumentStore::new_untitled(value).snapshot()).unwrap();
+    let mut p = MediaPanel::default();
+    p.refresh(&c, &Observed);
+    let page = p.page(&c, &Observed, 0, 100).unwrap();
+    let comp = page
+        .rows
+        .iter()
+        .find_map(|r| match &r.data {
+            RowData::Composition(c) if c.id == "C1" => Some(c),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(comp.background.as_deref(), Some("#112233"));
+    assert_eq!(comp.poster.as_deref(), Some("poster:C1"));
+    assert!(
+        !p.dispatch(
+            &c,
+            &Observed,
+            Input::DragStart {
+                id: asset("a"),
+                nested_control: false
+            }
+        )
+        .unwrap()
+        .handled
+    );
+    let asset = page
+        .rows
+        .iter()
+        .find_map(|r| match &r.data {
+            RowData::Asset(a, r) if a.id == "a" => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        asset.progress,
+        Some(DownloadProgress {
+            completed: 25,
+            total: 100
+        })
+    );
 }

@@ -14,7 +14,17 @@ const dimensions = (a: { width: number | null; height: number | null }) =>
 export function status(
   availability: Availability,
   a: Asset,
-): { overlay: string; detail: string; tone: "danger" | "muted" } | null {
+): {
+  overlay: string;
+  detail: string;
+  tone: "danger" | "muted" | "warning";
+} | null {
+  if (typeof availability === "object" && "Changed" in availability)
+    return {
+      overlay: "",
+      detail: `Changed · ${availability.Changed.source}`,
+      tone: "warning",
+    };
   if (availability === "Loading")
     return { overlay: "Loading…", detail: "", tone: "muted" };
   if (availability === "Offline")
@@ -111,6 +121,8 @@ export function accessibleName(row: Row): string {
     const availability = row.data.Asset[1].availability;
     if (availability === "Offline") parts.push("offline");
     if (availability === "Loading") parts.push("loading");
+    if (typeof availability === "object" && "Changed" in availability)
+      parts.push("changed");
     if (typeof availability === "object" && "Cloud" in availability)
       parts.push("in cloud");
   }
@@ -198,7 +210,8 @@ export function cardActions(row: Row, compositions: number): CardAction[] {
     });
   } else if (
     r.availability === "Offline" ||
-    (typeof r.availability === "object" && "Failed" in r.availability)
+    (typeof r.availability === "object" &&
+      ("Failed" in r.availability || "Changed" in r.availability))
   )
     result.push({
       label: "Locate File…",

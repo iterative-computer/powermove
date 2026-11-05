@@ -140,7 +140,7 @@ test("worker search retains previous results and drops stale completion", async 
   expect(model.searching).toBe(true);
   const newer = model.search("Appearance");
   await Promise.all([older, newer]);
-  expect([...model.matches.rows]).toEqual(["appearance", "density"]);
+  expect([...model.matches.rows]).toEqual(["appearance"]);
   expect(model.searching).toBe(false);
 });
 test("sidebar arrows/Home/End navigate matching sections only; scroll tracking changes title", async () => {

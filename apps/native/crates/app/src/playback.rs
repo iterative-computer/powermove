@@ -163,6 +163,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let error=format!("Viewer: {error}");
                     if v.message!=error {v.message=error;cx.notify();}
                 }
+                v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
                 if let Some(clock)=status.clock { v.sync_popout(&clock); }
                 if let Some(clock)=status.clock {
@@ -182,7 +183,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*head,setBackgroundColor:&*cg!(colors.accent)];
                         let _:()=msg_send![&*head,setContentsScale:scale];
                         let geometry=TIMELINES.with(|t|t.borrow().get(&cx.entity_id()).copied());
-                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()];
+                        let _:()=msg_send![&*layers.timecode,setHidden:true];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none()];
                         if let Some((r,x,y))=geometry {
                             // Timecode sits in the timeline header (the shell's) after the play button.

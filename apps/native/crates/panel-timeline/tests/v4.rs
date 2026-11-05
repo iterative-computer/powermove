@@ -413,3 +413,57 @@ fn window_refreshes_the_actual_kernel_publication_without_an_intervening_client_
     let result = v4::window(&mut c, 0, 10).unwrap();
     assert_eq!(result["window"]["rows"][1]["selected"], true);
 }
+
+#[test]
+fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
+    use pm_design::{Accessibility, Scheme, Tokens};
+    use pm_panel_timeline::render as paint;
+    struct Presentation;
+    impl paint::ModelPresenter for Presentation {
+        fn accessibility_label(&self, row: &RowId) -> String {
+            v4::row_id(row)
+        }
+        fn layer_label(&self, _: &Layer) -> paint::Label {
+            paint::Label::Blue
+        }
+        fn media(&self, _: &Layer) -> paint::Media {
+            paint::Media::Ready
+        }
+        fn waveform(&self, _: &Layer) -> Option<Vec<f64>> {
+            Some(vec![0., 0.25, -0.5])
+        }
+        fn interpolation(&self, _: &Key) -> paint::Interpolation {
+            paint::Interpolation::Linear
+        }
+        fn track_accessibility_label(&self, area: tracks::Area, lane: usize) -> Option<String> {
+            Some(format!("{area:?} {}", lane + 1))
+        }
+    }
+    let (_actor, mut c) = client();
+    dispatch(
+        &mut c,
+        json!({"type":"selectRow","id":id("a:[]"),"modifiers":{}}),
+    )
+    .unwrap();
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    assert_eq!(scene.total(), c.model.rows().len());
+    let row = scene.row(&id("a:[]")).unwrap();
+    assert!(row.selected);
+    let paint::RowContent::Layer {
+        clip: Some(clip),
+        summary,
+    } = &row.content
+    else {
+        panic!("layer paint");
+    };
+    assert_eq!(clip.from, -0.125);
+    assert_eq!(clip.duration, 4.);
+    assert_eq!(clip.waveform, Some(vec![0., 0.25, -0.5]));
+    assert_eq!(summary[0].seconds, 0.);
+    c.model.mode = TimelineMode::Tracks;
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    assert!(
+        matches!(&scene.row("[\"track\",\"Video\",0]").unwrap().content,paint::RowContent::Track{clips} if clips.len()==2)
+    );
+}

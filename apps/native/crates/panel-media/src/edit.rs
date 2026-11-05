@@ -102,7 +102,7 @@ impl Catalog {
                 f.insert("parent", optional(parent.as_deref()));
                 ensure_map(&mut next, "assetFolders").insert(id.as_str(), Value::Object(f));
                 created = Some(id);
-                "New folder"
+                "New Folder"
             }
             Edit::RenameFolder { id, name } => {
                 if !self.folders.contains_key(&id) {
@@ -115,7 +115,7 @@ impl Catalog {
                         .ok_or(Error::InvalidMedia)?
                         .insert("name", Value::from(name));
                 }
-                "Rename folder"
+                "Rename Folder"
             }
             Edit::DeleteFolder { id } => {
                 let folder = self.folders.get(&id).ok_or(Error::MissingItem)?;
@@ -131,7 +131,7 @@ impl Catalog {
                     }
                 }
                 ensure_map(&mut next, "assetFolders").remove(&id);
-                "Delete folder"
+                "Delete Folder"
             }
             Edit::Move {
                 assets,
@@ -168,7 +168,7 @@ impl Catalog {
                         .unwrap()
                         .insert("name", Value::from(name.as_str()));
                 }
-                "Move to folder"
+                "Move to Folder"
             }
             Edit::DeleteAssets { ids, confirmed } => {
                 if ids.iter().any(|id| !self.assets.contains_key(id)) {
@@ -181,7 +181,7 @@ impl Catalog {
                     remove_asset(&mut next, id, &mut removed_layers);
                     ensure_map(&mut next, "assets").remove(id);
                 }
-                "Delete media"
+                "Delete Media"
             }
             Edit::DuplicateComposition { id, new_id } => {
                 if !self.compositions.contains_key(&id) {

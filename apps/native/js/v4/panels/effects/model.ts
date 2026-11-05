@@ -128,6 +128,7 @@ export class EffectsModel {
   focus: "search" | "scope" | "list" | null = null;
   focusRequest: string | undefined;
   target: Target | null = null;
+  error?: string;
   announcement = { sequence: 0, text: "" };
   viewport = { start: 0, size: 0 };
   constructor(private readonly ports: ModelPorts) {}
@@ -288,6 +289,7 @@ export class EffectsModel {
   }
   async setQuery(query: string) {
     if (this.retired) return;
+    this.error = undefined;
     this.query = query;
     const epoch = ++this.epoch;
     if (!query.trim()) {
@@ -311,6 +313,8 @@ export class EffectsModel {
     } catch (error) {
       if (epoch === this.epoch && !this.retired) {
         this.searching = false;
+        this.error = "Couldn’t search effects. Try again.";
+        this.announce(this.error);
         this.ports.report(error);
         this.changed();
       }
@@ -319,6 +323,7 @@ export class EffectsModel {
   pickScope(scope: Scope) {
     if (!this.scopes().some((option) => option.value === scope)) return;
     ++this.epoch;
+    this.error = undefined;
     this.query = "";
     this.searching = false;
     this.scope = scope;
@@ -408,6 +413,7 @@ export class EffectsModel {
   async apply(id: string) {
     const item = this.byId.get(id);
     if (!item || item.failed || this.retired) return false;
+    this.error = undefined;
     const target = this.target;
     if (!target) {
       this.announce("Select a layer first");
@@ -428,7 +434,12 @@ export class EffectsModel {
       this.changed();
       return true;
     } catch (error) {
-      if (!this.retired) this.ports.report(error);
+      if (!this.retired) {
+        this.error = `Couldn’t add ${item.label}. Try again.`;
+        this.announce(this.error);
+        this.ports.report(error);
+        this.changed();
+      }
       return false;
     }
   }

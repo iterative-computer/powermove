@@ -23,3 +23,5 @@ pub enum Error {
     Host(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub mod work_groups;

@@ -54,11 +54,8 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "value": null,
     },
     {
-      "actions": [
-        "Focus",
-        "SetValue",
-      ],
-      "disabled": false,
+      "actions": [],
+      "disabled": true,
       "expanded": null,
       "id": 5,
       "label": "Search effects",
@@ -67,11 +64,8 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "value": "",
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
-      "disabled": false,
+      "actions": [],
+      "disabled": true,
       "expanded": null,
       "id": 6,
       "label": "Category, All",
@@ -80,23 +74,10 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "value": "All",
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
-      "disabled": false,
-      "expanded": null,
-      "id": 7,
-      "label": "Effects",
-      "role": "Tree",
-      "selected": null,
-      "value": null,
-    },
-    {
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 8,
+      "id": 7,
       "label": "No Effects",
       "role": "Group",
       "selected": null,
@@ -106,7 +87,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 9,
+      "id": 8,
       "label": "No Effects",
       "role": "Heading",
       "selected": null,
@@ -116,8 +97,18 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "actions": [],
       "disabled": false,
       "expanded": null,
-      "id": 10,
+      "id": 9,
       "label": "No Effects",
+      "role": "Label",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 10,
+      "label": "Installed effects and presets appear here.",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -132,22 +123,8 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "selected": null,
       "value": null,
     },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 12,
-      "label": "Installed effects and presets appear here.",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
   ],
-  "focusOrder": [
-    5,
-    6,
-    7,
-  ],
+  "focusOrder": [],
   "nodes": {
     "0": {
       "children": [
@@ -188,23 +165,13 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "type": "div",
     },
     "10": {
-      "children": [],
+      "children": [
+        11,
+      ],
       "id": 10,
       "input": null,
       "listeners": {},
-      "parent": 9,
-      "props": {},
-      "text": "No Effects",
-      "type": "text",
-    },
-    "11": {
-      "children": [
-        12,
-      ],
-      "id": 11,
-      "input": null,
-      "listeners": {},
-      "parent": 8,
+      "parent": 7,
       "props": {
         "style": {
           "color": {
@@ -218,12 +185,12 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "text": "",
       "type": "text",
     },
-    "12": {
+    "11": {
       "children": [],
-      "id": 12,
+      "id": 11,
       "input": null,
       "listeners": {},
-      "parent": 11,
+      "parent": 10,
       "props": {},
       "text": "Installed effects and presets appear here.",
       "type": "text",
@@ -342,6 +309,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": true,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -403,6 +371,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": true,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -457,87 +426,12 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
     "7": {
       "children": [
         8,
+        10,
       ],
       "id": 7,
       "input": null,
-      "listeners": {
-        "focus": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-          "preventDefault": true,
-        },
-        "pointermove": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
-      "parent": 1,
-      "props": {
-        "data-pm-component": "tree",
-        "id": "fxbrowser:list",
-        "label": "Effects",
-        "metadata": {
-          "acceptsDrops": false,
-          "range": [
-            0,
-            0,
-          ],
-          "rowCount": 0,
-          "selectionMode": "single",
-        },
-        "preventDefault": {
-          "keydown": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-        },
-        "role": "tree",
-        "style": {
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
-        },
-        "tabIndex": 0,
-      },
-      "text": "",
-      "type": "div",
-    },
-    "8": {
-      "children": [
-        9,
-        11,
-      ],
-      "id": 8,
-      "input": null,
       "listeners": {},
-      "parent": 7,
+      "parent": 1,
       "props": {
         "attr": {
           "symbol": "wand.and.rays",
@@ -555,14 +449,14 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       "text": "",
       "type": "div",
     },
-    "9": {
+    "8": {
       "children": [
-        10,
+        9,
       ],
-      "id": 9,
+      "id": 8,
       "input": null,
       "listeners": {},
-      "parent": 8,
+      "parent": 7,
       "props": {
         "role": "heading",
         "style": {
@@ -578,6 +472,16 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         },
       },
       "text": "",
+      "type": "text",
+    },
+    "9": {
+      "children": [],
+      "id": 9,
+      "input": null,
+      "listeners": {},
+      "parent": 8,
+      "props": {},
+      "text": "No Effects",
       "type": "text",
     },
   },
@@ -1585,6 +1489,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -1646,6 +1551,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -2961,6 +2867,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -3022,6 +2929,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -4337,6 +4245,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -4398,6 +4307,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -5710,6 +5620,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -5771,6 +5682,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -7083,6 +6995,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -7144,6 +7057,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -8001,6 +7915,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -8062,6 +7977,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -9300,6 +9216,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -9361,6 +9278,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -10609,6 +10527,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -10670,6 +10589,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -11985,6 +11905,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -12046,6 +11967,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -12373,15 +12295,12 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       "value": "All",
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
+      "actions": [],
       "disabled": false,
       "expanded": null,
       "id": 7,
-      "label": "Effects",
-      "role": "Tree",
+      "label": "No effects match “absent”",
+      "role": "Label",
       "selected": null,
       "value": null,
     },
@@ -12395,21 +12314,10 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       "selected": null,
       "value": null,
     },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 9,
-      "label": "No effects match “absent”",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
   ],
   "focusOrder": [
     5,
     6,
-    7,
   ],
   "nodes": {
     "0": {
@@ -12564,6 +12472,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -12625,6 +12534,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -12698,83 +12608,8 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       ],
       "id": 7,
       "input": null,
-      "listeners": {
-        "focus": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-          "preventDefault": true,
-        },
-        "pointermove": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
-      "parent": 1,
-      "props": {
-        "data-pm-component": "tree",
-        "id": "fxbrowser:list",
-        "label": "Effects",
-        "metadata": {
-          "acceptsDrops": false,
-          "range": [
-            0,
-            0,
-          ],
-          "rowCount": 0,
-          "selectionMode": "single",
-        },
-        "preventDefault": {
-          "keydown": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-        },
-        "role": "tree",
-        "style": {
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
-        },
-        "tabIndex": 0,
-      },
-      "text": "",
-      "type": "div",
-    },
-    "8": {
-      "children": [
-        9,
-      ],
-      "id": 8,
-      "input": null,
       "listeners": {},
-      "parent": 7,
+      "parent": 1,
       "props": {
         "style": {
           "color": {
@@ -12789,12 +12624,12 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       "text": "",
       "type": "text",
     },
-    "9": {
+    "8": {
       "children": [],
-      "id": 9,
+      "id": 8,
       "input": null,
       "listeners": {},
-      "parent": 8,
+      "parent": 7,
       "props": {},
       "text": "No effects match “absent”",
       "type": "text",
@@ -12883,15 +12718,12 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       "value": "Empty",
     },
     {
-      "actions": [
-        "Focus",
-        "Click",
-      ],
+      "actions": [],
       "disabled": false,
       "expanded": null,
       "id": 7,
-      "label": "Effects",
-      "role": "Tree",
+      "label": "Nothing here yet",
+      "role": "Label",
       "selected": null,
       "value": null,
     },
@@ -12905,21 +12737,10 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       "selected": null,
       "value": null,
     },
-    {
-      "actions": [],
-      "disabled": false,
-      "expanded": null,
-      "id": 9,
-      "label": "Nothing here yet",
-      "role": "Label",
-      "selected": null,
-      "value": null,
-    },
   ],
   "focusOrder": [
     5,
     6,
-    7,
   ],
   "nodes": {
     "0": {
@@ -13074,6 +12895,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -13135,6 +12957,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, Empty",
         "metadata": {
@@ -13216,83 +13039,8 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       ],
       "id": 7,
       "input": null,
-      "listeners": {
-        "focus": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-        "keydown": {
-          "bubble": true,
-          "capture": false,
-          "keys": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-          "preventDefault": true,
-        },
-        "pointermove": {
-          "bubble": true,
-          "capture": false,
-          "keys": [],
-          "preventDefault": false,
-        },
-      },
-      "parent": 1,
-      "props": {
-        "data-pm-component": "tree",
-        "id": "fxbrowser:list",
-        "label": "Effects",
-        "metadata": {
-          "acceptsDrops": false,
-          "range": [
-            0,
-            0,
-          ],
-          "rowCount": 0,
-          "selectionMode": "single",
-        },
-        "preventDefault": {
-          "keydown": [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-        },
-        "role": "tree",
-        "style": {
-          "minHeight": {
-            "token": "metrics.hit",
-          },
-          "minWidth": {
-            "token": "metrics.hit",
-          },
-        },
-        "tabIndex": 0,
-      },
-      "text": "",
-      "type": "div",
-    },
-    "8": {
-      "children": [
-        9,
-      ],
-      "id": 8,
-      "input": null,
       "listeners": {},
-      "parent": 7,
+      "parent": 1,
       "props": {
         "style": {
           "color": {
@@ -13307,12 +13055,12 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       "text": "",
       "type": "text",
     },
-    "9": {
+    "8": {
       "children": [],
-      "id": 9,
+      "id": 8,
       "input": null,
       "listeners": {},
-      "parent": 8,
+      "parent": 7,
       "props": {},
       "text": "Nothing here yet",
       "type": "text",
@@ -13765,6 +13513,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -13826,6 +13575,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -14787,6 +14537,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -14848,6 +14599,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, Recent",
         "metadata": {
@@ -15842,6 +15594,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -15903,6 +15656,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -16726,6 +16480,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -16787,6 +16542,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {
@@ -18768,6 +18524,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
+        "disabled": false,
         "id": "fxbrowser:search",
         "label": "Search effects",
         "preventDefault": {
@@ -18908,6 +18665,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "binding": "local:effects:scope",
         "control": "select",
         "data-pm-component": "pop-up-button",
+        "disabled": false,
         "id": "fxbrowser:scope",
         "label": "Category, All",
         "metadata": {

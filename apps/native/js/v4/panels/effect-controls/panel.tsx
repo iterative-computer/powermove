@@ -113,7 +113,7 @@ export function EffectControls(props: PanelProps) {
     setDrag(null);
   };
   const trailingAdd = (
-    <UI.ToolbarItem
+    <UI.PushButton
       id={`${PANEL_ID}:add-bottom`}
       label="Add Effect…"
       disabled={!editable}
@@ -121,7 +121,7 @@ export function EffectControls(props: PanelProps) {
       style={{ height: t("metrics.control"), marginTop: t("metrics.inset") }}
     >
       Add Effect…
-    </UI.ToolbarItem>
+    </UI.PushButton>
   );
   return (
     <div

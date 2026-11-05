@@ -1,0 +1,34 @@
+[package]
+name = "pm-builtins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-runtime-v8 = { path = "../runtime-v8" }
+pm-surface = { path = "../surface" }
+pm-design = { path = "../design" }
+pm-kernel = { path = "../kernel" }
+pm-panel-inspector = { path = "../panel-inspector" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+serde_json = "1"
+pm-time = { path = "../../../../engine/crates/pm-time" }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+tempfile = "3"
+
+pm-panel-timeline = { path = "../panel-timeline" }
+pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
+pm-panel-media = { path = "../panel-media" }
+pm-panel-agentpanel = { path = "../panel-agentpanel" }
+pm-agents = { path = "../agents" }
+pm-services = { path = "../services" }
+futures-lite = "2"
+pm-promedia = { path = "../promedia" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
+pm-export = { path = "../../../../engine/crates/pm-export" }
+pm-render = { path = "../../../../engine/crates/pm-render" }
+pm-audio = { path = "../../../../engine/crates/pm-audio" }
+pm-media = { path = "../../../../engine/crates/pm-media" }

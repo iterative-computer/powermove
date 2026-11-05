@@ -88,18 +88,6 @@ export function generalRows(multiWindow: boolean): Row[] {
       ]),
       detail: "Follow your system setting, or pick a light or dark theme.",
     },
-    // DESIGN-TODO(opus): density persistence key/model is absent; retain the specified default without writing an invented key.
-    {
-      id: "density",
-      section: "general",
-      group: "Appearance",
-      label: "Density",
-      control: "choice",
-      value: "Normal",
-      disabled: true,
-      options: choices(["Compact", "Normal", "Comfortable"]),
-      detail: "Spacing of panels, rows and controls.",
-    },
     {
       id: "workspace",
       section: "general",

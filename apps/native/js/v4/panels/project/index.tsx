@@ -74,6 +74,9 @@ export interface NativeServices {
 }
 export interface ProjectViewProps {
   view: Projection | null;
+  transportFailed?: boolean;
+  errorSequence?: number;
+  unknownLoading?: ReadonlySet<string>;
   input(input: Input): void;
   menu(id: ItemId | null, anchor: number): void;
   native: NativeServices;
@@ -116,9 +119,11 @@ function filePaths(event: SurfaceEvent): string[] {
     ? (paths as string[])
     : [];
 }
-// DESIGN-TODO(opus): Availability::Unknown has no treatment in media-browser §3; retain a neutral poster well without declaring it offline or ready.
 export function ProjectView(props: ProjectViewProps) {
-  const { view, input, native, layout } = props;
+  const { view, native, layout } = props;
+  const input = (value: Input) => {
+    if (!props.transportFailed) props.input(value);
+  };
   if (
     !Number.isSafeInteger(layout.columns) ||
     layout.columns < 1 ||
@@ -166,7 +171,8 @@ export function ProjectView(props: ProjectViewProps) {
   ) => {
     event.stopPropagation();
     if (event.button === 2) {
-      if (phase === "Down") props.menu(row.id, event.currentTarget);
+      if (phase === "Down" && !props.transportFailed)
+        props.menu(row.id, event.currentTarget);
       return;
     }
     input({
@@ -199,11 +205,18 @@ export function ProjectView(props: ProjectViewProps) {
     const name = itemName(row);
     const asset = "Asset" in row.data ? row.data.Asset : null;
     const comp = "Composition" in row.data ? row.data.Composition : null;
-    const overlay = asset ? status(asset[1].availability, asset[0]) : null;
+    const overlay = asset
+      ? status(
+          props.unknownLoading?.has(asset[0].id)
+            ? "Loading"
+            : asset[1].availability,
+          asset[0],
+        )
+      : null;
     const duration =
       comp?.duration ??
       (asset?.[0].kind === "image" ? null : asset?.[0].duration);
-    const posterKey = asset?.[1].poster;
+    const posterKey = asset?.[1].poster ?? comp?.poster;
     const poster = posterKey ? props.posters?.get(posterKey) : undefined;
     const actions = cardActions(row, view!.composition_count);
     const folderId = "Folder" in row.data ? row.data.Folder.id : null;
@@ -216,10 +229,14 @@ export function ProjectView(props: ProjectViewProps) {
         tabIndex={-1}
         aria-selected={row.selected}
         attr={{ item: row.id }}
+        aria-disabled={!!props.transportFailed}
         state={{
           selected: row.selected,
           focused: row.focused,
           dragging: !!view?.drag,
+          disabled: !!props.transportFailed,
+          hovered: hovered === itemKey(row.id),
+          loading: !!asset && !!props.unknownLoading?.has(asset[0].id),
           dropTarget:
             folderId !== null &&
             !!view?.drop_target &&
@@ -262,12 +279,13 @@ export function ProjectView(props: ProjectViewProps) {
               style={{ color: token("colors.accent") }}
             />
           ) : null}
-          {overlay ? (
+          {overlay?.overlay ? (
             <text
               style={{
                 fontSize: token("typography.minimum"),
                 color: token("colors.selected_text"),
               }}
+              metadata={{ progress: asset?.[1].progress ?? null }}
             >
               {overlay.overlay}
             </text>
@@ -281,13 +299,14 @@ export function ProjectView(props: ProjectViewProps) {
                   title={action.label}
                   attr={{ symbol: action.symbol }}
                   tabIndex={-1}
-                  disabled={action.disabled}
+                  disabled={props.transportFailed || action.disabled}
                   onPointerDown={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
                   onDragStart={(event) => event.stopPropagation()}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!action.disabled) input(action.input);
+                    if (!props.transportFailed && !action.disabled)
+                      input(action.input);
                   }}
                   style={{
                     color: token(
@@ -353,7 +372,9 @@ export function ProjectView(props: ProjectViewProps) {
             overflow: "hidden",
           }}
         >
-          {meta(row)}
+          {[meta(row), row.folder_path?.join(" / ")]
+            .filter(Boolean)
+            .join(" · ")}
         </text>
       </div>
     );
@@ -381,7 +402,8 @@ export function ProjectView(props: ProjectViewProps) {
     if (!key) return;
     event.stopPropagation();
     input({
-      Key: {
+      GridKey: {
+        columns: layout.columns,
         target: view?.focused ? { Row: view.focused } : "List",
         key,
         modifiers: modifiers(event),
@@ -457,8 +479,10 @@ export function ProjectView(props: ProjectViewProps) {
             label="Add"
             title="Add"
             attr={{ symbol: "plus" }}
-            disabled={!view}
-            onClick={(e) => props.menu(null, e.currentTarget)}
+            disabled={!view || props.transportFailed}
+            onClick={(e) => {
+              if (!props.transportFailed) props.menu(null, e.currentTarget);
+            }}
             style={{ symbolSize: token("metrics.symbol_panel") }}
           />
         </div>
@@ -551,6 +575,21 @@ export function ProjectView(props: ProjectViewProps) {
           ])}
         </div>
       ) : null}
+      {props.transportFailed && (
+        <div
+          id="media:transport-error"
+          role="status"
+          label="Error"
+          metadata={{ sequence: props.errorSequence ?? 0 }}
+          style={{ ...text, color: token("colors.warning") }}
+        >
+          <text
+            attr={{ symbol: "exclamationmark.triangle.fill" }}
+            style={{ color: token("colors.warning") }}
+          />
+          <text>Project media isn’t updating right now.</text>
+        </div>
+      )}
       <List
         label="Project media"
         tabIndex={0}
@@ -564,7 +603,8 @@ export function ProjectView(props: ProjectViewProps) {
         preventDefault={{ keydown: [...gridKeys, "F2"] }}
         onKeyDown={gridKey}
         onPointerDown={(e) => {
-          if (e.button === 2) props.menu(null, e.currentTarget);
+          if (e.button === 2 && !props.transportFailed)
+            props.menu(null, e.currentTarget);
           else native.marquee?.("begin", e, input);
         }}
         onPointerMove={(e) => {
@@ -706,6 +746,7 @@ export function ProjectView(props: ProjectViewProps) {
             label="Delete selected media"
             title="Delete Selected Media…"
             attr={{ symbol: "trash" }}
+            disabled={props.transportFailed}
             onClick={() => invoke("DeleteAssets")}
             style={{ color: token("colors.danger") }}
           />
@@ -727,6 +768,15 @@ export function ProjectPanel({
     <ProjectView
       {...props}
       view={view}
+      transportFailed={service.error !== null}
+      errorSequence={service.errorSequence}
+      unknownLoading={
+        new Set(
+          view?.page.rows
+            .filter((row) => service.readiness.loading(row, service.now()))
+            .flatMap((row) => ("Asset" in row.id ? [row.id.Asset] : [])) ?? [],
+        )
+      }
       input={(input) => {
         if (view) service.run(service.input(input, view.page.stamp));
       }}

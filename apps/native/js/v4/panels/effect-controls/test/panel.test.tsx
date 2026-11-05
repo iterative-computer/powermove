@@ -105,6 +105,11 @@ for (const name of [
       });
     const result = wire(f.commits);
     expect(result.diagnostics).toEqual([]);
+    if (name === "focus")
+      expect(
+        header.props.metadata &&
+          (header.props.metadata as Record<string, Json>).focused,
+      ).toBe(true);
     const data =
       JSON.stringify({
         ops: f.commits,

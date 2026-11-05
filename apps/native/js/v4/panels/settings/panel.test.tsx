@@ -315,7 +315,7 @@ test("extension row enters details, back returns without clearing search, Delete
   await event(root, find(root, "Fixture 0", "list-item").id, "click");
   expect(f.model.detailId).toBe("fixture-0");
   await render();
-  await event(root, find(root, "Delete…", "toolbar-item").id, "click");
+  await event(root, find(root, "Delete…", "push-button").id, "click");
   await Promise.resolve();
   expect(f.actions).toEqual([{ type: "extension.archive", id: "fixture-0" }]);
   await f.model.search("Fixture");

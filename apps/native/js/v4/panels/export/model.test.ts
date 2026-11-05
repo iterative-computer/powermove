@@ -388,3 +388,25 @@ test("malformed accepted command projections fence further export starts", async
   expect(model.fault).toBeDefined();
   expect(model.canExport).toBe(false);
 });
+
+test("planning and preset failures retain authored drafts and recover on actual acknowledgement", async () => {
+  const f = fixture();
+  f.model.set("quality", "draft");
+  f.rejection = "planner unavailable";
+  await expect(f.model.refreshPlan()).rejects.toThrow("planner unavailable");
+  expect(f.model.planningError).toContain("planner unavailable");
+  expect(f.model.canExport).toBe(false);
+  expect(f.model.options.quality).toBe("draft");
+  f.rejection = undefined;
+  await f.model.refreshPlan();
+  expect(f.model.planningError).toBeUndefined();
+  expect(f.model.canExport).toBe(true);
+  f.model.namePreset("Authored name");
+  f.rejection = "store unavailable";
+  await expect(f.model.savePreset()).rejects.toThrow("store unavailable");
+  expect(f.model.presetError).toBe(true);
+  expect(f.model.presetName).toBe("Authored name");
+  f.rejection = undefined;
+  await f.model.savePreset();
+  expect(f.model.presetError).toBe(false);
+});

@@ -14,6 +14,8 @@ name = "behaviours"
 path = "../tests/behaviours.rs"
 
 [dependencies]
+accesskit = "=0.24.1"
+pm-design = { path = "../../design" }
 serde_json = "1"
 pm-kernel = { path = "../../kernel" }
 pm-model = { path = "../../../../../engine/crates/pm-model" }
@@ -26,4 +28,3 @@ path = "../tests/v4.rs"
 
 [dev-dependencies]
 pm-surface = { path = "../../surface" }
-pm-design = { path = "../../design" }

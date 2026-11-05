@@ -235,7 +235,13 @@ impl Recipe {
             widget,
             material: t.material(kind.surface(), glass_available),
             content_material: Material::Solid,
-            background: if matches!(kind, PopoverAnchor | ColourPopover) {
+            background: if kind == FormGroup {
+                if t.scheme == pm_design::Scheme::Light {
+                    t.colors.field
+                } else {
+                    t.colors.floating
+                }
+            } else if matches!(kind, PopoverAnchor | ColourPopover) {
                 t.colors.floating
             } else if kind == ToolbarItem {
                 t.colors.window
@@ -273,6 +279,7 @@ impl Recipe {
                 _ => None,
             },
             radius: match kind {
+                FormGroup => Some(t.metrics.group_radius),
                 Segment => Some(t.metrics.inner_radius),
                 NumberField | TextField | SecureField | SegmentedControl | PopUpButton
                 | ColourWell => Some(t.metrics.control_radius),

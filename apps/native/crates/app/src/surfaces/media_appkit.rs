@@ -142,3 +142,79 @@ impl MediaHost for AppKitHost {
         }
     }
 }
+
+/// S039 system sheet, with shared Opus geometry. The shell's native input target
+/// maps these control IDs to Sequence::respond; all frame work stays on a worker.
+pub fn sequence_sheet(
+    sequence: &super::media::sequence::Sequence,
+    tokens: &pm_design::Tokens,
+    mtm: MainThreadMarker,
+) -> super::media::sheet_layout::native::Sheet {
+    use super::media::sheet_layout::native::Sheet;
+    let warnings = sequence.warnings();
+    let mut sheet = Sheet::new(
+        sequence.title(),
+        5 + warnings.len() + usize::from(sequence.validation().is_some()),
+        tokens,
+        false,
+        mtm,
+    );
+    sheet.line(
+        sequence.explanation(),
+        tokens.typography.reading.into(),
+        tokens.colors.secondary,
+    );
+    sheet.line(
+        &sequence.image_count(),
+        tokens.typography.body.into(),
+        tokens.colors.secondary,
+    );
+    sheet.line(
+        &sequence.range(),
+        tokens.typography.minimum.into(),
+        tokens.colors.muted,
+    );
+    sheet.number("fps", "Frame Rate", &sequence.fps.to_string(), "fps", true);
+    let duration = objc2_app_kit::NSTextField::labelWithString(
+        &NSString::from_str(&sequence.duration().unwrap_or_default()),
+        mtm,
+    );
+    sheet.row("Duration", &duration);
+    for warning in warnings {
+        sheet.line(
+            &warning,
+            tokens.typography.minimum.into(),
+            tokens.colors.warning,
+        );
+    }
+    if let Some(error) = sequence.validation() {
+        sheet.line(
+            error,
+            tokens.typography.minimum.into(),
+            tokens.colors.danger,
+        );
+    }
+    for (id, action) in [
+        ("individual", Action::IndividualImages),
+        ("cancel", Action::Cancel),
+        ("apply", sequence.default_action()),
+    ] {
+        if sequence.buttons().contains(&action) {
+            sheet.button(
+                id,
+                action.label(),
+                id != "apply" || sequence.validation().is_none(),
+                id == "apply",
+                id == "cancel",
+            );
+        }
+    }
+    sheet.footer(
+        &["cancel", "apply"],
+        sequence
+            .buttons()
+            .contains(&Action::IndividualImages)
+            .then_some("individual"),
+    );
+    sheet
+}

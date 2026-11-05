@@ -5,6 +5,7 @@ import { asset, owner, projection } from "./fixtures";
 import type { Input, Stamp } from "../contract";
 function fixture() {
   const requests: HostRequest[] = [];
+  const announcements: { message: string; sequence: number }[] = [];
   let stamp = { ...owner };
   let delay: Promise<void> | undefined;
   let reply: Json | undefined;
@@ -51,11 +52,13 @@ function fixture() {
     command: "fixture.media",
     subscription: "fixture.project",
     projectStamp: (value) => (value as unknown as { stamp: Stamp }).stamp,
+    announce: (message, sequence) => announcements.push({ message, sequence }),
   });
   return {
     host,
     service,
     requests,
+    announcements,
     replace(s: Stamp) {
       stamp = s;
     },
@@ -67,6 +70,9 @@ function fixture() {
     },
     reject() {
       reject = true;
+    },
+    recover() {
+      reject = false;
     },
   };
 }
@@ -266,5 +272,34 @@ test("late same-document publications cannot regress an acknowledged projection"
   await f.service.idle();
   expect(f.service.view!.page.stamp.revision).toBe(2);
   expect(f.requests.length).toBe(count);
+  await f.service.dispose();
+});
+
+test("transport failure fences card input and announces once until accepted publications resume", async () => {
+  const f = fixture();
+  await f.service.start();
+  f.reject();
+  f.service.run(f.service.input("Clear"));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(1);
+  const count = f.requests.length;
+  expect(await f.service.input("FilesEnter")).toBeNull();
+  expect(await f.service.menu(null)).toBeNull();
+  expect(f.requests.length).toBe(count);
+  f.service.run(f.service.page(0, 12));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(1);
+  f.recover();
+  await f.service.page(0, 12);
+  expect(f.service.error).toBeNull();
+  expect((await f.service.input("Clear"))?.view).toBeTruthy();
+  f.reject();
+  f.service.run(f.service.input("Clear"));
+  await f.service.idle();
+  expect(f.service.errorSequence).toBe(2);
+  expect(f.announcements).toEqual([
+    { message: "Project media isn’t updating right now.", sequence: 1 },
+    { message: "Project media isn’t updating right now.", sequence: 2 },
+  ]);
   await f.service.dispose();
 });

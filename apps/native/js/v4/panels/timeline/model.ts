@@ -64,6 +64,16 @@ interface RowBase {
 }
 export interface LayerRow extends RowBase {
   kind: "layer";
+  layerKind?: string;
+  labelColor?:
+    | "blue"
+    | "violet"
+    | "orange"
+    | "red"
+    | "yellow"
+    | "green"
+    | "teal"
+    | "gray";
   layer: string;
   index: number | null;
   canOpen: boolean;

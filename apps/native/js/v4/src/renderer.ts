@@ -300,7 +300,9 @@ export class SurfaceRoot {
     detail = eventDetail(detail);
     if (
       detail.value !== undefined &&
-      ["input", "textarea"].includes(this.host.nodes.get(plan.target)!.type)
+      ["input", "textarea"].includes(this.host.nodes.get(plan.target)!.type) &&
+      !(type === "change" && typeof detail.value === "number" &&
+        this.host.nodes.get(plan.target)!.props.control === "number")
     ) {
       if (typeof detail.value !== "string")
         throw new TypeError("Native text observation must be a string");

@@ -255,3 +255,38 @@ pub fn pop_up_menu(window: &NSWindow, items: &[(String, bool)], x: f64, y: f64) 
         .and_then(|tag| usize::try_from(tag).ok())
         .filter(|&i| i < items.len())
 }
+
+/// PNG sequences choose a parent directory; publication owns a fresh child
+/// folder, so existing frames are never overwritten.
+pub fn export_destination(
+    window: &NSWindow,
+    folder: bool,
+    name: &str,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    if !folder {
+        return paths_named(window, true, name);
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(true);
+    let retained = panel.clone();
+    // The suggestion is authored by the Export model, never a pathname.
+    let name = PathBuf::from(name).file_name().map(|s| s.to_owned());
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let path = path
+            .zip(name.clone())
+            .map(|(parent, name)| parent.join(name));
+        let _ = tx.try_send(path);
+    });
+    panel.beginSheetModalForWindow_completionHandler(window, &done);
+    rx
+}

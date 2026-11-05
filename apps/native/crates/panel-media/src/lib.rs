@@ -8,6 +8,8 @@ mod edit;
 mod input;
 mod model;
 mod preview;
+pub mod readiness;
+pub mod render;
 
 pub use catalog::*;
 pub use edit::*;
@@ -50,3 +52,5 @@ impl ValueMut for pm_model::Value {
         self.as_object_mut()?.get_mut(key)
     }
 }
+
+pub mod v4;

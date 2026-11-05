@@ -3,7 +3,10 @@ use crate::{
     Stamp,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::OnceLock,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filter {
@@ -26,6 +29,9 @@ pub struct Row {
     pub selected: bool,
     pub focused: bool,
     pub tab_stop: bool,
+    /// Descendant-search breadcrumb, empty outside search.
+    #[serde(default)]
+    pub folder_path: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
@@ -208,6 +214,11 @@ pub struct MediaPanel {
     pub drag: Option<Drag>,
     pub drop_target: Option<Option<String>>,
     pub(crate) stamp: Option<Stamp>,
+    pub(crate) grid_columns: usize,
+    pub(crate) row_positions: HashMap<ItemId, usize>,
+    /// All visible assets except these IDs; never enumerate on Select All.
+    pub(crate) all_except: Option<HashSet<String>>,
+    pub(crate) selection_cache: OnceLock<Vec<String>>,
     pub(crate) selection: Vec<String>,
     pub(crate) selected: HashSet<String>,
     pub(crate) active: Option<String>,
@@ -256,7 +267,36 @@ impl MediaPanel {
         Ok(effects)
     }
     pub fn selected_assets(&self) -> &[String] {
-        &self.selection
+        if let Some(excluded) = &self.all_except {
+            self.selection_cache.get_or_init(|| {
+                self.asset_order
+                    .iter()
+                    .filter(|id| !excluded.contains(*id))
+                    .cloned()
+                    .collect()
+            })
+        } else {
+            &self.selection
+        }
+    }
+    pub fn selected_count(&self) -> usize {
+        self.all_except.as_ref().map_or(self.selection.len(), |e| {
+            self.asset_order.len().saturating_sub(e.len())
+        })
+    }
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.all_except.as_ref().map_or_else(
+            || self.selected.contains(id),
+            |e| self.positions.contains_key(id) && !e.contains(id),
+        )
+    }
+    pub(crate) fn materialize_selection(&mut self) {
+        if self.all_except.is_some() {
+            self.selection = self.selected_assets().to_vec();
+            self.selected = self.selection.iter().cloned().collect();
+            self.all_except = None;
+            self.selection_cache.take();
+        }
     }
     pub fn selected_item(&self) -> Option<&ItemId> {
         self.exclusive.as_ref()
@@ -295,11 +335,13 @@ impl MediaPanel {
         self.folder = c.valid_folder(self.folder.as_deref());
         let needle = self.filter.query.to_lowercase();
         let mut rows = vec![];
-        // Search is scoped to the current bin; it never rewrites the bins.
+        self.selection_cache.take();
+        // N2: search descendants, without changing authored folders or ordering.
+        let descendants = !needle.is_empty();
         if self.filter.kind.is_none() && !self.filter.missing_only && self.filter.proxy.is_none() {
             rows.extend(
-                c.child_ids(self.folder.as_deref())
-                    .iter()
+                c.search_folders(self.folder.as_deref(), descendants)
+                    .into_iter()
                     .filter(|id| c.folders[*id].name.to_lowercase().contains(&needle))
                     .cloned()
                     .map(ItemId::Folder),
@@ -319,7 +361,13 @@ impl MediaPanel {
             .iter()
             .map(|id| &c.assets[id])
             .filter(|a| {
-                if a.folder != self.folder {
+                if a.folder != self.folder
+                    && !(descendants
+                        && self
+                            .folder
+                            .as_ref()
+                            .is_none_or(|root| c.within(a.folder.as_deref(), root)))
+                {
                     return false;
                 }
                 if self.filter.kind.as_ref().is_some_and(|k| k != &a.kind) {
@@ -341,6 +389,7 @@ impl MediaPanel {
                         && !matches!(
                             s.availability,
                             Availability::Offline
+                                | Availability::Changed { .. }
                                 | Availability::Failed(_)
                                 | Availability::Cloud { .. }
                         )
@@ -362,15 +411,27 @@ impl MediaPanel {
             .map(|(i, id)| (id.clone(), i))
             .collect();
         rows.extend(self.asset_order.iter().cloned().map(ItemId::Asset));
+        self.row_positions = rows
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
         self.rows = rows;
         self.selection.retain(|id| self.positions.contains_key(id));
         self.selected = self.selection.iter().cloned().collect();
-        if !self
-            .active
-            .as_ref()
-            .is_some_and(|id| self.selected.contains(id))
-        {
-            self.active = self.selection.last().cloned();
+        if let Some(excluded) = &mut self.all_except {
+            excluded.retain(|id| self.positions.contains_key(id));
+        }
+        if !self.active.as_ref().is_some_and(|id| self.is_selected(id)) {
+            self.active = if self.all_except.is_some() {
+                self.asset_order
+                    .iter()
+                    .rev()
+                    .find(|id| self.is_selected(id))
+                    .cloned()
+            } else {
+                self.selection.last().cloned()
+            };
         }
         if !self
             .anchor
@@ -397,7 +458,7 @@ impl MediaPanel {
             .preview
             .asset
             .as_ref()
-            .is_some_and(|id| !self.selected.contains(id))
+            .is_some_and(|id| !self.is_selected(id))
         {
             self.clear_preview(&mut effects);
         }
@@ -430,7 +491,7 @@ impl MediaPanel {
                 let (data, selected, tab_stop) = match id {
                     ItemId::Asset(id) => (
                         RowData::Asset(Box::new(c.assets[id].clone()), runtime.state(&c.stamp, id)),
-                        self.selected.contains(id),
+                        self.is_selected(id),
                         self.active.as_ref().or(self.asset_order.first()) == Some(id),
                     ),
                     ItemId::Folder(id) => (
@@ -439,7 +500,11 @@ impl MediaPanel {
                         false,
                     ),
                     ItemId::Composition(id) => (
-                        RowData::Composition(c.compositions[id].clone()),
+                        RowData::Composition({
+                            let mut comp = c.compositions[id].clone();
+                            comp.poster = runtime.composition_poster(&c.stamp, id);
+                            comp
+                        }),
                         self.exclusive.as_ref() == Some(&ItemId::Composition(id.clone())),
                         false,
                     ),
@@ -450,6 +515,16 @@ impl MediaPanel {
                     selected,
                     focused: self.focused.as_ref() == Some(id),
                     tab_stop,
+                    folder_path: if self.filter.query.is_empty() {
+                        vec![]
+                    } else {
+                        let folder = match id {
+                            ItemId::Asset(id) => c.assets[id].folder.as_deref(),
+                            ItemId::Folder(id) => c.folders[id].parent.as_deref(),
+                            ItemId::Composition(_) => None,
+                        };
+                        c.path(folder).into_iter().map(|f| f.name.clone()).collect()
+                    },
                 }
             })
             .collect::<Vec<_>>();
@@ -471,6 +546,8 @@ impl MediaPanel {
         effects.push(Effect::ClearPreview);
     }
     pub(crate) fn clear(&mut self, effects: &mut Vec<Effect>) {
+        self.all_except = None;
+        self.selection_cache.take();
         self.selection.clear();
         self.selected.clear();
         self.active = None;
@@ -482,6 +559,7 @@ impl MediaPanel {
     }
     pub(crate) fn select(&mut self, id: &str, m: crate::Modifiers, effects: &mut Vec<Effect>) {
         self.exclusive = None;
+        self.selection_cache.take();
         let previous = self.active.clone();
         if m.shift
             && self
@@ -489,6 +567,7 @@ impl MediaPanel {
                 .as_ref()
                 .is_some_and(|id| self.positions.contains_key(id))
         {
+            self.materialize_selection();
             let a = self.positions[self.anchor.as_ref().unwrap()];
             let b = self.positions[id];
             if !m.primary() {
@@ -501,7 +580,11 @@ impl MediaPanel {
                 }
             }
         } else if m.primary() {
-            if self.selected.remove(id) {
+            if let Some(excluded) = &mut self.all_except {
+                if !excluded.remove(id) {
+                    excluded.insert(id.into());
+                }
+            } else if self.selected.remove(id) {
                 self.selection.retain(|s| s != id);
             } else {
                 self.selected.insert(id.into());
@@ -509,16 +592,23 @@ impl MediaPanel {
             }
             self.anchor = Some(id.into());
         } else {
+            self.all_except = None;
             self.selection = vec![id.into()];
             self.selected = HashSet::from([id.into()]);
             self.anchor = Some(id.into());
         }
-        self.active = if self.selected.contains(id) {
+        self.active = if self.is_selected(id) {
             Some(id.into())
+        } else if self.all_except.is_some() {
+            self.asset_order
+                .iter()
+                .rev()
+                .find(|id| self.is_selected(id))
+                .cloned()
         } else {
             self.selection.last().cloned()
         };
-        if self.selection.len() != 1
+        if self.selected_count() != 1
             || previous
                 .as_ref()
                 .is_some_and(|p| Some(p) != self.active.as_ref())
@@ -529,6 +619,8 @@ impl MediaPanel {
         effects.push(Effect::Focus(self.focused.clone()));
     }
     pub(crate) fn select_exclusive(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
+        self.all_except = None;
+        self.selection_cache.take();
         self.selection.clear();
         self.selected.clear();
         self.active = None;
@@ -560,10 +652,10 @@ impl MediaPanel {
                 if !self.positions.contains_key(&id) {
                     return Err(Error::MissingItem);
                 }
-                if !self.selected.contains(&id) {
+                if !self.is_selected(&id) {
                     self.select(&id, crate::Modifiers::default(), &mut effects);
                 }
-                if self.selection.len() > 1 {
+                if self.selected_count() > 1 {
                     commands.push((DeleteAssets, true));
                 } else {
                     let a = &c.assets[&id];
@@ -574,7 +666,10 @@ impl MediaPanel {
                     ) {
                         return Ok(ContextMenu {
                             owner: c.stamp.clone(),
-                            entries: vec![],
+                            entries: vec![MenuEntry {
+                                command: DeleteAssets,
+                                enabled: true,
+                            }],
                             effects,
                         });
                     }

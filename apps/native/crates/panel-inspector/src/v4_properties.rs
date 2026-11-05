@@ -14,13 +14,14 @@ use pm_kernel::{Caller, Request};
 #[derive(Clone, Debug)]
 struct Entry {
     bindings: Vec<Binding>,
-    selection: Vec<String>,
+    selection: std::sync::Arc<[String]>,
     document: u64,
 }
 #[derive(Default)]
 pub struct V4Adapter {
     next: u64,
     entries: HashMap<String, Entry>,
+    selection: Option<(u64, std::sync::Arc<[String]>)>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum V4Action {
@@ -53,11 +54,26 @@ impl V4Adapter {
             .checked_add(1)
             .ok_or(InspectorError::InvalidInput)?;
         let handle = format!("inspector:{}", self.next);
+        if !self
+            .selection
+            .as_ref()
+            .is_some_and(|(document, selection)| {
+                *document == model.document_id() && selection.as_ref() == model.selected_layers()
+            })
+        {
+            self.selection = Some((model.document_id(), model.selected_layers().into()));
+        }
+        let selection = self
+            .selection
+            .as_ref()
+            .ok_or(InspectorError::InvalidInput)?
+            .1
+            .clone();
         self.entries.insert(
             handle.clone(),
             Entry {
                 bindings,
-                selection: model.selected_layers().to_vec(),
+                selection,
                 document: model.published.snapshot.doc_id,
             },
         );
@@ -68,13 +84,14 @@ impl V4Adapter {
     }
     pub fn retire(&mut self) {
         self.entries.clear();
+        self.selection = None;
     }
     fn entry(&self, model: &Inspector, handle: &str) -> Result<&Entry, InspectorError> {
         let entry = self
             .entries
             .get(handle)
             .ok_or(InspectorError::InvalidInput)?;
-        if entry.selection != model.selected_layers()
+        if entry.selection.as_ref() != model.selected_layers()
             || entry.document != model.published.snapshot.doc_id
         {
             return Err(InspectorError::InvalidInput);

@@ -20,6 +20,7 @@ export type Availability =
   | "Loading"
   | "Ready"
   | "Offline"
+  | { Changed: { source: string } }
   | { Failed: string }
   | {
       Cloud: {
@@ -58,6 +59,8 @@ export interface Composition {
   open: boolean;
   can_nest: boolean;
   uses: number;
+  background?: string | null;
+  poster?: string | null;
 }
 export interface Row {
   id: ItemId;
@@ -65,7 +68,12 @@ export interface Row {
     | {
         Asset: [
           Asset,
-          { availability: Availability; proxy: Json; poster: string | null },
+          {
+            availability: Availability;
+            proxy: Json;
+            poster: string | null;
+            progress?: { completed: number; total: number } | null;
+          },
         ];
       }
     | { Folder: Folder }
@@ -73,6 +81,7 @@ export interface Row {
   selected: boolean;
   focused: boolean;
   tab_stop: boolean;
+  folder_path?: string[];
 }
 export interface Page {
   stamp: Stamp;
@@ -115,6 +124,15 @@ export type Key =
   | "Backspace"
   | "Escape";
 export type Input =
+  | { GridColumns: number }
+  | {
+      GridKey: {
+        target: "List" | { Row: ItemId };
+        key: Key;
+        modifiers: Modifiers;
+        columns: number;
+      };
+    }
   | "Clear"
   | "CancelRename"
   | "DragEnd"

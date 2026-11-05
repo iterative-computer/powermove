@@ -44,6 +44,14 @@ pub enum PointerPhase {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Input {
+    /// Native layout facts; no visual geometry is guessed in the model.
+    GridColumns(usize),
+    GridKey {
+        target: KeyTarget,
+        key: Key,
+        modifiers: Modifiers,
+        columns: usize,
+    },
     Pointer {
         id: ItemId,
         phase: PointerPhase,
@@ -138,6 +146,24 @@ impl MediaPanel {
     ) -> Result<Outcome, Error> {
         let mut out = Outcome::handled();
         match input {
+            Input::GridKey {
+                target,
+                key,
+                modifiers,
+                columns,
+            } => {
+                if columns == 0 || columns > 4096 {
+                    return Err(Error::InvalidTarget);
+                }
+                self.grid_columns = columns;
+                return self.key(c, r, target, key, modifiers);
+            }
+            Input::GridColumns(columns) => {
+                if columns == 0 || columns > 4096 {
+                    return Err(Error::InvalidTarget);
+                }
+                self.grid_columns = columns;
+            }
             Input::Pointer {
                 id,
                 phase,
@@ -154,8 +180,8 @@ impl MediaPanel {
                 match id {
                     ItemId::Asset(id) => match phase {
                         PointerPhase::Down => {
-                            if self.selection.len() <= 1
-                                || !self.selected.contains(&id)
+                            if self.selected_count() <= 1
+                                || !self.is_selected(&id)
                                 || m.primary()
                                 || m.shift
                             {
@@ -168,8 +194,8 @@ impl MediaPanel {
                         PointerPhase::Click => {
                             if !m.primary()
                                 && !m.shift
-                                && self.selection.len() > 1
-                                && self.selected.contains(&id)
+                                && self.selected_count() > 1
+                                && self.is_selected(&id)
                             {
                                 self.select(&id, m, &mut out.effects);
                             }
@@ -290,7 +316,7 @@ impl MediaPanel {
                         if !matches!(r.state(&c.stamp, id).availability, Availability::Ready) {
                             return Ok(Outcome::default());
                         }
-                        if !self.selected.contains(id) {
+                        if !self.is_selected(id) {
                             self.select(id, Modifiers::default(), &mut out.effects);
                         }
                         (
@@ -299,7 +325,7 @@ impl MediaPanel {
                             a.duration,
                             self.asset_order
                                 .iter()
-                                .filter(|id| self.selected.contains(*id))
+                                .filter(|id| self.is_selected(id))
                                 .cloned()
                                 .collect(),
                             true,
@@ -390,11 +416,13 @@ impl MediaPanel {
             }
             Input::BeginMarquee { pointer, modifiers } => {
                 let base = if modifiers.primary() || modifiers.shift {
-                    self.selection.clone()
+                    self.selected_assets().to_vec()
                 } else {
                     vec![]
                 };
                 self.clear(&mut out.effects);
+                self.all_except = None;
+                self.selection_cache.take();
                 self.selection = base.clone();
                 self.selected = base.iter().cloned().collect();
                 self.active = base.last().cloned();
@@ -409,6 +437,8 @@ impl MediaPanel {
                 let Some(m) = self.marquee.as_ref().filter(|m| m.pointer == pointer) else {
                     return Ok(Outcome::default());
                 };
+                self.all_except = None;
+                self.selection_cache.take();
                 self.selection = m.base.clone();
                 self.selected = self.selection.iter().cloned().collect();
                 if activated {
@@ -494,7 +524,7 @@ impl MediaPanel {
                 self.select(id, Modifiers::default(), &mut out.effects);
                 out.effects.push(Effect::Download(id.into()));
             }
-            Availability::Offline | Availability::Failed(_) => {
+            Availability::Offline | Availability::Changed { .. } | Availability::Failed(_) => {
                 self.select(id, Modifiers::default(), &mut out.effects);
                 out.effects.push(Effect::PickFiles {
                     replace: Some(id.into()),
@@ -568,12 +598,12 @@ impl MediaPanel {
         if self.confirmation.is_some() {
             return Ok(());
         }
-        let ids = if let Some(id) = asset.filter(|id| !self.selected.contains(id)) {
+        let ids = if let Some(id) = asset.filter(|id| !self.is_selected(id)) {
             vec![id]
-        } else if !self.selection.is_empty() {
+        } else if self.selected_count() > 0 {
             self.asset_order
                 .iter()
-                .filter(|id| self.selected.contains(*id))
+                .filter(|id| self.is_selected(id))
                 .cloned()
                 .collect()
         } else {
@@ -664,11 +694,46 @@ impl MediaPanel {
         }
         if key == Key::A && m.primary() {
             self.exclusive = None;
-            self.selection = self.asset_order.clone();
-            self.selected = self.selection.iter().cloned().collect();
-            self.active = self.selection.last().cloned();
-            self.anchor = self.selection.first().cloned();
+            self.all_except = Some(Default::default());
+            self.selection_cache.take();
+            // Retain any explicit buffers until the next ordinary selection or
+            // worker refresh; entering All must not visit the previous batch.
+            self.active = self.asset_order.last().cloned();
+            self.anchor = self.asset_order.first().cloned();
             self.clear_preview(&mut out.effects);
+            return Ok(out);
+        }
+        if matches!(
+            key,
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
+        ) {
+            let n = self.rows.len();
+            if n == 0 {
+                return Ok(out);
+            }
+            let index = match &target {
+                KeyTarget::Row(id) => *self.row_positions.get(id).ok_or(Error::MissingItem)?,
+                _ => 0,
+            };
+            let columns = self.grid_columns.max(1).min(n);
+            let next = match key {
+                Key::Right => (index + 1) % n,
+                Key::Left => (index + n - 1) % n,
+                Key::Down => (((index / columns + 1) % n.div_ceil(columns)) * columns
+                    + index % columns)
+                    .min(n - 1),
+                Key::Up => (((index / columns + n.div_ceil(columns) - 1) % n.div_ceil(columns))
+                    * columns
+                    + index % columns)
+                    .min(n - 1),
+                Key::Home => 0,
+                Key::End => n - 1,
+                _ => unreachable!(),
+            };
+            match self.rows[next].clone() {
+                ItemId::Asset(id) => self.select(&id, m, &mut out.effects),
+                id => self.select_exclusive(id, &mut out.effects),
+            }
             return Ok(out);
         }
         match target {

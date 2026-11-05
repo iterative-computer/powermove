@@ -12,6 +12,8 @@ export function layer(id = "headline", index = 1): LayerRow {
   return {
     id: `layer:${id}`,
     kind: "layer",
+    layerKind: "text",
+    labelColor: "blue",
     layer: id,
     label: "Headline",
     accessibilityLabel: "Headline, text layer, 0:00 to 0:10",

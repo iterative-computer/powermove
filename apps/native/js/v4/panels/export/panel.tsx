@@ -39,9 +39,7 @@ const detail = {
   fontSize: token("typography.minimum"),
 };
 
-/** Neutral structural wrapper until the kit's sheet form-row recipe lands.
- * API-GAP: InspectorRow hard-codes inspector metrics/checkbox alignment. Do not
- * substitute those metrics for sheet_inset, sheet_value_column or row+inset. */
+/** Use the approved kit's sheet form controls without changing the v4 API. */
 function FormRow(props: {
   name: keyof typeof rows;
   help?: string;
@@ -49,52 +47,18 @@ function FormRow(props: {
 }) {
   const [label, help] = rows[props.name];
   return (
-    <div
-      role="group"
+    <UI.FormRow
       label={label}
+      detail={props.help ?? help}
       id={`export.row.${props.name}`}
-      metadata={{
-        export: {
-          recipe: "sheet-form-row",
-          valueColumn: "metrics.sheet_value_column",
-          minHeight: ["metrics.row", "metrics.inset"],
-          checkboxAlignment: "trailing",
-        },
-      }}
-    >
-      <div style={line}>
-        <div style={stack}>
-          <text style={text}>{label}</text>
-          <text style={detail}>{props.help ?? help}</text>
-        </div>
-        <div style={cluster}>{props.children}</div>
-      </div>
-    </div>
+      control={props.children}
+    />
   );
 }
 function Group(props: { label: string; children: ComponentChildren }) {
-  // API-GAP: settings-card recipe owns light/dark fill and summed radius.
-  return (
-    <div
-      role="group"
-      label={props.label}
-      metadata={{ export: { recipe: "settings-group" } }}
-    >
-      <text
-        role="heading"
-        style={{
-          color: token("colors.text"),
-          fontSize: token("typography.title"),
-        }}
-      >
-        {props.label}
-      </text>
-      {props.children}
-    </div>
-  );
+  return <UI.FormGroup title={props.label}>{props.children}</UI.FormGroup>;
 }
-/** The kit has no push-button yet. ToolbarItem is an explicitly provisional,
- * neutral action placeholder; the native adapter must use NSButton here. */
+/** Native NSButton role metadata is owned by the approved kit. */
 function Action(props: {
   label: string;
   id: string;
@@ -103,12 +67,7 @@ function Action(props: {
   onClick: () => void;
 }) {
   const { primary, ...rest } = props;
-  return (
-    <UI.ToolbarItem
-      {...rest}
-      metadata={{ export: { nativeControl: "NSButton", default: !!primary } }}
-    />
-  );
+  return <UI.PushButton {...rest} role={primary ? "default" : "normal"} />;
 }
 export interface ExportSheetProps {
   model: ExportModel;
@@ -202,6 +161,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       label="Export"
       anchor={anchor}
       open
+      style={{
+        padding: token("metrics.sheet_inset"),
+        width: token("metrics.sheet_width_wide"),
+        gap: token("metrics.inset"),
+      }}
       // No substitute for missing wide-sheet/inset tokens. Metadata is a request,
       // not a claim the current kit interprets these properties.
       metadata={{
@@ -485,6 +449,17 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     onClick={() => watch(model.savePreset())}
                   />
                 </FormRow>
+                {model.presetError ? (
+                  <text
+                    role="status"
+                    style={{
+                      color: token("colors.danger"),
+                      fontSize: token("typography.minimum"),
+                    }}
+                  >
+                    Couldn’t save the preset. Try again.
+                  </text>
+                ) : null}
                 <text style={detail}>{colorNote}</text>
               </Group>
             </>
@@ -503,15 +478,28 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             <div style={stack}>
               <text
                 id="export.summary"
-                label={p.summary}
-                metadata={{ export: { announce: "polite" } }}
+                label={
+                  model.planningError
+                    ? `Can’t export with these settings: ${model.planningError}`
+                    : p.summary
+                }
+                metadata={{
+                  export: { announce: "polite" },
+                  ...(model.planningError
+                    ? { symbol: "exclamationmark.triangle.fill" }
+                    : {}),
+                }}
                 style={{
-                  color: token("colors.secondary"),
+                  color: token(
+                    model.planningError ? "colors.warning" : "colors.secondary",
+                  ),
                   fontSize: token("typography.body"),
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {p.summary}
+                {model.planningError
+                  ? `Can’t export with these settings: ${model.planningError}`
+                  : p.summary}
               </text>
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>

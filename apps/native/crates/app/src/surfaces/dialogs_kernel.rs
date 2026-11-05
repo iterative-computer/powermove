@@ -711,6 +711,8 @@ pub enum PresetError {
     Missing,
     NeedsReplace,
     DesignTodo,
+    EmptyName,
+    DuplicateName,
     Malformed,
 }
 impl PresetError {
@@ -780,13 +782,23 @@ impl Presets {
     }
     pub fn rename(&self, id: &str, name: &str) -> Result<Self, PresetError> {
         let name = name.trim();
-        if name.is_empty()
-            || self
-                .entries
-                .iter()
-                .any(|e| text(e, "id") != id && text(e, "name") == name)
+        if name.is_empty() {
+            return Err(PresetError::EmptyName);
+        }
+        if self
+            .entries
+            .iter()
+            .any(|e| text(e, "id") != id && text(e, "name") == name)
         {
-            return Err(PresetError::DesignTodo);
+            return Err(PresetError::DuplicateName);
+        }
+        let original = self
+            .entries
+            .iter()
+            .find(|e| text(e, "id") == id)
+            .ok_or(PresetError::Missing)?;
+        if text(original, "name") == name {
+            return Ok(self.clone());
         }
         let mut next = self.clone();
         let entry = next
