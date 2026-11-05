@@ -14,6 +14,9 @@ are those of panels/README §1.
 | [agent-auth.md](agent-auth.md) | Agent surfaces, providers, runtime, sign-in, account | S057 S059 S060 S062–S066 S070–S072 S083–S086 |
 | [store.md](store.md) | Store window, Library, extension management, updates, publishing, sandbox check | S073 S075–S082 |
 | [captions.md](captions.md) | Captions panel, inspector, timeline, generation, speech models, import/export | S087–S093 |
+| [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
+| [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
+| [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; shipped 3D layers, inspector and viewer controls | S097 S098 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
@@ -118,3 +121,4 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 1 | The region-selection overlay exists in v1.2.0 code but nothing opens it. Ship it, or retire the row? | Specified, **do not build** until decided | S066 |
 | 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | Archive is kept, copy says so, no restore UI | S060, S095, S103 |
 | 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | Keep automatic registration, and make it visible and reversible in Settings | S070 |
+| 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | The shipped surfaces are specified so old projects stay editable; the new system is not designed here | S098 |
