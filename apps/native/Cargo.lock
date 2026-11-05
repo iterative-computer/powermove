@@ -4606,8 +4606,11 @@ version = "0.1.0"
 dependencies = [
  "futures-lite",
  "pm-agents",
+ "pm-audio",
  "pm-design",
+ "pm-export",
  "pm-kernel",
+ "pm-media",
  "pm-model",
  "pm-panel-agentpanel",
  "pm-panel-inspector",
@@ -4615,10 +4618,14 @@ dependencies = [
  "pm-panel-timeline",
  "pm-panel-viewerchrome",
  "pm-promedia",
+ "pm-protocol",
+ "pm-render",
  "pm-runtime-v8",
  "pm-services",
  "pm-surface",
+ "pm-time",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

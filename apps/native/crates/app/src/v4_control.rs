@@ -101,6 +101,7 @@ impl NativeControl {
         options: Vec<Value>,
         disabled: bool,
         default: bool,
+        destructive: bool,
         t: &pm_design::Tokens,
         window: &Window,
         cx: &mut Context<Self>,
@@ -128,7 +129,9 @@ impl NativeControl {
         let control = match kind {
             Kind::Popup => {
                 let v = NSPopUpButton::initWithFrame_pullsDown(
-                    NSPopUpButton::alloc(mtm), NSRect::ZERO, false,
+                    NSPopUpButton::alloc(mtm),
+                    NSRect::ZERO,
+                    false,
                 );
                 for option in &options {
                     v.addItemWithTitle(&NSString::from_str(
@@ -164,6 +167,7 @@ impl NativeControl {
                     v.setButtonType(NSButtonType::Switch);
                 } else {
                     v.setBezelStyle(NSBezelStyle::Push);
+                    v.setHasDestructiveAction(destructive);
                     if default {
                         v.setKeyEquivalent(&NSString::from_str("\r"));
                     }

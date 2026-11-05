@@ -63,7 +63,12 @@ fn cards_snapshot_every_scheme_contrast_selection_and_focus_state() {
     if std::env::var_os("PM_UPDATE_MEDIA_RENDER").is_some() {
         std::fs::write(&path, &wire).unwrap();
     }
-    assert_eq!(wire, std::fs::read_to_string(path).unwrap());
+    // serde_json's preserve_order feature is unified by the V8 host. Object
+    // member order is not paint order; retain exact ordered operation arrays.
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(actual, expected);
 }
 #[test]
 fn middle_truncation_retains_extension_and_balances_the_stem() {

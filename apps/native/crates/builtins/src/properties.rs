@@ -1,7 +1,7 @@
 //! Read-only Properties presentation using model-issued, selection-fenced leases.
 use pm_kernel::{Caller, Request};
 use pm_panel_inspector::{
-    Binding, Inspector, PropertyId,
+    Binding, FieldType, Inspector, PropertyId,
     v4_properties::{V4Action, V4Adapter, V4Plan},
 };
 use serde_json::{Value, json};
@@ -12,6 +12,9 @@ pub struct Properties {
     key: String,
     handles: BTreeMap<String, String>,
     collapsed: BTreeMap<String, bool>,
+    selection: Vec<String>,
+    document: Option<u64>,
+    sequence: u64,
 }
 impl Properties {
     fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
@@ -33,11 +36,16 @@ impl Properties {
         time: f64,
         playing: bool,
     ) -> Result<Value, String> {
-        let key = format!("{}:{:?}", model.document_id(), model.selected_layers());
-        if self.key != key {
+        if self.document != Some(model.document_id()) || self.selection != model.selected_layers() {
             self.adapter.retire();
             self.handles.clear();
-            self.key = key;
+            self.selection = model.selected_layers().to_vec();
+            self.document = Some(model.document_id());
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or("Properties identity exhausted")?;
+            self.key = format!("properties:{}:{}", model.document_id(), self.sequence);
         }
         let target = if let Some(id) = model.primary() {
             let layer = model.layer(id).map_err(|e| e.to_string())?;
@@ -45,7 +53,7 @@ impl Properties {
                 .get("type")
                 .and_then(pm_model::Value::as_str)
                 .unwrap_or("");
-            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(pm_model::Value::as_str).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":kind})
+            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(pm_model::Value::as_str).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":if model.selected_layers().iter().all(|id|model.layer(id).ok().and_then(|l|l.get("type").and_then(pm_model::Value::as_str).map(str::to_owned)).as_deref()==Some(kind)) {Some(kind)} else {None}})
         } else {
             json!({"kind":"composition","key":self.key})
         };
@@ -57,19 +65,112 @@ impl Properties {
                 .get("type")
                 .and_then(pm_model::Value::as_str)
                 == Some("audio");
-            let record = model.layer(&layer).map_err(|e| e.to_string())?;
-            if record.get("type").and_then(pm_model::Value::as_str) == Some("text") {
-                let binding = Binding::Content {
-                    layer: layer.clone(),
-                    field: "text".into(),
+            let mut content = vec![];
+            let mut layer_rows = vec![];
+            // The model decides applicability; this adapter only maps authored
+            // labels and supported control descriptors to frozen v4 rows.
+            for field in model.fields().map_err(|e| e.to_string())? {
+                let (id, label, unit) = match &field.binding {
+                    Binding::Content { field, .. } => match field.as_str() {
+                        "text" => ("content.text", "Text", ""),
+                        "font" => ("content.font", "Font", ""),
+                        "size" => ("content.size", "Size", "px"),
+                        "tracking" => ("content.tracking", "Tracking", "px"),
+                        "leading" => ("content.leading", "Leading", ""),
+                        "color" => (
+                            "content.color",
+                            if audio || target["first"]["type"] == "text" {
+                                "Color"
+                            } else {
+                                "Fill"
+                            },
+                            "",
+                        ),
+                        "w" => ("content.w", "Width", "px"),
+                        "h" => ("content.h", "Height", "px"),
+                        "shape" => ("content.shape", "Shape", ""),
+                        "radius" => ("content.radius", "Corner Radius", "px"),
+                        "smoothing" => ("content.smoothing", "Corner Smoothing", "%"),
+                        "independentCorners" => {
+                            ("content.independentCorners", "Independent Corners", "")
+                        }
+                        "stroke" => ("content.stroke", "Stroke", "px"),
+                        "strokeColor" => ("content.strokeColor", "Stroke Color", ""),
+                        "points" => ("content.points", "Points", ""),
+                        "fit" => ("content.fit", "Fit", ""),
+                        "trim" => ("content.trim", "Trim Start", "s"),
+                        "speed" => ("content.speed", "Speed", ""),
+                        "gain" => ("content.gain", "Gain", ""),
+                        "fadeIn" => ("content.fadeIn", "Fade In", "s"),
+                        "fadeOut" => ("content.fadeOut", "Fade Out", "s"),
+                        "audioMuted" => ("content.audioMuted", "Mute Audio", ""),
+                        "audioGain" => ("content.audioGain", "Gain", ""),
+                        // DESIGN-TODO(opus): per-kind structured/contributed and
+                        // variable-font-axis control details need design review.
+                        // Retain authored data; no generic replacement control.
+                        _ => continue,
+                    },
+                    Binding::Layer { field, .. } => match field.as_str() {
+                        "solo" => ("layer.solo", "Solo", ""),
+                        "visible" => ("layer.visible", "Visible", ""),
+                        "color" => ("layer.color", "Label Color", ""),
+                        _ => continue,
+                    },
+                    _ => continue,
                 };
-                if let Ok(state) = model.binding_state(&binding, time) {
-                    if let Some(value) = state.value.as_str() {
-                        let value = value.to_owned();
-                        let lease = self.lease(model, "content.text", binding)?;
-                        sections.push(json!({"id":"content","title":"Content","collapsed":self.collapsed.get("content").copied().unwrap_or(false),"rows":[{"id":"content.text","label":"Text","locked":!model.editable(&layer),"control":{"kind":"text","multiline":true,"binding":lease,"value":value,"mixed":state.mixed}}]}));
+                let state = model
+                    .binding_state(&field.binding, time)
+                    .map_err(|e| e.to_string())?;
+                let lease = self.lease(model, id, field.binding.clone())?;
+                let value = super::data::wire(&state.value);
+                let control = match (&field.kind, &value) {
+                    (FieldType::Number(spec), Value::Number(_)) => {
+                        let mut axis = json!({"binding":lease,"value":value,"unit":unit,"step":spec.step,"precision":2,"mixed":state.mixed});
+                        if let Some(min) = spec.min {
+                            axis["min"] = json!(min);
+                        }
+                        if let Some(max) = spec.max {
+                            axis["max"] = json!(max);
+                        }
+                        json!({"kind":"number","axes":[axis]})
                     }
+                    (FieldType::Boolean, Value::Bool(_)) => {
+                        json!({"kind":"toggle","binding":lease,"value":value,"mixed":state.mixed})
+                    }
+                    (FieldType::Text, Value::String(_)) => {
+                        json!({"kind":"text","multiline":id=="content.text","binding":lease,"value":value,"mixed":state.mixed})
+                    }
+                    (FieldType::Color, Value::String(_)) => {
+                        json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed})
+                    }
+                    (FieldType::Font, Value::String(_)) => {
+                        json!({"kind":"font","binding":lease,"value":value,"options":[],"disabled":true,"mixed":state.mixed})
+                    }
+                    (FieldType::Choice, _) if matches!(id, "content.shape" | "content.fit") => {
+                        json!({"kind":"choice","binding":lease,"value":value,"options":if id=="content.shape" { vec!["rect","ellipse","polygon","star","line"] } else { vec!["cover","contain","stretch"] },"mixed":state.mixed})
+                    }
+                    _ => continue,
+                };
+                let animation = if !field.animatable {
+                    Value::Null
+                } else {
+                    json!(if state.key_at_playhead {
+                        "key-at-playhead"
+                    } else if state.animated {
+                        "animated"
+                    } else {
+                        "static"
+                    })
+                };
+                let row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control});
+                if id.starts_with("layer.") {
+                    layer_rows.push(row);
+                } else {
+                    content.push(row);
                 }
+            }
+            if !content.is_empty() {
+                sections.push(json!({"id":"content","title":"Content","collapsed":self.collapsed.get("content").copied().unwrap_or(false),"rows":content}));
             }
             if !audio {
                 let mut rows = vec![];
@@ -125,6 +226,9 @@ impl Properties {
                     }
                 }
                 sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+            }
+            if !layer_rows.is_empty() {
+                sections.push(json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows}));
             }
         } else {
             let mut rows = vec![];
@@ -213,6 +317,25 @@ impl Properties {
             return Ok(None);
         }
         let handle = self.handles.get(path).ok_or("Unknown property row")?;
+        let group;
+        let handle = if matches!(row, "position" | "scale" | "anchor") {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            group = self
+                .adapter
+                .register(
+                    model,
+                    ["x", "y"]
+                        .iter()
+                        .map(|axis| {
+                            Binding::Property(PropertyId::new(&layer, format!("{row}.{axis}")))
+                        })
+                        .collect(),
+                )
+                .map_err(|e| e.to_string())?;
+            &group
+        } else {
+            handle
+        };
         let action = if intent["type"] == "key" {
             if intent["removeAnimation"] == true {
                 V4Action::RemoveAnimation
@@ -226,14 +349,15 @@ impl Properties {
                 Some("reset") => V4Action::Reset(None),
                 Some("remove-expression") => V4Action::Expression(None),
                 Some("link") => V4Action::LinkScale,
+                Some("show-graph") => V4Action::ShowGraph,
                 _ => return Err("Property action requires native service".into()),
             }
         };
-        match self
-            .adapter
-            .action(model, caller, handle, action, time)
-            .map_err(|e| e.to_string())?
-        {
+        let result = self.adapter.action(model, caller, handle, action, time);
+        if matches!(row, "position" | "scale" | "anchor") {
+            self.adapter.dispose(handle);
+        }
+        match result.map_err(|e| e.to_string())? {
             V4Plan::Request(request) => Ok(Some(request)),
             V4Plan::Service(_) => Err("Graph service unavailable".into()),
         }

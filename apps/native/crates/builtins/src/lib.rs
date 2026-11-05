@@ -1,9 +1,13 @@
 //! Application v4 embedding. JavaScript owns presentation; the kernel remains
 //! the only document writer. GPUI consumes immutable accepted surfaces.
+mod agent_host;
 mod data;
+pub mod delivery;
 mod models;
 mod properties;
+mod settings;
 pub mod timeline_scene;
+pub mod virtualization;
 use data::Backend;
 use pm_kernel::KernelHandle;
 use pm_runtime_v8::*;
@@ -60,6 +64,7 @@ pub struct Builtins {
 }
 struct Broker {
     project: String,
+    application: bool,
     kernel: KernelHandle,
     entries: Mutex<BTreeMap<String, Entry>>,
     publications: Mutex<BTreeMap<String, Publication>>,
@@ -76,8 +81,24 @@ impl Builtins {
         project: &str,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
+        Self::create(kernel, project, false, wake)
+    }
+    /// Application-owned Agent/Settings without inventing an open document.
+    pub fn application(
+        kernel: KernelHandle,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::create(kernel, "builtin-application", true, wake)
+    }
+    fn create(
+        kernel: KernelHandle,
+        project: &str,
+        application: bool,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self> {
         let broker = Arc::new(Broker {
             project: project.into(),
+            application,
             kernel,
             entries: Default::default(),
             publications: Default::default(),
@@ -110,11 +131,14 @@ impl Builtins {
     /// Ticket is awaited off the UI handler. First publication is delivered only
     /// after Rust accepts the complete atomic surface commit.
     pub fn mount(&mut self, panel: &str) -> Result<Ticket<Evaluation>> {
-        if !LIVE_PANELS.contains(&panel) || self.realms.contains_key(panel) {
+        if !LIVE_PANELS.contains(&panel)
+            || self.realms.contains_key(panel)
+            || (self.broker.application && !matches!(panel, "settings" | "agent"))
+        {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
-        let ticket = realm.eval(&format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
+        let ticket = realm.eval(format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
         self.realms.insert(panel.into(), realm);
         Ok(ticket)
     }
@@ -135,6 +159,18 @@ impl Builtins {
             entry.backend.lock().unwrap().native.facts = facts.clone();
         }
     }
+    /// Worker-only native observations. Never expose filesystem paths to JSX.
+    pub fn update_media(
+        &self,
+        originals: BTreeMap<String, std::path::PathBuf>,
+        observed: pm_panel_media::readiness::ObservedRuntime,
+    ) {
+        for entry in self.broker.entries.lock().unwrap().values_mut() {
+            let mut backend = entry.backend.lock().unwrap();
+            backend.native.originals = originals.clone();
+            backend.native.media_runtime = observed.clone();
+        }
+    }
     pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {
         if id == 0 {
             return;
@@ -151,7 +187,7 @@ impl Builtins {
         self.realms
             .get("export")
             .ok_or(Error::Closed)?
-            .eval(&format!(
+            .eval(format!(
                 "runtime.engine('export.observe',{});__pmBuiltin.publish()",
                 run
             ))
@@ -169,10 +205,10 @@ impl Builtins {
         key: &str,
         additive: bool,
     ) -> Result<Ticket<Evaluation>> {
-        self.realms.get("timeline").ok_or(Error::Closed)?.eval(&format!("__pmBuiltin.command('panel.timeline',{})",json!({"type":"native.select-key","layer":layer,"channel":channel,"key":key,"additive":additive})))
+        self.realms.get("timeline").ok_or(Error::Closed)?.eval(format!("__pmBuiltin.command('panel.timeline',{})",json!({"type":"native.select-key","layer":layer,"channel":channel,"key":key,"additive":additive})))
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
-        self.realms.get(panel).ok_or(Error::Closed)?.eval(&format!(
+        self.realms.get(panel).ok_or(Error::Closed)?.eval(format!(
             "__pmBuiltin.write({},{})",
             json!(handle),
             value
@@ -216,7 +252,7 @@ impl Builtins {
         self.realms
             .get(panel)
             .ok_or(Error::Closed)?
-            .eval(&format!("__pmBuiltin.event({wire})"))
+            .eval(format!("__pmBuiltin.event({wire})"))
     }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
     /// revokes its writer on the isolate owner, including after a failed mount.
@@ -278,7 +314,13 @@ impl EngineProxy for Broker {
                 project: self.project.clone(),
             };
             let backend = Arc::new(Mutex::new(
-                Backend::new(self.kernel.clone(), identity.clone(), panel).map_err(Error::Host)?,
+                Backend::new(
+                    self.kernel.clone(),
+                    identity.clone(),
+                    panel,
+                    self.application,
+                )
+                .map_err(Error::Host)?,
             ));
             let facts = self.facts.lock().unwrap().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {

@@ -495,11 +495,7 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
-        if self.opening
-            || self.recovery_pending
-            || self.close_pending
-            || self.save_pending
-        {
+        if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }

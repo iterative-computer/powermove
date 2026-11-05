@@ -39,7 +39,8 @@ pub(crate) struct Backend {
     pub(crate) kernel: KernelHandle,
     pub(crate) identity: Identity,
     pub(crate) caller: Caller,
-    pub(crate) model: Inspector,
+    pub(crate) model: Option<Inspector>,
+    pub(crate) application: bool,
     panel: EffectsPanel,
     extension: String,
     bindings: BTreeMap<String, Vec<String>>,
@@ -52,10 +53,20 @@ pub(crate) struct Backend {
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
 impl Backend {
-    pub fn new(kernel: KernelHandle, identity: Identity, panel: &str) -> Result<Self, String> {
-        let published = kernel
-            .published(&identity.project)
-            .ok_or("project closed")?;
+    pub fn new(
+        kernel: KernelHandle,
+        identity: Identity,
+        panel: &str,
+        application: bool,
+    ) -> Result<Self, String> {
+        let published = if application {
+            None
+        } else {
+            kernel.published(&identity.project)
+        };
+        if !application && published.is_none() {
+            return Err("project closed".into());
+        }
         let mut presentation = Presentation::default();
         for (id, label) in [
             ("shape", "Shape"),
@@ -80,12 +91,14 @@ impl Backend {
             kernel.clone(),
             &identity.project,
             Caller::realm(realm, 1, Origin::Interface),
+            application,
         )?;
         Ok(Self {
             kernel,
             identity,
+            application,
             caller: Caller::realm(realm, 1, Origin::Interface),
-            model: Inspector::new(published, EffectClipboard::default()),
+            model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
             panel: EffectsPanel::new(presentation, 0..96),
             extension: format!("ext.builtin.{panel}"),
             native,
@@ -98,11 +111,25 @@ impl Backend {
             retired: false,
         })
     }
+    pub(crate) fn published(&self) -> Option<Arc<Published>> {
+        if self.application {
+            None
+        } else {
+            self.kernel.published(&self.identity.project)
+        }
+    }
     pub(crate) fn sync(&mut self) -> Result<(), String> {
-        let published = self
-            .kernel
-            .published(&self.identity.project)
-            .ok_or("project closed")?;
+        let published = self.published();
+        if self.model.is_none() {
+            let stamp = self.kernel.state().revision.to_string();
+            if self.native.stamp != stamp {
+                self.native.stamp = stamp;
+                self.native.settings_sequence += 1;
+                self.native.agent_sequence += 1;
+            }
+            return Ok(());
+        }
+        let published = published.ok_or("project closed")?;
         let stamp = format!(
             "{}:{}:{}:{:?}",
             published.snapshot.doc_id,
@@ -119,7 +146,10 @@ impl Backend {
                     json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
             }
         }
-        self.model.sync(published);
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .sync(published);
         let state = self.kernel.state();
         let mut latest = BTreeMap::new();
         for registration in state.registries.get("effects").into_iter().flatten() {
@@ -127,13 +157,18 @@ impl Backend {
         }
         for id in self
             .model
+            .as_mut()
+            .ok_or("No open project")?
             .effect_definitions()
             .keys()
             .filter(|id| !latest.contains_key(*id))
             .cloned()
             .collect::<Vec<_>>()
         {
-            self.model.remove_definition(&id);
+            self.model
+                .as_mut()
+                .ok_or("No open project")?
+                .remove_definition(&id);
         }
         for (id, d) in latest {
             let mut params = vec![];
@@ -177,6 +212,8 @@ impl Backend {
                 }
             }
             self.model
+                .as_mut()
+                .ok_or("No open project")?
                 .register_effect(pm_panel_inspector::EffectDefinition {
                     effect_type: id.clone(),
                     version: d["version"].as_u64().unwrap_or(1) as u32,
@@ -192,7 +229,7 @@ impl Backend {
         self.sync()?;
         self.panel
             .project(
-                &mut self.model,
+                self.model.as_mut().ok_or("No open project")?,
                 self.native.facts["time"].as_f64().unwrap_or(0.),
             )
             .map(|v| wire(&v))
@@ -214,13 +251,18 @@ impl Backend {
     }
     pub fn target(&mut self) -> Result<Value, String> {
         self.sync()?;
-        let Some(id) = self.model.primary() else {
+        let Some(id) = self.model.as_ref().ok_or("No open project")?.primary() else {
             return Ok(Value::Null);
         };
-        if !self.model.editable(id) {
+        if !self.model.as_ref().ok_or("No open project")?.editable(id) {
             return Ok(Value::Null);
         }
-        let layer = self.model.layer(id).map_err(|e| e.to_string())?;
+        let layer = self
+            .model
+            .as_ref()
+            .ok_or("No open project")?
+            .layer(id)
+            .map_err(|e| e.to_string())?;
         if layer.get("type").and_then(pm_model::Value::as_str) == Some("audio") {
             return Ok(Value::Null);
         }
@@ -243,8 +285,7 @@ impl Backend {
         result: Result<Value, String>,
     ) -> Result<(), String> {
         let revision = self
-            .kernel
-            .published(&self.identity.project)
+            .published()
             .map(|p| p.revision())
             .unwrap_or(request.expected_revision);
         let state_revision = request
@@ -269,10 +310,10 @@ impl Backend {
         .map_err(|e| e.to_string())
     }
     pub fn tick(&mut self) -> Result<(), String> {
-        if let Some(result) = self.poll_timeline() {
-            if let Some((request, reply)) = self.timeline_waiter.take() {
-                self.reply(request, reply, result)?;
-            }
+        if let Some(result) = self.poll_timeline()
+            && let Some((request, reply)) = self.timeline_waiter.take()
+        {
+            self.reply(request, reply, result)?;
         }
         let mut index = 0;
         while index < self.pending.len() {
@@ -288,7 +329,7 @@ impl Backend {
                 }
                 if let Some(plan) = item.plan {
                     self.panel
-                        .acknowledge(&mut self.model, plan, &ack)
+                        .acknowledge(self.model.as_mut().ok_or("No open project")?, plan, &ack)
                         .map_err(|e| e.to_string())?;
                 }
                 match &item.request.operation {
@@ -331,10 +372,8 @@ impl KernelData for Data {
             return Err("retired/foreign data service".into());
         }
         b.sync()?;
-        let p = b
-            .kernel
-            .published(&identity.project)
-            .ok_or("project closed")?;
+        let p = b.published();
+        let revision = p.as_ref().map_or(0, |p| p.revision());
         let value = if let Some(value) = b.extra_query(query, channels)? {
             value
         } else {
@@ -343,19 +382,18 @@ impl KernelData for Data {
                     b.projection()?
                 }
                 Query::Project => {
+                    let p = p.as_ref().ok_or("No open project")?;
                     json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision()})
                 }
                 Query::Selection => {
+                    let p = p.as_ref().ok_or("No open project")?;
                     json!({"primary":p.selection.primary(),"count":p.selection.layers().len()})
                 }
                 _ => return Err("unknown built-in query channel".into()),
             }
         };
-        b.service_revision = p.revision();
-        Ok(QuerySnapshot {
-            revision: p.revision(),
-            value,
-        })
+        b.service_revision = revision;
+        Ok(QuerySnapshot { revision, value })
     }
     fn enqueue(&mut self, request: HostRequest, reply: SyncSender<HostAck>) -> Result<(), String> {
         let mut b = self.0.lock().unwrap();
@@ -363,10 +401,7 @@ impl KernelData for Data {
             return Err("built-in retired".into());
         }
         b.sync()?;
-        let published = b
-            .kernel
-            .published(&b.identity.project)
-            .ok_or("project closed")?;
+        let revision = b.published().as_ref().map_or(0, |p| p.revision());
         let needs_current = match &request.operation {
             HostOperation::Edit { .. } => true,
             HostOperation::Command { command, .. } => !matches!(
@@ -375,7 +410,7 @@ impl KernelData for Data {
             ),
             _ => false,
         };
-        if needs_current && request.expected_revision != published.revision() {
+        if needs_current && request.expected_revision != revision {
             return b.reply(
                 request,
                 reply,
@@ -452,15 +487,18 @@ impl KernelData for Data {
                             return Err("Unregistered built-in edit".into());
                         }
                         let target = command.args["target"].as_str().ok_or("effect target")?;
-                        if b.model.primary() != Some(target) {
+                        if b.model.as_ref().ok_or("No open project")?.primary() != Some(target) {
                             return Err("Effect target selection changed".into());
                         }
                         let definition = command.args["definition"]
                             .as_str()
                             .ok_or("effect definition")?;
+                        let caller = b.caller;
                         let request = b
                             .model
-                            .add_effect(b.caller, target, definition)
+                            .as_mut()
+                            .ok_or("No open project")?
+                            .add_effect(caller, target, definition)
                             .map_err(|e| e.to_string())?;
                         if let pm_kernel::Call::Transact {
                             body: pm_kernel::WriteBody::Commands(commands),
@@ -485,7 +523,12 @@ impl KernelData for Data {
                         panel, model: m, ..
                     } = &mut *b;
                     let mut next = panel
-                        .plan(m, caller, &model(args)?, 0.)
+                        .plan(
+                            m.as_mut().ok_or("No open project")?,
+                            caller,
+                            &model(args)?,
+                            0.,
+                        )
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
                     plan = Some(next);
@@ -542,9 +585,10 @@ impl KernelData for Data {
             return Err("foreign retirement".into());
         }
         if !b.retired {
-            let _ = b
-                .kernel
-                .call(&identity.project, Request::new(b.caller, Call::RealmFailed));
+            drop(
+                b.kernel
+                    .call(&identity.project, Request::new(b.caller, Call::RealmFailed)),
+            );
             b.bindings.clear();
             b.retired = true;
         }

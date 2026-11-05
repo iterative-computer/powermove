@@ -26,7 +26,11 @@ pub fn for_session(
         let destination = cache.join(format!("asset-{index}.{extension}"));
         item.copy_to(&destination)?;
         let resolved = destination;
-        catalog.originals.insert(item.id.to_string(), resolved);
+        if pm_builtins::delivery::embedded_proxy(snapshot, &item.id.to_string()) {
+            catalog.proxies.insert(item.id.to_string(), resolved);
+        } else {
+            catalog.originals.insert(item.id.to_string(), resolved);
+        }
     }
     // Linked originals already have public document descriptors. No proxy fallback.
     if let Some(root) = snapshot.document.to_value()

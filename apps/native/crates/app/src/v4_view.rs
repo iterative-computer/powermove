@@ -112,7 +112,7 @@ impl SurfaceView {
                 self.leases.insert(node.id, lease.clone());
                 self.option_sets.insert(node.id, options);
             }
-            if node.r#type == "scroll" {
+            if matches!(node.r#type.as_str(), "scroll" | "virtual-list") {
                 self.scrolls
                     .entry(node.id)
                     .or_insert_with(ScrollHandle::new);
@@ -167,8 +167,15 @@ impl SurfaceView {
                         .and_then(Value::as_array)
                         .cloned()
                         .unwrap_or_default();
-                    let primary = node.props.get("attr").and_then(|a| a.get("default-button"))
-                        == Some(&Value::Bool(true))
+                    let button_role = node
+                        .props
+                        .get("metadata")
+                        .and_then(|m| m.get("pmKit"))
+                        .and_then(|m| m.get("buttonRole"))
+                        .and_then(Value::as_str);
+                    let primary = button_role == Some("default")
+                        || node.props.get("attr").and_then(|a| a.get("default-button"))
+                            == Some(&Value::Bool(true))
                         || node
                             .props
                             .get("metadata")
@@ -184,6 +191,7 @@ impl SurfaceView {
                             options,
                             disabled,
                             primary,
+                            button_role == Some("destructive"),
                             &self.tokens,
                             window,
                             cx,
@@ -711,6 +719,63 @@ impl SurfaceView {
                 .overflow_y_scroll()
                 .track_scroll(scroll);
         }
+        let virtual_window = if node.r#type == "virtual-list" {
+            node.props
+                .get("count")
+                .and_then(Value::as_u64)
+                .zip(node.props.get("range").and_then(Value::as_array))
+                .zip(
+                    node.props
+                        .get("itemSize")
+                        .and_then(Value::as_f64)
+                        .or_else(|| {
+                            (node
+                                .props
+                                .get("metadata")
+                                .and_then(|m| m.get("rowHeightToken"))
+                                .and_then(Value::as_str)
+                                == Some("metrics.row"))
+                            .then_some(self.tokens.metrics.row as f64)
+                        }),
+                )
+                .and_then(|((count, range), size)| {
+                    pm_builtins::virtualization::Window::new(
+                        count as usize,
+                        (
+                            range.first()?.as_u64()? as usize,
+                            range.get(1)?.as_u64()? as usize,
+                        ),
+                        size,
+                    )
+                    .ok()
+                })
+        } else {
+            None
+        };
+        if let Some(geometry) = virtual_window {
+            element = element
+                .aria_row_count(geometry.count)
+                .on_scroll_wheel(cx.listener(move |_, _, _, cx| {
+                    cx.defer(move |v, cx| {
+                        let Some(scroll) = v.scrolls.get(&id) else {
+                            return;
+                        };
+                        let offset = -f32::from(scroll.offset().y) as f64;
+                        let height = f32::from(scroll.bounds().size.height) as f64;
+                        if let Ok(range) = geometry.visible(offset, height) {
+                            v.send(
+                                id,
+                                "rangechange",
+                                EventDetail {
+                                    range: Some(range),
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                        }
+                    });
+                }));
+        }
         if node.props.get("aria-selected") == Some(&Value::Bool(true))
             || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true))
         {
@@ -888,6 +953,10 @@ impl SurfaceView {
             }))
             .border_r(px(self.tokens.metrics.border))
             .border_color(rgb(self.tokens.colors.separator));
+        if let Some(geometry) = virtual_window {
+            let (before, _) = geometry.spacers();
+            element = element.child(div().flex_none().h(px(before as f32)));
+        }
         for child in &node.children {
             let child_node = surface.node(*child).unwrap();
             if child_node.r#type == "text"
@@ -906,6 +975,10 @@ impl SurfaceView {
                     element = element.child(self.element(*child, window, cx, skip));
                 }
             }
+        }
+        if let Some(geometry) = virtual_window {
+            let (_, after) = geometry.spacers();
+            element = element.child(div().flex_none().h(px(after as f32)));
         }
         if let Some(row) = native_row {
             element = element

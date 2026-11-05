@@ -35,7 +35,12 @@ fn all_reviewed_paint_states_have_wire_snapshots_in_each_appearance() {
     if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
         std::fs::write(&path, &wire).unwrap();
     }
-    assert_eq!(wire, std::fs::read_to_string(path).unwrap());
+    // Workspace feature unification can enable serde_json preserve_order.
+    // JSON object order is immaterial; ordered paint arrays remain exact.
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(actual, expected);
 }
 #[test]
 fn selected_clips_use_label_mix_and_text_ring_and_exact_authored_times() {
@@ -257,7 +262,12 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
     if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
         std::fs::write(&path, &wire).unwrap();
     }
-    assert_eq!(wire, std::fs::read_to_string(path).unwrap());
+    // Workspace feature unification can enable serde_json preserve_order.
+    // JSON object order is immaterial; ordered paint arrays remain exact.
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]

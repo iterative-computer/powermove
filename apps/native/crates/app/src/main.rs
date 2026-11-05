@@ -2,15 +2,15 @@ mod builtins;
 #[cfg(test)]
 mod builtins_tests;
 mod diag;
-mod export_coordinator;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
+mod export_coordinator;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
-mod lifecycle;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
+mod lifecycle;
 mod mcp;
 mod media;
 mod panels;
@@ -20,10 +20,10 @@ mod playback;
 mod rows;
 mod session;
 mod smoke;
-mod v4_native;
-mod v4_control;
-mod v4_view;
 mod surfaces;
+mod v4_control;
+mod v4_native;
+mod v4_view;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

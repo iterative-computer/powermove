@@ -11,6 +11,7 @@ use std::{
 #[derive(Default)]
 pub struct Host {
     project: Option<String>,
+    application: bool,
     pub runtime: Option<Arc<Builtins>>,
     pending: BTreeMap<String, Publication>,
     pub views: BTreeMap<String, Entity<SurfaceView>>,
@@ -19,20 +20,33 @@ pub struct Host {
     generations: BTreeMap<String, u64>,
     requests: VecDeque<PlatformRequest>,
     windows: BTreeMap<String, AnyWindowHandle>,
+    opening_windows: BTreeSet<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
+    pub export_retry: Option<crate::export_coordinator::Frozen>,
+    pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub last_tick: Option<std::time::Instant>,
     pub last_time: f64,
     pub last_playing: bool,
+    pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
+    media_probe_key: String,
     updating: bool,
     again: bool,
 }
 impl Controller {
     pub fn start_builtins(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+        let application = self.session.is_none();
+        let project = self
+            .session
+            .as_ref()
+            .map(|s| s.project.clone())
+            .unwrap_or_else(|| "builtin-application".into());
+        if self.builtins.project.as_ref() == Some(&project)
+            && self.builtins.application == application
+        {
             return;
-        };
-        if self.builtins.project.as_ref() == Some(&project) {
-            return;
+        }
+        if let Some(job) = &self.builtins.export_job {
+            job.cancel.store(true, std::sync::atomic::Ordering::Release);
         }
         if let Some(runtime) = self.builtins.runtime.take() {
             runtime.close();
@@ -41,10 +55,17 @@ impl Controller {
         self.builtins = Host::default();
         self.builtins.windows = windows;
         self.builtins.project = Some(project.clone());
+        self.builtins.application = application;
         let (tx, rx) = async_channel::bounded(1);
-        let mut runtime = match Builtins::new(self.kernel.clone(), &project, move || {
+        let wake = move || {
             let _ = tx.try_send(());
-        }) {
+        };
+        let created = if application {
+            Builtins::application(self.kernel.clone(), wake)
+        } else {
+            Builtins::new(self.kernel.clone(), &project, wake)
+        };
+        let mut runtime = match created {
             Ok(runtime) => runtime,
             Err(e) => {
                 self.message = format!("Panels could not start: {e}");
@@ -53,6 +74,9 @@ impl Controller {
         };
         let mut tickets = vec![];
         for id in LIVE_PANELS {
+            if application && !matches!(*id, "agent" | "settings") {
+                continue;
+            }
             tickets.push((id.to_string(), runtime.mount(id)));
         }
         let runtime = Arc::new(runtime);
@@ -109,14 +133,60 @@ impl Controller {
         })
         .detach();
     }
+    fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let originals = self.media.originals.clone();
+        let proxies = self.media.proxies.clone();
+        let key = format!(
+            "{}:{}:{:?}:{:?}",
+            published.snapshot.doc_id,
+            published.revision(),
+            originals,
+            proxies
+        );
+        if self.builtins.media_probe_key == key {
+            return;
+        }
+        self.builtins.media_probe_key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let observed = cx
+                .background_executor()
+                .spawn(async move {
+                    pm_builtins::delivery::observe_media(
+                        &published.project,
+                        &published.snapshot,
+                        &originals,
+                        &proxies,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                if v.builtins.media_probe_key != key {
+                    return;
+                }
+                match observed {
+                    Ok(observed) => {
+                        v.builtins.media_runtime = observed;
+                        v.update_builtins(cx);
+                    }
+                    Err(error) => {
+                        v.message = error;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
     fn facts(&self) -> Value {
         let playing = self.viewer.as_ref().is_some_and(|v| {
             v.status()
                 .clock
                 .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
         });
-        json!({"time":self.time(),"playing":playing,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "exportCapabilities":{"prores":{"available":true},"mp4":{"available":true},"webm":{"available":true},"png":{"available":true},"still":{"available":true},"json":{"available":true}}})
+        json!({"time":self.time(),"playing":playing,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
     }
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
         let playing = self.playing();
@@ -140,6 +210,7 @@ impl Controller {
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
         self.start_builtins(cx);
+        self.probe_builtin_media(cx);
         if self.builtins.updating {
             self.builtins.again = true;
             return;
@@ -148,6 +219,8 @@ impl Controller {
             return;
         };
         let facts = self.facts();
+        let originals = self.media.originals.clone();
+        let observed = self.builtins.media_runtime.clone();
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -155,6 +228,7 @@ impl Controller {
                 .background_executor()
                 .spawn(async move {
                     runtime.update_facts(facts);
+                    runtime.update_media(originals, observed);
                     runtime.publish()
                 })
                 .await;
@@ -279,6 +353,10 @@ impl Controller {
         Some(div().w_full().child(header.clone()).into_any_element())
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_builtins(cx);
+        if self.builtins.opening_windows.contains(id) {
+            return;
+        }
         if let Some(existing) = self.builtins.windows.get(id).copied() {
             if existing.update(cx, |_, w, _| w.activate()).is_ok() {
                 return;
@@ -287,6 +365,7 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
+        self.builtins.opening_windows.insert(id.into());
         let owner = cx.entity();
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
@@ -314,6 +393,17 @@ impl Controller {
             if let Ok(ticket) = runtime.show(&id) {
                 let _ = ticket.await;
             }
+            let current = this
+                .update(cx, |v, _| {
+                    v.builtins
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| Arc::ptr_eq(r, &runtime))
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
             let result = cx.open_window(
                 WindowOptions::new()
                     .kind(kind)
@@ -333,6 +423,7 @@ impl Controller {
                 },
             );
             let _ = this.update(cx, |v, cx| {
+                v.builtins.opening_windows.remove(&id);
                 match result {
                     Ok(handle) => {
                         v.builtins.windows.insert(id, handle.into());
@@ -446,33 +537,26 @@ impl Controller {
                         _ => Err("Media action belongs to a retired publication".into()),
                     }
                 }
-                "export.begin" => {
-                    self.begin_builtin_export(request.input.clone(), cx);
+                "export.begin" | "export.retry" => {
+                    self.begin_builtin_export(
+                        request.input.clone(),
+                        request.operation == "export.retry",
+                        cx,
+                    );
                     Ok(Value::Null)
                 }
                 "export.cancel" => {
-                    if let Some(job) = self.builtins.export_job.clone() {
-                        let runtime = runtime.clone();
-                        cx.spawn(async move |_, cx| {
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    let mut guard = job.lock().unwrap();
-                                    if let Some(job) = guard.as_mut() {
-                                        job.cancel()
-                                    } else {
-                                        Ok(())
-                                    }
-                                })
-                                .await;
-                            if let Err(error) = result {
-                                let _ = runtime.observe_export(
-                                    json!({"phase":"failed","message":error.to_string()}),
-                                );
-                            }
-                        })
-                        .detach();
+                    if let Some(job) = &self.builtins.export_job {
+                        // Worker observes the flag and publishes terminal state
+                        // only after the child is reaped and cleanup completes.
+                        job.cancel.store(true, std::sync::atomic::Ordering::Release);
+                    } else {
+                        let _ = runtime.observe_export(json!({"phase":"cancelled"}));
                     }
+                    Ok(Value::Null)
+                }
+                "export.reveal" => {
+                    self.show_builtin("export", window, cx);
                     Ok(Value::Null)
                 }
                 "activatePanel" => {
@@ -504,6 +588,21 @@ impl Controller {
                     if let Some(message) = request.input.as_str() {
                         crate::v4_native::announce(&self.host.borrow().window, message);
                     }
+                    Ok(Value::Null)
+                }
+                "agent.settings" => {
+                    self.show_builtin("settings", window, cx);
+                    Ok(Value::Null)
+                }
+                "agent.open" => {
+                    self.show_builtin("agent", window, cx);
+                    Ok(Value::Null)
+                }
+                "agent.close" => {
+                    if let Some(handle) = self.builtins.windows.remove("agent") {
+                        let _ = handle.update(cx, |_, w, _| w.remove_window());
+                    }
+                    self.host.borrow().window.makeKeyAndOrderFront(None);
                     Ok(Value::Null)
                 }
                 "settings.present" => {

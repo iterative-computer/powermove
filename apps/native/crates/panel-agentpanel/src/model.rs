@@ -1434,6 +1434,10 @@ impl Panel {
             },
         ))
     }
+    pub fn host_settings(&mut self, thread: &str) -> Result<Effect> {
+        let target = self.target(thread)?;
+        Ok(self.effect(target, EffectKind::OpenSettings))
+    }
     pub fn host_action(&mut self, thread: &str, action: ShellAction) -> Result<Effect> {
         let target = self.target(thread)?;
         Ok(self.effect(target, EffectKind::Shell(action)))

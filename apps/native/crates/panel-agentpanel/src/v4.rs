@@ -82,6 +82,14 @@ impl Window {
         let selection = session.draft.selection();
         value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
+        value["threadTitle"] = json!(
+            panel
+                .summaries()
+                .into_iter()
+                .find(|s| s.id == self.thread)
+                .map(|s| s.title)
+                .unwrap_or_default()
+        );
         value["elapsedMs"] = json!(session.elapsed_ms(now));
         value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
         value["showJump"] = json!(session.follow.show_jump);
@@ -249,6 +257,7 @@ pub fn dispatch(
                 )?
                 .effect
         }
+        "openSettings" => Some(panel.host_settings(thread)?),
         "submit" => Some(panel.submit(thread, context.run, context.request, now)?),
         "stop" => Some(panel.stop(thread)?),
         "newThread" => {
