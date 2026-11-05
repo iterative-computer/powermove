@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 //! Real GPUI element tree + P-HEADLESS Metal renderer. No AppKit windows/screens.
 use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
