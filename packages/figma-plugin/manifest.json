@@ -3,8 +3,14 @@
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "ui.html",
-  "editorType": ["figma"],
+  "editorType": [
+    "figma"
+  ],
   "documentAccess": "dynamic-page",
-  "enablePrivatePluginApi": true,
-  "networkAccess": { "allowedDomains": ["none"], "devAllowedDomains": ["http://localhost:47832"] }
+  "networkAccess": {
+    "allowedDomains": [
+      "http://localhost:47832"
+    ],
+    "reasoning": "Send your selected layers to the Powermove app running on your computer."
+  }
 }

@@ -37,6 +37,12 @@ files:
   # install-time bin copy is the same executable and is not used by Powermove.
   - '!node_modules/esbuild/bin/esbuild'
 extraResources:
+  - from: ../../packages/figma-plugin
+    to: figma-plugin
+    filter:
+      - manifest.json
+      - ui.html
+      - dist/code.js
   - from: resources/sounds
     to: sounds
   - from: node_modules/ffmpeg-static/ffmpeg
@@ -96,6 +102,7 @@ extraResources:
 extraMetadata:
   main: out/main/index.js
 
+beforePack: ./scripts/before-pack.mjs
 afterPack: ./scripts/after-pack.mjs
 # Releases live in this repository. electron-updater reads the GitHub release
 # feed (latest-mac.yml / beta-mac.yml), so the repo must be public for updates

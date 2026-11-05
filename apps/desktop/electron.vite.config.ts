@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'electron-vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'node:path';
@@ -7,6 +8,14 @@ export default defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
   // `"type": "module"` in package.json cannot silently flip it to .mjs.
   main: {
+    plugins: [{
+      name: 'bundle-figma-plugin',
+      buildStart() {
+        execFileSync('bun', ['run', '--cwd', path.resolve(__dirname, '../../packages/figma-plugin'), 'build'], {
+          stdio: 'inherit',
+        });
+      },
+    }],
     build: {
       // @powermove/registry ships TypeScript sources, which Electron cannot
       // require at runtime: bundle it (and in the preload, which is sandboxed

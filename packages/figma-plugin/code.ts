@@ -1,3 +1,4 @@
+import { figmaFileId } from './identity';
 import { fallbackScopes } from '../../apps/desktop/src/shared/figma/convert';
 import {
   MAX_PAYLOAD,
@@ -7,7 +8,10 @@ import {
   type Matrix,
   type Paint,
 } from '../../apps/desktop/src/shared/figma/doc';
-figma.showUI(__html__, { width: 300, height: 200, themeColors: true });
+figma.showUI(__html__, { width: 300, height: 230, themeColors: true });
+const selectionChanged = () => figma.ui.postMessage({ type: 'count', count: figma.currentPage.selection.length });
+figma.on('selectionchange', selectionChanged);
+selectionChanged();
 const matrix = (m: Transform): Matrix => [m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]];
 const b64 = (bytes: Uint8Array) => figma.base64Encode(bytes);
 let busy = false;
@@ -16,6 +20,12 @@ figma.ui.onmessage = async (message) => {
   if (message.type === 'token') {
     if (typeof message.token === 'string' && /^[a-f0-9]{64}$/.test(message.token))
       await figma.clientStorage.setAsync('powermove-token', message.token);
+    else if (!message.token) await figma.clientStorage.deleteAsync('powermove-token');
+    return;
+  }
+  if (message.type === 'ready') {
+    selectionChanged();
+    void figma.clientStorage.getAsync('powermove-token').then((token) => status({ type: 'token', token }));
     return;
   }
   if (message.type !== 'send' || busy) return;
@@ -26,7 +36,9 @@ figma.ui.onmessage = async (message) => {
     if (payload.length > MAX_PAYLOAD) throw new Error('Select fewer layers (32 MB limit).');
     status({ type: 'selection', doc });
   } catch (e) {
-    status({ type: 'error', text: e instanceof Error ? e.message : 'Could not send selection' });
+    const text = e instanceof Error ? e.message : 'Could not send selection';
+    figma.notify(text, { error: true });
+    status({ type: 'error', text });
   } finally {
     busy = false;
   }
@@ -34,8 +46,7 @@ figma.ui.onmessage = async (message) => {
 void figma.clientStorage.getAsync('powermove-token').then((token) => status({ type: 'token', token }));
 export async function serializeSelection(): Promise<FigmaDoc> {
   if (!figma.currentPage.selection.length) throw new Error('Select layers in Figma first.');
-  if (!figma.fileKey)
-    throw new Error('Open a saved Figma file. File identity requires this development plugin’s private API access.');
+  const fileId = figmaFileId(figma.root);
   const images: Record<string, string> = {},
     seen = new Set<string>();
   let count = 0;
@@ -64,7 +75,7 @@ export async function serializeSelection(): Promise<FigmaDoc> {
     const n = node as SceneNode & Record<string, any>;
     const out: FigmaNode = {
       id: n.id,
-      fileKey: figma.fileKey!,
+      fileKey: fileId,
       type: n.type,
       name: n.name,
       absoluteTransform: matrix(n.absoluteTransform),
