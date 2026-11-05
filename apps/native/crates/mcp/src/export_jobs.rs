@@ -214,6 +214,9 @@ impl Pending {
                 "Powermove timed out while running __mcp_export_video. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.",
             ));
         }
+        // Progress is an external host callback. It must not prevent the worker
+        // from publishing completion or another caller from draining the job.
+        drop(state);
         let mut value = json!({"status":"running","jobId":self.id,"next":format!("The export continues in Powermove. Call export_video with {{\"jobId\":\"{}\"}} to keep waiting for its file.",self.id)});
         if let Some(progress) = self.job.child.video_progress(&self.job.snapshot) {
             let mut fields = json!({"frames":progress.frames});

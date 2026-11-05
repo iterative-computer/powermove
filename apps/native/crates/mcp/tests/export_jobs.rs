@@ -226,6 +226,11 @@ fn waiting_releases_host_mutex_and_document_replacement_never_admits_old_job() {
             .expect("MCP must release the kernel-host mutex before waiting/progress");
         host.create_project(&json!({"name":"Replacement"})).unwrap();
     }
+    // Completion/draining must also proceed while the host's progress callback
+    // is blocked; no internal result mutex may be held across that callback.
+    f.child.gate.release();
+    let jobs = f.host.lock().unwrap().export_jobs.clone();
+    jobs.drain(Duration::from_secs(5)).unwrap();
     f.child.progress_gate.release();
     assert!(waiter.join().unwrap().is_err());
     let mut next = f.session();
