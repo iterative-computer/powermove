@@ -104,6 +104,7 @@ pub mod masks;
 pub mod media;
 pub mod properties;
 pub mod scene3d;
+pub mod shader;
 pub mod text;
 pub mod timing;
 pub mod transform;

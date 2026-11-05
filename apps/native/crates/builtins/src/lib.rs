@@ -56,6 +56,14 @@ struct Entry {
     surface: Surface,
     interaction: Interaction,
 }
+/// Completed byte receipts stay native; the JSX panel receives metadata only.
+pub struct RetainedAsset {
+    pub id: String,
+    pub metadata: pm_model::Value,
+    pub original: pm_kernel::media_archive::Original,
+    pub previous: Option<pm_kernel::media_archive::Original>,
+}
+
 /// One host/pool per project window. A realm and native state exist separately
 /// for every extension; there is no editor-isolate shortcut for v4 built-ins.
 pub struct Builtins {
@@ -174,15 +182,12 @@ impl Builtins {
             backend.native.media_runtime = observed.clone();
         }
     }
-    /// Worker-side completion of an import/Locate File/Replace File operation.
-    /// The media service must first durably retain the original bytes (including
-    /// old versions for relink). This method admits metadata through the actor;
-    /// it does not declare decoder readiness or substitute a proxy for originals.
-    /// Keep the returned pending receipt and publish success only after it passes.
+    /// Admit worker-owned originals, then await the actor's durable outcome.
+    /// A metadata-only StoredAsset is never sufficient for live admission.
     pub fn admit_media(
         &self,
         owner: &pm_panel_media::Stamp,
-        items: Vec<pm_panel_media::StoredAsset>,
+        items: Vec<RetainedAsset>,
         folder: Option<String>,
         replace: Option<String>,
         caller: pm_kernel::Caller,
@@ -200,10 +205,35 @@ impl Builtins {
             .ok_or("Project closed")?;
         let catalog =
             pm_panel_media::Catalog::published(&published).map_err(|e| format!("{e:?}"))?;
+        let mut stored = Vec::new();
+        let mut bindings = Vec::new();
+        for item in items {
+            let id = replace.as_ref().unwrap_or(&item.id).clone();
+            stored.push(pm_panel_media::StoredAsset {
+                id: item.id,
+                metadata: item.metadata,
+                original_version: item.original.version().into(),
+            });
+            let expected = published
+                .snapshot
+                .root()
+                .and_then(|r| r.get("assets"))
+                .and_then(|a| a.get(&id))
+                .map(pm_model::Node::to_value);
+            bindings.push(pm_kernel::MediaBinding {
+                asset: id,
+                expected,
+                original: item.original,
+                previous: item.previous,
+            });
+        }
         let edit = catalog
-            .prepare_import(owner, items, folder, replace)
+            .prepare_import(owner, stored, folder, replace)
             .map_err(|e| format!("{e:?}"))?;
-        Ok(edit.submit(&self.broker.kernel, caller))
+        Ok(self
+            .broker
+            .kernel
+            .call(&owner.project, edit.request_with_media(caller, bindings)))
     }
 
     pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {

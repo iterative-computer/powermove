@@ -10,7 +10,7 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
     model.show();
     expect(model.active).toBe(project ? "project" : "general");
     expect(model.availableSections).toEqual([
-      ...(project ? ["project" as const] : []),
+      ...(project ? ["project" as const, "memory" as const] : []),
       "general",
       "accounts",
       "transcription",
@@ -375,4 +375,33 @@ test("profile adapter declined acknowledgements never publish read or write valu
   );
   expect(f.settings.size).toBe(0);
   model.dispose();
+});
+
+test("project memory is read-only, searchable and only available with a project", async () => {
+  const { model } = fixture({
+    project: { id: "p", name: "Synthetic" },
+    memory: {
+      enabled: false,
+      entries: [
+        {
+          id: "note",
+          kind: "decision",
+          text: "Synthetic intent",
+          why: "Synthetic reason",
+          author: "agent",
+          updatedAt: 1000,
+          resolved: true,
+        },
+      ],
+    },
+  });
+  model.show("memory");
+  expect(model.active).toBe("memory");
+  await model.search("Synthetic reason");
+  expect(model.visibleSections).toEqual(["memory"]);
+  expect(model.publication.memory?.entries[0].text).toBe("Synthetic intent");
+  expect(await model.write("note", "Changed")).toBe(false);
+  model.publish(publication({ revision: 2 }));
+  expect(model.availableSections).not.toContain("memory");
+  expect(model.active).toBe("general");
 });
