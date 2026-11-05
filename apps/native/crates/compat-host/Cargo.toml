@@ -7,6 +7,7 @@ publish = false
 
 [features]
 default = []
+macos-probes = []
 gpui = ["dep:gpui_macos"]
 smoke = ["gpui", "dep:gpui", "dep:metal", "dep:raw-window-handle"]
 
@@ -16,6 +17,8 @@ pm-store-host = { path = "../store-host" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
@@ -31,3 +34,11 @@ raw-window-handle = { version = "0.6", optional = true }
 [[example]]
 name = "shell-smoke"
 required-features = ["smoke"]
+
+[[example]]
+name = "offscreen-probe"
+required-features = ["macos-probes"]
+
+[[example]]
+name = "remote-dom-smoke"
+required-features = ["macos-probes"]

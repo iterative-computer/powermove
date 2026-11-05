@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(target_os = "macos", test))]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 pub type PanelId = u64;
 pub type Generation = u64;
@@ -173,17 +175,21 @@ pub trait DomPanelHost {
     fn focus(&mut self, panel: PanelId, node: Option<u64>) -> Result<()>;
     fn composition(&self) -> CompositionSnapshot;
 }
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug)]
 pub(crate) struct Panel {
+    #[cfg(target_os = "macos")]
     pub spec: PanelSpec,
     pub slot: Option<PanelSlot>,
     pub overlays: Vec<Rect>,
 }
+#[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 pub(crate) struct Panels {
     pub items: BTreeMap<PanelId, Panel>,
     pub viewport: Rect,
 }
+#[cfg(any(target_os = "macos", test))]
 impl Panels {
     pub fn create(&mut self, spec: PanelSpec) -> Result<()> {
         if self.items.contains_key(&spec.id) {
@@ -192,6 +198,7 @@ impl Panels {
         self.items.insert(
             spec.id,
             Panel {
+                #[cfg(target_os = "macos")]
                 spec,
                 slot: None,
                 overlays: vec![],
