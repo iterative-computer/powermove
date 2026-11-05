@@ -72,11 +72,11 @@ impl McpSession {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
-        catalog::validate(name, args)?;
         if name == "start_session" {
             return self.start(args);
         }
         if name == "finish_session" {
+            crate::validation::session(name, args)?;
             if self.active.is_none() {
                 return Err(Error::invalid("No MCP session is active."));
             }
@@ -92,6 +92,7 @@ impl McpSession {
                     "Finish the current session before changing projects.",
                 ));
             }
+            catalog::validate(name, args)?;
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
@@ -102,15 +103,36 @@ impl McpSession {
             .active
             .as_mut()
             .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
-        if session.access == "editor" && !catalog::permits("inspection", name) {
-            return Err(Error::invalid("This tool requires project access."));
+        // External-session gates run before the bridge and body parsers in the tag.
+        if name == "publish_extensions" && session.access == "editor" {
+            return Err(Error::invalid("Planning access cannot publish extensions."));
         }
-        if session.context == "app" && !catalog::permits("app", name) {
+        if name == "publish_extensions" {
+            crate::validation::extensions(args)?;
+            return Err(Error::unavailable(catalog::backing(name)));
+        }
+        if name == "import_media_to_timeline"
+            && (session.access == "editor" || session.context == "app")
+        {
             return Err(Error::invalid(
                 "This tool requires project access and an attached project.",
             ));
         }
+        if catalog::spec(name).is_none() {
+            return Err(Error::invalid(format!("Unknown Powermove tool: {name}")));
+        }
+        if session.access == "editor" && !catalog::permits("inspection", name) {
+            return Err(Error::invalid(
+                "This planning run can only inspect the project.",
+            ));
+        }
+        if session.context == "app" && !catalog::permits("app", name) {
+            return Err(Error::invalid(
+                "This agent has no project attached. Open a project to use composition tools.",
+            ));
+        }
         if name == "manage_project" {
+            catalog::validate(name, args)?;
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
@@ -129,6 +151,7 @@ impl McpSession {
             return crate::effect::validate(&args["definition"]);
         }
         if name == "fork_builtin_extension" {
+            catalog::validate(name, args)?;
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
@@ -155,6 +178,7 @@ impl McpSession {
             let store = host.store_reads.as_deref().ok_or_else(|| Error::unavailable(
                 "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
             ))?;
+            catalog::validate(name, args)?;
             return match name {
                 "store_search" => crate::store::search(store, args),
                 "store_extension" => crate::store::detail(store, args),
@@ -164,6 +188,36 @@ impl McpSession {
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }
+        let prepared_selection = if name == "select_layers" {
+            let project = host
+                .active
+                .as_deref()
+                .map(|id| host.read_document(id))
+                .transpose()?;
+            let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
+                id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
+            })).ok_or_else(|| Error::invalid("Select existing layer IDs from get_project_state. No selection was changed."))?;
+            Some(
+                ids.iter()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let cleaned_commands = if name == "apply_commands" {
+            Some(commands::clean_commands(
+                args["commands"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )?)
+        } else {
+            if name != "select_layers" {
+                catalog::validate(name, args)?;
+            }
+            None
+        };
         let session = self.active.as_mut().unwrap();
         let id = session
             .project
@@ -244,12 +298,7 @@ impl McpSession {
                 Ok(result)
             }
             "select_layers" => {
-                let ids = args["layerIds"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>();
+                let ids = prepared_selection.unwrap();
                 Ok(
                     json!({"selection":host.select_layers(&id,&ids,args["add"]==true, self.writer)?}),
                 )
@@ -296,10 +345,10 @@ impl McpSession {
                     None
                 };
                 let batch = if strips.is_none() && video.is_none() {
-                    Some(commands::plan_with_definitions(
+                    Some(commands::plan_cleaned_with_definitions(
                         &p,
                         &selection,
-                        args["commands"].as_array().unwrap(),
+                        cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
                         Some(host.kernel().state()),
                     )?)
@@ -373,6 +422,7 @@ impl McpSession {
         if self.active.is_some() {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
+        crate::validation::session("start_session", args)?;
         let access = args["access"].as_str().unwrap_or("project");
         let context = args["context"].as_str().unwrap_or("project");
         if context == "app" && access == "editor" {

@@ -542,3 +542,99 @@ macOS verification still required: real Headless pixels/fonts/extension producer
 source media decode/rotation/retiming/scan, labelled sheets, measured waveforms,
 original-only child exports, no-clobber/cancel/reap behavior and full app-actor
 hosting. Linux doubles do not certify those integrations or physical UI behavior.
+
+## 2026-11-04 — MCP admission, error content and memory contract
+
+This dated section supersedes the earlier statement that MCP errors serialize
+`{code,message,backing}` into a text block. `McpSession::dispatch` still returns
+those structured Rust diagnostics; **MCP text blocks now contain the error's
+message verbatim**, as the tagged `mcp-stdio.mjs` does. Existing Rust diagnostic
+assertions use `dispatch`; actual `call`/JSON-RPC tests assert the wire content.
+JSON-RPC also treats null tool arguments as `{}`, matching the tag's `?? {}`;
+arrays/nonobjects still receive the protocol-level invalid-arguments response.
+
+`scripts/error-pairs.mjs` executes the actual tagged external-session class and
+bridge admission method. Its committed fixture records **209 refusals**, covering
+all 67 tool names across closed/no-session/planning/app access and competing
+argument errors, plus session parser cases and unknown tools. The oracle uses
+Zod **4.6.5** only when regenerating fixtures; ordinary Rust tests do not require
+npm/Zod. Generation refuses unexpected TypeError/ReferenceError failures instead
+of recording broken seams as expected tool errors:
+
+```sh
+PM_ORACLE_MODULE_ROOT=/absolute/disposable-npm-prefix \
+  node apps/native/crates/mcp/scripts/error-pairs.mjs --write
+```
+
+External session admission now precedes ordinary body/schema validation. The
+publish and direct-timeline-import exceptions retain their tagged gate order;
+publish payload parsing runs before the explicit unavailable-promotion error.
+The native session/publish parsers reproduce Zod issue ordering, paths and message
+format. Zod's string limits count Unicode code points in this pinned version;
+the tagged command JSON limit separately counts UTF-16 units. These are distinct
+contracts, exercised by Unicode cases.
+
+`apply_commands` cleans **the entire batch** before checking revisions or resolving
+command targets. Unsupported types, invalid JSON, malformed keyframe/section
+payloads and oversized commands report the tagged first-invalid-index message.
+Ignored fields are removed before the cleaned-object size limit; default start
+time and hand-edit protection are explicit; section prototype keys are removed.
+The typed scratch planner and single guarded kernel transaction remain the write
+authority. Source-paired tests include a malformed later command competing with
+an earlier missing target and a foreign revision, with no partial publication.
+`select_layers` now uses the actual body validation/message and deliberate
+ID-deduplication behavior. Extra body fields do not change selection. The frozen
+catalog's `uniqueItems` declaration remains unchanged; tagged `Set` normalization
+is authored logic, not a Chromium quirk.
+
+### A511/A512: resolved attribution, retained cutover requirements
+
+The frozen reference is `v1.2.0`, commit
+`07ed5fa17ee640659cb075f9cad1af2095011d60`. Executing its complete external +
+agent catalog gives **67 tools and no `project_memory`**. Its `get_project_state`
+description and renderer projection contain no project-memory index, even when
+the supplied synthetic project has memory fields. `scripts/memory-contract.mjs`
+and the Rust regression pin these facts against the actual tag; they do not
+infer them from native output.
+
+**Contract reconciliation:** W1 A511/A512's attributed *shipped-tag* provenance is
+incorrect. Retain both IDs and their full memory-index/read-write requirements
+as **additive native cutover requirements**, separately from frozen 67-tool
+conformance. Neither requirement is deleted, marked passed, nor silently
+implemented by adding a tool to the frozen catalog. The additive memory schema,
+authority/agent-access policy, durable kernel admission and read/write/index
+adapter still need an explicit contract and implementation. In particular,
+preserving an opaque `memory` field is not a working `project_memory` tool.
+The acceptance/W1 owners must append this attribution correction and retain
+both cases as blocked on that additive implementation; those files are outside
+this lane's ownership. The existing acceptance blocker therefore remains visible.
+
+### Real PMV ingress for A506 consumers
+
+`Automation::open_file(id, absolute_working_path)` exposes the kernel's
+`PrepareOpen(File)`/adoption path without changing any frozen tool schema. It
+retains kernel file locks, recovery/copy refusals, session generation and the
+resident original-media table. It performs no metadata-only media import.
+Call this on the MCP worker with an explicitly selected working copy before
+starting a session. Recovery/copy outcomes remain errors requiring the host's
+existing decision flow; they are never silently accepted as writable originals.
+
+A synthetic real PCM WAV is packed into a PMV, copied to a working file, opened
+through this public ingress, edited and saved through MCP, then reopened with the
+production reader and again through public ingress. The test verifies every WAV
+byte, native persisted Undo history, opaque memory/unknown fields and unchanged
+original PMV bytes. This supplies the previously missing MCP-owned ingress for
+A506's acceptance fixture. It does not certify every real-project media case,
+decoding, migration or audible playback.
+
+Decisions and selecting rules:
+
+- **N6/N7:** error messages cross MCP unchanged; structured diagnostics stay on
+  Rust `Result`. Session/access failures win over body validation where the tag
+  specifies that order.
+- **N3/N4/N6:** clean complete batches before admission, then use one atomic
+  kernel transaction; malformed later commands never publish earlier ones.
+- **N3/N4/N6:** retain A511/A512 as additive requirements with corrected
+  provenance, and preserve opaque memory data without inventing a shipped API.
+- **N4/N7:** expose explicit working-file ingress through kernel sessions,
+  retaining original bytes and history rather than creating another packer.

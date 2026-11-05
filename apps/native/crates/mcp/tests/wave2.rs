@@ -66,7 +66,7 @@ fn ok(v: Value) -> Value {
 }
 fn err(v: Value) -> Value {
     assert_eq!(v["isError"], true, "{v}");
-    serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap()
+    json!({"message":v["content"][0]["text"]})
 }
 fn oracle(input: Value) -> Value {
     let mut c = Command::new("node")
@@ -216,7 +216,7 @@ fn video_rejects_unsafe_edits_without_partial_work() {
         json!({"operation":"insert","assetId":"a","from":19,"duration":2}),
     ] {
         let before = f.read();
-        err(s.call("edit_video", args));
+        diagnostic(&mut s, "edit_video", args);
         assert_eq!(f.read(), before);
     }
     ok(s.call(
@@ -224,10 +224,11 @@ fn video_rejects_unsafe_edits_without_partial_work() {
         json!({"commands":[{"type":"set_layer","target":"clip","patch":{"locked":true}}]}),
     ));
     let before = f.read();
-    err(s.call(
+    diagnostic(
+        &mut s,
         "edit_video",
         json!({"operation":"move","layerId":"clip","from":3}),
-    ));
+    );
     assert_eq!(f.read(), before);
 }
 #[test]
@@ -243,10 +244,11 @@ fn video_revision_and_document_guards_preserve_foreign_work() {
     ));
     let before = f.read();
     assert_eq!(
-        err(s.call(
+        diagnostic(
+            &mut s,
             "edit_video",
             json!({"operation":"move","layerId":"clip","from":4})
-        ))["code"],
+        )["code"],
         "revision_conflict"
     );
     assert_eq!(f.read(), before);
@@ -331,7 +333,7 @@ fn manage_media_folders_and_native_undo_match_tag() {
         assert_eq!(after["assetFolders"], expected["project"]["assetFolders"]);
     }
     assert_eq!(
-        err(s.call("rollback_changes", json!({})))["code"],
+        diagnostic(&mut s, "rollback_changes", json!({}))["code"],
         "revision_conflict"
     );
     ok(s.call("finish_session", json!({"commit":true})));
@@ -346,10 +348,11 @@ fn manage_delete_preserves_bytes_and_refuses_locked_or_structured_references() {
     let mut s = f.session();
     f.seed_video(&mut s);
     let before = f.read();
-    err(s.call(
+    diagnostic(
+        &mut s,
         "manage_media",
         json!({"operation":"delete","assetIds":["a"]}),
-    ));
+    );
     assert_eq!(f.read(), before);
     let args = json!({"operation":"delete","assetIds":["a"],"removeReferenced":true});
     let expected = oracle(json!({"tool":"manage_media","project":before,"arguments":args}));
@@ -571,7 +574,7 @@ fn host_absence_and_invalid_targets_are_precise_and_do_not_refresh_edit_guard() 
         ("get_workspace_state", json!({})),
         ("capture_panel", json!({"panelId":"viewer"})),
     ] {
-        let e = err(s.call(tool, args));
+        let e = diagnostic(&mut s, tool, args);
         assert_eq!(e["code"], "not_available_in_this_build", "{tool}: {e}");
         assert!(!e["backing"].as_str().unwrap().is_empty());
     }
@@ -583,7 +586,7 @@ fn host_absence_and_invalid_targets_are_precise_and_do_not_refresh_edit_guard() 
         json!({"assetId":"bad","layerId":"clip"}),
     ] {
         assert_eq!(
-            err(s.call("probe_media", args))["code"],
+            diagnostic(&mut s, "probe_media", args)["code"],
             "invalid_arguments"
         );
     }
@@ -594,10 +597,11 @@ fn host_absence_and_invalid_targets_are_precise_and_do_not_refresh_edit_guard() 
     ));
     ok(s.call("render_frames", json!({"times":[0]})));
     assert_eq!(
-        err(s.call(
+        diagnostic(
+            &mut s,
             "edit_video",
             json!({"operation":"move","layerId":"clip","from":4})
-        ))["code"],
+        )["code"],
         "revision_conflict"
     );
     ok(other.call("finish_session", json!({"commit":true})));
@@ -648,9 +652,12 @@ fn export_child_defaults_formats_no_clobber_errors_and_caption_text() {
     assert_eq!(r.options.range, "all");
     assert!(r.options.audio && r.options.motion_blur && !r.options.alpha);
     drop(calls);
-    assert_eq!(err(s.call("export_video", json!({})))["code"], "io_error");
     assert_eq!(
-        err(s.call("export_video", json!({"alpha":true})))["code"],
+        diagnostic(&mut s, "export_video", json!({}))["code"],
+        "io_error"
+    );
+    assert_eq!(
+        diagnostic(&mut s, "export_video", json!({"alpha":true}))["code"],
         "invalid_arguments"
     );
     ok(s.call("export_video",json!({"format":"prores","range":"work","alpha":true,"audio":false,"motionBlur":false,"name":"Synthetic"})));
@@ -659,7 +666,7 @@ fn export_child_defaults_formats_no_clobber_errors_and_caption_text() {
         requests: Mutex::new(vec![]),
         fail: true,
     });
-    err(s.call("export_video", json!({})));
+    diagnostic(&mut s, "export_video", json!({}));
     assert_eq!(f.read(), before);
 }
 #[test]
@@ -680,7 +687,7 @@ fn caption_export_normalization_clipping_language_escaping_matches_tag() {
         let mut s = f.session();
         assert_eq!(ok(s.call("export_captions", args)), expected["result"]);
         assert_eq!(f.read(), before);
-        err(s.call("export_captions", json!({"layerId":"missing"})));
+        diagnostic(&mut s, "export_captions", json!({"layerId":"missing"}));
     }
 }
 #[test]
@@ -830,7 +837,7 @@ fn nested_media_references_status_and_folder_errors_match_tag() {
         json!({"operation":"move","assetIds":["a"],"folderId":"bad"}),
         json!({"operation":"rename","assetIds":["a","b"],"name":"Test"}),
     ] {
-        err(s.call("manage_media", args));
+        diagnostic(&mut s, "manage_media", args);
         assert_eq!(f.read(), before);
     }
     // An unlocked structured reference also refuses deletion, rather than
@@ -841,10 +848,11 @@ fn nested_media_references_status_and_folder_errors_match_tag() {
     f.host.lock().unwrap().restore(&f.id, p, r, 1).unwrap();
     ok(s.call("list_media", json!({})));
     let before = f.read();
-    err(s.call(
+    diagnostic(
+        &mut s,
         "manage_media",
         json!({"operation":"delete","assetIds":["a"],"removeReferenced":true}),
-    ));
+    );
     assert_eq!(f.read(), before);
 }
 #[test]
@@ -867,10 +875,11 @@ fn source_timing_and_check_media_limits_use_kernel_evaluation() {
         p["layers"][0]["d"]
     );
     let before = f.read();
-    err(s.call(
+    diagnostic(
+        &mut s,
         "edit_video",
         json!({"operation":"split","layerId":"clip","at":4}),
-    ));
+    );
     assert_eq!(f.read(), before);
     f.host.lock().unwrap().media_registry = Some(Arc::new(Registry));
     let args = json!({"tool":"check_project","project":before,"runtime":{"a":{"available":true,"duration":30,"hasAudio":true}}});
@@ -1038,7 +1047,7 @@ fn archive_collision_preserves_existing_archive_and_retiring_workspace() {
     std::fs::create_dir_all(&archive).unwrap();
     std::fs::write(archive.join("previous.txt"), "Synthetic previous work").unwrap();
     assert_eq!(
-        err(s.call("finish_session", json!({"commit":false})))["code"],
+        diagnostic(&mut s, "finish_session", json!({"commit":false}))["code"],
         "io_error"
     );
     assert_eq!(
@@ -1049,4 +1058,14 @@ fn archive_collision_preserves_existing_archive_and_retiring_workspace() {
         std::fs::read_to_string(archive.join("previous.txt")).unwrap(),
         "Synthetic previous work"
     );
+}
+
+// Internal diagnostics retain codes/backing; MCP wire errors expose the tagged message.
+fn diagnostic(session: &mut McpSession, name: &str, args: Value) -> Value {
+    serde_json::to_value(
+        session
+            .dispatch(name, &args)
+            .expect_err("expected tool refusal"),
+    )
+    .unwrap()
 }

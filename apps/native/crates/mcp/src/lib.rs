@@ -16,6 +16,7 @@ pub mod session;
 pub mod store;
 pub mod strips;
 pub mod transport;
+mod validation;
 pub mod video;
 pub mod views;
 
@@ -84,7 +85,9 @@ pub fn success(value: Value) -> Value {
     json!({"content":[{"type":"text","text":pm_model::json::to_canonical_string(&model(&value))}],"isError":false})
 }
 pub fn failure(error: Error) -> Value {
-    json!({"content":[{"type":"text","text":serde_json::to_string(&error).expect("error JSON")}],"isError":true})
+    // The frozen stdio host sends Error.message verbatim. Structured diagnostics
+    // stay on dispatch/Result; wrapping them in text changes agent-visible errors.
+    json!({"content":[{"type":"text","text":error.message}],"isError":true})
 }
 pub(crate) fn model(value: &Value) -> pm_model::Value {
     pm_model::json::parse(&value.to_string()).expect("valid JSON")

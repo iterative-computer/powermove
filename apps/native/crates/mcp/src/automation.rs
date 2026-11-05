@@ -529,6 +529,26 @@ impl Automation {
         let value = self.read_document(id)?;
         Ok(json!({"projectId":id,"name":value["name"]}))
     }
+    /// Explicit host ingress for a caller-selected working file. This uses the
+    /// same kernel session/locks, recovery decisions and resident media table
+    /// as the app; it does not import metadata in place of original bytes.
+    /// The frozen open_project MCP schema remains a library-ID operation.
+    pub fn open_file(&mut self, id: &str, path: PathBuf) -> Result<Value> {
+        if !path.is_absolute() {
+            return Err(Error::invalid("Use an absolute project working-file path"));
+        }
+        let reply = self
+            .kernel
+            .shell(ShellCall::PrepareOpen {
+                id: id.into(),
+                source: SessionSource::File(path),
+                electron_profile: None,
+            })
+            .map_err(Error::kernel)?;
+        let project = self.adopt(reply)?;
+        let value = self.read_document(&project)?;
+        Ok(json!({"projectId":project,"name":value["name"]}))
+    }
     pub fn save_library(&mut self, id: &str) -> Result<()> {
         let handle = self
             .sessions

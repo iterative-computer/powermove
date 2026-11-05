@@ -160,7 +160,11 @@ impl<T: ToolConnection> Rpc<T> {
                 Err(e) => return error(id, -32603, &e.message),
             },
             "tools/call" => {
-                let args = m["params"].get("arguments").cloned().unwrap_or(json!({}));
+                let args = m["params"]
+                    .get("arguments")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or(json!({}));
                 if !args.is_object() || !m["params"]["name"].is_string() {
                     return error(id, -32602, "Invalid tool arguments");
                 }
