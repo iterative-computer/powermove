@@ -1019,6 +1019,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-fx-defs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
@@ -1035,6 +1043,7 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
+ "libc",
  "naga",
  "rspirv",
  "serde",
@@ -1051,9 +1060,13 @@ dependencies = [
  "pm-edit",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-model",
+ "pm-scene3d",
  "pm-text",
  "pm-wasm",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -1063,6 +1076,18 @@ version = "0.1.0"
 dependencies = [
  "pm-time",
  "ryu-js",
+ "sha2",
+]
+
+[[package]]
+name = "pm-scene3d"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "pm-geom3d",
+ "pm-model",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -1291,6 +1316,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
