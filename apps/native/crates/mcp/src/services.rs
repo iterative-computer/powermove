@@ -116,6 +116,9 @@ pub struct VideoExportRequest {
 /// cancellation/draining. Caption export is pure text and needs no subprocess.
 pub trait ExportChild: Send + Sync {
     fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
+    fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {
+        None
+    }
     fn captions(&self, layer: &Value, format: &str) -> Result<String> {
         captions(layer, format)
     }
@@ -320,23 +323,13 @@ impl Automation {
     pub fn export_video(&self, id: &str, args: &Value) -> Result<Value> {
         let options = VideoOptions::parse(args)?;
         let snapshot = self.freeze(id)?;
-        let path = self.export_child.video(&VideoExportRequest {
-            snapshot: snapshot.clone(),
-            options,
-            directory: self.exports.clone(),
-        })?;
-        let canonical = std::fs::canonicalize(&path)?;
-        let directory = std::fs::canonicalize(&self.exports)?;
-        if !canonical.starts_with(directory)
-            || !std::fs::metadata(&canonical)?.is_file()
-            || std::fs::metadata(&canonical)?.len() == 0
-        {
-            return Err(Error::invalid(
-                "Export produced no saved file in the explicit export directory.",
-            ));
-        }
-        Ok(
-            json!({"path":path,"projectId":id,"width":snapshot.project["w"],"height":snapshot.project["h"],"fps":snapshot.project["fps"]}),
+        run_video(
+            self.export_child.as_ref(),
+            &VideoExportRequest {
+                snapshot,
+                options,
+                directory: self.exports.clone(),
+            },
         )
     }
     pub fn export_captions(&self, id: &str, args: &Value) -> Result<Value> {
@@ -484,4 +477,21 @@ pub fn captions(layer: &Value, format: &str) -> Result<String> {
         blocks.insert(0, header);
     }
     Ok(blocks.join("\n"))
+}
+
+pub(crate) fn run_video(child: &dyn ExportChild, request: &VideoExportRequest) -> Result<Value> {
+    let path = child.video(request)?;
+    let canonical = std::fs::canonicalize(&path)?;
+    let directory = std::fs::canonicalize(&request.directory)?;
+    if !canonical.starts_with(directory)
+        || !std::fs::metadata(&canonical)?.is_file()
+        || std::fs::metadata(&canonical)?.len() == 0
+    {
+        return Err(Error::invalid(
+            "Export produced no saved file in the explicit export directory.",
+        ));
+    }
+    Ok(
+        json!({"path":path,"projectId":request.snapshot.project_id,"width":request.snapshot.project["w"],"height":request.snapshot.project["h"],"fps":request.snapshot.project["fps"]}),
+    )
 }

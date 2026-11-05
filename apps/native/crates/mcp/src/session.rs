@@ -234,6 +234,34 @@ impl McpSession {
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }
+        if name == "export_video" {
+            let id = session
+                .project
+                .as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let jobs = host.export_jobs.clone();
+            let pending = jobs.prepare(
+                host.freeze(id)?,
+                args,
+                host.export_child.clone(),
+                host.exports.clone(),
+            )?;
+            drop(host);
+            let outcome = pending.wait();
+            let finished = !matches!(&outcome, Ok((_, false)));
+            if finished && !jobs.consume(&pending.id)? {
+                return Err(Error::invalid(
+                    "Unknown export job. A finished job is reported once; check the export folder.",
+                ));
+            }
+            let observed = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("headless host stopped"))?;
+            assert_project(session, &observed, id)?;
+            return outcome.map(|(value, _)| value);
+        }
         let prepared_selection = if name == "select_layers" {
             let project = host
                 .active
@@ -304,7 +332,7 @@ impl McpSession {
                 };
                 host.media_tool(&id, operation, args)?.content()
             }
-            "export_video" => host.export_video(&id, args),
+
             "export_captions" => host.export_captions(&id, args),
             "manage_media" => {
                 let expected = session

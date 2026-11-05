@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod commands;
 pub mod creative;
 pub mod effect;
+pub mod export_jobs;
 pub mod extensions;
 pub mod inspection;
 pub mod media;
