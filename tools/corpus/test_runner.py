@@ -11,11 +11,24 @@ spec = importlib.util.spec_from_file_location('corpus', Path(__file__).with_name
 corpus = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(corpus)
 
+class ContainerCapacity(unittest.TestCase):
+    def test_macos_capacity_uses_exact_apfs_container_bytes(self):
+        output = SimpleNamespace(stdout='Container Free Space: 10.7 GB (10737418240 Bytes)\n')
+        with patch.object(corpus.sys, 'platform', 'darwin'), patch.object(corpus.subprocess, 'run', return_value=output) as run, patch.object(corpus.shutil, 'disk_usage', side_effect=AssertionError('volume free space queried')):
+            self.assertEqual(corpus.free_bytes(), 10737418240)
+        self.assertEqual(run.call_args.args[0], ['diskutil', 'info', '/'])
+
+    def test_missing_container_measurement_refuses_admission(self):
+        with patch.object(corpus.sys, 'platform', 'darwin'), patch.object(corpus.subprocess, 'run', return_value=SimpleNamespace(stdout='Volume Free Space: 100 GB\n')):
+            with self.assertRaisesRegex(RuntimeError, 'container_free_space_unavailable'):
+                corpus.free_bytes()
+
+
 class CorpusSafety(unittest.TestCase):
     def setUp(self):
         # Unit fixtures are only a few bytes. Model capacity explicitly so
         # another lane's builds cannot change a timeout/pause test's meaning.
-        capacity=patch.object(corpus.shutil,'disk_usage',return_value=SimpleNamespace(free=corpus.FLOOR+1024**3))
+        capacity=patch.object(corpus,'free_bytes',return_value=corpus.FLOOR+1024**3)
         capacity.start()
         self.addCleanup(capacity.stop)
 
@@ -113,6 +126,33 @@ class CorpusSafety(unittest.TestCase):
             self.assertEqual(report['library_slots'],0)
             self.assertFalse(report['gate_pass'])
 
+    def test_dataless_project_is_blocked_before_parser_or_project_worker(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source, target = base/'source', base/'snapshot'
+            source.mkdir()
+            placeholder = source/'synthetic.pmv'
+            args = SimpleNamespace(profile=source, projects_only=True, projects=[source], extra_files=None,
+                resume_snapshot=False, resume_results=False, report=base/'report.json',
+                retain_for_debug=False, batch_gib=1.5, only_ids=None, binary=base/'worker', compiler=base/'helper', timeout=5)
+            def worker(binary, arguments, log, **kwargs):
+                self.assertEqual(arguments[0], 'inventory')
+                (target/'inventory.json').write_text(json.dumps({'projects':[], 'associated_files':[]}))
+                return 0
+            def external(arguments, **kwargs):
+                if arguments[0] == 'rg':
+                    return SimpleNamespace(returncode=0, stdout=os.fsencode(placeholder)+b'\n')
+                self.assertEqual(arguments[-2:], ['--stat-one', str(placeholder)])
+                return SimpleNamespace(returncode=1, stdout='', stderr='source_not_local')
+            with patch.object(corpus, 'ROOT', target), patch.object(corpus, 'freeze_tools', return_value=(args.binary,args.compiler,{'worker_sha256':'w','compiler_sha256':'c'})), patch.object(corpus, 'call', side_effect=worker) as call, patch.object(corpus.subprocess, 'run', side_effect=external):
+                corpus.run(args)
+            result = json.loads(args.report.read_text())
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(result['totals']['open'], {'pass':0, 'fail':0, 'blocked':1})
+            self.assertEqual(result['projects'][0]['failures'][0]['class'], 'source_not_local')
+            self.assertTrue(all(state == 'blocked' for state in result['projects'][0]['stages'].values()))
+
     def test_preflight_uses_frozen_pair_and_fails_before_source_capture(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -180,6 +220,14 @@ class CorpusSafety(unittest.TestCase):
                     corpus.clone(source,root/'copy')
             self.assertFalse((root/'copy').exists())
             self.assertEqual(source.read_bytes(),b'synthetic original')
+
+    def test_inventory_refuses_dataless_metadata_before_hashing_or_copying(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'placeholder').write_bytes(b'synthetic metadata')
+            with patch.object(corpus, 'source_stat', side_effect=RuntimeError('source_not_local')), patch.object(corpus, 'digest', side_effect=AssertionError('placeholder read attempted')):
+                with self.assertRaisesRegex(RuntimeError, 'source_not_local'):
+                    corpus.inventory(root)
 
     def test_source_and_temporary_root_cannot_overlap(self):
         from types import SimpleNamespace
@@ -250,7 +298,7 @@ class CorpusSafety(unittest.TestCase):
             root=Path(directory)
             source=root/'source'
             source.write_bytes(b'synthetic bytes')
-            with patch.object(corpus.shutil,'disk_usage',return_value=SimpleNamespace(free=corpus.FLOOR+1)):
+            with patch.object(corpus,'free_bytes',return_value=corpus.FLOOR+1):
                 with self.assertRaises(corpus.DiskFloor):
                     corpus.clone(source,root/'copy')
             self.assertFalse((root/'copy').exists())
