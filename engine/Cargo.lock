@@ -2404,6 +2404,7 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
+ "libc",
  "naga",
  "pm-color",
  "pm-gpu",
