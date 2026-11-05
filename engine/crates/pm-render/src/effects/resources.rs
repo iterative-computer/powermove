@@ -156,6 +156,8 @@ pub struct Reference {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Producer {
+    /// Source framebuffer cost of this producer, including nested leases.
+    pub source_bytes: u64,
     pub source_extent: Option<pm_fx_defs::spatial::Extent>,
     pub request: pm_fx_defs::inputs::Request,
     pub plan: Arc<crate::plan::CompPlan>,

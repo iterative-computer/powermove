@@ -1273,6 +1273,38 @@ pub(crate) struct Chain {
 }
 
 impl EffectPasses for Chain {
+    fn source_allocation_bytes(&self, (w, h): (u32, u32)) -> Option<u64> {
+        self.steps.first()?.source_domain?;
+        let bytes = |w: u32, h: u32| u64::from(w).checked_mul(u64::from(h))?.checked_mul(16);
+        let mut total = bytes(w, h)?.checked_mul(6)?;
+        for step in &self.steps {
+            for (_, asset) in &step.assets {
+                total = total.checked_add(bytes(asset.width, asset.height)?)?;
+            }
+            let mut previous = (w, h);
+            for pass in 0..step.passes {
+                let out = if pass == 0 {
+                    step.spatial
+                        .and_then(|s| s.grid)
+                        .map_or((w, h), |g| (g[0], g[1]))
+                } else {
+                    (w, h)
+                };
+                total = total.checked_add(bytes(out.0, out.1)?)?;
+                if step.spatial.is_some_and(|s| s.lod > 0)
+                    && !(pass > 0 && step.spatial.is_some_and(|s| s.grid.is_some()))
+                {
+                    // A complete pyramid is smaller than twice its base.
+                    total = total.checked_add(bytes(previous.0, previous.1)?.checked_mul(2)?)?;
+                }
+                previous = out;
+            }
+            if step.clamp {
+                total = total.checked_add(bytes(w, h)?)?;
+            }
+        }
+        Some(total)
+    }
     fn vector_assets(&self) -> Vec<Arc<super::resources::Asset>> {
         self.steps
             .iter()

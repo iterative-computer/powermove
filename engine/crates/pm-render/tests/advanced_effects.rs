@@ -1131,3 +1131,88 @@ fn metal_reference_cache_keeps_each_precomp_density_independent() {
         assert!(alone.chunks_exact(4).any(|p| p[3] > 0.));
     }
 }
+
+#[test]
+fn metal_source_atlas_passes_are_charged_before_allocating_them() {
+    let mut value = fixture(
+        "pixelate",
+        2,
+        json!({"horizontalBlocks":2048,"verticalBlocks":2048,"sharpColors":false}),
+        json!({}),
+        None,
+    );
+    value["layers"][0]["effectSpace"] = json!("source");
+    let fx = value["layers"][0]["fx"][0].clone();
+    value["layers"][0]["fx"] = json!(
+        (0..7)
+            .map(|i| {
+                let mut fx = fx.clone();
+                fx["id"] = json!(format!("atlas{i}"));
+                fx
+            })
+            .collect::<Vec<_>>()
+    );
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let error = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            Ticks::ZERO,
+            &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+            &MapResolver::default(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("memory budget"), "{error}");
+}
+
+#[test]
+fn metal_source_shared_plan_replays_each_count_toward_admission() {
+    let mut value = fixture(
+        "setMatte",
+        1,
+        json!({}),
+        json!({"map":{"layerId":"shared","stage":"source","space":"source"}}),
+        None,
+    );
+    let owner = value["layers"][0].clone();
+    value["layers"] = json!(
+        (0..3)
+            .map(|i| {
+                let mut l = owner.clone();
+                l["id"] = json!(format!("consumer{i}"));
+                l
+            })
+            .collect::<Vec<_>>()
+    );
+    let mut source = layer(
+        "shared",
+        "solid",
+        json!({"w":1280,"h":1280,"color":"#FFFFFF"}),
+        0.,
+        0.,
+        1.,
+    );
+    source["on"] = json!(false);
+    value["layers"].as_array_mut().unwrap().push(source);
+    let mut doc = load(&value);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let error = renderer
+        .render(
+            &doc,
+            "Ptest-root",
+            Ticks::ZERO,
+            &RenderRequest::sized(Size::new(32, 32), Precision::Float32),
+            &MapResolver::default(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("memory budget"), "{error}");
+}

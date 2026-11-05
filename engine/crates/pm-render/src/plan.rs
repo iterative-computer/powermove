@@ -326,6 +326,16 @@ pub struct Build<'r> {
 use crate::pass_facts::PassFacts;
 
 impl Build<'_> {
+    fn charge_source(&mut self, bytes: u64) -> Result<(), Feature> {
+        let total = self.source_bytes.checked_add(bytes);
+        if total.is_none_or(|n| n > 384 * 1024 * 1024) {
+            return Err(Feature::Definition(
+                "Source rasters exceed framebuffer memory budget".into(),
+            ));
+        }
+        self.source_bytes = total.unwrap();
+        Ok(())
+    }
     fn world<'d>(
         &self,
         scope: &mut Scope<'_, 'd>,
@@ -2533,14 +2543,16 @@ fn source_plan<'d>(
     };
     // Main's default framebuffer allowance, with its six-surface reserve.
     // Charge at float32 (the largest working format) before allocating any GPU target.
-    let charge = u64::from(w) * u64::from(h) * 16 * 6;
-    let total = b.source_bytes.checked_add(charge);
-    if total.is_none_or(|n| n > 384 * 1024 * 1024) {
-        return Ok(Err(refuse(
-            "Source rasters exceed framebuffer memory budget",
-        )));
+    let charge = match &effects {
+        Some(e) => e.passes.source_allocation_bytes((w, h)),
+        None => Some(u64::from(w) * u64::from(h) * 16 * 6),
+    };
+    let Some(charge) = charge else {
+        return Ok(Err(refuse("Effect host has no source allocation estimate")));
+    };
+    if let Err(f) = b.charge_source(charge) {
+        return Ok(Err(f));
     }
-    b.source_bytes = total.unwrap();
     let old_raster = b.source_raster.replace((
         scope.comp.id().to_string_lossy(),
         js::layer_id(layer),
@@ -2636,8 +2648,13 @@ fn effect_inputs<'d>(
             scale: [scale.0.to_bits(), scale.1.to_bits()],
             origin: [b.origin.0.to_bits(), b.origin.1.to_bits()],
         };
-        if let Some(producer) = b.input_cache.get(&cache_key) {
-            producers.push(producer.clone());
+        if let Some(producer) = b.input_cache.get(&cache_key).cloned() {
+            // The executor currently retains separate consumer targets. A
+            // shared plan is not a shared GPU allocation across chains.
+            if let Err(f) = b.charge_source(producer.source_bytes) {
+                return Ok(Err(f));
+            }
+            producers.push(producer);
             continue;
         }
         if b.input_active.contains(&active_key) {
@@ -2670,6 +2687,7 @@ fn effect_inputs<'d>(
             )));
         }
         let at = request.time().unwrap_or(time);
+        let source_before = b.source_bytes;
         if request.space == Space::Source {
             b.input_active.insert(active_key.clone());
             let result = source_plan(
@@ -2690,6 +2708,7 @@ fn effect_inputs<'d>(
                 Err(f) => return Ok(Err(f)),
             };
             let producer = crate::effects::resources::Producer {
+                source_bytes: b.source_bytes - source_before,
                 source_extent: Some(raster.extent),
                 request: request.clone(),
                 plan: std::sync::Arc::new(plan),
@@ -2800,6 +2819,7 @@ fn effect_inputs<'d>(
                 ))),
             }];
             Ok(Ok(crate::effects::resources::Producer {
+                source_bytes: b.source_bytes - source_before,
                 source_extent: None,
                 request: request.clone(),
                 owner: owner_binding,

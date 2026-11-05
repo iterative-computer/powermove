@@ -175,6 +175,11 @@ pub struct Covered<'a> {
 
 /// A prepared effect chain.
 pub trait EffectPasses: Send + Sync {
+    /// Worst-case source framebuffer bytes at float32, including all retained
+    /// intermediate passes. An opaque host must supply its own estimate.
+    fn source_allocation_bytes(&self, _size: (u32, u32)) -> Option<u64> {
+        None
+    }
     fn vector_assets(&self) -> Vec<Arc<crate::effects::resources::Asset>> {
         vec![]
     }
