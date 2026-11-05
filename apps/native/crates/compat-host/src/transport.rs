@@ -31,6 +31,7 @@ impl Channel {
             queue: VecDeque::new(),
         }
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn base(&self) -> String {
         format!("pmcompat://host/{}/", self.token)
     }
@@ -118,6 +119,7 @@ impl Channel {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn csp(nonce: &str, trust: &Trust) -> String {
     // Rendering assets retain the manifest's network permission. JS fetch and
     // WebSocket live in V8 and are permission-enforced by the kernel; this page
@@ -135,6 +137,7 @@ pub(crate) fn csp(nonce: &str, trust: &Trust) -> String {
 pub(crate) fn page(base: &str, nonce: &str, generation: Generation) -> String {
     page_with_applier(base, nonce, generation, PAGE_APPLIER, &Trust::Trusted)
 }
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn page_with_applier(
     base: &str,
     nonce: &str,

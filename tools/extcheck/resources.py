@@ -1,5 +1,7 @@
 """The lane's shared APFS container floor, measured by diskutil (decimal GB)."""
 import re
+import shutil
+import sys
 import subprocess
 import time
 
@@ -11,6 +13,9 @@ def container_free_bytes():
     global _sample
     now = time.monotonic()
     if now - _sample[0] < .5:
+        return _sample[1]
+    if sys.platform != 'darwin':
+        _sample = (now, shutil.disk_usage('.').free)
         return _sample[1]
     output = subprocess.check_output(['diskutil', 'info', '/'], text=True)
     match = re.search(r'Container Free Space:.*?\((\d+) Bytes\)', output)

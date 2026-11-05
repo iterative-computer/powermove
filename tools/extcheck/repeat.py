@@ -13,6 +13,9 @@ def main():
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--case',action='append',default=[])
     p.add_argument('--store',action='store_true')
+    p.add_argument('--owner-root',type=Path,default=Path.home()/'Library/Application Support/Powermove/extensions')
+    p.add_argument('--corpus-root',type=Path,default=run.ROOT/'apps/desktop/e2e/fixtures/compat-corpus')
+    p.add_argument('--scripts',type=Path,help='Private reviewed per-case scripts; same selection as run.py')
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--keep-sample',action='store_true',help='Retain only one case’s small screenshots/traces for diagnosis')
     args=p.parse_args()
@@ -20,8 +23,9 @@ def main():
     if args.output.resolve().is_relative_to(run.ROOT):p.error('Private diagnostics must be outside the checkout')
     run.WORK.mkdir(mode=0o700,exist_ok=True)
     store=run.PublicStore(); rows={};totals=Counter()
-    populations={'owner':run.discover(Path.home()/'Library/Application Support/Powermove/extensions'),
-                 'local-corpus':run.discover(run.ROOT/'apps/desktop/e2e/fixtures/compat-corpus')}
+    clock_fixture=run.fixture_identity()
+    populations={'owner':run.discover(args.owner_root),
+                 'local-corpus':run.discover(args.corpus_root)}
     if args.store:populations['store']=store.catalog()
     for source,items in populations.items():
         for index,item in enumerate(items,1):
@@ -32,21 +36,23 @@ def main():
                 root=Path(temp);input=root/'input';outputs=[]
                 try:
                     sha=store.source(item,input) if source=='store' else run.copy_extension(item,input)
+                    script=run.load_script(args.scripts,case)
+                    labels=[step['label'] for step in script['steps'] if step['op']=='screenshot']
                     request={'version':1,'case':case,'extension':str(input),'input_sha256':sha,
-                             'script_sha256':run.digest(json.dumps(run.DEFAULT_SCRIPT,sort_keys=True).encode()),
-                             'script':run.DEFAULT_SCRIPT,'role':'reference'}
+                             'script_sha256':run.digest(json.dumps(script,sort_keys=True).encode()),
+                             'script':script,'role':'reference','clock_fixture':clock_fixture}
                     if source=='store':request['store']={'repoId':item['repoId'],'releaseId':item['latest']['id']}
                     for sample in range(args.repeats):
                         out=root/str(sample);outputs.append(out)
                         run.capture(['node',str(Path(__file__).with_name('reference.mjs')),str(args.reference_root)],request,out,90)
-                    result=inspect_repeats(outputs,['active'])
+                    result=inspect_repeats(outputs,labels)
                     rows[case]=result;totals['stable' if result['stable'] else 'unstable']+=1
                     if args.keep_sample:
                         args.output.parent.mkdir(parents=True,exist_ok=True)
                         target=Path(tempfile.mkdtemp(prefix='reference-sample-',dir=args.output.parent))
                         target.chmod(0o700)
                         for index,out in enumerate(outputs):
-                            for name in ['trace.jsonl','active.png','interactions.json']:
+                            for name in ['trace.jsonl','interactions.json']+[label+'.png' for label in labels]:
                                 shutil.copyfile(out/name,target/f'{index}-{name}')
                         args.keep_sample=False
                 except run.Blocked as error:

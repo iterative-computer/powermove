@@ -124,7 +124,7 @@ class HarnessTests(unittest.TestCase):
             events.append(request['role'])
             return {'status':'synthetic'}
         with patch('run.disk_check'),patch('gui_capture.gui_slot',lease), \
-             patch('run.capture_unlocked',side_effect=capture):
+             patch('run.sys.platform','darwin'), patch('run.capture_unlocked',side_effect=capture):
             for role in ['reference','native']:
                 run.capture(['synthetic-driver'],{'role':role},Path('/unused'),1)
         self.assertEqual(events,['acquire','reference','release','acquire','native','release'])
@@ -154,7 +154,7 @@ class HarnessTests(unittest.TestCase):
             sibling=root/'untouched'
             sibling.write_text('synthetic')
             with patch('run.disk_check'),patch('gui_capture.gui_slot',lease), \
-                 patch('run.capture_unlocked',side_effect=capture):
+                 patch('run.sys.platform','darwin'), patch('run.capture_unlocked',side_effect=capture):
                 self.assertEqual(run.capture(['synthetic-driver'],{'role':'native'},root/'out',1),
                                  {'status':'synthetic'})
             self.assertEqual(sibling.read_text(),'synthetic')
@@ -231,6 +231,107 @@ class HarnessTests(unittest.TestCase):
                        {'version':1,'complete':True,'steps':[{'op':'screenshot','label':'../escape'}]}]:
             with self.assertRaises(run.Blocked):run.validate_script(script)
         run.validate_script(run.DEFAULT_SCRIPT)
+
+    def test_population_never_drops_absent_inputs_or_catalog_failures(self):
+        counts = [run.population_counts(source, 0, False) for source in run.SOURCES]
+        self.assertEqual(sum(row['total'] for row in counts), 58)
+        self.assertEqual(sum(row['cant_run'] for row in counts), 58)
+        local = run.population_counts('local-corpus', 9, True)
+        self.assertEqual((local['total'], local['cant_run'], local['observed']), (10, 1, 9))
+        extra = run.population_counts('store', 5, True)
+        self.assertEqual((extra['total'], extra['unavailable']), (5, 0))
+
+    def test_linux_full_capture_reports_a_blocker_without_a_gui_probe(self):
+        with patch('run.sys.platform', 'linux'), patch('gui_capture.gui_slot') as gui:
+            with self.assertRaisesRegex(run.Blocked, 'macos-capture-unavailable'):
+                run.capture(['synthetic-driver'], {}, Path('/unused'), 1)
+        gui.assert_not_called()
+
+    def test_script_clock_rejects_invalid_and_unbounded_progression(self):
+        for value in [True, None, -1, 60_001, float('nan'), float('inf')]:
+            script = {**run.DEFAULT_SCRIPT, 'steps': [{'op': 'advance', 'ms': value},
+                      {'op': 'screenshot', 'label': 'active'}]}
+            with self.assertRaises(run.Blocked):run.validate_script(script)
+        run.validate_script({**run.DEFAULT_SCRIPT, 'steps': [{'op':'advance','ms':16},
+                            {'op':'screenshot','label':'active'}]})
+
+    def test_absent_populations_still_produce_a_58_case_open_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output=Path(temporary)/'summary.json'
+            def discover(path):
+                if path.name == 'unavailable-owner':raise run.Blocked('input-root-missing')
+                return []
+            with patch('sys.argv',['extcheck','--reference-root',temporary,
+                       '--owner-root',str(Path(temporary)/'unavailable-owner'),
+                       '--summary',str(output),'--store']), patch('run.disk_check'), \
+                 patch('run.discover',side_effect=discover), \
+                 patch('run.PublicStore.catalog',side_effect=run.Blocked('store-public-read-failed')), \
+                 patch('run.fixture_identity',return_value={'version':1,'sha256':'synthetic'}), \
+                 patch('builtins.print'):
+                self.assertEqual(run.main(),2)
+            result=json.loads(output.read_text())
+            self.assertEqual(result['gate'],'OPEN')
+            self.assertEqual(sum(row['total'] for row in result['sources'].values()),58)
+            self.assertEqual(sum(row['cant_run'] for row in result['sources'].values()),58)
+            self.assertFalse(result['sources']['store']['enumerated'])
+
+    def test_capture_requires_the_exact_fixture_identity(self):
+        fixture={'version':1,'sha256':'synthetic'}
+        request={'role':'native','case':'local-corpus-0001','input_sha256':'input',
+                 'script_sha256':'script','clock_fixture':fixture}
+        for actual in [None,{'version':1,'sha256':'different'},fixture]:
+            with tempfile.TemporaryDirectory() as temporary:
+                output=Path(temporary)/'out'
+                status={'status':'captured',**{key:request[key] for key in ('case','input_sha256','script_sha256')},
+                        'clock_fixture':actual,'path':{'logic':'runtime-v8','panels':'webkit-remote-dom','canvas':'native-recorder'}}
+                child=Mock(returncode=0)
+                child.poll.return_value=0
+                child.communicate.side_effect=lambda *_args,**_kwargs:(output/'capture.json').write_text(json.dumps(status))
+                with patch('run.subprocess.Popen',return_value=child),patch('run.disk_ready',return_value=True), \
+                     patch.object(run,'PAUSE_LOCAL',Mock(exists=Mock(return_value=False))):
+                    if actual==fixture:
+                        self.assertEqual(run.capture_unlocked(['synthetic-driver'],request,output,1),status)
+                    else:
+                        with self.assertRaisesRegex(run.Blocked,'capture-clock-fixture-mismatch'):
+                            run.capture_unlocked(['synthetic-driver'],request,output,1)
+
+    def test_unstable_second_recording_does_not_hide_the_third_or_the_other_host(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'source';source.mkdir()
+            (source/'manifest.json').write_text('{"id":"synthetic"}')
+            output=root/'summary.json'
+            def discover(path):return [source] if path.name=='corpus' else []
+            def capture(_command,request,output,_timeout):
+                output.mkdir()
+                value=2 if output.name.endswith('repeat-1') else 1
+                (output/'trace.jsonl').write_text(trace(result=value))
+                (output/'interactions.json').write_text(json.dumps([
+                    {'op':step['op'],'result':None} for step in run.DEFAULT_SCRIPT['steps']]))
+                Image.new('RGBA',(2,2)).save(output/'active.png')
+            with patch('sys.argv',['extcheck','--reference-root',temporary,'--owner-root',str(root/'owner'),
+                       '--corpus-root',str(root/'corpus'),'--summary',str(output),
+                       '--native-command','["synthetic-driver"]']),patch('run.disk_check'), \
+                 patch('run.discover',side_effect=discover),patch('run.capture',side_effect=capture) as captures, \
+                 patch('run.fixture_identity',return_value={'version':1,'sha256':'synthetic'}),patch('builtins.print'):
+                self.assertEqual(run.main(),2)
+            self.assertEqual(captures.call_count,6)
+            roles=[item.args[1]['role'] for item in captures.call_args_list]
+            self.assertEqual(roles,['reference']*3+['native']*3)
+            result=json.loads(output.read_text())
+            self.assertEqual(result['reasons']['reference-nondeterministic'],1)
+            self.assertEqual(result['reasons']['native-nondeterministic'],1)
+            self.assertEqual(sum(row['cant_run'] for row in result['sources'].values()),58)
+
+    def test_repeat_and_paired_drivers_load_the_same_private_scenario(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            script={**run.DEFAULT_SCRIPT,'steps':[{'op':'advance','ms':16},{'op':'screenshot','label':'authored'}]}
+            (root/'local-corpus-0001.json').write_text(json.dumps(script))
+            self.assertEqual(run.load_script(root,'local-corpus-0001'),script)
+            self.assertIs(run.load_script(root,'local-corpus-0002'),run.DEFAULT_SCRIPT)
+            (root/'local-corpus-0001.json').write_text('[]')
+            with self.assertRaisesRegex(run.Blocked,'invalid-script'):run.load_script(root,'local-corpus-0001')
 
 
 if __name__=='__main__':unittest.main()
