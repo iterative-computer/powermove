@@ -824,6 +824,7 @@ dependencies = [
  "pm-model",
  "pm-text",
  "pm-wasm",
+ "serde",
  "sha2",
 ]
 

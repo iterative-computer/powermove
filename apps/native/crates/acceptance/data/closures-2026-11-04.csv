@@ -1,0 +1,24 @@
+case_id,workflow,evidence_scope,executed_assertion
+A510,W037,original,"MCP &#96;fork_builtin_extension&#96;: Copy a shipped built-in extension into this run's isolated extension staging directory, rewrite it as a user fork, and retain a pristine merge base."
+A532,W037,original,"MCP actual effect validator: frozen acceptance, exact diagnostic order and no project edits"
+A660,W040,original,"KeybindingsAPI: Preserve extension-facing contract: &#96;bind&#96;, &#96;unbind&#96;, &#96;list&#96;, &#96;chordOf&#96;."
+A661,W040,original,"EffectsAPI at tag: register, list, get(id). supports* capability flags, parameterDefault and versioned get are post-tag."
+A662,W040,original,"TransitionsAPI: Preserve extension-facing contract: &#96;register&#96;, &#96;list&#96;, &#96;get&#96;."
+A663,W040,original,"ExtensionLayersAPI: Preserve extension-facing contract: &#96;register&#96;, &#96;list&#96;, &#96;get&#96;."
+A666,W040,original,"ThemeAPI: Preserve extension-facing contract: &#96;register&#96;, &#96;activate&#96;, &#96;active&#96;, &#96;list&#96;, &#96;scheme&#96;, &#96;setScheme&#96;."
+A668,W040,original,"MenusAPI: Preserve extension-facing contract: &#96;contribute&#96;, &#96;collect&#96;, &#96;gather&#96;."
+A669,W040,original,"StatusAPI: Preserve extension-facing contract: &#96;register&#96;, &#96;list&#96;."
+A678,W040,original,"InspectorAPI: Preserve extension-facing contract: &#96;registerSection&#96;, &#96;sections&#96;."
+A690,W040,original,"StorageAPI: Preserve extension-facing contract: &#96;get&#96;, &#96;set&#96;, &#96;delete&#96;."
+A693,W040,original,"VarsAPI: Preserve extension-facing contract: &#96;get&#96;, &#96;has&#96;, &#96;keys&#96;."
+A695,W040,original,"Contribution locations: titlebar:right, panel:context, layer:context, timeline:context and viewer:context accept synchronous or asynchronous menu contributions."
+A696,W040,original,Inspector contribution: Register conditional sections after content/transform/effects with build and disposal lifecycle.
+A698,W040,original,Status contribution: Register left/right computed text items with title and click handler.
+B568,W073,original,binding contract: Reads a live API time source for channel edits.
+B569,W073,original,binding contract: Maps layer and content fields to typed commands.
+B570,W073,original,binding contract: Clamps work-area endpoints through project and utility APIs.
+B610,W073,original,gesture contract: Command mode drives a typed edit transaction with the label and origin.
+B611,W073,original,gesture contract: Click-without-drag still begins and cancels (edit.cancel fast path).
+B612,W073,original,gesture contract: Once() applies one-shot with the default interface origin.
+B613,W073,original,gesture contract: Local mode never touches edit or history.
+B614,W073,original,gesture contract: Legacy set mode wraps in history.

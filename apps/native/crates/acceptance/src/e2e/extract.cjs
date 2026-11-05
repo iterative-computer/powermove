@@ -9,16 +9,19 @@ const crypto = require('node:crypto');
 if (ts.version !== '5.9.3') throw Error('Expected TypeScript 5.9.3');
 const root = cp.execFileSync('git', ['rev-parse', '--show-toplevel'], {encoding:'utf8'}).trim();
 process.chdir(root);
-const revision = '07ed5fa17ee640659cb075f9cad1af2095011d60';
-if (cp.execFileSync('git', ['rev-parse', 'v1.2.0^{commit}'], {encoding:'utf8'}).trim() !== revision) {
+const flags=process.argv.slice(2);
+if (flags.some(flag=>!['--write','--reference=main','--reference=v1.2.0'].includes(flag)) || (flags.includes('--reference=main') && flags.includes('--reference=v1.2.0'))) throw Error('Expected --reference=main or --reference=v1.2.0');
+const mainReference = !flags.includes('--reference=v1.2.0');
+const revision = mainReference ? 'c7f46a05641b23944d3692c9d80f9677c7e1ef1d' : '07ed5fa17ee640659cb075f9cad1af2095011d60';
+if (!mainReference && cp.execFileSync('git', ['rev-parse', 'v1.2.0^{commit}'], {encoding:'utf8'}).trim() !== revision) {
   throw Error('v1.2.0 is not the frozen reference');
 }
-const files = cp.execFileSync('git', ['grep', '-l', 'test(', 'v1.2.0', '--', 'apps/desktop/e2e'], {encoding:'utf8'})
-  .trim().split('\n').map(f => f.slice('v1.2.0:'.length));
+const files = cp.execFileSync('git', ['grep', '-l', 'test(', revision, '--', 'apps/desktop/e2e'], {encoding:'utf8'})
+  .trim().split('\n').map(f => f.slice(revision.length+1));
 const hash = s => crypto.createHash('sha256').update(s).digest('hex');
 const cases = [], sources = [];
 for (const file of files) {
-  const source = cp.execFileSync('git', ['show', `v1.2.0:${file}`], {encoding:'utf8',maxBuffer:10*1024*1024});
+  const source = cp.execFileSync('git', ['show', `${revision}:${file}`], {encoding:'utf8',maxBuffer:10*1024*1024});
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   if (ast.parseDiagnostics.length) throw Error(file + ': TypeScript parse error');
   let count = 0;
@@ -67,7 +70,7 @@ for (const file of files) {
   sources.push({file,sha256:hash(source),declarations:count,guards:fileGuards});
 }
 const result = {revision,sources,cases};
-const destination = path.join(__dirname, 'frozen.json');
+const destination = path.join(__dirname, mainReference ? '../../data/main-e2e-frozen.json' : 'frozen.json');
 const output = JSON.stringify(result, null, 2) + '\n';
 if (process.argv.includes('--write')) fs.writeFileSync(destination, output);
 else if (fs.readFileSync(destination, 'utf8') !== output) throw Error('Frozen inventory drift; inspect before extract.cjs --write');

@@ -1,6 +1,12 @@
 //! Optional real V8 backing. The parent acceptance runner owns the wall timeout.
 use pm_runtime_v8::*;
+mod native_compat;
 mod portable;
+mod source_mcp;
+// fork/exec can briefly inherit a service lock before CLOEXEC runs. Keep the
+// bundler child outside the exact drop/reopen assertion; never retry the lock.
+#[cfg(test)]
+static FIXTURE_PROCESS_GATE: Mutex<()> = Mutex::new(());
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
@@ -67,6 +73,12 @@ fn eval(realm: &Realm, source: impl Into<String>) -> Result<Evaluation> {
     wait(realm.eval(source)?)
 }
 fn check(id: &str, bundle: Option<&str>) -> Result<()> {
+    if id == "A510" {
+        return source_mcp::fork().map_err(Error::Host);
+    }
+    if native_compat::IDS.contains(&id) {
+        return native_compat::check(id, bundle.ok_or(Error::Invalid("compat bundle required"))?);
+    }
     if let Some(result) = portable::check(id) {
         return result.map_err(Error::Host);
     }
@@ -129,15 +141,46 @@ fn check(id: &str, bundle: Option<&str>) -> Result<()> {
         "W037.compat-services"
         | "W040.compat-recorder"
         | "W040.compat-remote-dom"
+        | "A660"
+        | "A661"
+        | "A662"
+        | "A663"
+        | "A666"
+        | "A668"
+        | "A669"
+        | "A678"
+        | "B568"
+        | "B569"
+        | "B570"
+        | "B610"
+        | "B611"
+        | "B612"
+        | "B613"
+        | "B614"
+        | "A693"
+        | "A695"
+        | "A696"
+        | "A698"
         | "A659"
         | "A689"
         | "A691" => {
             let bundle = bundle.ok_or(Error::Invalid("compat bundle required"))?;
             eval(&realm, bundle)?;
             assert_eq!(
-                eval(&realm, format!("PowermoveAcceptance.run({})", json!(id)))?.value,
+                eval(&realm, format!("globalThis.__acceptanceResult = null; Promise.resolve(PowermoveAcceptance.run({})).then(v => {{ __acceptanceResult = v }}, e => {{ __acceptanceResult = String(e) }}); true", json!(id)))?.value,
                 "true"
             );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let result = eval(&realm, "JSON.stringify(__acceptanceResult)")?.value;
+                if result == "true" {
+                    break;
+                }
+                if result != "null" || Instant::now() >= deadline {
+                    return Err(Error::Host(format!("compat assertion {id}: {result}")));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
             if id == "W040.compat-remote-dom" {
                 let evidence = eval(&realm, "JSON.stringify(PowermoveAcceptance.evidence())")?;
                 let evidence: Value = serde_json::from_str(&evidence.value)
@@ -191,6 +234,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_current_source_compat_case_executes_in_native_v8() {
+        let gate = FIXTURE_PROCESS_GATE.lock().unwrap();
+        let built = std::process::Command::new("bun")
+            .arg("build")
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("compat-probes.ts"))
+            .args(["--target=browser", "--format=iife"])
+            .output()
+            .expect("Bun is required to bundle current production compat sources");
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let bundle = String::from_utf8(built.stdout).unwrap();
+        drop(gate);
+        for &(id, _, _, requires_bundle) in pm_acceptance::runtime::CASES {
+            if requires_bundle {
+                check(id, Some(&bundle)).unwrap_or_else(|error| panic!("{id}: {error}"));
+            }
+        }
+    }
     #[test]
     fn reload_preserves_active_generation() {
         check("W037.v8-reload", None).unwrap();

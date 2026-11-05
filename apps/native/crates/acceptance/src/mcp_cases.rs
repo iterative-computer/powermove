@@ -175,3 +175,93 @@ pub fn manage() -> Check {
     assert_eq!(layer(&f.document()?, "kept")["id"], "kept");
     Ok(())
 }
+
+/// Frozen kernel/glsl.ts admission, through the actual MCP body. No compilation
+/// or rendered pixels are implied by the tool's own definition-only result.
+pub fn validate_effect() -> Check {
+    let mut f = Fixture::new()?;
+    let before = f.document()?;
+    let revision = f.revision();
+    let definition = json!({"id":"Synthetic.effect","label":"Synthetic","group":"Synthetic","params":[{"k":"amount","def":1}],"frag":"outColor=vec4(1.);"});
+    let expected = json!({"valid":true,"id":"Synthetic.effect","parameterCount":1,"note":"Definition validation only. This does not register the effect or compile/render its shader."});
+    assert_eq!(
+        f.call("validate_effect", json!({"definition":definition}))?,
+        expected
+    );
+    for (key, value, diagnostic) in [
+        ("id", json!(""), "effect: invalid id \"\""),
+        (
+            "label",
+            json!(""),
+            "effect \"Synthetic.effect\": \"label\" is required",
+        ),
+        (
+            "group",
+            json!(null),
+            "effect \"Synthetic.effect\": \"group\" is required",
+        ),
+        (
+            "backdrop",
+            json!(1),
+            "effect \"Synthetic.effect\": \"backdrop\" must be a boolean",
+        ),
+        (
+            "passes",
+            json!(9),
+            "effect \"Synthetic.effect\": \"passes\" must be an integer 1..8",
+        ),
+        (
+            "params",
+            json!([{"k":"a"},{"k":"a"}]),
+            "effect \"Synthetic.effect\": duplicate param key \"a\"",
+        ),
+        (
+            "frag",
+            json!(""),
+            "effect \"Synthetic.effect\": \"frag\" must be a non-empty string",
+        ),
+    ] {
+        let mut invalid = definition.clone();
+        invalid[key] = value;
+        let error = tool_error(
+            &mut f.session,
+            "validate_effect",
+            json!({"definition":invalid}),
+        )?;
+        assert_eq!(error["code"], "invalid_arguments");
+        assert_eq!(error["message"], diagnostic);
+    }
+    let mut invalid = definition.clone();
+    invalid["label"] = json!("");
+    invalid["frag"] = json!("");
+    assert_eq!(
+        tool_error(
+            &mut f.session,
+            "validate_effect",
+            json!({"definition":invalid})
+        )?["message"],
+        "effect \"Synthetic.effect\": \"label\" is required"
+    );
+    for (count, valid) in [(32768, true), (32769, false)] {
+        let mut boundary = definition.clone();
+        boundary["frag"] = json!("😀".repeat(count));
+        if valid {
+            assert_eq!(
+                f.call("validate_effect", json!({"definition":boundary}))?,
+                expected
+            );
+        } else {
+            assert_eq!(
+                tool_error(
+                    &mut f.session,
+                    "validate_effect",
+                    json!({"definition":boundary})
+                )?["message"],
+                "effect \"Synthetic.effect\": shader is too large (65538 > 65536 bytes)"
+            );
+        }
+    }
+    assert_eq!(f.document()?, before);
+    assert_eq!(f.revision(), revision);
+    Ok(())
+}

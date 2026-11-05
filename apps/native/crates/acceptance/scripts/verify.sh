@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic data only. Returns the acceptance verdict, including known failures.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 if [[ -f /workspace/.tools/activate.sh ]]; then source /workspace/.tools/activate.sh; fi
 acceptance_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 cd "$acceptance_root"
@@ -9,6 +10,8 @@ mkdir -p "$acceptance_work"
 acceptance_manifest="$acceptance_root/apps/native/crates/acceptance/runtime/Cargo.toml"
 acceptance_features=()
 if [[ "$(uname -s)" == Darwin ]]; then acceptance_features=(--features macos-sandbox); fi
+python3 -m unittest discover -s apps/native/crates/acceptance/scripts -p 'test_*.py'
+python3 apps/native/crates/acceptance/src/e2e/annotate.py
 cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance
 cargo fmt --manifest-path apps/native/Cargo.toml -p pm-acceptance -- --check
 cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance --all-targets --no-deps -- -D warnings
@@ -16,6 +19,9 @@ cargo test --locked --manifest-path "$acceptance_manifest" "${acceptance_feature
 cargo fmt --manifest-path "$acceptance_manifest" -- --check
 cargo clippy --locked --manifest-path "$acceptance_manifest" "${acceptance_features[@]}" --all-targets --no-deps -- -D warnings
 cargo build --locked --manifest-path "$acceptance_manifest" "${acceptance_features[@]}"
+cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+cargo fmt --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml -- --check
+cargo clippy --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --all-targets --no-deps -- -D warnings
 bun build apps/native/crates/acceptance/runtime/compat-probes.ts --target=browser --format=iife --outfile="$acceptance_work/compat-probes.js"
 # Respect an explicit shared target directory; otherwise use the companion's target.
 acceptance_runtime_target="${CARGO_TARGET_DIR:-$acceptance_root/apps/native/crates/acceptance/runtime/target}"
@@ -29,6 +35,11 @@ if [[ $acceptance_exit -le 2 ]]; then
   python3 - "$acceptance_work/report.json" <<'PY'
 import collections, csv, json, pathlib, sys
 report = json.load(open(sys.argv[1]))
+if report.get('reference'):
+    print('Selected reference:', report['reference'])
+    legacy = report.get('compatibility')
+    if legacy:
+        pathlib.Path(sys.argv[1]).with_name('legacy-report.json').write_text(json.dumps(legacy, indent=2)+'\n')
 counts = collections.Counter(case['status'] for case in report['cases'])
 print(f"{counts['pass']} pass / {counts['fail']} fail / {counts['blocked-by']} blocked-by")
 for case in report['cases']:

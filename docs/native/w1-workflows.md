@@ -2720,3 +2720,206 @@ The 370 roster contains 81 post-tag branch specs, including the J/K/L transport 
 - E2e: 370 of 370 requested roster paths and 289 of 289 tag paths mapped; no helper/fixture/script counted as a spec.
 - Source research only. No builds, app launches, e2e executions or performance measurements were run for W1. Native execution, frozen trace capture, classified visual differences and lane review are still required gates.
 - Frozen references include public source contracts only; isolated user fixtures stay outside tracked artifacts.
+
+<!-- native-acceptance-status:2026-11-04:start -->
+## Native execution status — 2026-11-04
+
+This dated run supersedes the earlier Wave 5 status table without rewriting its evidence.
+Configured Linux: **1,466 pass / 1 fail / 3,136 blocked**.
+All 83 complete workflow contracts remain blocked; a supporting failure makes W061's aggregate fail.
+All 396 triaged specs and the frozen 370 roster are retained. Shared e2e-triage.csv is historical input;
+the lane-owned e2e-map.csv and remaining-blockers.csv hold current coverage and exact open assertions.
+See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04) and
+[backing groups](../../apps/native/crates/acceptance/data/blocker-groups.csv).
+
+| Workflow | Status | Pass | Fail | Blocked | Remaining backing |
+|---|---|---:|---:|---:|---|
+| W001 | blocked-by | 1 | 0 | 14 | native-launch-open-routing |
+| W002 | blocked-by | 0 | 0 | 20 | native-window-tab-routing |
+| W003 | blocked-by | 0 | 0 | 9 | native-close-quit-coordinator |
+| W004 | blocked-by | 1 | 0 | 6 | native-crash-recovery-coordinator |
+| W005 | blocked-by | 0 | 0 | 4 | native-signed-updater |
+| W006 | blocked-by | 57 | 0 | 82 | native-project-library-controls; real-keyboard-dispatch |
+| W007 | blocked-by | 32 | 0 | 64 | native-portable-document-flow; real-keyboard-dispatch |
+| W008 | blocked-by | 0 | 0 | 9 | native-async-project-open |
+| W009 | blocked-by | 29 | 0 | 44 | native-composition-settings-controls; real-keyboard-dispatch |
+| W010 | blocked-by | 7 | 0 | 25 | native-key-command-dispatch; real-keyboard-dispatch |
+| W011 | blocked-by | 0 | 0 | 77 | native-menu-command-dispatch |
+| W012 | blocked-by | 15 | 0 | 34 | native-settings-service-bindings; real-keyboard-dispatch |
+| W013 | blocked-by | 0 | 0 | 6 | native-first-run-about |
+| W014 | blocked-by | 0 | 0 | 14 | native-workspace-layout-controller |
+| W015 | blocked-by | 0 | 0 | 5 | native-panel-popout-lifecycle |
+| W016 | blocked-by | 0 | 0 | 7 | native-library-live-previews |
+| W017 | blocked-by | 14 | 0 | 41 | native-palette-dialog-notices; real-keyboard-dispatch |
+| W018 | blocked-by | 0 | 0 | 17 | native-media-browser-controller |
+| W019 | blocked-by | 29 | 0 | 61 | durable-media-import-coordinator; real-keyboard-dispatch |
+| W020 | blocked-by | 0 | 0 | 9 | image-sequence-import-coordinator |
+| W021 | blocked-by | 0 | 0 | 8 | native-source-preview-controller |
+| W022 | blocked-by | 2 | 0 | 13 | durable-media-relink-replacement |
+| W023 | blocked-by | 0 | 0 | 4 | cloud-media-download-coordinator |
+| W024 | blocked-by | 0 | 0 | 32 | agent-provider-auth-stream-host |
+| W025 | blocked-by | 14 | 0 | 34 | native-agent-conversation-surface; real-keyboard-dispatch |
+| W026 | blocked-by | 0 | 0 | 12 | native-agent-composer-attachments |
+| W027 | blocked-by | 0 | 0 | 24 | agent-run-thread-coordinator; mcp:task_send; mcp:thread_cancel; mcp:thread_launch; mcp:thread_list; mcp:thread_read; mcp:thread_send; mcp:thread_unwatch; mcp:thread_watch |
+| W028 | blocked-by | 0 | 0 | 7 | agent-approval-question-stream-host |
+| W029 | blocked-by | 0 | 0 | 11 | agent-visual-reply-publication; mcp:publish_visual_reply |
+| W030 | blocked-by | 4 | 0 | 15 | agent-project-tool-integration; memory-post-tag-requirement |
+| W031 | blocked-by | 3 | 0 | 14 | engine-media-registry-integration; mcp:import_media_to_timeline; mcp:media_contact_sheet; mcp:media_waveform; mcp:probe_media; mcp:replace_media; mcp:sample_media_frames; mcp:save_project |
+| W032 | blocked-by | 3 | 0 | 14 | mcp:computer_use_panel; mcp:get_panel_state; mcp:get_workspace_state; mcp:interact_panel; mcp:open_panel; mcp:set_panel_layout; native-panel-semantic-surface-host |
+| W033 | blocked-by | 14 | 0 | 9 | external-mcp-application-integration; mcp:render_frames; mcp:stage_fork_rebase |
+| W034 | blocked-by | 0 | 0 | 8 | owner-browser-host-scope |
+| W035 | blocked-by | 0 | 0 | 5 | store-account-library-service |
+| W036 | blocked-by | 0 | 0 | 18 | mcp:store_extension; mcp:store_install; mcp:store_library; mcp:store_publish; mcp:store_publish_prepare; mcp:store_search; mcp:store_source; mcp:store_uninstall; mcp:store_update; store-remote-install-publish-service |
+| W037 | blocked-by | 4 | 0 | 28 | extension-source-promotion-activation; mcp:capture_panel; mcp:import_media; mcp:inspect_creative_extension; mcp:inspect_creative_workspace; mcp:publish_extensions |
+| W038 | blocked-by | 2 | 0 | 13 | signed-store-helper-admission |
+| W039 | blocked-by | 0 | 0 | 3 | extension-settings-storage-host |
+| W040 | blocked-by | 23 | 0 | 35 | compat-live-kernel-render-page-binding; compat:animation-evaluator; compat:asset-byte-import; compat:complete-canvas-engine-resources; compat:ease-query-backend; compat:extension-lifecycle; compat:group-query-edit; compat:history-selection-adapter; compat:legacy-util-backend; compat:media-registry; compat:model-constructors; compat:native-drag-drop; compat:native-host-actions; compat:palette-host; compat:panel-render-mount; compat:project-kernel; compat:remote-dom-controls; compat:scene3d-backend; compat:selection-kernel; compat:space3d-backend; compat:store-namespaced-events; compat:structural-mutation-lease-adapter; compat:transport-engine; compat:ui-state-kernel; compat:workspace-kernel |
+| W041 | blocked-by | 0 | 0 | 16 | transcription-model-inference-service |
+| W042 | blocked-by | 0 | 0 | 17 | native-theme-host-bindings |
+| W043 | blocked-by | 0 | 0 | 7 | native-input-ime-accessibility |
+| W044 | blocked-by | 0 | 0 | 5 | native-notification-haptic-adapters |
+| W045 | blocked-by | 126 | 0 | 194 | native-viewer-navigation; real-keyboard-dispatch |
+| W046 | blocked-by | 204 | 0 | 287 | native-viewer-selection-movement; real-keyboard-dispatch |
+| W047 | blocked-by | 42 | 0 | 73 | native-viewer-transform-gestures; real-keyboard-dispatch |
+| W048 | blocked-by | 71 | 0 | 114 | native-path-mask-editor; real-keyboard-dispatch |
+| W049 | blocked-by | 36 | 0 | 76 | native-text-editor-layout; real-keyboard-dispatch |
+| W050 | blocked-by | 1 | 0 | 30 | mcp:edit_3d; native-scene3d-editor |
+| W051 | blocked-by | 133 | 0 | 187 | native-playback-engine-transport; real-keyboard-dispatch |
+| W052 | blocked-by | 57 | 0 | 82 | native-work-area-controls; real-keyboard-dispatch |
+| W053 | blocked-by | 1 | 0 | 8 | native-marker-controls |
+| W054 | blocked-by | 0 | 0 | 17 | native-timeline-snapping |
+| W055 | blocked-by | 1 | 0 | 60 | native-timeline-layer-controls |
+| W056 | blocked-by | 71 | 0 | 104 | native-clip-trim-split-controls; real-keyboard-dispatch |
+| W057 | blocked-by | 3 | 0 | 1 | decoded-source-slip-integration |
+| W058 | blocked-by | 0 | 0 | 3 | decoded-source-retiming-integration |
+| W059 | blocked-by | 0 | 0 | 7 | native-embedded-audio-routing |
+| W060 | blocked-by | 183 | 0 | 277 | native-keyframe-editor; real-keyboard-dispatch |
+| W061 | fail | 37 | 1 | 72 | native-graph-editor-and-curve-oracle; real-keyboard-dispatch |
+| W062 | blocked-by | 99 | 0 | 159 | native-group-parent-precompose-pixels; real-keyboard-dispatch |
+| W063 | blocked-by | 1 | 0 | 59 | native-inspector-property-bindings |
+| W064 | blocked-by | 0 | 0 | 7 | native-effects-matte-controls |
+| W065 | blocked-by | 0 | 0 | 11 | native-easing-preset-library |
+| W066 | blocked-by | 0 | 0 | 19 | native-font-text-animation-controls |
+| W067 | blocked-by | 1 | 0 | 78 | mcp:generate_captions; mcp:transcribe_media; native-caption-editor-and-inference |
+| W068 | blocked-by | 0 | 0 | 8 | native-audio-mixer-device-meters |
+| W069 | blocked-by | 28 | 0 | 56 | mcp:export_video; native-export-child-codec-integration; real-keyboard-dispatch |
+| W070 | blocked-by | 0 | 0 | 6 | native-export-queue-snapshots |
+| W071 | blocked-by | 1 | 0 | 1 | encoded-fractional-rate-oracle |
+| W072 | blocked-by | 0 | 0 | 1 | owner-web-animation-export-scope |
+| W073 | blocked-by | 8 | 0 | 50 | native-control-input-bindings |
+| W074 | blocked-by | 0 | 0 | 38 | native-colour-control-sampler |
+| W075 | blocked-by | 99 | 0 | 142 | native-cross-surface-history-clipboard; real-keyboard-dispatch |
+| W076 | blocked-by | 1 | 0 | 1 | metal-authored-frame-oracles |
+| W077 | blocked-by | 1 | 0 | 1 | physical-paired-performance-oracles |
+| W078 | blocked-by | 0 | 0 | 1 | native-shader-compiler-editor |
+| W079 | blocked-by | 1 | 0 | 1 | native-shuttle-command-engine-routing |
+| W080 | blocked-by | 2 | 0 | 2 | native-ripple-gesture-integration |
+| W081 | blocked-by | 2 | 0 | 1 | native-roll-slide-gesture-integration |
+| W082 | blocked-by | 1 | 0 | 1 | native-source-monitor-three-point |
+| W083 | blocked-by | 1 | 0 | 1 | native-linked-av-editor-integration |
+
+<!-- native-acceptance-status:2026-11-04:end -->
+
+<!-- main-acceptance-c7f46a0:start -->
+## Native execution status — main reference, 2026-11-04
+
+Active behavior reference: `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This supersedes earlier tagged parity counts;
+v1.2.0 remains a separate required file/extension compatibility inventory.
+Current main assertions: **1,651 pass / 32 fail / 2,661 blocked**.
+Schema/routing/supporting passes do not certify a complete tool body, native key dispatch or workflow.
+All 83 current workflow contracts remain blocked; main declarations retain 1 measured failure and 718 blockers.
+The union map preserves all 396 legacy specs and the frozen 370 roster; main adds one further spec.
+
+| Workflow | Status | Pass | Fail | Blocked | Remaining backing |
+|---|---|---:|---:|---:|---|
+| W001 | blocked-by | 0 | 0 | 8 | main:native-launch-open-routing; native-app:native-launch-open-routing |
+| W002 | blocked-by | 0 | 0 | 12 | main:native-window-tab-routing; native-app:native-window-tab-routing |
+| W003 | blocked-by | 0 | 0 | 11 | main:native-close-quit-coordinator; native-app:native-close-quit-coordinator |
+| W004 | blocked-by | 0 | 0 | 4 | main:native-crash-recovery-coordinator; native-app:native-crash-recovery-coordinator |
+| W005 | blocked-by | 0 | 0 | 1 | main:native-signed-updater |
+| W006 | blocked-by | 0 | 0 | 4 | main:native-project-library-controls; native-app:native-project-library-controls |
+| W007 | blocked-by | 0 | 0 | 27 | delta-data:native-portable-document-flow; main:native-portable-document-flow |
+| W008 | blocked-by | 0 | 0 | 12 | delta-data:native-async-project-open; main:native-async-project-open |
+| W009 | blocked-by | 0 | 0 | 6 | main:native-composition-settings-controls; native-app:native-composition-settings-controls |
+| W010 | fail | 1560 | 24 | 1788 | main:native-key-command-dispatch; main:native-keyboard-dispatch; native-app:native-key-command-dispatch |
+| W011 | blocked-by | 0 | 0 | 1 | main:native-menu-command-dispatch |
+| W012 | blocked-by | 0 | 0 | 7 | main:native-settings-service-bindings; native-app:native-settings-service-bindings |
+| W013 | blocked-by | 0 | 0 | 2 | main:native-first-run-about; native-app:native-first-run-about |
+| W014 | blocked-by | 0 | 0 | 8 | main:native-workspace-layout-controller; native-app:native-workspace-layout-controller |
+| W015 | blocked-by | 0 | 0 | 3 | main:native-panel-popout-lifecycle; native-app:native-panel-popout-lifecycle |
+| W016 | blocked-by | 0 | 0 | 9 | main:native-library-live-previews; native-app:native-library-live-previews |
+| W017 | blocked-by | 0 | 0 | 9 | main:native-palette-dialog-notices; native-app:native-palette-dialog-notices |
+| W018 | blocked-by | 0 | 0 | 7 | main:native-media-browser-controller; native-app:native-media-browser-controller |
+| W019 | blocked-by | 0 | 0 | 22 | delta-data:durable-media-import-coordinator; main:durable-media-import-coordinator |
+| W020 | blocked-by | 0 | 0 | 4 | delta-data:image-sequence-import-coordinator; main:image-sequence-import-coordinator |
+| W021 | blocked-by | 0 | 0 | 3 | main:native-source-preview-controller; native-app:native-source-preview-controller |
+| W022 | blocked-by | 0 | 0 | 9 | delta-data:durable-media-relink-replacement; main:durable-media-relink-replacement |
+| W023 | blocked-by | 0 | 0 | 3 | main:cloud-media-download-coordinator; native-app:cloud-media-download-coordinator |
+| W024 | blocked-by | 0 | 0 | 10 | main:agent-provider-auth-stream-host; native-app:agent-provider-auth-stream-host |
+| W025 | blocked-by | 0 | 0 | 22 | main:native-agent-conversation-surface; native-app:native-agent-conversation-surface |
+| W026 | blocked-by | 0 | 0 | 10 | main:native-agent-composer-attachments; native-app:native-agent-composer-attachments |
+| W027 | blocked-by | 0 | 0 | 13 | main:agent-run-thread-coordinator; native-app:agent-run-thread-coordinator |
+| W028 | blocked-by | 0 | 0 | 3 | main:agent-approval-question-stream-host; native-app:agent-approval-question-stream-host |
+| W029 | blocked-by | 0 | 0 | 8 | main:agent-visual-reply-publication; native-app:agent-visual-reply-publication |
+| W030 | fail | 3 | 3 | 14 | main:agent-project-tool-integration; native-app:agent-project-tool-integration |
+| W031 | blocked-by | 3 | 0 | 6 | main:engine-media-registry-integration; native-app:engine-media-registry-integration |
+| W032 | blocked-by | 1 | 0 | 10 | main:native-panel-semantic-surface-host; native-app:native-panel-semantic-surface-host |
+| W033 | fail | 82 | 4 | 71 | delta-data:project-memory-index-and-tool; main:external-mcp-application-integration; main:mcp:apply_commands; main:mcp:capture_panel; main:mcp:check_project; main:mcp:computer_use_panel; main:mcp:create_project; main:mcp:delegate_task; main:mcp:edit_3d; main:mcp:edit_layer_strips; main:mcp:edit_video; main:mcp:export_captions; main:mcp:export_video; main:mcp:finish_session; main:mcp:fork_builtin_extension; main:mcp:generate_captions; main:mcp:get_3d_scene; main:mcp:get_panel_layout; main:mcp:get_panel_state; main:mcp:get_project_state; main:mcp:get_timeline; main:mcp:get_workspace_state; main:mcp:import_media; main:mcp:import_media_to_timeline; main:mcp:inspect_creative_extension; main:mcp:inspect_creative_workspace; main:mcp:interact_panel; main:mcp:list_media; main:mcp:list_projects; main:mcp:manage_media; main:mcp:manage_project; main:mcp:media_contact_sheet; main:mcp:media_waveform; main:mcp:open_panel; main:mcp:open_project; main:mcp:orchestrator_capabilities; main:mcp:probe_media; main:mcp:publish_extensions; main:mcp:publish_visual_reply; main:mcp:render_frames; main:mcp:replace_media; main:mcp:rollback_changes; main:mcp:sample_media_frames; main:mcp:save_project; main:mcp:select_layers; main:mcp:set_panel_layout; main:mcp:stage_fork_rebase; main:mcp:start_session; main:mcp:store_extension; main:mcp:store_install; main:mcp:store_library; main:mcp:store_publish; main:mcp:store_publish_prepare; main:mcp:store_search; main:mcp:store_source; main:mcp:store_uninstall; main:mcp:store_update; main:mcp:task_cancel; main:mcp:task_send; main:mcp:task_status; main:mcp:thread_cancel; main:mcp:thread_launch; main:mcp:thread_list; main:mcp:thread_read; main:mcp:thread_send; main:mcp:thread_unwatch; main:mcp:thread_watch; main:mcp:transcribe_media; main:mcp:validate_effect; native-app:external-mcp-application-integration |
+| W034 | blocked-by | 0 | 0 | 1 | main:owner-browser-host-scope |
+| W035 | blocked-by | 0 | 0 | 1 | main:store-account-library-service |
+| W036 | blocked-by | 0 | 0 | 3 | main:store-remote-install-publish-service; native-app:store-remote-install-publish-service |
+| W037 | blocked-by | 0 | 0 | 20 | main:extension-source-promotion-activation; native-app:extension-source-promotion-activation |
+| W038 | blocked-by | 0 | 0 | 11 | main:signed-store-helper-admission; native-app:signed-store-helper-admission |
+| W039 | blocked-by | 0 | 0 | 1 | main:extension-settings-storage-host |
+| W040 | blocked-by | 0 | 0 | 4 | main:compat-live-kernel-render-page-binding; native-app:compat-live-kernel-render-page-binding |
+| W041 | blocked-by | 0 | 0 | 6 | main:transcription-model-inference-service; native-app:transcription-model-inference-service |
+| W042 | blocked-by | 0 | 0 | 4 | main:native-theme-host-bindings; native-app:native-theme-host-bindings |
+| W043 | blocked-by | 0 | 0 | 12 | main:native-input-ime-accessibility; native-app:native-input-ime-accessibility |
+| W044 | blocked-by | 0 | 0 | 2 | main:native-notification-haptic-adapters; native-app:native-notification-haptic-adapters |
+| W045 | blocked-by | 0 | 0 | 20 | main:native-viewer-navigation; native-app:native-viewer-navigation |
+| W046 | blocked-by | 0 | 0 | 5 | main:native-viewer-selection-movement; native-app:native-viewer-selection-movement |
+| W047 | blocked-by | 0 | 0 | 8 | main:native-viewer-transform-gestures; native-app:native-viewer-transform-gestures |
+| W048 | blocked-by | 0 | 0 | 16 | main:native-path-mask-editor; native-app:native-path-mask-editor |
+| W049 | blocked-by | 0 | 0 | 12 | main:native-text-editor-layout; native-app:native-text-editor-layout |
+| W050 | blocked-by | 0 | 0 | 13 | delta-fx:native-scene3d-editor; main:native-scene3d-editor |
+| W051 | blocked-by | 0 | 0 | 26 | main:native-playback-engine-transport; native-app:native-playback-engine-transport |
+| W052 | blocked-by | 0 | 0 | 1 | main:native-work-area-controls |
+| W053 | blocked-by | 0 | 0 | 2 | main:native-marker-controls; native-app:native-marker-controls |
+| W054 | blocked-by | 0 | 0 | 5 | main:native-timeline-snapping; native-app:native-timeline-snapping |
+| W055 | blocked-by | 0 | 0 | 38 | main:native-timeline-layer-controls; native-app:native-timeline-layer-controls |
+| W056 | blocked-by | 0 | 0 | 1 | main:native-clip-trim-split-controls |
+| W057 | blocked-by | 0 | 0 | 1 | main:decoded-source-slip-integration |
+| W058 | blocked-by | 0 | 0 | 2 | main:decoded-source-retiming-integration; native-app:decoded-source-retiming-integration |
+| W059 | blocked-by | 0 | 0 | 4 | delta-fx:native-embedded-audio-routing; main:native-embedded-audio-routing |
+| W060 | blocked-by | 0 | 0 | 31 | main:native-keyframe-editor; native-app:native-keyframe-editor |
+| W061 | fail | 1 | 1 | 11 | main:native-graph-editor-and-curve-oracle; native-app:native-graph-editor-and-curve-oracle |
+| W062 | blocked-by | 0 | 0 | 24 | main:native-group-parent-precompose-pixels; native-app:native-group-parent-precompose-pixels |
+| W063 | blocked-by | 0 | 0 | 14 | main:native-inspector-property-bindings; native-app:native-inspector-property-bindings |
+| W064 | blocked-by | 0 | 0 | 83 | delta-fx:native-effects-matte-controls; main:native-effects-matte-controls |
+| W065 | blocked-by | 0 | 0 | 4 | main:native-easing-preset-library; native-app:native-easing-preset-library |
+| W066 | blocked-by | 0 | 0 | 11 | main:native-font-text-animation-controls; native-app:native-font-text-animation-controls |
+| W067 | blocked-by | 1 | 0 | 11 | main:native-caption-editor-and-inference; native-app:native-caption-editor-and-inference |
+| W068 | blocked-by | 0 | 0 | 4 | delta-fx:native-audio-mixer-device-meters; main:native-audio-mixer-device-meters |
+| W069 | blocked-by | 0 | 0 | 49 | delta-fx:native-export-child-codec-integration; main:native-export-child-codec-integration |
+| W070 | blocked-by | 0 | 0 | 1 | main:native-export-queue-snapshots |
+| W071 | blocked-by | 0 | 0 | 1 | main:encoded-fractional-rate-oracle |
+| W072 | blocked-by | 0 | 0 | 1 | delta-data:archived-web-export-preferences |
+| W073 | blocked-by | 0 | 0 | 5 | main:native-control-input-bindings; native-app:native-control-input-bindings |
+| W074 | blocked-by | 0 | 0 | 8 | main:native-colour-control-sampler; native-app:native-colour-control-sampler |
+| W075 | blocked-by | 0 | 0 | 6 | main:native-cross-surface-history-clipboard; native-app:native-cross-surface-history-clipboard |
+| W076 | blocked-by | 0 | 0 | 4 | delta-fx:metal-authored-frame-oracles; main:metal-authored-frame-oracles |
+| W077 | blocked-by | 0 | 0 | 30 | main:physical-paired-performance-oracles; native-app:physical-paired-performance-oracles |
+| W078 | blocked-by | 0 | 0 | 2 | delta-fx:native-shader-compiler-editor; main:native-shader-compiler-editor |
+| W079 | blocked-by | 0 | 0 | 1 | main:native-shuttle-command-engine-routing |
+| W080 | blocked-by | 0 | 0 | 1 | main:native-ripple-gesture-integration |
+| W081 | blocked-by | 0 | 0 | 1 | main:native-roll-slide-gesture-integration |
+| W082 | blocked-by | 0 | 0 | 1 | main:native-source-monitor-three-point |
+| W083 | blocked-by | 0 | 0 | 1 | main:native-linked-av-editor-integration |
+
+A01–A10 current contracts are independently gated as `MAIN.DELTA.A01` through `MAIN.DELTA.A10`.
+P rows route to delta-data, E rows to delta-fx, U rows to the later UI lane; retaining their source requirements does not claim implementation.
+A511/A512's old discrepancy is superseded: main explicitly requires project memory and indexing.
+The native tool/list and missing index now fail against that source; no additional catalog-change approval is inferred.
+See [acceptance.md](acceptance.md#main-reference-change--2026-11-04), the current blockers/failures CSVs and the archived legacy snapshots.
+
+<!-- main-acceptance-c7f46a0:end -->

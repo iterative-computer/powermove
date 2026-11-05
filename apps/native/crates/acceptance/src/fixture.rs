@@ -10,7 +10,8 @@ use std::{
 pub struct Scratch(pub PathBuf);
 impl Scratch {
     pub fn new() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(pm_kernel::new_id("pm-acceptance-synthetic"));
+        let path = std::fs::canonicalize(std::env::temp_dir())?
+            .join(pm_kernel::new_id("pm-acceptance-synthetic"));
         std::fs::create_dir(&path)?;
         Ok(Self(path))
     }

@@ -60,6 +60,11 @@ pub fn validate() -> Result<(), String> {
     let catalog = pm_acceptance::catalog::Catalog::embedded()?;
     let backings = backings();
     let bindings = bindings();
+    let declaration_rows =
+        pm_acceptance::catalog::csv_rows(include_str!("../../data/e2e-declarations.csv"))?;
+    if declaration_rows.len() != frozen.cases.len() + 1 {
+        return Err("frozen declaration map cardinality drift".into());
+    }
     if frozen.revision != REFERENCE {
         return Err("unexpected frozen revision".into());
     }
@@ -88,8 +93,29 @@ pub fn validate() -> Result<(), String> {
                 return Err(format!("empty backing {workflow}"));
             }
         }
-        if !spec.coverage_limit.contains(&format!("L{}=", case.line)) {
-            return Err(format!("missing CSV declaration {}", case.id));
+        let rows = declaration_rows
+            .iter()
+            .skip(1)
+            .filter(|row| row.first() == Some(&case.id))
+            .collect::<Vec<_>>();
+        let expected_checks = bindings
+            .iter()
+            .filter(|b| b.sources.contains(&case.id))
+            .map(|b| b.check.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(";");
+        if rows.len() != 1
+            || rows[0].len() != 7
+            || rows[0][1] != case.file
+            || rows[0][2] != case.line.to_string()
+            || rows[0][3] != case.sha256
+            || rows[0][4] != expected_checks
+            || rows[0][5] != spec.workflows.join(";")
+            || rows[0][6] != case.title
+        {
+            return Err(format!("frozen declaration map drift {}", case.id));
         }
     }
     let mut files = BTreeSet::new();

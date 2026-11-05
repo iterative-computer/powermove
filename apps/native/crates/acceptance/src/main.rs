@@ -21,6 +21,8 @@ fn cli() -> Result<u8, String> {
     let mut filter = Filter::default();
     let mut format = "json".to_owned();
     let mut strict = false;
+    let mut reference = "main".to_owned();
+    let mut reference_explicit = false;
     let mut corpus = vec![];
     let mut runtime_runner = None;
     let mut compat_bundle = None;
@@ -35,6 +37,13 @@ fn cli() -> Result<u8, String> {
                     .ok_or("--format requires json, markdown, e2e-csv, blockers-csv or catalog")?
             }
             "--strict" => strict = true,
+            "--reference" => {
+                reference_explicit = true;
+                reference = args.next().ok_or("--reference requires main or v1.2.0")?;
+                if !["main", "v1.2.0"].contains(&reference.as_str()) {
+                    return Err("unsupported behavior reference".into());
+                }
+            }
             "--runtime-runner" => {
                 runtime_runner = Some(PathBuf::from(
                     args.next()
@@ -70,7 +79,7 @@ fn cli() -> Result<u8, String> {
             }
             "--help" => {
                 println!(
-                    "pm-acceptance [--workflow W033] [--case A517] [--strict] [--runtime-runner /path/to/pm-acceptance-runtime] [--compat-bundle /path/to/probes.js] [--format json|markdown|e2e-csv|blockers-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
+                    "pm-acceptance [--reference main|v1.2.0] [--workflow W033] [--case A517] [--strict] [--runtime-runner /path/to/pm-acceptance-runtime] [--compat-bundle /path/to/probes.js] [--format json|markdown|e2e-csv|blockers-csv|catalog] [--corpus /absolute/synthetic-corpus]\nExit: 0 no failures (blockers allowed), 1 failed assertion, 2 strict blockers, 3 invalid configuration. Corpus inputs are copied before opening; use public/synthetic data only."
                 );
                 return Ok(0);
             }
@@ -80,7 +89,25 @@ fn cli() -> Result<u8, String> {
     if !["json", "markdown", "e2e-csv", "blockers-csv", "catalog"].contains(&format.as_str()) {
         return Err("unknown report format".into());
     }
+    // Existing ID-based consumers remain drivable, with their original source
+    // explicitly labeled in the result. Full/default workflow reports use main.
+    if !reference_explicit
+        && filter
+            .case
+            .as_deref()
+            .is_some_and(|id| !id.starts_with("MAIN."))
+    {
+        reference = "v1.2.0".into();
+    }
     let catalog = Catalog::embedded()?;
+    if format == "catalog" && reference == "main" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(pm_acceptance::main_reference::snapshot())
+                .map_err(|e| e.to_string())?
+        );
+        return Ok(0);
+    }
     if format == "catalog" {
         println!(
             "{}",
@@ -95,6 +122,26 @@ fn cli() -> Result<u8, String> {
         executable,
         compat_bundle,
     });
+    if reference == "main" {
+        let report = pm_acceptance::main_reference::run(
+            &catalog,
+            &filter,
+            &corpus,
+            runtime
+                .as_ref()
+                .map(|r| r as &dyn pm_acceptance::runtime::RuntimeHook),
+        )?;
+        match format.as_str() {
+            "markdown" => print!("{}", report.markdown()),
+            "e2e-csv" => print!("{}", report.e2e_csv()),
+            "blockers-csv" => print!("{}", report.blockers_csv()),
+            _ => println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+            ),
+        }
+        return Ok(report.exit_code(strict));
+    }
     let report = run_with_runtime(
         &catalog,
         &filter,

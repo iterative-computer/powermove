@@ -5,6 +5,7 @@ macro_rules! checks {
     )*}
 }
 checks! {
+    effect_validator => "A532",
     wave5_lint => "A539", wave5_simplify => "A529",
     wave5_slip => "B258",
     wave5_strips => "A504", wave5_scene => "A508", wave5_list_media => "A513", wave5_manage_media => "A516", wave5_video => "A530", wave5_captions => "A550", wave5_video_refusals => "W057.mcp-refusals",
@@ -84,5 +85,21 @@ fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
         pm_acceptance::runner::Status::Pass,
         "{}",
         result.reason
+    );
+}
+
+#[test]
+fn frozen_replace_curve_passes_and_set_curve_defect_stays_visible() {
+    pm_acceptance::curve_oracle::replace().unwrap();
+    let error = pm_acceptance::curve_oracle::set().expect_err(
+        "Glide defect fixed: promote this strict oracle without changing its expected values",
+    );
+    assert!(
+        error.starts_with("set_property: rotation at 1s is "),
+        "{error}"
+    );
+    assert!(
+        error.ends_with("complete glide curve was not preserved"),
+        "{error}"
     );
 }
