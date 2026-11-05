@@ -487,6 +487,118 @@ fn folder_batch_combines_verified_outputs_as_one_undo_step_without_losing_unknow
     assert_eq!(fs::read(owned).unwrap(), b"abc");
 }
 
+#[test]
+fn import_cannot_claim_retained_original_metadata() {
+    let t = private_tempdir();
+    let source = t.path().canonicalize().unwrap().join("input.bin");
+    fs::write(&source, b"abc").unwrap();
+    let input = import_input(
+        &source,
+        "new",
+        json!({"originalVersion":"retained"}),
+        b"abc",
+    );
+    assert!(pm_kernel::import::PreparedImport::capture("forged".into(), vec![input]).is_err());
+    assert_eq!(fs::read(source).unwrap(), b"abc");
+}
+
+#[test]
+fn import_respects_retained_original_and_history_id_namespaces_atomically() {
+    use pm_kernel::{DocumentStore, Origin, import::PreparedImport};
+    let t = private_tempdir();
+    let source = t.path().canonicalize().unwrap().join("input.bin");
+    fs::write(&source, b"abc").unwrap();
+    for section in ["originals", "baselines", "owners"] {
+        let mut manifest = json!({"version":1,"originals":{},"baselines":{},"owners":{}});
+        manifest[section]["reserved"] = if section == "originals" {
+            json!({"sha256":format!("{:x}",Sha256::digest(b"abc")),"length":3,"mime":"application/octet-stream"})
+        } else {
+            json!({"future":true})
+        };
+        let project =
+            json!({"id":"p","w":1,"h":1,"layers":[],"assets":{},"nativeMediaVersions":manifest});
+        let mut store =
+            DocumentStore::new_untitled(pm_model::json::parse(&project.to_string()).unwrap());
+        let before = store.root().unwrap().to_value();
+        let revision = store.revision();
+        let prepared = PreparedImport::capture(
+            "batch".into(),
+            vec![
+                import_input(&source, "new", json!({"future":true}), b"abc"),
+                import_input(&source, "reserved", json!({}), b"abc"),
+            ],
+        )
+        .unwrap()
+        .with_folders(pm_model::json::parse(r#"{"folder":{"id":"folder","future":true}}"#).unwrap())
+        .unwrap();
+        assert!(
+            store
+                .execute(prepared.command(), Origin::Interface)
+                .is_err(),
+            "{section}"
+        );
+        assert_eq!(store.revision(), revision);
+        assert_eq!(store.root().unwrap().to_value(), before);
+        assert_eq!(store.media().len(), 0);
+    }
+}
+
+#[test]
+fn same_length_and_revision_import_cannot_replace_bytes_retained_for_redo() {
+    use pm_kernel::{DocumentStore, Origin, import::PreparedImport};
+    let t = private_tempdir();
+    let root = t.path().canonicalize().unwrap();
+    let original = root.join("original.bin");
+    let different = root.join("different.bin");
+    fs::write(&original, b"abc").unwrap();
+    fs::write(&different, b"xyz").unwrap();
+    let mut store = DocumentStore::new_untitled(
+        pm_model::json::parse(r#"{"id":"p","w":1,"h":1,"layers":[],"assets":{}}"#).unwrap(),
+    );
+    let first = PreparedImport::capture(
+        "first".into(),
+        vec![import_input(&original, "a", json!({}), b"abc")],
+    )
+    .unwrap();
+    store.execute(first.command(), Origin::Interface).unwrap();
+    store.undo().unwrap();
+    let before = store.root().unwrap().to_value();
+    let revision = store.revision();
+    let collision = PreparedImport::capture(
+        "collision".into(),
+        vec![import_input(&different, "a", json!({}), b"xyz")],
+    )
+    .unwrap();
+    assert!(
+        store
+            .execute(collision.command(), Origin::Interface)
+            .is_err()
+    );
+    assert_eq!(store.root().unwrap().to_value(), before);
+    assert_eq!(store.revision(), revision);
+    store.redo().unwrap();
+    let recovered = root.join("recovered.bin");
+    store.media().get("a").unwrap().copy_to(&recovered).unwrap();
+    assert_eq!(fs::read(recovered).unwrap(), b"abc");
+}
+
+fn import_input(
+    path: &std::path::Path,
+    id: &str,
+    metadata: serde_json::Value,
+    bytes: &[u8],
+) -> pm_kernel::import::ImportInput {
+    pm_kernel::import::ImportInput {
+        asset_id: id.into(),
+        asset: pm_model::json::parse(&metadata.to_string()).unwrap(),
+        owned_path: path.into(),
+        mime: "application/octet-stream".into(),
+        revision: "r1".into(),
+        size: bytes.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    }
+}
+
 fn private_tempdir() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();

@@ -1060,15 +1060,39 @@ impl DocumentStore {
                     .chain(crate::commands::media::import_media(c))
             })
             .collect::<Vec<_>>();
+        let imported_ids: std::collections::HashSet<_> = commands
+            .iter()
+            .flat_map(crate::commands::media::import_media)
+            .filter_map(|m| m.id.as_str().map(str::to_owned))
+            .collect();
         for item in &media {
             if self
                 .file
                 .media
                 .get(item.id.as_str().unwrap_or(""))
-                .is_some_and(|old| old.revision != item.revision || old.length() != item.length())
+                .is_some_and(|old| {
+                    let imported = imported_ids.contains(item.id.as_str().unwrap_or(""));
+                    let same_hash = match (&old.source, &item.source) {
+                        (
+                            project_io::MediaSource::File {
+                                sha256: Some(a), ..
+                            }
+                            | project_io::MediaSource::Embedded {
+                                sha256: Some(a), ..
+                            },
+                            project_io::MediaSource::File {
+                                sha256: Some(b), ..
+                            },
+                        ) => a == b,
+                        _ => false,
+                    };
+                    old.revision != item.revision
+                        || old.length() != item.length()
+                        || (imported && (old.media_type != item.media_type || !same_hash))
+                })
             {
                 return Err(TransactionError::Invalid(
-                    "A retained 3D import already owns this asset ID".into(),
+                    "Retained media already owns this asset ID".into(),
                 ));
             }
         }

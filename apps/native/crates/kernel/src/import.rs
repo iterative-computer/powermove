@@ -46,6 +46,11 @@ impl PreparedImport {
         let mut ids = std::collections::BTreeSet::new();
         let mut hash = Sha256::new();
         for a in &assets {
+            if a.asset.get("originalVersion").is_some() {
+                return Err(invalid(
+                    "Imported metadata cannot select a retained original",
+                ));
+            }
             if a.asset_id.is_empty()
                 || !ids.insert(&a.asset_id)
                 || a.asset.as_object().is_none()

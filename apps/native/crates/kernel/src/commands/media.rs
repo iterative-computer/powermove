@@ -161,6 +161,18 @@ impl MediaCommand {
                     )?;
                 }
                 for a in prepared.assets() {
+                    if ["originals", "baselines", "owners"].iter().any(|field| {
+                        cx.lookup(&[
+                            crate::media_versions::FIELD.into(),
+                            (*field).into(),
+                            a.asset_id.as_str().into(),
+                        ])
+                        .is_some()
+                    }) {
+                        return Err(CommandError::Invalid(
+                            "Imported asset ID belongs to retained media history".into(),
+                        ));
+                    }
                     if cx
                         .lookup(&["assets".into(), a.asset_id.as_str().into()])
                         .is_some()

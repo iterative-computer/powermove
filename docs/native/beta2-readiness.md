@@ -24,6 +24,10 @@ The historical beta2 gaps below are superseded in these owned paths:
   The service copies and verifies each file into a private owned output before
   admission, so it survives source loss even before Save. This layer does not
   invent a cloud downloader or Figma converter.
+  Retained native original/history IDs remain reserved, and worker metadata
+  cannot select `originalVersion` without the retained-media admission path.
+  Reusing an unreferenced media ID also requires the same MIME and full SHA-256;
+  matching length and revision alone cannot replace bytes needed by Redo.
   `SetAssetFolder` now follows main's valid-folder/root/missing-asset behavior and
   participates in Undo/Redo. No app or panel UX was added.
 - `pm-update-policy::sparkle` provides an asynchronous cycle rather than claiming
