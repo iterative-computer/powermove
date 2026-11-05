@@ -271,3 +271,108 @@ Both Value and Node paths follow the same rule. **N3** selected equal authored
 values AND equal revisioned state; the comparison was not relaxed. The seed and
 an exact regression remain tracked. The full model suite passed **130 tests,
 0 failed, 1 existing ignored benchmark** after this fix.
+
+### Main-format implementation and boundaries — 2026-11-04
+
+Implementation commits: model fields `6f53efa80`, Memory/container model
+`64528efad`, kernel files/queues `424c30c42`, main-profile migration `65c497123`.
+The P01–P13/U13 coverage cells in `main-delta.md` now cite those commits. Their
+**data/model** portions are distinguished from unverified application workflows;
+this is not a P1–P5 or full-row native/macOS parity sign-off.
+
+| Rows | Implemented data behavior and synthetic evidence |
+| --- | --- |
+| P01 | Saved global, trash and project workspaces receive historical migrations 4–5. Version 3 reruns the bottom-dock move; custom groups, dimensions, hidden specs and future fields survive; current/newer versions are unchanged. Original workspaces stay in the immutable checkpoint. Schema-6 chrome is retained as input data, not adopted as native styling. |
+| P02 | Lossless typed Memory plus pure add/update/remove/index/list. A second goal updates the first identity; standing guidance survives the active cap; disabled notes remain present. Unknown/malformed notes are retained, and removed/evicted notes go to `nativeMemoryArchive`. Authored `revision` and `edits` are unchanged. |
+| P03/P10/P12 | Main's filesystem media index is joined to browser/current/history/take/agent closure. Owned bytes are verified against main SHA-256 and native BLAKE3. Missing source links are not dereferenced by the index reader, proxy metadata never grants original status, and owned converted/pasted bytes remain usable with an offline original. Folder/cloud/import metadata is lossless. Source/recipe conversion models share jobs while retaining separate outputs and final-consumer cancellation. |
+| P04 | A Python-generated synthetic main gzip envelope decodes to the exact document. Declared output bounds, invalid codec/marker/payload, and gzip round-trip for project/history/session/journal/takes are exercised. Production codec behavior remains in the existing kernel reader/writer. |
+| P05 | Exact version-1 receipt with per-origin ordered steps, before/freed bytes, persisted acknowledgement and unknown fields. The worker model checkpoints only after verified completion and successful receipt publication; errors, waiting browser work, stale leases and a failed publication cannot advance it. The actual legacy receipt is captured independently of the native migration checkpoint. |
+| P06/P07/P11 | Capture main backups, recovery directories, associations and pending association publications into the immutable base and `legacy-main` archive, never live native destinations. Autosave is driven by IDs and independent recovery revisions, with 750 ms debounce/5 s maximum, transaction readiness, latest-at-dequeue capture, explicit flush serialization, visible failure, retry, cancellation/superseded checkpoints and generation-safe completions. A close/export barrier stays false while work is pending or failed. |
+| P08/P09 | Owned JSON, PMV3, range-based PMV4, gzip and dictionary fixtures cover repeated save/reopen, raw dictionary retention, pending redo and Undo, history-only bytes, whole-file hashing, unknown header/index fields, corrupt media and overlapping archived ranges. Unedited history remains byte-logically exact. After edits, dictionaries/refused/newer history metadata are retained in `nativeHistoryArchive`; normal known history keeps the existing TypeScript writer's byte parity. |
+| P13/U13 | Retired `web` export defaults, unknown delivery options, working precision, composition output gain, nested animated gain/mute, caption cue/word times and line breaks, and transcription/model preferences remain exact. No retired export action is reintroduced. |
+
+Decisions and selecting rules:
+
+- **N3/N4:** loading is lossless, rather than applying main's destructive
+  sanitization to malformed/future notes or dropping unknown history metadata.
+  Active memory limits remain bounded; archived data is retained without a new
+  restore UI. Unknown fields are kept in place where representable and retained
+  verbatim in archive members where replacing a legacy representation requires it.
+- **N4/prune:** unused binary payloads leave the active media catalog but remain
+  in additive PMV4 `nativeArchivedMedia` ranges. They receive the same bounds,
+  overlap, digest and whole-file checks as active ranges, survive compaction and
+  repeated saves, and remain available to native readers. This is still PMV4,
+  not a new file magic. Legacy base64 data and per-media metadata remain under
+  `nativeLegacyMediaArchive`; PMV3-only metadata uses `nativePmv3Metadata`.
+  Existing colliding archive values are retained rather than overwritten.
+- **N3/N4:** source links are explicit provenance, not inferred from a disk path.
+  Normal Save/Save As retains source references without requiring the source.
+  Portable export streams available admitted links, verifies their digests, and
+  reports already-offline link IDs in `SaveReceipt.unavailable_links`; it never
+  silently asserts complete closure. Export receipts cannot adopt the live save
+  association. Missing link metadata causes embedding/failure instead of silently
+  discarding the sole payload.
+- **N3/N4:** main's library-record metadata is not restricted by PMV4's separate
+  200-unit revision field. A 256-unit disk revision and a long MIME string migrate
+  exactly; PMV4's actual bounds are unchanged. Conflicting mappings keep both
+  objects and retain the existing public key, with the conflict still reported.
+- **N6/N7/N8:** extension data remains raw JSON, source/media and queue state are
+  inspectable by ID, and the new queue/Memory/upgrade models need no Node, browser,
+  JS callback, or UI-thread wait. No extension catalog or production host binding
+  is claimed from a pure model test.
+- **Design ownership:** historical workspace values are data transforms from the
+  pinned reference, not new native visual defaults. No visual/copy/interaction
+  implementation was added and no new `DESIGN-TODO(opus)` is introduced.
+
+Integration still required outside this lane's owned paths:
+
+- Kernel actor/tool routes must call the Memory model with a non-Undo journaled
+  recovery write and independent autosave sequence. The Settings and MCP Memory
+  surfaces/catalog are not changed here.
+- Shell/service hosts must drive `AutosaveQueue`, `ConversionQueue` and the
+  upgrade worker/`ReceiptStore` callbacks, including real close/quit/export
+  arbitration, native version listing, cancellation and per-consumer outputs.
+- Source admission/resolution must supply verified link provenance and consume
+  incomplete-portable/availability/conflict receipts. Cloud-file availability,
+  security-scoped access and physical NSFileVersion integration require the Mac
+  adapter; a Linux model pass does not certify those paths.
+- Old-app refusal of native-only data and the native archive extensions is a
+  separate Electron/reader integration change, outside these owned paths. This
+  lane adds no reverse migration or claim that an old app preserves native archives.
+
+The first baseline parallel first-launch run had one `native library not writable`
+failure; the subsequent complete serial and default-concurrency suites passed.
+The baseline also lacked fetched tag objects required by the existing tagged-reader
+oracle; fetching `v1.2.0` and `v1.3.0` supplied its real inputs, without modifying
+that test or skipping it. The generated model failure is recorded above, with its
+assertion and seed retained. No widened equality tolerance or skipped new case was
+used. Physical APFS cloning/full-fsync/atomic exchange, power-loss recovery,
+NSFileVersion, cloud placeholders, signed first launch and actual app/UI behavior
+remain macOS verification work.
+
+### Final cloud validation — 2026-11-04
+
+Merged integration base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`, without
+conflicts. Post-merge Linux validation, Rust 1.96.1:
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove/apps/native
+cargo test --locked -p pm-kernel -p pm-native-migrate -p pm-first-launch --no-fail-fast
+# 334 passed, 0 failed, 1 existing ignored real-store smoke
+cargo clippy --locked -p pm-kernel -p pm-native-migrate -p pm-first-launch --all-targets -- -D warnings
+cargo fmt --package pm-kernel --package pm-native-migrate --package pm-first-launch -- --check
+cd /workspace/powermove/engine
+cargo test --locked -p pm-model
+# 130 passed, 0 failed, 1 existing ignored timing report
+cargo clippy --locked -p pm-model --all-targets -- -D warnings
+cargo fmt --package pm-model -- --check
+```
+
+Both Clippy and formatting checks passed. No dependencies were added or updated;
+`apps/native/Cargo.lock` and `engine/Cargo.lock` remain unchanged and all test/
+Clippy commands used `--locked`. There are no new crates. Staged diffs and secret
+scans were checked for implementation, evidence and final commits. The initially
+absent activation script/toolchain was provisioned outside Git under `/workspace`.
+The ignored real-profile smoke and timing report are not accepted migration or
+performance evidence. The macOS/integration boundaries listed above remain open.
