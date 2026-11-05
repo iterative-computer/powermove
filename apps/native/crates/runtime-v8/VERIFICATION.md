@@ -117,3 +117,22 @@ pixels and fixes invalid snapshot sharing; N4/N6 retain every extension and
 synchronous behavior; N7 exposes id/generation diagnostics; N8 keeps V8 and
 native sync adapters off the main thread. The prune rule retains every existing
 consumer. None of these open assertions is converted into a pass.
+
+## Final Linux replay
+
+Merged base: `ed5482622f41c533199a724dcb8c8738dd4dcc93`; the final fetch/merge
+reported already up to date, without conflicts. The complete debug and release
+workspace replays each pass **199 / 0 / 0** (pass/fail/ignored). Release command:
+
+```sh
+cargo test --locked --release --manifest-path apps/native/Cargo.toml \
+  -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster
+```
+
+The debug command, three-package strict all-target Clippy and package formatting
+commands above also pass after integration. The Mac launcher passes Bash syntax,
+all three embedded Python blocks parse as Python 3.9, and the entitlement plist
+parses with exactly allow-jit. The actual Linux launcher returns **BLOCKED / 2**,
+as required. macOS remains unexecuted. Item 5 remains **BLOCKED** for the hard
+allocator, complete compatibility/resource integrations and real Mac budgets
+listed above; passing these Linux suites is not a phase sign-off.
