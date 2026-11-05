@@ -15,7 +15,11 @@ fn main() {
         });
     let lib = dir.join("lib");
     assert!(lib.is_dir(), "OIDN_DIR/lib does not exist");
+    println!("cargo::metadata=oidn_lib={}", lib.display());
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=dylib=OpenImageDenoise");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+    }
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
 }

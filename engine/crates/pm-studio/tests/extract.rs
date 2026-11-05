@@ -67,13 +67,23 @@ fn material_and_layer_assignment_do_not_rebuild_geometry() {
     let e = extractor.extract(&input).unwrap();
     assert_eq!(extractor.builds, 1);
     assert_eq!(e.layers, ["a", "b"]);
-    assert_eq!(e.prepared.tris[0].uv2m[2..], [0., 0.]);
-    assert_eq!(e.prepared.tris[1].uv2m[2..], [1., 1.]);
+    assert_eq!(e.prepared.tris.len(), 1, "GPU geometry is shared too");
+    let offset = e.prepared.lights.len() * 4;
+    let mut assignments: Vec<_> = e.prepared.sdata[offset..]
+        .chunks_exact(9)
+        .map(|r| (r[4][3] as u32, r[5][3] as u32))
+        .collect();
+    assignments.sort();
+    assert_eq!(assignments, [(1, 1), (2, 2)]);
     input.instances[1].layer = "a".into();
     let e = extractor.extract(&input).unwrap();
     assert_eq!(extractor.builds, 1);
     assert_eq!(e.layers, ["a"]);
-    assert_eq!(e.prepared.tris[1].uv2m[3], 0.);
+    assert!(
+        e.prepared.sdata[offset..]
+            .chunks_exact(9)
+            .all(|r| r[5][3] == 1.)
+    );
 }
 
 #[test]
@@ -113,8 +123,7 @@ fn tlas_leaves_index_instances_in_reordered_scene_data() {
                         assert!(root > input.instances.len() * 2);
                         let b = e.prepared.nodes[root];
                         assert_eq!(b.lcount, 1);
-                        let tri = &e.prepared.tris[b.left as usize];
-                        let id = tri.uv2m[3] as usize;
+                        let id = inv[5][3] as usize - 1;
                         assert_eq!(input.instances[id].world.0[12], x);
                     }
                 }

@@ -127,6 +127,8 @@ fn provider_ids_layers_progress_and_resource_invalidation() {
     );
     let frame = service.render(&source, request(), final_tier).unwrap();
     assert_eq!(first, pixels(&service, &frame));
+    assert_eq!(service.geometry_uploads(), 1);
+    assert_eq!(service.scene_updates(), 1);
     source.changed.store(1, Ordering::SeqCst); // Same revision: resources still invalidate.
     let frame = service.render(&source, request(), final_tier).unwrap();
     assert_ne!(first, pixels(&service, &frame));
@@ -143,6 +145,10 @@ fn provider_ids_layers_progress_and_resource_invalidation() {
     let mut moved = request();
     moved.ticks = 29_400_000;
     assert_eq!(service.render(&source, moved, refine).unwrap().samples, 2);
+    assert_eq!(
+        service.render(&source, request(), refine).unwrap().samples,
+        2
+    );
     let live = service
         .render(&source, request(), Tier::QualityLive)
         .unwrap();
@@ -210,4 +216,84 @@ fn unsupported_or_zero_sample_final_never_claims_success() {
             .contains("without optional OIDN")
     );
     assert!(service.device().is_none());
+}
+
+struct Screens {
+    source: Source,
+    swapped: std::sync::atomic::AtomicBool,
+}
+impl SceneSource for Screens {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.lights.clear();
+        input.scene.extra_lights.clear();
+        input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+        let mut display = Material::dielectric(Vec3::ZERO, 1.);
+        display.emission = Vec3::splat(0.5);
+        display.specular = 0.;
+        input.scene.materials = vec![display, display];
+        let mut materials = input.scene.gpu_materials();
+        materials[0].maps[1] = 0.;
+        materials[1].maps[1] = 1.;
+        input.materials = Some(materials);
+        input.instances[1].material = 1;
+        let mut layers = vec![vec![255, 0, 0, 255], vec![0, 0, 255, 255]];
+        if self.swapped.load(Ordering::SeqCst) {
+            layers.swap(0, 1);
+        }
+        input.maps = Some(pm_studio::extract::TextureMaps {
+            width: 1,
+            height: 1,
+            layers,
+        });
+        Ok(input)
+    }
+}
+#[test]
+fn multiple_live_screens_update_at_the_same_document_revision() {
+    let source = Screens {
+        source: Source::new(),
+        swapped: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut service = StudioService::default();
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 19,
+        denoise: Denoise::None,
+    };
+    let frame = service.render(&source, request(), tier).unwrap();
+    let before = pixels(&service, &frame);
+    assert!(before[0].chunks_exact(4).filter(|p| p[0] > p[2]).count() > 20);
+    assert!(before[1].chunks_exact(4).filter(|p| p[2] > p[0]).count() > 20);
+    source.swapped.store(true, Ordering::SeqCst);
+    let frame = service.render(&source, request(), tier).unwrap();
+    let after = pixels(&service, &frame);
+    assert!(after[0].chunks_exact(4).filter(|p| p[2] > p[0]).count() > 20);
+    assert!(after[1].chunks_exact(4).filter(|p| p[0] > p[2]).count() > 20);
+    assert_eq!(service.geometry_uploads(), 1);
+}
+
+#[cfg(feature = "oidn")]
+#[test]
+fn final_can_use_the_optional_oidn_device() {
+    let mut service = StudioService::default();
+    let source = Source::new();
+    let frame = service
+        .render(
+            &source,
+            request(),
+            Tier::Final {
+                samples: 4,
+                salt: 1,
+                denoise: Denoise::Oidn,
+            },
+        )
+        .unwrap();
+    let images = pixels(&service, &frame);
+    assert_eq!(images.len(), 2);
+    assert!(
+        images
+            .iter()
+            .all(|image| image.chunks_exact(4).any(|p| p[3] > 0 && p[0] > 0))
+    );
 }

@@ -141,6 +141,8 @@ pub struct Extractor {
 }
 
 pub struct Extracted {
+    pub(crate) geometry: Vec<Arc<Mesh>>,
+    pub(crate) tlas_capacity: usize,
     pub prepared: Prepared,
     /// Stable first-appearance order; indices are exactly the shader's IDs.
     pub layers: Vec<String>,
@@ -213,6 +215,8 @@ impl Extractor {
         let mut tris = Vec::new();
         let mut blases = Vec::new();
         let mut roots = Vec::new();
+        let mut uploaded = HashMap::new();
+        let mut geometry = Vec::new();
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         // TLAS capacity is independent of the SAH tree's shape.
         let capacity = input.instances.len() * 2 + 1;
@@ -223,7 +227,7 @@ impl Extractor {
             if instance.material >= materials.len() || instance.layer.is_empty() {
                 return Err("Studio instance has no material or layer ID".into());
             }
-            let rows = instance.world.rows()?;
+            let mut rows = instance.world.rows()?;
             let key = Arc::as_ptr(&instance.mesh) as usize;
             if let std::collections::hash_map::Entry::Vacant(entry) = self.cache.entry(key) {
                 entry.insert(build(instance.mesh.clone())?);
@@ -245,6 +249,9 @@ impl Extractor {
                 for y in [b.bounds.0.y, b.bounds.1.y] {
                     for z0 in [b.bounds.0.z, b.bounds.1.z] {
                         let p = instance.world.point(v3(x, y, z0));
+                        if ![p.x, p.y, p.z].iter().all(|v| v.is_finite()) {
+                            return Err("Studio world bounds overflow".into());
+                        }
                         a = a.min(p);
                         z = z.max(p);
                     }
@@ -253,17 +260,20 @@ impl Extractor {
             lo = lo.min(a);
             hi = hi.max(z);
             boxes.push([a, z, a]);
+            rows[4][3] = (instance.material + 1) as f32;
+            rows[5][3] = (id + 1) as f32;
             transforms.push(rows);
+            if let Some(&root) = uploaded.get(&key) {
+                roots.push(root);
+                continue;
+            }
             let tri_offset = tris.len() as u32;
             let node_offset = (capacity + blases.len()) as u32;
             roots.push(node_offset);
+            uploaded.insert(key, node_offset);
+            geometry.push(instance.mesh.clone());
             positions.extend_from_slice(&b.positions);
-            tris.extend(b.tris.iter().map(|t| {
-                let mut t = *t;
-                t.uv2m[2] = instance.material as f32;
-                t.uv2m[3] = id as f32;
-                t
-            }));
+            tris.extend_from_slice(&b.tris);
             blases.extend(b.nodes.iter().map(|n| {
                 let mut n = *n;
                 for (link, count) in [(&mut n.left, n.lcount), (&mut n.right, n.rcount)] {
@@ -295,6 +305,8 @@ impl Extractor {
             hi = Vec3::ZERO;
         }
         Ok(Extracted {
+            geometry,
+            tlas_capacity: capacity,
             prepared: Prepared {
                 positions,
                 tris,

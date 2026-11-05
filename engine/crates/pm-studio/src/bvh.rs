@@ -71,10 +71,10 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
     let mut order: Vec<u32> = (0..tris.len() as u32).collect();
     let mut nodes = vec![Node::default(); 1];
     nodes.reserve(tris.len() * 2);
-    let mut stack = vec![(0usize, 0usize, tris.len())];
+    let mut stack = vec![(0usize, 0usize, tris.len(), 0u32)];
     // Reserve slot 1 so children always come in pairs at even offsets.
     nodes.push(Node::default());
-    while let Some((index, first, count)) = stack.pop() {
+    while let Some((index, first, count, depth)) = stack.pop() {
         let mut b = Aabb::EMPTY;
         let mut cb = Aabb::EMPTY;
         for &t in &order[first..first + count] {
@@ -89,7 +89,9 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
                 count: count as u32,
             };
         };
-        if count <= 2 {
+        // Both shader stacks are fixed; a depth cap keeps pathological SAH trees
+        // exact by using a larger leaf instead of dropping intersections.
+        if count <= 2 || depth >= 20 {
             leaf(&mut nodes);
             continue;
         }
@@ -160,8 +162,8 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
             max: [b.hi.x, b.hi.y, b.hi.z],
             count: 0,
         };
-        stack.push((left, first, mid - first));
-        stack.push((left + 1, mid, first + count - mid));
+        stack.push((left, first, mid - first, depth + 1));
+        stack.push((left + 1, mid, first + count - mid, depth + 1));
     }
     (nodes, order)
 }
@@ -324,6 +326,34 @@ mod tests {
             }
         }
         assert_eq!(leaf_tris as usize, tris.len());
+    }
+
+    #[test]
+    fn pathological_sah_depth_fits_the_shader_stacks_without_losing_triangles() {
+        let tris: Vec<_> = (0..1000)
+            .map(|i| {
+                let x = 2f32.powf(-(i as f32) / 8.);
+                [v3(x, 0., 0.), v3(x, x * 0.1, 0.), v3(x, 0., x * 0.1)]
+            })
+            .collect();
+        let (nodes, order) = build(&tris);
+        let mut stack = vec![(0, 0)];
+        let mut count = 0;
+        while let Some((i, depth)) = stack.pop() {
+            assert!(
+                depth <= 20,
+                "fixed shader traversal stacks must never overflow"
+            );
+            let n = nodes[i];
+            if n.count > 0 {
+                count += n.count as usize;
+            } else {
+                stack.push((n.left_first as usize, depth + 1));
+                stack.push((n.left_first as usize + 1, depth + 1));
+            }
+        }
+        assert_eq!(count, tris.len());
+        assert_eq!(order.len(), tris.len());
     }
 
     #[test]

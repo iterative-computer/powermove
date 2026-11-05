@@ -62,3 +62,158 @@ Metal shader compilation/execution, hardware-query equivalence, full compositor
 masks/effects/opacity/blends, application service/export-child integration,
 source-sized exports, real product scenes, performance on base Apple silicon,
 GPU scheduling/cancellation, packaging/signing and Opus review of visual output.
+
+## 2026-11-04 — source-aligned models and portable qualification
+
+Merged integration/design head `78294c4c9`. The controlling UI specification is
+[3d-studio.md](design/surfaces/3d-studio.md). `status::LightKind` uses **Softbox,
+Spotlight, Bulb, Sun**, round-tripping **area, spot, point, sun** unchanged.
+`Progress` and `Failure` contain the exact approved capsule/banner/export copy;
+Live and Fast emit no capsule. Delays, announcements and transitions remain host
+responsibilities. The two messages claiming a Fast fallback are explicitly for
+use **after** a Fast adapter actually succeeds. They are not emitted by an
+unattached renderer. No §12 proposal, explode/place-on human control or new
+interaction has been implemented. No DESIGN-TODO(opus) is introduced: this lane
+adds no control, layout or new copy. Rendered content remains provisional pending
+Opus's visual review.
+
+Shared immutable meshes now share one GPU BLAS as well as one CPU build. The
+instance record holds material and layer overrides; zero retains the existing
+per-triangle contract for earlier callers. Geometry buffers remain resident when
+only transforms, camera, lights, materials or screens change. CPU/GPU upload
+counters are inspectable; tests require one geometry upload across resource edits.
+The SAH builder caps depth at 20, retaining **every** triangle in a larger leaf
+when necessary, so neither fixed shader stack can overflow. Non-finite world
+bounds and oversized storage buffers are explicit failures.
+
+The reflection witness places an emissive card **behind the camera** and requires
+its reflection on another layer's metal sphere; the card itself must have no
+primary coverage. Its initial assertion expected pure-red output at 4× emission
+and failed: the observed red reflection was `[253,143,143]`, which is the specified
+Neutral tone mapper's highlight desaturation. The fixture now emits 0.5, below
+Neutral's 0.76 shoulder, retaining the original pure-red/channel/coverage
+assertions. No renderer tolerance or missed reflection was hidden.
+
+`engine/hosts/pm-studio-host` is an engine-workspace member. It is a synthetic,
+headless integration witness, **not the application's video-export replacement**:
+
+```sh
+cd engine
+cargo +1.96.1 run --locked -p pm-studio-host -- hero /ABSOLUTE/NEW_OUTPUT 320 180 11
+```
+
+It writes per-layer PNGs and a JSON manifest mapping stable synthetic IDs to
+filenames, with ticks, samples, frame salt, adapter and actual hardware-RT use.
+The destination must be new; existing output is refused. Readback accepts any
+row width using aligned staging rows; PNGs unpremultiply the compositor textures.
+The integration test decodes every PNG, requires actual covered product pixels,
+and proves a second export preserves the original manifest.
+
+### Optional OIDN licence and packaging
+
+The `oidn` feature (service forwarding feature `studio-oidn`) is **off by default**.
+It links Intel Open Image Denoise **2.x**, under **Apache-2.0**. The tested binary
+is the upstream `oidn-2.5.1.x86_64.linux.tar.gz` release. Its unmodified licence is
+vendored at [OIDN-2.5.1-LICENSE.txt](../../engine/crates/pm-studio/licenses/OIDN-2.5.1-LICENSE.txt).
+No OIDN binary, downloaded package, training data or system tool is committed.
+`OIDN_DIR` selects an installed package; the build script never downloads code
+or invokes a package manager. Non-macOS feature builds require it explicitly;
+macOS also accepts the existing Apple-silicon Homebrew prefix for development.
+
+Final's native guide/variance filter is always available. Selecting OIDN in a
+build without it returns an error before extraction/GPU work. A requested OIDN
+failure propagates to the job. The old `finish_with` API now fails explicitly;
+new hosts should use `try_finish_with`/`try_present_with` to receive the error.
+Input dimensions, strides and guide lengths are checked before entering C.
+
+A shipping OIDN-enabled Mac bundle must vendor `libOpenImageDenoise` and its
+complete chosen-device/runtime dependency closure under `Contents/Frameworks`
+for **each supported architecture**, preserve required device libraries, and
+include OIDN's licence plus upstream `third-party-programs*.txt` notices for
+exactly the shipped distribution (including oneTBB and any DPC++/SYCL runtime).
+Use `@rpath` install names and `@executable_path/../Frameworks`; audit with
+`otool -L`, rewrite Homebrew absolute load paths, then sign nested libraries before
+the app and notarize. The witness/service binary build helpers add that bundle rpath as well as the
+local installation rpath for development, forwarding `DEP_PM_STUDIO_OIDN_LIB`
+metadata from the library. The final native-app binary must also supply its
+bundle rpath: a dependency rlib cannot install an executable runtime search path. No shipping binary/rpath/signing check was
+possible on Linux. Do not enable the feature in a release before the clean-Mac,
+both-architecture, no-Homebrew launch and denoised-export checks pass.
+
+### Remaining delivery blockers
+
+- The core branch became available at the final fetch: read-only input
+  `1ffa79bda4137ef7872d6688f681b70a592e65c4` supplies `pm-scene3d`, schema,
+  transactional edits and evaluated JSON assembly, but its handoff explicitly
+  leaves imported geometry adapters/renderer integration open. It has not been
+  merged wholesale into this lane. The trait is ready for that scene adapter; project migration/imports, exact
+  evaluated visibility/material groups, screen compositions and source snapshots
+  still need that adapter. This lane does not change or discard project data.
+- The application compositor's Studio pass is private in **unowned** `pm-render`.
+  It needs a typed setter/provider hook, and its frame planner/executor must
+  consume these layer textures using the existing masks/effects/opacity/blends
+  path. Minimal out-of-lane permission was requested but not received. The
+  `pm-engine-service::studio` facade is additive, not installed production wiring.
+- Export-child setup must reconstruct the same scene source/resources, select
+  Final using the camera's samples, partition samples across existing shutter
+  times and composite those results before encoding. The source itself divides
+  samples by shutter count; motion blur belongs to the outer compositor.
+  Orthographic/oversized Fast fallback requires a real attached rasterizer.
+  General errors must not silently fall back during Final export.
+- Live temporal reprojection, automatic idle/refine scheduling, bounded
+  preparation/progress delivery, cancellation/admission between GPU slices and
+  multi-view/device-loss recovery remain application-integration work. The
+  synchronous portable facade is not a UI-thread task or a certified latency gate.
+- Instanced Metal hardware-query acceleration is not implemented; the Metal
+  compute BVH is the honest backend for these scenes. SDR `RGBA8` presentation
+  follows the source; float/HDR compositor/export preservation is still open.
+
+### Qualification checkpoint — 2026-11-04
+
+Merged base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`. Backend: Vulkan
+llvmpipe, LLVM 19.1.7. Rust: **1.96.1**. OIDN: **2.5.1**. Default suite:
+**27 passed / 0 failed / 0 ignored**. OIDN-enabled suite:
+**30 passed / 0 failed / 0 ignored** (the same 27 plus three OIDN checks,
+not 57 independent tests). Both include the headless host's two export/CLI tests.
+Default and OIDN all-target Clippy pass with `-D warnings`; engine packages and
+the touched engine-service package pass formatting checks. Both workspace
+lockfiles contain only the needed additive resolution changes; no bulk update.
+
+Run from the repository root after sourcing the environment. Set `OIDN_DIR` to
+the installed upstream OIDN 2.x directory for the optional commands:
+
+```sh
+cd engine
+cargo +1.96.1 test --locked -p pm-studio -p pm-studio-host
+cargo +1.96.1 test --locked -p pm-studio -p pm-studio-host --features oidn
+cargo +1.96.1 clippy --locked -p pm-studio -p pm-studio-host --all-targets --no-deps -- -D warnings
+cargo +1.96.1 clippy --locked -p pm-studio -p pm-studio-host --all-targets --features oidn --no-deps -- -D warnings
+cargo +1.96.1 fmt -p pm-studio -p pm-studio-host --check
+cd ../apps/native
+cargo +1.96.1 fmt -p pm-engine-service --check
+```
+
+An initial OIDN-enabled CLI test exposed a **real runtime library lookup failure**:
+a library crate's link arguments do not propagate its rpath into dependent
+executables. The fix declares Cargo `links` metadata and forwards the selected
+OIDN directory into the host/service binary build helpers. Replays now pass
+without adding OIDN to `LD_LIBRARY_PATH`. The app's final bundle closure remains
+a Mac gate, as described above.
+
+This required check is **blocked**, not passed:
+
+```sh
+cd apps/native
+cargo +1.96.1 test --locked -p pm-engine-service --no-default-features
+```
+
+It stops before running tests because the existing `objc2` dependency explicitly
+refuses non-Apple platforms. No GNUstep substitute, skipped test, empty image or
+capability flag was used to turn that into a pass. The additive facade/build
+wiring needs the real service test/Clippy replay on a Mac. The portable witness
+is not evidence of native-app composition or encoded video delivery.
+
+**Handoff state: BLOCKED**, pending authorized production compositor hooks and
+the core/resource adapter. This branch deliberately does not emit a MERGE-READY
+finish signal for an unfinished production integration. Read the concrete
+remaining-delivery list above before resuming.

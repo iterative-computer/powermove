@@ -1,5 +1,6 @@
 [package]
 name = "pm-studio"
+links = "pm_studio"
 description = "Studio: the product-shot renderer (docs/3d-studio-redesign.md). Phase 0: Live and Refine on one GPU path tracer"
 version.workspace = true
 edition.workspace = true

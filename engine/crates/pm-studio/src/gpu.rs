@@ -141,6 +141,10 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     trace_group: Option<wgpu::BindGroup>,
     scene_buffers: Vec<wgpu::Buffer>,
+    resident_geometry: Vec<std::sync::Arc<crate::mesh::Mesh>>,
+    resident_tlas_capacity: usize,
+    pub geometry_uploads: u64,
+    pub scene_updates: u64,
     light_count: u32,
     instance_count: u32,
     rt_scene_compatible: bool,
@@ -247,7 +251,7 @@ impl Renderer {
     }
 
     /// The device and queue Studio needs (see [`Renderer::new`]); `limits`
-    /// for a host that creates its own device: at least 10 storage buffers
+    /// for a host that creates its own device: at least 11 storage buffers
     /// per stage and the adapter's largest bindings.
     pub fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
         let have = adapter.limits();
@@ -503,6 +507,10 @@ impl Renderer {
             sampler,
             trace_group: None,
             scene_buffers: Vec::new(),
+            resident_geometry: Vec::new(),
+            resident_tlas_capacity: 0,
+            geometry_uploads: 0,
+            scene_updates: 0,
             light_count: 0,
             instance_count: 0,
             rt_scene_compatible: true,
@@ -550,7 +558,14 @@ impl Renderer {
 
     /// Upload a scene (geometry, materials, lights, camera). Resets accumulation.
     pub fn set_scene(&mut self, scene: &Scene, prepared: &Prepared) {
-        let extra = if self.rt.is_some() {
+        self.upload_scene(scene, prepared, true);
+    }
+
+    fn upload_scene(&mut self, scene: &Scene, prepared: &Prepared, hardware: bool) {
+        self.resident_geometry.clear();
+        self.resident_tlas_capacity = 0;
+        self.geometry_uploads += 1;
+        let extra = if hardware && self.rt.is_some() {
             wgpu::BufferUsages::BLAS_INPUT
         } else {
             wgpu::BufferUsages::empty()
@@ -565,7 +580,7 @@ impl Renderer {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(label),
                     contents: &data,
-                    usage: wgpu::BufferUsages::STORAGE | extra,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra,
                 })
         };
         self.scene_buffers = vec![
@@ -581,9 +596,11 @@ impl Renderer {
         } else {
             ((prepared.sdata.len() - prepared.lights.len() * 4) / 9) as u32
         };
-        self.rt_scene_compatible = true;
+        self.rt_scene_compatible = hardware;
         self.trace_group = None;
-        self.build_rt(prepared.positions.len() as u32);
+        if hardware {
+            self.build_rt(prepared.positions.len() as u32);
+        }
         // Caustics only where something can focus light: glass or polished metal.
         self.caustics = prepared
             .materials
@@ -613,11 +630,79 @@ impl Renderer {
         self.set_camera(scene);
     }
 
+    /// Admission before any scene buffer allocation. Hosts can fall back only
+    /// after this explicit error, without dropping oversized geometry.
+    pub fn check_prepared(&self, prepared: &Prepared) -> Result<(), String> {
+        for data in [
+            bytemuck::cast_slice::<_, u8>(&prepared.positions),
+            bytemuck::cast_slice(&prepared.tris),
+            bytemuck::cast_slice(&prepared.nodes),
+            bytemuck::cast_slice(&prepared.materials),
+            bytemuck::cast_slice(&prepared.sdata),
+        ] {
+            let size = (data.len() as u64).max(64);
+            if size > self.device.limits().max_storage_buffer_binding_size
+                || size > self.device.limits().max_buffer_size
+            {
+                return Err("Studio scene exceeds GPU buffer limits".into());
+            }
+        }
+        Ok(())
+    }
+
     /// Upload the core lane's instanced scene. The software BVH runs on Metal
     /// and Vulkan. Hardware queries currently support only the legacy flattened
     /// path: never claim they support these local-space instances.
     pub fn set_extracted(&mut self, scene: &Scene, extracted: &crate::extract::Extracted) {
-        self.set_scene(scene, &extracted.prepared);
+        let p = &extracted.prepared;
+        let same_geometry = self.scene_buffers.len() == 5
+            && self.resident_tlas_capacity == extracted.tlas_capacity
+            && self.resident_geometry.len() == extracted.geometry.len()
+            && self
+                .resident_geometry
+                .iter()
+                .zip(&extracted.geometry)
+                .all(|(a, b)| std::sync::Arc::ptr_eq(a, b));
+        if same_geometry {
+            self.scene_updates += 1;
+            self.queue.write_buffer(
+                &self.scene_buffers[1],
+                0,
+                bytemuck::cast_slice(&p.nodes[..extracted.tlas_capacity]),
+            );
+            for (index, data) in [
+                (2, bytemuck::cast_slice::<_, u8>(&p.materials)),
+                (3, bytemuck::cast_slice(&p.sdata)),
+            ] {
+                let data = if data.is_empty() { &[0u8; 64] } else { data };
+                if self.scene_buffers[index].size() < data.len() as u64 {
+                    self.scene_buffers[index] =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("studio scene update"),
+                                contents: data,
+                                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                            });
+                } else {
+                    self.queue.write_buffer(&self.scene_buffers[index], 0, data);
+                }
+            }
+            self.trace_group = None;
+            self.light_count = p.lights.len() as u32;
+            self.instance_count = if p.tris.is_empty() {
+                0
+            } else {
+                ((p.sdata.len() - p.lights.len() * 4) / 9) as u32
+            };
+            self.caustics = p.materials.iter().any(|m| {
+                m.spec[3] * (1. - m.base[3]) > 0.5 || (m.base[3] > 0.5 && m.spec[0] < 0.25)
+            });
+            self.set_camera(scene);
+        } else {
+            self.upload_scene(scene, p, false);
+            self.resident_geometry = extracted.geometry.clone();
+            self.resident_tlas_capacity = extracted.tlas_capacity;
+        }
         self.rt_scene_compatible = false;
         let (lo, hi) = extracted.bounds;
         let c = (lo + hi) * 0.5;

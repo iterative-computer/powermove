@@ -2636,7 +2636,9 @@ name = "pm-studio-host"
 version = "0.1.0"
 dependencies = [
  "pm-studio",
+ "png",
  "serde_json",
+ "tempfile",
  "wgpu",
 ]
 
