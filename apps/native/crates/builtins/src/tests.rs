@@ -487,3 +487,682 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     }
     assert!(backend.native.platform.is_empty());
 }
+
+#[path = "timeline_tests.rs"]
+mod timeline;
+fn select_layer(kernel: &pm_kernel::KernelHandle, id: &str) {
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec![id.into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+}
+
+#[test]
+fn project_color_depth_uses_real_kernel_receipts_and_one_undo() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings-depth".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "project.colorDepth")
+        .unwrap();
+    assert_eq!(row["options"][2], json!({"v":32,"label":"32-bit float"}));
+    for value in [json!(12), json!("16"), json!(16.5), json!(null)] {
+        assert!(backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.colorDepth","value":value}})).is_err());
+    }
+    let before = kernel
+        .published("synthetic")
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.colorDepth","value":32}})).unwrap() else { panic!("actor request") };
+    assert_eq!(
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    assert_eq!(
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .get("colorDepth")
+            .unwrap()
+            .to_value(),
+        pm_model::Value::Number(32.)
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
+}
+
+#[test]
+fn properties_independent_corners_seed_from_uniform_radius_in_one_actor_edit() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut patch = pm_model::Map::new();
+    patch.insert("shape", "rect".into());
+    patch.insert("radius", 17.5.into());
+    patch.insert("independentCorners", false.into());
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::ContentCommand::Set {
+                            layer_id: "a".into(),
+                            patch,
+                            time: 0.,
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+    let row = publication["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["rows"].as_array().unwrap())
+        .find(|r| r["id"] == "content.independentCorners")
+        .unwrap();
+    let request = presenter
+        .write(
+            &mut model,
+            Caller::native(),
+            row["control"]["binding"]["handle"].as_str().unwrap(),
+            true.into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+    let layer = model.layer("a").unwrap();
+    for field in ["radiusTL", "radiusTR", "radiusBL", "radiusBR"] {
+        assert_eq!(
+            layer.get("d").unwrap().get(field).unwrap().as_f64(),
+            Some(17.5)
+        );
+    }
+    let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(
+        publication["sections"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["id"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("content.radius")))
+            .count(),
+        4
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    model.sync(kernel.published("synthetic").unwrap());
+    assert_eq!(
+        model
+            .layer("a")
+            .unwrap()
+            .get("d")
+            .unwrap()
+            .get("independentCorners")
+            .unwrap()
+            .as_bool(),
+        Some(false)
+    );
+}
+
+fn register_synthetic_effect(kernel: &pm_kernel::KernelHandle) {
+    kernel.state_transaction(pm_kernel::state::StateTransaction {
+        expected_revision: None,
+        ops: vec![pm_kernel::state::StateOp::Register { registry:"effects".into(), entry: pm_kernel::state::Registration {
+            token:"synthetic-effect-token".into(), owner:Caller::native().writer,
+            id:"synthetic.glow".into(), definition: data::model(&json!({"label":"Synthetic Glow","version":1,"params":[{"k":"amount","label":"Amount","type":"number","def":5,"step":0.25},{"k":"tint","label":"Tint","type":"color","def":"#FF0000"},{"k":"enabled","label":"Enabled","type":"toggle","def":true},{"k":"mode","label":"Mode","type":"select","def":"a","options":[{"v":"a","label":"A"},{"v":"b","label":"B"}]},{"k":"label","label":"Label","type":"text","def":"Authored"}]})).unwrap(),
+        }}],
+    }).wait().unwrap().unwrap();
+}
+
+#[test]
+fn properties_header_add_effect_uses_native_menu_then_real_actor_transaction() {
+    let actor = actor();
+    let kernel = actor.handle();
+    register_synthetic_effect(&kernel);
+    select_layer(&kernel, "a");
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let button = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("inspector:add-effect"))
+        .unwrap();
+    finish(
+        panels
+            .event(
+                "inspector",
+                publication.generation,
+                publication.surface.revision(),
+                button.id,
+                "click",
+                EventDetail::default(),
+            )
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let request = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "effectMenu")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "native menu was not enqueued");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(request.panel, "inspector");
+    let effect_count = || {
+        let p = kernel.published("synthetic").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let loc = pm_kernel::model::find_layer(root, "a").unwrap();
+        pm_kernel::model::layer_at(root, &loc)
+            .unwrap()
+            .get("fx")
+            .unwrap()
+            .to_value()
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(effect_count(), 0);
+    panels.platform_reply(request.id, Ok(json!("synthetic.glow")));
+    loop {
+        if effect_count() == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "chosen effect did not reach the kernel: {:?}",
+            panels.take_errors()
+        );
+        // Publish on the worker also polls actual actor receipts.
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(panels.take_errors().is_empty());
+}
+
+#[test]
+fn effect_controls_native_binding_and_diamond_use_published_playhead() {
+    let actor = actor();
+    let kernel = actor.handle();
+    register_synthetic_effect(&kernel);
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "effect-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    setup.sync().unwrap();
+    let request = setup
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":2.25,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("layer-effects").unwrap());
+    let projection = panels
+        .broker
+        .entries
+        .lock()
+        .unwrap()
+        .get("layer-effects")
+        .unwrap()
+        .backend
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let parameter = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "parameter")
+        .unwrap()["parameter"]
+        .clone();
+    let handle = parameter["binding"].as_str().unwrap();
+    finish(panels.write("layer-effects", handle, json!(7.5)).unwrap());
+    let projection = panels
+        .broker
+        .entries
+        .lock()
+        .unwrap()
+        .get("layer-effects")
+        .unwrap()
+        .backend
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":{"type":"parameter","id":parameter["id"],"action":"diamond"}});
+    finish(
+        panels
+            .realms
+            .get("layer-effects")
+            .unwrap()
+            .eval(format!(
+                "__pmBuiltin.command('panel.effect-controls',{args})"
+            ))
+            .unwrap(),
+    );
+    let p = kernel.published("synthetic").unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    let id = pm_panel_inspector::PropertyId::from_value(
+        &pm_model::json::parse(parameter["id"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let state = model
+        .binding_state(&pm_panel_inspector::Binding::Property(id.clone()), 2.25)
+        .unwrap();
+    assert_eq!(state.value.as_f64(), Some(7.5));
+    assert!(state.key_at_playhead);
+    assert!(
+        !model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap()
+            .key_at_playhead
+    );
+    // A selection change invalidates the registered native field lease.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec![],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let ticket = panels.write("layer-effects", handle, json!(99.)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            assert!(result.is_err());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn properties_row_menu_separators_do_not_replace_the_following_actions() {
+    let (operation, options) = inspector_platform("inspector", &json!({"operation":"inspector","input":{"type":"row-menu","items":[
+        {"action":"add-key","label":"Add Keyframe at Playhead","enabled":true},
+        {"action":"edit-expression","label":"Add Expression…","enabled":true,"separatorBefore":true},
+        {"action":"reset","label":"Reset","enabled":false,"separatorBefore":true}
+    ]}})).map(|(op, input)| (op.to_owned(), input)).unwrap();
+    assert_eq!(operation, "contextMenu");
+    assert_eq!(options.as_array().unwrap().len(), 5);
+    assert!(options[1].is_null());
+    assert_eq!(options[2]["id"], "edit-expression");
+    assert!(options[3].is_null());
+    assert_eq!(options[4]["id"], "reset");
+    assert_eq!(options[4]["disabled"], true);
+}
+
+#[test]
+fn viewer_repeated_publications_keep_usable_native_tickets_until_model_changes() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "viewer-tickets".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "viewer", false).unwrap();
+    let first = backend.viewer_snapshot().unwrap();
+    for _ in 0..10 {
+        assert_eq!(backend.viewer_snapshot().unwrap(), first);
+    }
+    let args = json!({"ticket":first["model"]["ticket"],"element":"viewer.zoom","argument":2});
+    let models::NativeCommand::State(tx) = backend
+        .native_command("viewer.chrome.drive", &args)
+        .unwrap()
+    else {
+        panic!("actor state write")
+    };
+    kernel.state_transaction(tx).wait().unwrap().unwrap();
+    let updated = backend.viewer_snapshot().unwrap();
+    assert_ne!(updated["model"]["ticket"], first["model"]["ticket"]);
+    assert_eq!(updated["model"]["shownZoom"], 2.);
+    assert!(
+        backend
+            .native_command("viewer.chrome.drive", &args)
+            .is_err()
+    );
+    backend.native.facts["stage"] = json!([800., 600.]);
+    assert_ne!(
+        backend.viewer_snapshot().unwrap()["model"]["ticket"],
+        updated["model"]["ticket"]
+    );
+}
+
+#[test]
+fn media_completion_reaches_actor_without_fabricating_readiness_and_relink_undo_keeps_data() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    let catalog =
+        pm_panel_media::Catalog::published(&kernel.published("synthetic").unwrap()).unwrap();
+    let stored = pm_panel_media::StoredAsset {
+        id: "imported-image".into(),
+        original_version: "archived-original-v1".into(),
+        metadata: data::model(
+            &json!({"name":"Synthetic.png","kind":"image","w":80,"h":40,"future":{"keep":true}}),
+        )
+        .unwrap(),
+    };
+    let ack = panels
+        .admit_media(
+            &catalog.stamp,
+            vec![stored.clone()],
+            None,
+            None,
+            Caller::native(),
+        )
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let imported = kernel.published("synthetic").unwrap();
+    let imported_root = imported.snapshot.root().unwrap().to_value();
+    let catalog = pm_panel_media::Catalog::published(&imported).unwrap();
+    use pm_panel_media::MediaRuntime;
+    let unknown = pm_panel_media::readiness::ObservedRuntime::default();
+    assert_eq!(
+        unknown.state(&catalog.stamp, "imported-image").availability,
+        pm_panel_media::Availability::Unknown
+    );
+    let replacement = pm_panel_media::StoredAsset {
+        id: "worker-temp-id".into(),
+        original_version: "archived-original-v2".into(),
+        metadata: data::model(&json!({"name":"Relinked.png","kind":"image","w":100,"h":50}))
+            .unwrap(),
+    };
+    let ack = panels
+        .admit_media(
+            &catalog.stamp,
+            vec![replacement],
+            None,
+            Some("imported-image".into()),
+            Caller::native(),
+        )
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let relinked = kernel.published("synthetic").unwrap();
+    let meta = relinked
+        .snapshot
+        .root()
+        .unwrap()
+        .get("assets")
+        .unwrap()
+        .get("imported-image")
+        .unwrap()
+        .to_value();
+    assert_eq!(
+        meta.get("originalVersion")
+            .and_then(pm_model::Value::as_str),
+        Some("archived-original-v2")
+    );
+    assert_eq!(
+        meta.get("future")
+            .unwrap()
+            .get("keep")
+            .and_then(pm_model::Value::as_bool),
+        Some(true)
+    );
+    // Stale and foreign completions never reach the actor; stored versions remain the service's archives.
+    assert!(
+        panels
+            .admit_media(
+                &catalog.stamp,
+                vec![stored.clone()],
+                None,
+                None,
+                Caller::native()
+            )
+            .is_err()
+    );
+    let mut foreign = catalog.stamp.clone();
+    foreign.project = "other".into();
+    assert!(
+        panels
+            .admit_media(&foreign, vec![stored], None, None, Caller::native())
+            .is_err()
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        imported_root
+    );
+}
+
+#[test]
+fn effect_controls_edits_every_supported_scalar_type_through_registered_native_fields() {
+    let actor = actor();
+    let kernel = actor.handle();
+    register_synthetic_effect(&kernel);
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "effect-scalars".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    setup.sync().unwrap();
+    let request = setup
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    for (label, value) in [
+        ("Amount", json!(8.25)),
+        ("Tint", json!("#123456")),
+        ("Enabled", json!(false)),
+        ("Mode", json!("b")),
+        ("Label", json!("日本🙂\nSecond line")),
+    ] {
+        let projection = panels
+            .broker
+            .entries
+            .lock()
+            .unwrap()
+            .get("layer-effects")
+            .unwrap()
+            .backend
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap();
+        let parameter = projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["label"] == label)
+            .unwrap()["parameter"]
+            .clone();
+        assert_eq!(parameter["readonly"], false);
+        finish(
+            panels
+                .write(
+                    "layer-effects",
+                    parameter["binding"].as_str().unwrap(),
+                    value.clone(),
+                )
+                .unwrap(),
+        );
+        let after = panels
+            .broker
+            .entries
+            .lock()
+            .unwrap()
+            .get("layer-effects")
+            .unwrap()
+            .backend
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap();
+        let actual = after["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["label"] == label)
+            .unwrap()["parameter"]["value"]
+            .clone();
+        assert_eq!(actual, value);
+    }
+    assert!(panels.take_errors().is_empty());
+}
+
+#[test]
+fn collapsed_properties_dispose_native_binding_capabilities() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let handle = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("value:opacity:0"))
+        .unwrap()
+        .props["binding"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    finish(panels.realms.get("inspector").unwrap().eval("__pmBuiltin.command('panel.inspector',{type:'collapse',section:'transform',collapsed:true})").unwrap());
+    let before = kernel.published("synthetic").unwrap().revision();
+    let ticket = panels.write("inspector", &handle, json!(77.)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            assert!(result.is_err());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(kernel.published("synthetic").unwrap().revision(), before);
+}

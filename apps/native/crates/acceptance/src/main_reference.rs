@@ -21,10 +21,9 @@ pub fn snapshot() -> &'static Value {
 /// snapshot unchanged, and compare every field of each exact overlay as well.
 pub fn expected_catalog() -> Value {
     let mut catalog = snapshot()["catalog"].clone();
-    let studio: Value = serde_json::from_str(include_str!(
-        "../../mcp/fixtures/scene3d-source-catalog.json"
-    ))
-    .expect("pinned Studio source contracts");
+    let studio: Value =
+        serde_json::from_str(include_str!("../data/fixtures/scene3d-source-catalog.json"))
+            .expect("pinned Studio source contracts");
     for overlay in studio["tools"].as_array().unwrap() {
         assert!(["edit_3d", "get_3d_scene"].contains(&overlay["name"].as_str().unwrap()));
         let base = catalog["tools"]
@@ -288,7 +287,7 @@ pub fn run(
         .into_iter()
         .filter(|s| s.id.starts_with('A'))
     {
-        if matches!(scenario.id, "A508" | "A532") {
+        if matches!(scenario.id, "A506" | "A508" | "A532") {
             continue;
         } // new 3D/effect definitions need their new owners' fixtures.
         let contract = catalog
@@ -513,6 +512,47 @@ pub fn run(
         }
         cases.push(result);
     }
+    check!(
+        "MAIN.file.utf16-ingress",
+        "W007",
+        "main-file-compatibility",
+        "Production MCP ingress preserves kernel-valid authored UTF-16",
+        crate::headless::utf16_ingress
+    );
+    if let Some(case) = cases
+        .iter_mut()
+        .find(|c| c.id == "MAIN.MCP.fork_builtin_extension.behavior")
+        && selected(filter, case)
+        && let Some(runtime) = runtime
+    {
+        *case = execute(
+            &case.id,
+            &case.workflow,
+            &case.kind,
+            "Production file-backed MCP fork preserves exact sources, pristine merge base and staged lifecycle",
+            || runtime.check("A510"),
+        );
+    }
+    // Only individually reviewed, connected portable bodies are promoted. A
+    // schema match or a passing neighboring operation alone never closes one.
+    for case in &mut cases {
+        if case.kind == "main-tool-behavior"
+            && let Some(name) = case
+                .id
+                .strip_prefix("MAIN.MCP.")
+                .and_then(|s| s.strip_suffix(".behavior"))
+            && crate::headless::TOOLS.iter().any(|t| t.0 == name)
+            && selected(filter, case)
+        {
+            *case = execute(
+                &case.id,
+                &case.workflow,
+                &case.kind,
+                "Production MCP/kernel body, exact catalog, lifecycle/error precedence and persisted authored-state assertions",
+                || crate::headless::check(name),
+            );
+        }
+    }
     cases.retain(|c| selected(filter, c));
     if cases.is_empty() {
         return Err(
@@ -539,7 +579,10 @@ pub fn run(
                 .iter()
                 .filter(|case| {
                     case.kind == "corpus-copy"
-                        || case.id == "W007.portable"
+                        || matches!(
+                            case.id.as_str(),
+                            "W007.portable" | "W007.mcp-utf16-ingress" | "A506"
+                        )
                         || (matches!(case.workflow.as_str(), "W037" | "W038" | "W040")
                             && crate::runtime::CASES.iter().any(|entry| entry.0 == case.id))
                 })

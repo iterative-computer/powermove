@@ -1,4 +1,5 @@
-use pm_recorder::{Canvas, FillRule, Point, Rect, Source};
+use base64::Engine;
+use pm_recorder::{Affine, Canvas, Cap, FillRule, ImageData, Join, Point, Rect, Source, Vec2};
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +17,8 @@ struct State {
     missing: BTreeSet<String>,
     dom: Vec<Value>,
     invalidated: bool,
+    bindings: BTreeMap<u64, String>,
+    dom_sequence: u64,
 }
 pub struct NativeHost {
     state: Mutex<State>,
@@ -34,6 +37,54 @@ fn dimension(value: Option<&Value>) -> Result<u32> {
         .and_then(Value::as_u64)
         .and_then(|n| n.try_into().ok())
         .ok_or(Error::Invalid("canvas dimension"))
+}
+fn boolean(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|n| n != 0.),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
+    }
+}
+fn fill_rule(value: Option<&Value>) -> Result<FillRule> {
+    match value.and_then(Value::as_str) {
+        None if value.is_none() => Ok(FillRule::NonZero),
+        Some("nonzero") => Ok(FillRule::NonZero),
+        Some("evenodd") => Ok(FillRule::EvenOdd),
+        _ => Err(Error::Invalid("canvas winding rule")),
+    }
+}
+fn numbers(value: &Value) -> Result<Vec<f64>> {
+    value
+        .as_array()
+        .ok_or(Error::Invalid("numeric array"))?
+        .iter()
+        .map(|v| v.as_f64().ok_or(Error::Invalid("numeric array")))
+        .collect()
+}
+fn matrix(values: &[Value]) -> Result<Affine> {
+    let mut coefficients = [0.; 6];
+    for (index, item) in coefficients.iter_mut().enumerate() {
+        *item = num(values, index)?;
+    }
+    Ok(Affine::new(coefficients))
+}
+pub(crate) fn encode_png(image: &ImageData) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| Error::Host(e.to_string()))?;
+        writer
+            .write_image_data(image.bytes())
+            .map_err(|e| Error::Host(e.to_string()))?;
+    }
+    Ok(bytes)
 }
 impl NativeHost {
     pub fn new(initial: &Value) -> Result<Self> {
@@ -54,6 +105,40 @@ impl NativeHost {
     }
     pub fn take_dom_batches(&self) -> Vec<Value> {
         std::mem::take(&mut self.state.lock().unwrap().dom)
+    }
+    pub fn canvas_frames(&self) -> Result<Vec<pm_compat_host::CanvasFrame>> {
+        let mut state = self.state.lock().unwrap();
+        let bindings = state.bindings.clone();
+        let sequence = state.dom_sequence;
+        if sequence == 0 && !bindings.is_empty() {
+            return Err(Error::Invalid("canvas DOM batch is not flushed"));
+        }
+        bindings
+            .into_iter()
+            .map(|(node, id)| {
+                let canvas = state
+                    .surfaces
+                    .get_mut(&id)
+                    .ok_or(Error::Invalid("bound canvas retired"))?;
+                let (width, height) = canvas.size();
+                let (version, png) = if width == 0 || height == 0 {
+                    (canvas.key().version, Vec::new())
+                } else {
+                    let source = canvas.snapshot().map_err(host_error)?;
+                    (source.key.version, encode_png(&source.pixels)?)
+                };
+                Ok(pm_compat_host::CanvasFrame {
+                    generation: 1,
+                    node,
+                    dom_sequence: sequence,
+                    surface: id,
+                    version,
+                    width,
+                    height,
+                    png: png.into(),
+                })
+            })
+            .collect()
     }
     fn recorder(&self, operation: &str, input: &Value) -> Result<Value> {
         let args = input["args"]
@@ -160,6 +245,27 @@ impl NativeHost {
             .ok_or(Error::Invalid("unknown surface"))?;
         let mut supported = true;
         let result = match (operation, name) {
+            ("recorder.read", "get") => match values.first().and_then(Value::as_str) {
+                Some("globalAlpha") => json!(canvas.state().alpha),
+                Some("lineWidth") => json!(canvas.state().line.width),
+                Some("miterLimit") => json!(canvas.state().line.miter_limit),
+                Some("lineDashOffset") => json!(canvas.state().line.dash_offset),
+                Some("imageSmoothingEnabled") => json!(canvas.state().image_smoothing),
+                Some("lineCap") => json!(match canvas.state().line.start_cap {
+                    Cap::Butt => "butt",
+                    Cap::Round => "round",
+                    Cap::Square => "square",
+                }),
+                Some("lineJoin") => json!(match canvas.state().line.join {
+                    Join::Miter => "miter",
+                    Join::Round => "round",
+                    Join::Bevel => "bevel",
+                }),
+                _ => {
+                    supported = false;
+                    Value::Null
+                }
+            },
             ("recorder.command", "context")
                 if values
                     .first()
@@ -191,6 +297,26 @@ impl NativeHost {
                         .map_err(host_error)?,
                     "globalAlpha" => canvas.set_global_alpha(num(values, 1)?),
                     "lineWidth" => canvas.set_line_width(num(values, 1)?),
+                    "miterLimit" => canvas.set_miter_limit(num(values, 1)?),
+                    "lineDashOffset" => canvas.set_line_dash_offset(num(values, 1)?),
+                    "imageSmoothingEnabled" => canvas.set_image_smoothing(
+                        values
+                            .get(1)
+                            .and_then(Value::as_bool)
+                            .ok_or(Error::Invalid("smoothing"))?,
+                    ),
+                    "lineCap" => match values.get(1).and_then(Value::as_str) {
+                        Some("butt") => canvas.set_line_cap(Cap::Butt),
+                        Some("round") => canvas.set_line_cap(Cap::Round),
+                        Some("square") => canvas.set_line_cap(Cap::Square),
+                        _ => (), // Canvas ignores invalid enumerated values.
+                    },
+                    "lineJoin" => match values.get(1).and_then(Value::as_str) {
+                        Some("miter") => canvas.set_line_join(Join::Miter),
+                        Some("round") => canvas.set_line_join(Join::Round),
+                        Some("bevel") => canvas.set_line_join(Join::Bevel),
+                        _ => (),
+                    },
                     "globalCompositeOperation" => canvas.set_composite(
                         values
                             .get(1)
@@ -228,6 +354,103 @@ impl NativeHost {
             ("recorder.command", "lineTo") => {
                 canvas.line_to(num(values, 0)?, num(values, 1)?);
                 Value::Null
+            }
+            ("recorder.command", "quadraticCurveTo") => {
+                canvas.quadratic_curve_to(
+                    Point::new(num(values, 0)?, num(values, 1)?),
+                    Point::new(num(values, 2)?, num(values, 3)?),
+                );
+                Value::Null
+            }
+            ("recorder.command", "bezierCurveTo") => {
+                canvas.bezier_curve_to(
+                    Point::new(num(values, 0)?, num(values, 1)?),
+                    Point::new(num(values, 2)?, num(values, 3)?),
+                    Point::new(num(values, 4)?, num(values, 5)?),
+                );
+                Value::Null
+            }
+            ("recorder.command", "arc") => {
+                canvas
+                    .arc(
+                        Point::new(num(values, 0)?, num(values, 1)?),
+                        num(values, 2)?,
+                        num(values, 3)?,
+                        num(values, 4)?,
+                        boolean(values.get(5)),
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.command", "arcTo") => {
+                canvas
+                    .arc_to(
+                        Point::new(num(values, 0)?, num(values, 1)?),
+                        Point::new(num(values, 2)?, num(values, 3)?),
+                        num(values, 4)?,
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.command", "ellipse") => {
+                canvas
+                    .ellipse(
+                        Point::new(num(values, 0)?, num(values, 1)?),
+                        Vec2::new(num(values, 2)?, num(values, 3)?),
+                        num(values, 4)?,
+                        num(values, 5)?,
+                        num(values, 6)?,
+                        boolean(values.get(7)),
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.command", "setTransform" | "transform") => {
+                let transform = matrix(values)?;
+                if name == "setTransform" {
+                    canvas.set_transform(transform)
+                } else {
+                    canvas.transform(transform)
+                }
+                Value::Null
+            }
+            ("recorder.command", "setLineDash") => {
+                canvas.set_line_dash(&numbers(
+                    values.first().ok_or(Error::Invalid("dash array"))?,
+                )?);
+                Value::Null
+            }
+            ("recorder.read", "getLineDash") => json!(canvas.state().line.dash_pattern.as_slice()),
+            ("recorder.read", "getTransform") => {
+                let [a, b, c, d, e, f] = canvas.state().transform.as_coeffs();
+                json!({"a":a,"b":b,"c":c,"d":d,"e":e,"f":f,"is2D":true})
+            }
+            ("recorder.read", "isPointInPath" | "isPointInStroke") => {
+                let point = Point::new(num(values, 0)?, num(values, 1)?);
+                json!(if name == "isPointInPath" {
+                    canvas.is_point_in_path(point, fill_rule(values.get(2))?)
+                } else {
+                    canvas.is_point_in_stroke(point)
+                })
+            }
+            ("recorder.read", "toDataURL")
+                if values
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    == "image/png" =>
+            {
+                let (width, height) = canvas.size();
+                if width == 0 || height == 0 {
+                    json!("data:,")
+                } else {
+                    let source = canvas.snapshot().map_err(host_error)?;
+                    json!(format!(
+                        "data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(encode_png(&source.pixels)?)
+                    ))
+                }
             }
             ("recorder.command", "translate") => {
                 canvas.translate(num(values, 0)?, num(values, 1)?);
@@ -272,11 +495,7 @@ impl NativeHost {
             ("recorder.command", "fill" | "stroke" | "clip")
                 if values.len() <= 1 && values.first().is_none_or(Value::is_string) =>
             {
-                let rule = if values.first().and_then(Value::as_str) == Some("evenodd") {
-                    FillRule::EvenOdd
-                } else {
-                    FillRule::NonZero
-                };
+                let rule = fill_rule(values.first())?;
                 match name {
                     "fill" => canvas.fill(rule),
                     "stroke" => canvas.stroke(),
@@ -390,8 +609,33 @@ impl EngineProxy for NativeHost {
             if state.dom.len() >= 64 {
                 return Ok(json!(false));
             }
+            state.dom_sequence = input["batch"]["seq"]
+                .as_u64()
+                .ok_or(Error::Invalid("DOM sequence"))?;
             state.dom.push(input["batch"].clone());
             return Ok(json!(true));
+        }
+        if operation == "recorder.bind" {
+            let mut state = self.state.lock().unwrap();
+            let inputs = input["bindings"]
+                .as_array()
+                .filter(|items| items.len() <= 4096)
+                .ok_or(Error::Invalid("canvas bindings"))?;
+            let mut bindings = BTreeMap::new();
+            for input in inputs {
+                let node = input["node"]
+                    .as_u64()
+                    .filter(|id| *id > 5 && *id < (1 << 53))
+                    .ok_or(Error::Invalid("canvas DOM id"))?;
+                let id = input["surface"]
+                    .as_str()
+                    .ok_or(Error::Invalid("canvas surface"))?;
+                if !state.surfaces.contains_key(id) || bindings.insert(node, id.into()).is_some() {
+                    return Err(Error::Invalid("canvas binding conflict"));
+                }
+            }
+            state.bindings = bindings;
+            return Ok(Value::Null);
         }
         if operation.starts_with("recorder.") {
             return self.recorder(operation, input);

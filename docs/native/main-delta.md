@@ -464,3 +464,34 @@ check("lane ownership", changed == [str(DOC)])
 print("9 checks passed; 138 commits; 57 expanded changes; 0 runtime claims")
 ```
 <!-- audit-python:end -->
+
+## 2026-11-05 — cloud Timeline integration, partial evidence
+
+`feat/na-cloud-timeline`: `5fbeeb5ff`, `dfb9ee065`, `21c7536a5` connect the existing
+v4 worker to kernel-backed gestures, scoped pro edits, parent/key/easing edits,
+joined Position and per-axis diamonds; retain negative/coincident key identities;
+and back the existing Easing library service with atomic archive-preserving
+extension storage. Post-merge Linux evidence: 193 Rust tests and 54 Timeline Bun
+tests / 18 snapshots passed; touched-crate Clippy, formatting and v4 typecheck
+passed. The read-only timeline-render input is already contained in the base.
+
+U04/U05/U06/U07/U12 and Timeline U13 remain **partial/blocked**, not closed:
+application hit-testing/control/menu/field/presentation bindings, full Easing and
+motion-path tools, caption command bodies, Mac physical checks and Opus review
+remain. No coverage-column completion or whole-app acceptance promotion is
+claimed. Exact ownership boundaries, commands and required Mac verification are
+in [cloud-timeline.md](cloud-timeline.md#2026-11-05--final-integration-evidence-and-blocked-handoff).
+## 2026-11-05 — Inspector lane application-path evidence (partial)
+
+Reference remains `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This append
+preserves the inventory and records partial coverage, not closed UI acceptance.
+See [cloud-inspector.md](cloud-inspector.md) for exact unowned dependencies and
+Linux verification. No acceptance blocker or existing row is removed.
+
+| Row | Coverage / commit | Still required |
+| --- | --- | --- |
+| U02 | Partial — existing point models retained; no new visual-point parity claim. | Actual point-pad/native recipe, independent axis gestures, generated/contributed parameter bindings and Mac input proof. |
+| U03 | Partial — `85f03e014` connects archived media-completion metadata to guarded actor admission, with relink preservation/Undo tests. | Byte-store admission, shell pasteboard ownership/focus/precedence, image/Finder import and placement/cancellation/save/reopen. Completion descriptors do not prove bytes or readiness. |
+| U08 | Partial — `2702a18cd` connects Properties Add Effect through real V8, asynchronous native-menu replies and kernel receipts. Supported Effect Controls scalar fields now write through real registered bindings at current time. `85f03e014` preserves row actions after separators and rejects disposed/opaque bindings. | Native effect menu groups/Recent/checkmarks, remaining property services, Mac pointer/keyboard/AX and Opus presentation acceptance. |
+| U13 | Partial — `2702a18cd` adds the approved Settings Color Depth row and real 8/16/32 actor edits/Undo; `85f03e014` tests numeric/colour/toggle/choice/text effect fields and retained authored weight values. | Captions Add/Edit planner and extension-content kernel backing, full Inspector recipes/services, audio/captions/speech integration and Mac verification. |
+| U14 | Partial — no anchor live-edit or on-screen claim. | Actual viewer hit/selection/narrowing/parent-transform drag/cancel, atomic document fencing for Selection/Gesture calls, then Mac screen verification. |

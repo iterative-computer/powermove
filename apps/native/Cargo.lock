@@ -4733,13 +4733,21 @@ dependencies = [
 name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "flate2",
+ "libc",
+ "pm-compat-host",
  "pm-kernel",
  "pm-mcp",
  "pm-model",
  "pm-recorder",
  "pm-runtime-v8",
  "pm-store-host",
+ "png",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 
