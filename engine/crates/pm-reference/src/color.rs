@@ -297,7 +297,11 @@ pub fn ycbcr_to_rgb(ypbpr: [f64; 3], (kr, kb): (f64, f64)) -> [f64; 3] {
 /// E′R, E′G, E′B to E′Y, E′Pb, E′Pr (H.273 equations 38–40).
 pub fn rgb_to_ycbcr(rgb: [f64; 3], (kr, kb): (f64, f64)) -> [f64; 3] {
     let y = kr * rgb[0] + (1.0 - kr - kb) * rgb[1] + kb * rgb[2];
-    [y, (rgb[2] - y) / (2.0 * (1.0 - kb)), (rgb[0] - y) / (2.0 * (1.0 - kr))]
+    [
+        y,
+        (rgb[2] - y) / (2.0 * (1.0 - kb)),
+        (rgb[0] - y) / (2.0 * (1.0 - kr)),
+    ]
 }
 
 /// A luma (or, for matrix 0, any R′G′B′) code value of `bits` bits to its
@@ -405,7 +409,11 @@ pub fn bradford(src: [f64; 3], dst: [f64; 3]) -> M3 {
         [0.0389, -0.0685, 1.0296],
     ];
     let (s, d) = (apply(&B, src), apply(&B, dst));
-    let scale = [[d[0] / s[0], 0.0, 0.0], [0.0, d[1] / s[1], 0.0], [0.0, 0.0, d[2] / s[2]]];
+    let scale = [
+        [d[0] / s[0], 0.0, 0.0],
+        [0.0, d[1] / s[1], 0.0],
+        [0.0, 0.0, d[2] / s[2]],
+    ];
     mul(&invert(&B), &mul(&scale, &B))
 }
 
@@ -422,7 +430,18 @@ pub enum Curve {
 impl Curve {
     /// The IEC 61966-2-1 curve as ICC `para` type 3.
     pub fn srgb() -> Curve {
-        Curve::Parametric(3, [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045, 0.0, 0.0])
+        Curve::Parametric(
+            3,
+            [
+                2.4,
+                1.0 / 1.055,
+                0.055 / 1.055,
+                1.0 / 12.92,
+                0.04045,
+                0.0,
+                0.0,
+            ],
+        )
     }
 
     pub fn eval(&self, x: f64) -> f64 {
@@ -433,16 +452,44 @@ impl Curve {
                 let p = x.clamp(0.0, 1.0) * n as f64;
                 let i = (p.floor() as usize).min(n.saturating_sub(1));
                 let f = p - i as f64;
-                if n == 0 { t[0] } else { t[i] + (t[i + 1] - t[i]) * f }
+                if n == 0 {
+                    t[0]
+                } else {
+                    t[i] + (t[i + 1] - t[i]) * f
+                }
             }
             Curve::Parametric(kind, [g, a, b, c, d, e, f]) => {
                 let pow = |x: f64| (a * x + b).max(0.0).powf(*g);
                 match kind {
                     0 => x.max(0.0).powf(*g),
-                    1 => if x >= -b / a { pow(x) } else { 0.0 },
-                    2 => if x >= -b / a { pow(x) + c } else { *c },
-                    3 => if x >= *d { pow(x) } else { c * x },
-                    _ => if x >= *d { pow(x) + e } else { c * x + f },
+                    1 => {
+                        if x >= -b / a {
+                            pow(x)
+                        } else {
+                            0.0
+                        }
+                    }
+                    2 => {
+                        if x >= -b / a {
+                            pow(x) + c
+                        } else {
+                            *c
+                        }
+                    }
+                    3 => {
+                        if x >= *d {
+                            pow(x)
+                        } else {
+                            c * x
+                        }
+                    }
+                    _ => {
+                        if x >= *d {
+                            pow(x) + e
+                        } else {
+                            c * x + f
+                        }
+                    }
                 }
             }
         }
@@ -470,7 +517,11 @@ impl Curve {
         }
         if let Curve::Gamma(g) = self {
             let x = y.max(0.0).powf(1.0 / g);
-            return if extent == Extent::Clip { x.min(1.0) } else { x };
+            return if extent == Extent::Clip {
+                x.min(1.0)
+            } else {
+                x
+            };
         }
         let f = |x: f64| match extent {
             Extent::Clip => self.eval(x),
@@ -558,7 +609,9 @@ impl MatrixTrc {
                         0 => Curve::Gamma(1.0),
                         1 => Curve::Gamma(entry(0)? / 256.0),
                         _ => Curve::Table(
-                            (0..n).map(|i| entry(i).map(|v| v / 65535.0)).collect::<Result<_, _>>()?,
+                            (0..n)
+                                .map(|i| entry(i).map(|v| v / 65535.0))
+                                .collect::<Result<_, _>>()?,
                         ),
                     })
                 }
@@ -726,7 +779,12 @@ mod tests {
         let red = convert(&p3, &srgb, [1.0, 0.0, 0.0], Extent::Unclipped);
         assert!(red[0] > 1.0 && red[1] < 0.0 && red[2] < 0.0, "{red:?}");
         let back = convert(&srgb, &p3, red, Extent::Unclipped);
-        assert!(back.iter().zip([1.0, 0.0, 0.0]).all(|(a, b)| (a - b).abs() < 1e-9), "{back:?}");
+        assert!(
+            back.iter()
+                .zip([1.0, 0.0, 0.0])
+                .all(|(a, b)| (a - b).abs() < 1e-9),
+            "{back:?}"
+        );
         let clipped = convert(&p3, &srgb, [1.0, 0.0, 0.0], Extent::Clip);
         assert!(clipped.iter().all(|v| (0.0..=1.0).contains(v)));
         let table = Curve::Table(vec![0.0, 0.25, 1.0]);
@@ -744,12 +802,18 @@ mod tests {
         let table = icc.len();
         icc.resize(table + 12 * tags.len(), 0);
         let fixed = |v: f64| ((v * 65536.0).round() as i32).to_be_bytes();
-        let cols = [[0.4361, 0.2225, 0.0139], [0.3851, 0.7169, 0.0971], [0.1431, 0.0606, 0.7141]];
+        let cols = [
+            [0.4361, 0.2225, 0.0139],
+            [0.3851, 0.7169, 0.0971],
+            [0.1431, 0.0606, 0.7141],
+        ];
         for (i, sig) in tags.iter().enumerate() {
             let offset = icc.len() as u32;
             if i < 3 {
                 icc.extend_from_slice(b"XYZ \0\0\0\0");
-                cols[i].iter().for_each(|v| icc.extend_from_slice(&fixed(*v)));
+                cols[i]
+                    .iter()
+                    .for_each(|v| icc.extend_from_slice(&fixed(*v)));
             } else {
                 icc.extend_from_slice(b"curv\0\0\0\0");
                 icc.extend_from_slice(&1u32.to_be_bytes());

@@ -359,6 +359,7 @@ pub fn window(client: &mut TimelineClient, first: usize, visible: usize) -> Resu
                     let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
                     value["layer"] = json!(id);
+                    value["layerKind"] = json!(layer.kind);
                     value["index"] = if layer.group.is_some() {
                         Value::Null
                     } else {

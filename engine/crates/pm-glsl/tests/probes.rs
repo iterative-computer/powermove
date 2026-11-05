@@ -132,8 +132,9 @@ fn mutants_of_the_probes_never_panic() {
     let mut tally = std::collections::BTreeMap::<String, usize>::new();
     for index in 0..300 {
         let (source, _, offset) = pm_glsl::fuzz::mutant(&seeds, 5, index);
-        let outcome = pm_glsl::fuzz::outcome_isolated(&source, offset)
-            .expect("the worker returns a compiler verdict");
+        let outcome = pm_glsl::fuzz::outcome_isolated(&source, offset).unwrap_or_else(|error| {
+            panic!("mutant {index}: the worker must return a compiler verdict: {error:?}")
+        });
         assert_ne!(
             outcome.result, "panic",
             "mutant {index}: {}",

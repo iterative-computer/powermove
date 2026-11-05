@@ -161,6 +161,12 @@ pub enum Call {
     DirectWrite {
         ops: Vec<Op>,
     },
+    /// Composition navigation, validated on the actor. Declines during an edit;
+    /// publishes without adding an undo step, like main Comps.open.
+    OpenComposition {
+        comp_id: String,
+        document: u64,
+    },
     /// Lost acknowledgement: the stored ack of `txid`, if any.
     QueryTx {
         txid: TxId,
@@ -590,6 +596,7 @@ pub struct Project {
     ack_order: VecDeque<TxId>,
     dead: HashSet<Writer>,
     workspace: Value,
+    composition_selections: HashMap<String, Vec<String>>,
     next_id: u64,
     mutation_serial: u64,
     mutations: VecDeque<(u64, Writer)>,
@@ -620,6 +627,7 @@ impl Project {
             ack_order: VecDeque::new(),
             dead: HashSet::new(),
             workspace: Value::Null,
+            composition_selections: HashMap::new(),
             next_id: 1,
             mutation_serial: 0,
             mutations: VecDeque::new(),
@@ -758,6 +766,10 @@ impl Project {
                 body,
                 expected_revision,
             } => Handled::reply(self.transact(caller, txid, label, body, expected_revision)),
+            Call::OpenComposition { comp_id, document } => {
+                let ack = self.open_composition(caller, txid, comp_id, document);
+                Handled::reply(ack)
+            }
             Call::DirectWrite { ops } => Handled::reply(self.direct_write(caller, txid, ops)),
             Call::RealmFailed => self.realm_failed(caller, txid),
             Call::ExternalDone {
@@ -1763,6 +1775,77 @@ impl Project {
                 },
             ),
             Err(e) => self.ack(txid, None, None, Reply::Throw(e.into())),
+        }
+    }
+
+    fn open_composition(
+        &mut self,
+        caller: Caller,
+        txid: Option<TxId>,
+        comp_id: String,
+        document: u64,
+    ) -> Ack {
+        if self.store.doc_id() != document {
+            return self.ack(
+                txid,
+                None,
+                None,
+                Reply::Throw(KernelError::Guard(
+                    "The project changed before opening this composition".into(),
+                )),
+            );
+        }
+        let previous = self.store.open_comp();
+        if previous.as_deref() == Some(&comp_id) {
+            return self.ack(
+                txid,
+                None,
+                None,
+                Reply::Applied {
+                    revision: self.revision(),
+                    changed: false,
+                },
+            );
+        }
+        let selection = self.store.selection().layers().to_vec();
+        let destination_selection = self
+            .composition_selections
+            .get(&comp_id)
+            .cloned()
+            .unwrap_or_default();
+        if self.entry.is_some() {
+            return self.ack(
+                txid,
+                None,
+                None,
+                Reply::Throw(KernelError::Guard(
+                    "Finish the active edit before opening a composition".into(),
+                )),
+            );
+        }
+        let command = crate::Command::Comp(crate::CompCommand::Open { comp_id });
+        let ops = self
+            .store
+            .root()
+            .ok_or(TransactionError::NoDocument)
+            .and_then(|root| {
+                command
+                    .plan(root, caller.origin)
+                    .map_err(TransactionError::Command)
+            });
+        match ops {
+            Ok(ops) => {
+                let ack = self.direct_write(caller, txid, ops);
+                if !matches!(ack.reply, Reply::Throw(_)) {
+                    if let Some(previous) = previous {
+                        self.composition_selections.insert(previous, selection);
+                    }
+                    self.store.clear_selection();
+                    self.store.select_layers(destination_selection, false);
+                }
+                ack
+            }
+            Err(error) => self.ack(txid, None, None, Reply::Throw(error.into())),
         }
     }
 

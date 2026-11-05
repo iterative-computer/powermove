@@ -5,6 +5,7 @@ macro_rules! checks {
     )*}
 }
 checks! {
+    effect_validator => "A532",
     wave5_lint => "A539", wave5_simplify => "A529",
     wave5_slip => "B258",
     wave5_strips => "A504", wave5_scene => "A508", wave5_list_media => "A513", wave5_manage_media => "A516", wave5_video => "A530", wave5_captions => "A550", wave5_video_refusals => "W057.mcp-refusals",
@@ -37,9 +38,9 @@ fn corpus_pmv4() {
     fixture::corpus_fixture("pmv4").unwrap();
 }
 #[test]
-fn all_195_real_bindings_under_seven_routing_contexts() {
+fn all_198_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
-    assert_eq!(keyboard::production::shipped().len(), 195);
+    assert_eq!(keyboard::production::shipped().len(), 198);
     for binding in &c.bindings {
         for context in keyboard::CONTEXTS {
             keyboard::check(binding, context).unwrap();
@@ -85,4 +86,10 @@ fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
         "{}",
         result.reason
     );
+}
+
+#[test]
+fn frozen_replace_and_sequential_set_preserve_complete_authored_curves() {
+    pm_acceptance::curve_oracle::replace().unwrap();
+    pm_acceptance::curve_oracle::set().unwrap();
 }

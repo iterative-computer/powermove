@@ -1,0 +1,1038 @@
+//! Native model coordination. Snapshots contain presentation facts and leased
+//! identifiers, never a writable JS project or a second persistence authority.
+use crate::{
+    data::{Backend, model, wire},
+    properties::Properties,
+};
+use pm_kernel::*;
+use pm_panel_media::{Catalog, readiness::ObservedRuntime, v4::ProjectBridge};
+use pm_panel_timeline::{PropertyFacts, TimelineClient};
+use pm_surface::host_api::Query;
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+
+type TimelineJob = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    TimelineClient,
+                    Result<Vec<pm_panel_timeline::HostEffect>, String>,
+                ),
+            > + Send,
+    >,
+>;
+pub(crate) struct Models {
+    pub properties: Properties,
+    pub timeline: Option<TimelineClient>,
+    pub timeline_scene: Option<std::sync::Arc<crate::timeline_scene::Scene>>,
+    pub viewer: pm_panel_viewerchrome::v4::Session,
+    pub project: ProjectBridge,
+    pub facts: Value,
+    pub fields: BTreeMap<String, String>,
+    pub platform: Vec<(String, Value)>,
+    pub agent: pm_panel_agentpanel::model::Panel,
+    pub agent_sequence: u64,
+    pub stamp: String,
+    pub settings_sequence: u64,
+    pub export: Value,
+    pub project_reply: Option<Value>,
+    pub media_runtime: ObservedRuntime,
+    pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
+    pub export_probe_stamp: String,
+    timeline_job: Option<TimelineJob>,
+}
+impl Models {
+    pub fn new(
+        kernel: KernelHandle,
+        project: &str,
+        caller: Caller,
+        application: bool,
+    ) -> Result<Self, String> {
+        let timeline = if application {
+            None
+        } else {
+            Some(TimelineClient::new(kernel.clone(), project, caller).map_err(|e| e.to_string())?)
+        };
+        let mut store = KernelStore {
+            kernel,
+            application,
+        };
+        let agent =
+            pm_panel_agentpanel::model::Panel::load(&mut store, project, &new_id("thread"), 0)
+                .map_err(|e| format!("{e:?}"))?;
+        Ok(Self {
+            properties: Properties::default(),
+            timeline,
+            timeline_scene: None,
+            viewer: Default::default(),
+            project: ProjectBridge::default(),
+            facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
+            fields: BTreeMap::new(),
+            platform: vec![],
+            agent,
+            agent_sequence: 1,
+            stamp: String::new(),
+            settings_sequence: 1,
+            export: Value::Null,
+            timeline_job: None,
+            project_reply: None,
+            media_runtime: Default::default(),
+            originals: Default::default(),
+            export_probe_stamp: String::new(),
+        })
+    }
+}
+// A disjoint actor setting namespace avoids treating any real project ID as
+// reserved. Unknown application fields are retained; concurrent writes refuse.
+const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
+struct KernelStore {
+    kernel: KernelHandle,
+    application: bool,
+}
+impl pm_agents::persistence::Store for KernelStore {
+    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        let state = self.kernel.state();
+        if !self.application {
+            return Ok(state.settings.get(key).map(wire));
+        }
+        match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
+            None => Ok(None),
+            Some(Value::Object(fields)) => Ok(fields.get(key).cloned()),
+            Some(_) => Err(std::io::Error::other(
+                "Unknown application Agent archive shape",
+            )),
+        }
+    }
+    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+        let state = self.kernel.state();
+        let (key, value) = if self.application {
+            let mut fields = match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
+                None => serde_json::Map::new(),
+                Some(Value::Object(fields)) => fields,
+                Some(_) => {
+                    return Err(std::io::Error::other(
+                        "Unknown application Agent archive shape",
+                    ));
+                }
+            };
+            fields.insert(key.into(), value.clone());
+            (APPLICATION_AGENT_STORE, Value::Object(fields))
+        } else {
+            (key, value.clone())
+        };
+        let value = model(&value).map_err(std::io::Error::other)?;
+        self.kernel
+            .state_transaction(state::StateTransaction {
+                expected_revision: Some(state.revision),
+                ops: vec![state::StateOp::Setting {
+                    key: key.into(),
+                    value: Some(value),
+                }],
+            })
+            .wait()
+            .ok_or_else(|| std::io::Error::other("kernel closed"))?
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+}
+
+impl Backend {
+    pub(crate) fn time(&self) -> f64 {
+        self.native.facts["time"].as_f64().unwrap_or(0.)
+    }
+    pub(crate) fn fields(&mut self, names: &Value) -> Result<Value, String> {
+        let mut fields = serde_json::Map::new();
+        for name in names.as_array().ok_or("field names")? {
+            let name = name.as_str().ok_or("field name")?;
+            let id = format!(
+                "builtin:{}:{}:{}",
+                self.panel_id, self.identity.generation, name
+            );
+            self.native.fields.insert(id.clone(), name.into());
+            fields.insert(name.into(), json!(id));
+        }
+        Ok(Value::Object(fields))
+    }
+    pub(crate) fn inspector_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let time = self.time();
+        let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        self.native.properties.snapshot(
+            self.model.as_mut().ok_or("No open project")?,
+            time,
+            playing,
+        )
+    }
+    pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
+        self.sync()?;
+        let time = self.time();
+        let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        let p = self.published().ok_or("closed")?;
+        let client = self
+            .native
+            .timeline
+            .as_mut()
+            .ok_or("timeline action in flight")?;
+        let first = request["first"].as_u64().ok_or("first row")? as usize;
+        let visible = request["visible"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= 512)
+            .ok_or("visible rows")? as usize;
+        let mut frame =
+            pm_panel_timeline::v4::window(client, first, visible).map_err(|e| e.to_string())?;
+        let fps = client.model.index.fps;
+        let mut scene = crate::timeline_scene::Scene {
+            duration: client.model.index.duration,
+            fps,
+            time,
+            rows: Default::default(),
+        };
+        let mut display = vec![];
+        for row in frame["window"]["rows"].as_array().ok_or("timeline rows")? {
+            let mut row = row.clone();
+            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
+            row["focused"] = json!(false);
+            row["hovered"] = json!(false);
+            if row["kind"] == "layer" {
+                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                row["accessibilityLabel"] = json!(format!(
+                    "{}, {}",
+                    l.name.to_string_lossy(),
+                    super::data::kind_label(&l.kind)
+                ));
+                row["canOpen"] = json!(!l.channels.is_empty() || l.kind == "group");
+                row["transformable"] = json!(l.kind != "audio");
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|client.model.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                row["media"] = json!(if matches!(l.kind.as_str(), "video" | "audio" | "image") {
+                    "loading"
+                } else {
+                    "ready"
+                });
+            } else {
+                let path = row["path"].as_str().ok_or("property path")?.to_owned();
+                let label = property_label(&path);
+                row["label"] = json!(label);
+                let binding = pm_panel_inspector::Binding::Property(
+                    pm_panel_inspector::PropertyId::new(&layer, &path),
+                );
+                if let Ok(state) = self
+                    .model
+                    .as_mut()
+                    .ok_or("No open project")?
+                    .binding_state(&binding, time)
+                {
+                    let value = wire(&state.value);
+                    let readout = match value.as_f64() {
+                        Some(n) => format!("{n:.2}"),
+                        None => value.to_string(),
+                    };
+                    row["readout"] = json!(readout);
+                    row["animated"] = json!(state.animated);
+                    row["keyAtPlayhead"] = json!(state.key_at_playhead);
+                } else {
+                    row["readout"] = json!("");
+                    row["animated"] = json!(false);
+                    row["keyAtPlayhead"] = json!(false);
+                }
+                let channel = client.model.index.channel(&layer, &path);
+                row["previous"] =
+                    json!(channel.is_some_and(|c| c.keys.iter().any(|k| k.time < time)));
+                row["next"] = json!(channel.is_some_and(|c| c.keys.iter().any(|k| k.time > time)));
+                row["accessibilityLabel"] = json!(format!(
+                    "{label}, {}",
+                    row["readout"].as_str().unwrap_or("")
+                ));
+            }
+            let layer_id = row["layer"].as_str().ok_or("layer")?;
+            if let Some(layer) = client.model.index.layer(layer_id) {
+                let property = row["kind"] == "property";
+                let path = row["path"].as_str();
+                let mut keys = vec![];
+                for channel in &layer.channels {
+                    if property
+                        && path.is_some_and(|p| {
+                            p != channel.path
+                                && !(p == "scale" && channel.path.starts_with("scale."))
+                        })
+                    {
+                        continue;
+                    }
+                    for key in &channel.keys {
+                        let time = layer.from + key.time;
+                        if time < 0. || time > scene.duration {
+                            continue;
+                        }
+                        keys.push(crate::timeline_scene::Key {
+                            id: key.id.clone(),
+                            channel: channel.path.clone(),
+                            time,
+                            selected: client.model.selection.keys().contains(&key.id),
+                            interpolation: key
+                                .stored
+                                .get("e")
+                                .and_then(pm_model::Value::as_str)
+                                .unwrap_or("linear")
+                                .into(),
+                        });
+                    }
+                }
+                keys.sort_by(|a, b| a.time.total_cmp(&b.time));
+                // Occluded keys in the same logical pixel share one painted mark;
+                // the full identities remain in the native model for hit testing.
+                let mut seen = std::collections::BTreeSet::new();
+                keys.retain(|k| {
+                    seen.insert((
+                        (k.time / scene.duration.max(0.001) * 2048.).floor() as i64,
+                        k.selected,
+                    ))
+                });
+                scene.rows.insert(
+                    row["id"].as_str().ok_or("row id")?.into(),
+                    crate::timeline_scene::Row {
+                        layer: layer.id.clone(),
+                        name: layer.name.to_string_lossy(),
+                        kind: layer.kind.clone(),
+                        from: layer.from,
+                        duration: layer.duration,
+                        property,
+                        selected: row["selected"].as_bool().unwrap_or(false),
+                        keys,
+                    },
+                );
+            }
+            display.push(row);
+        }
+        self.native.timeline_scene = Some(std::sync::Arc::new(scene));
+        frame["window"]["rows"] = json!(display);
+        let frames = (time * fps).round().max(0.) as u64;
+        let nominal = fps.round().max(1.) as u64;
+        let sec = frames / nominal;
+        frame["graphEmpty"] = json!(
+            !client
+                .model
+                .index
+                .layers
+                .iter()
+                .any(|l| l.channels.iter().any(|c| !c.keys.is_empty()))
+        );
+        frame["playing"] = json!(playing);
+        frame["timecode"] = json!(format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        ));
+        frame["spokenTime"] = json!(format!("{sec} seconds, {} frames", frames % nominal));
+        frame["frameRate"] = json!(format!("{fps} fps"));
+
+        let title = p
+            .snapshot
+            .root()
+            .and_then(|r| r.get("name"))
+            .and_then(|n| match n.kind() {
+                pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        frame["tabs"] =
+            json!([{"id":client.model.index.comp_id,"name":title,"active":true,"showClose":false}]);
+        frame["renderSummary"] = json!("");
+        frame["feedback"] = json!({});
+        Ok(frame)
+    }
+    pub(crate) fn viewer_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let p = self.published().ok_or("closed")?;
+        let vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
+            .map_err(|e| e.to_string())?;
+        let stage = pm_panel_viewerchrome::Size {
+            width: self.native.facts["stage"][0].as_f64().unwrap_or(640.),
+            height: self.native.facts["stage"][1].as_f64().unwrap_or(360.),
+        };
+        let viewport = vm
+            .viewport(
+                stage,
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
+                    .metrics
+                    .inset as f64,
+            )
+            .map_err(|e| e.to_string())?;
+        let model = wire(
+            &self
+                .native
+                .viewer
+                .publish(&vm, viewport)
+                .map_err(|e| e.to_string())?,
+        );
+        Ok(
+            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
+        )
+    }
+    pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
+        let p = self.published().ok_or("closed")?;
+        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
+        self.native
+            .project
+            .refresh(&catalog, &self.native.media_runtime);
+        if let Some(request) = request {
+            let reply = self
+                .native
+                .project
+                .request(
+                    &catalog,
+                    &self.native.media_runtime,
+                    serde_json::from_value(request).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            if reply
+                .outcome
+                .as_ref()
+                .is_some_and(|o| o.edit.is_some() || !o.effects.is_empty())
+            {
+                return Err("Project edit requires native coordinator".into());
+            }
+            serde_json::to_value(reply).map_err(|e| e.to_string())
+        } else {
+            serde_json::to_value(
+                self.native
+                    .project
+                    .view(&catalog, &self.native.media_runtime)
+                    .map_err(|e| format!("{e:?}"))?,
+            )
+            .map_err(|e| e.to_string())
+        }
+    }
+    fn project_command(&mut self, args: &Value) -> Result<NativeCommand, String> {
+        let p = self.published().ok_or("closed")?;
+        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
+        self.native
+            .project
+            .refresh(&catalog, &self.native.media_runtime);
+        let mut reply = self
+            .native
+            .project
+            .request(
+                &catalog,
+                &self.native.media_runtime,
+                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        if let Some(outcome) = reply.outcome.as_mut() {
+            for effect in outcome.effects.drain(..) {
+                self.native.platform.push((
+                    "project.effect".into(),
+                    serde_json::to_value(pm_panel_media::HostRequest {
+                        owner: catalog.stamp.clone(),
+                        effect,
+                    })
+                    .map_err(|e| e.to_string())?,
+                ));
+            }
+            if let Some(edit) = outcome.edit.take() {
+                let prepared = catalog.prepare(edit).map_err(|e| format!("{e:?}"))?;
+                self.native.project_reply =
+                    Some(serde_json::to_value(reply).map_err(|e| e.to_string())?);
+                return Ok(NativeCommand::Kernel(prepared.request(self.caller)));
+            }
+        }
+        Ok(NativeCommand::Value(
+            serde_json::to_value(reply).map_err(|e| e.to_string())?,
+        ))
+    }
+    pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
+        let window =
+            pm_panel_agentpanel::v4::Window::new(&self.native.agent, self.native.agent.active_id())
+                .map_err(|e| format!("{e:?}"))?;
+        let count = window
+            .count(&self.native.agent)
+            .map_err(|e| format!("{e:?}"))?;
+        let snapshot = window
+            .snapshot(&self.native.agent, count.saturating_sub(64)..count, 0)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_sequence,"snapshot":snapshot,"native":{"connection":"unavailable","reason":"Connect an API, Ollama, or LM Studio in Settings.","presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":false,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+        )
+    }
+    pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let project = self.published().map(|p| {
+            let name = p
+                .snapshot
+                .root()
+                .and_then(|r| r.get("name"))
+                .and_then(|n| match n.kind() {
+                    pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            json!({"id":p.project,"name":name})
+        });
+        let state = self.kernel.state();
+        let extensions=state.extensions.values().map(|e|json!({"id":e.id,"name":e.id,"type":"Other","source":if e.installed{"Installed"}else{"Built in"},"enabled":e.enabled,"about":"","includes":[],"shortcuts":[],"files":[],"variables":[],"canArchive":false})).collect::<Vec<_>>();
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":[],"extensions":extensions,"extensionsState":"ready","speech":[]});
+        if let Some(project) = project {
+            publication["project"] = project;
+            publication["rows"] = json!(self.settings_rows()?);
+        }
+        Ok(publication)
+    }
+    pub(crate) fn extra_query(
+        &mut self,
+        query: &Query,
+        channels: Option<&[String]>,
+    ) -> Result<Option<Value>, String> {
+        if channels == Some(&["settings".to_owned()][..]) {
+            return self.settings_snapshot().map(Some);
+        }
+        if channels == Some(&["agent".to_owned()][..]) {
+            return self.agent_snapshot().map(Some);
+        }
+        if channels == Some(&["viewer.chrome".to_owned()][..]) {
+            return self.viewer_snapshot().map(Some);
+        }
+        if channels == Some(&["export".to_owned()][..]) {
+            return self.export_snapshot().map(Some);
+        }
+        if self.panel_id == "inspector" && matches!(query, Query::Evaluated) {
+            return self.inspector_snapshot().map(Some);
+        }
+        if matches!(query, Query::Time) {
+            return Ok(Some(
+                json!({"time":self.time(),"playing":self.native.facts["playing"]}),
+            ));
+        }
+        if self.panel_id == "assets" && matches!(query, Query::Project) {
+            let p = self.published().ok_or("closed")?;
+            return Ok(Some(
+                json!({"stamp":{"project":p.project,"document":p.snapshot.doc_id,"revision":p.revision()}}),
+            ));
+        }
+        Ok(None)
+    }
+    pub(crate) fn start_timeline(&mut self, intent: Value) -> Result<(), String> {
+        if self.native.timeline_job.is_some() {
+            return Err("Timeline command pending".into());
+        }
+        let mut client = self.native.timeline.take().ok_or("Timeline closed")?;
+        let p = self.published().ok_or("closed")?;
+        let time = self.time();
+        self.native.timeline_job = Some(Box::pin(async move {
+            if intent["type"] == "native.select-key" {
+                let result = (async {
+                    client.sync().map_err(|e| e.to_string())?;
+                    let calls = client
+                        .model
+                        .select_keys(
+                            intent["layer"].as_str().ok_or("layer")?,
+                            intent["channel"].as_str().ok_or("channel")?,
+                            &[intent["key"].as_str().ok_or("key")?.into()],
+                            intent["additive"].as_bool().unwrap_or(false),
+                            false,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    for call in calls {
+                        client.call(call).await.map_err(|e| e.to_string())?;
+                    }
+                    Ok(Vec::new())
+                })
+                .await;
+                return (client, result);
+            }
+            let context = pm_panel_timeline::v4::Context {
+                time,
+                expected_document: p.snapshot.doc_id,
+                expected_revision: p.revision(),
+                millis: intent["millis"].as_u64().unwrap_or(0),
+                in_field: false,
+                keys_admitted: true,
+                property_facts: &PropertyFacts::default(),
+            };
+            let result = pm_panel_timeline::v4::dispatch(&mut client, &intent, &context)
+                .await
+                .map_err(|e| e.to_string());
+            (client, result)
+        }));
+        Ok(())
+    }
+    pub(crate) fn poll_timeline(&mut self) -> Option<Result<Value, String>> {
+        let future = self.native.timeline_job.as_mut()?;
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready((client, result)) = future.as_mut().poll(&mut cx) else {
+            return None;
+        };
+        self.native.timeline = Some(client);
+        self.native.timeline_job = None;
+        Some(result.map(|effects| {
+            for effect in effects {
+                use pm_panel_timeline::HostEffect;
+                let action = match effect {
+                    HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
+                    HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
+                    HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
+                    HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                    other => json!({"kind":"unavailable","action":format!("{other:?}")}),
+                };
+                self.native
+                    .platform
+                    .push(("timeline.effect".into(), action));
+            }
+            Value::Null
+        }))
+    }
+}
+fn property_label(path: &str) -> &str {
+    match path {
+        "position" => "Position",
+        "position.x" => "Position X",
+        "position.y" => "Position Y",
+        "scale" => "Scale",
+        "scale.x" => "Scale X",
+        "scale.y" => "Scale Y",
+        "rotation" => "Rotation",
+        "opacity" => "Opacity",
+        _ => path,
+    }
+}
+
+pub(crate) enum NativeCommand {
+    Value(Value),
+    Kernel(Request),
+    State(state::StateTransaction),
+    Timeline(Value),
+}
+impl Backend {
+    pub(crate) fn export_snapshot(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let p = self.published().ok_or("closed")?;
+        let root = p.snapshot.root().ok_or("closed")?;
+        let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .ok_or("composition")?;
+        let n = |key: &str, default: f64| {
+            comp.get(key)
+                .and_then(|n| match n.kind() {
+                    pm_model::NodeKind::Number(v) => Some(*v),
+                    _ => None,
+                })
+                .unwrap_or(default)
+        };
+        let width = n("w", 1920.) as u32;
+        let height = n("h", 1080.) as u32;
+        let fps = n("fps", 30.);
+        let name = root
+            .get("name")
+            .and_then(|n| match n.kind() {
+                pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if self.native.export.is_null() {
+            let fields = self.fields(&json!([
+                "format",
+                "scale",
+                "width",
+                "height",
+                "fps",
+                "range",
+                "quality",
+                "mblur",
+                "audio",
+                "alpha",
+                "captionsBurn",
+                "captionsSidecar",
+                "preset",
+                "presetName"
+            ]))?;
+            let saved = self.kernel.state().settings.get("exportOpts").map(wire);
+            let options=saved.filter(|v|crate::delivery::options(v).is_ok()).unwrap_or_else(||json!({"format":"mp4","scale":1,"width":width,"height":height,"fps":fps,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"}));
+            self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
+        }
+        let options: pm_promedia::export_panel::Options =
+            crate::delivery::options(&self.native.export["options"])?;
+        let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"summary":plan.summary});
+        self.native.export["presets"] = json!(
+            self.kernel
+                .state()
+                .settings
+                .get("renderPresets")
+                .map(wire)
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p["archived"] != true
+                    && p["id"].is_string()
+                    && p["name"].is_string()
+                    && crate::delivery::options(&p["options"]).is_ok())
+                .collect::<Vec<_>>()
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let key = format!(
+                "{}:{}:{}:{:?}",
+                p.snapshot.doc_id,
+                p.revision(),
+                serde_json::to_string(&options).map_err(|e| e.to_string())?,
+                self.native.originals
+            );
+            if self.native.export_probe_stamp != key {
+                self.native.export["capabilities"] = crate::delivery::capabilities(
+                    &p.snapshot,
+                    &options,
+                    self.time(),
+                    &self.native.originals,
+                );
+                self.native.export_probe_stamp = key;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        for format in ["prores", "mp4", "webm", "png", "still"] {
+            self.native.export["capabilities"][format] =
+                json!({"available":false,"reason":"Native encoder probes require macOS."});
+        }
+        self.native.export["capabilities"]["json"] =
+            crate::delivery::portable_capability(&p.snapshot, &self.native.originals);
+        Ok(self.native.export.clone())
+    }
+    pub(crate) fn command_reply(&mut self, command: &str) -> Result<Value, String> {
+        match command {
+            "export.begin" | "export.retry" => {
+                self.native.export["run"] = json!({"phase":"choosingDestination"});
+                self.native
+                    .platform
+                    .push((command.into(), self.native.export["options"].clone()));
+                self.native.export["sequence"] =
+                    json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                self.export_snapshot()
+            }
+            c if c.starts_with("export.") => {
+                self.native.export["sequence"] =
+                    json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
+                self.export_snapshot()
+            }
+            "profile.set" => Ok(json!({"stateRevision":self.kernel.state().revision})),
+            "panel.settings" => self.settings_snapshot(),
+            "panel.inspector" | "panel.binding" => self.inspector_snapshot(),
+            "viewer.chrome.drive" => self.viewer_snapshot(),
+            "panel.project" => {
+                let mut reply = self
+                    .native
+                    .project_reply
+                    .take()
+                    .ok_or("Missing project acknowledgement")?;
+                reply["view"] = self.project_view(None)?;
+                Ok(reply)
+            }
+            _ => self.projection(),
+        }
+    }
+    pub(crate) fn native_command(
+        &mut self,
+        command: &str,
+        args: &Value,
+    ) -> Result<NativeCommand, String> {
+        self.sync()?;
+        let time = self.time();
+        if matches!(
+            command,
+            "export.begin"
+                | "export.retry"
+                | "export.plan"
+                | "export.preset.save"
+                | "export.reset"
+                | "export.closeFailure"
+        ) && matches!(
+            self.native.export["run"]["phase"].as_str(),
+            Some("choosingDestination" | "preparing" | "rendering" | "cancelling")
+        ) {
+            return Err("Export is in progress".into());
+        }
+        let value = match command {
+            "panel.inspector" => {
+                if let Some(request) = self.native.properties.intent(
+                    self.model.as_mut().ok_or("No open project")?,
+                    self.caller,
+                    args,
+                    time,
+                )? {
+                    return Ok(NativeCommand::Kernel(request));
+                }
+                self.inspector_snapshot()?
+            }
+            "panel.binding" => {
+                let handle = args["handle"].as_str().ok_or("binding handle")?;
+                if self.native.fields.contains_key(handle) {
+                    return Err(
+                        "Local controls must dispatch their authored change listener".into(),
+                    );
+                }
+                let request = self.native.properties.write(
+                    self.model.as_mut().ok_or("No open project")?,
+                    self.caller,
+                    handle,
+                    model(&args["value"])?,
+                    time,
+                )?;
+                return Ok(NativeCommand::Kernel(request));
+            }
+            "panel.timeline" => return Ok(NativeCommand::Timeline(args.clone())),
+            "panel.timeline.dispose" => {
+                self.native.timeline_job = None;
+                Value::Null
+            }
+            "viewer.chrome.drive" => {
+                let p = self.published().ok_or("closed")?;
+                let vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
+                    .map_err(|e| e.to_string())?;
+                let stage = pm_panel_viewerchrome::Size {
+                    width: self.native.facts["stage"][0].as_f64().unwrap_or(640.),
+                    height: self.native.facts["stage"][1].as_f64().unwrap_or(360.),
+                };
+                let viewport = vm
+                    .viewport(
+                        stage,
+                        pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default())
+                            .metrics
+                            .inset as f64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let plan = self
+                    .native
+                    .viewer
+                    .drive(&vm, &model(args)?, viewport, self.caller)
+                    .map_err(|e| e.to_string())?;
+                match plan.effect {
+                    pm_panel_viewerchrome::Effect::State(tx) => {
+                        return Ok(NativeCommand::State(tx));
+                    }
+                    pm_panel_viewerchrome::Effect::Document(request) => {
+                        return Ok(NativeCommand::Kernel(request));
+                    }
+                    pm_panel_viewerchrome::Effect::Host(action) => {
+                        use pm_panel_viewerchrome::{HostAction, TransportAction};
+                        let action = match action {
+                            HostAction::Transport(action) => match action {
+                                TransportAction::Seek(time) => json!({"kind":"seek","time":time}),
+                                TransportAction::Step(frames) => {
+                                    json!({"kind":"command","name":"stepFrames","args":[frames]})
+                                }
+                                TransportAction::Toggle => json!({"kind":"command","name":"play"}),
+                                TransportAction::Start => {
+                                    json!({"kind":"command","name":"gotoStart"})
+                                }
+                                TransportAction::End => json!({"kind":"command","name":"gotoEnd"}),
+                                TransportAction::WorkIn => {
+                                    json!({"kind":"command","name":"gotoWorkIn"})
+                                }
+                                TransportAction::WorkOut => {
+                                    json!({"kind":"command","name":"gotoWorkOut"})
+                                }
+                                TransportAction::Pause => json!({"kind":"pause"}),
+                            },
+                            HostAction::Command { id, args } => {
+                                json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})
+                            }
+                            other => json!({"kind":"unavailable","action":format!("{other:?}")}),
+                        };
+                        self.native.platform.push(("viewer.action".into(), action));
+                        Value::Null
+                    }
+                }
+            }
+            "panel.project" => return self.project_command(args),
+            "panel.settings" => return self.settings_action(args),
+            "panel.agent.read" => self.agent_snapshot()?,
+            "panel.agent.dispatch" => {
+                crate::agent_host::admit(&args["action"])?;
+                let run = new_id("run");
+                let request = new_id("request");
+                let thread = new_id("thread");
+                let effect = pm_panel_agentpanel::v4::dispatch_at(
+                    &mut self.native.agent,
+                    self.native.agent_sequence,
+                    args,
+                    pm_panel_agentpanel::v4::Context {
+                        run: &run,
+                        request: &request,
+                        new_thread: &thread,
+                        now: 0,
+                        popover_open: true,
+                    },
+                )
+                .map_err(|e| format!("{e:?}"))?;
+                if let Some(effect) = effect {
+                    use pm_panel_agentpanel::model::{EffectKind, ShellAction};
+                    let operation = match effect.kind {
+                        EffectKind::OpenSettings => "agent.settings",
+                        EffectKind::Shell(ShellAction::Open) => "agent.open",
+                        EffectKind::Shell(ShellAction::Close) => "agent.close",
+                        _ => {
+                            return Err(
+                                "Agent provider or native action service is unavailable".into()
+                            );
+                        }
+                    };
+                    self.native.platform.push((operation.into(), Value::Null));
+                }
+                self.native
+                    .agent
+                    .save(
+                        &mut KernelStore {
+                            kernel: self.kernel.clone(),
+                            application: self.application,
+                        },
+                        0,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                self.native.agent_sequence += 1;
+                self.agent_snapshot()?
+            }
+            "profile.get" => {
+                let key = args["key"].as_str().ok_or("profile key")?;
+                if !profile_key(key) {
+                    return Err("Unprivileged profile key".into());
+                }
+                let state = self.kernel.state();
+                let mut result = json!({"stateRevision":state.revision});
+                if let Some(value) = state.settings.get(key) {
+                    result["value"] = wire(value);
+                }
+                result
+            }
+            "profile.set" => {
+                let key = args["key"].as_str().ok_or("profile key")?;
+                if !profile_key(key) {
+                    return Err("Unprivileged profile key".into());
+                }
+                crate::settings::validate_profile(key, &args["value"])?;
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(self.kernel.state().revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: key.into(),
+                        value: Some(model(&args["value"])?),
+                    }],
+                }));
+            }
+            "export.preset.save" => {
+                let state = self.kernel.state();
+                let presets = crate::delivery::save_preset(
+                    state.settings.get("renderPresets").map(wire),
+                    args["name"].as_str().ok_or("Preset name")?,
+                    args["options"].clone(),
+                )?;
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(state.revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: "renderPresets".into(),
+                        value: Some(model(&presets)?),
+                    }],
+                }));
+            }
+            "export.plan" => {
+                let options: pm_promedia::export_panel::Options =
+                    crate::delivery::options(&args["options"])?;
+                options.validate()?;
+                self.native.export["options"] = args["options"].clone();
+                self.command_reply(command)?
+            }
+            "export.reset" | "export.closeFailure" => {
+                self.native.export["run"] = json!({"phase":"idle"});
+                self.command_reply(command)?
+            }
+            "export.reveal" => {
+                self.native.platform.push((command.into(), args.clone()));
+                self.export_snapshot()?
+            }
+            "export.begin" | "export.retry" => {
+                self.native.export_probe_stamp.clear();
+                let options = if command == "export.retry" {
+                    self.native.export["options"].clone()
+                } else {
+                    args["options"].clone()
+                };
+                let typed: pm_promedia::export_panel::Options = crate::delivery::options(&options)?;
+                typed.validate()?;
+                self.native.export["options"] = options.clone();
+                return Ok(NativeCommand::State(state::StateTransaction {
+                    expected_revision: Some(self.kernel.state().revision),
+                    ops: vec![state::StateOp::Setting {
+                        key: "exportOpts".into(),
+                        value: Some(model(&options)?),
+                    }],
+                }));
+            }
+            "export.cancel" => {
+                self.native.export["run"] = json!({"phase":"cancelling"});
+                self.native
+                    .platform
+                    .push(("export.cancel".into(), Value::Null));
+                self.command_reply(command)?
+            }
+            "effect.reveal" => {
+                self.native
+                    .platform
+                    .push(("activatePanel".into(), json!("layer-effects")));
+                Value::Null
+            }
+            _ => return Err(format!("Unregistered built-in command {command}")),
+        };
+        Ok(NativeCommand::Value(value))
+    }
+}
+fn profile_key(key: &str) -> bool {
+    matches!(
+        key,
+        "themeMode" | "previewMemoryMiB" | "autoDownloadCloudMedia" | "restoreWindows"
+    )
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use pm_agents::persistence::Store;
+    #[test]
+    fn application_agent_archive_is_disjoint_and_preserves_unknown_fields() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let mut application = KernelStore {
+            kernel: actor.handle(),
+            application: true,
+        };
+        let mut project = KernelStore {
+            kernel: actor.handle(),
+            application: false,
+        };
+        let key = "agentThreads.builtin-application";
+        project.set(key, &json!({"realProject":"keep"})).unwrap();
+        application
+            .set("future", &json!({"authored":"日本🙂"}))
+            .unwrap();
+        application
+            .set(key, &json!({"application":"separate"}))
+            .unwrap();
+        assert_eq!(
+            project.get(key).unwrap(),
+            Some(json!({"realProject":"keep"}))
+        );
+        assert_eq!(
+            application.get(key).unwrap(),
+            Some(json!({"application":"separate"}))
+        );
+        assert_eq!(
+            application.get("future").unwrap(),
+            Some(json!({"authored":"日本🙂"}))
+        );
+        project
+            .set(APPLICATION_AGENT_STORE, &json!(["unknown future shape"]))
+            .unwrap();
+        assert!(application.set(key, &json!({})).is_err());
+        assert_eq!(
+            project.get(APPLICATION_AGENT_STORE).unwrap(),
+            Some(json!(["unknown future shape"]))
+        );
+    }
+}

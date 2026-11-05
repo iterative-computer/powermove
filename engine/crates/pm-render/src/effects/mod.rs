@@ -21,6 +21,7 @@
 pub(crate) mod exec;
 pub mod fallback;
 pub mod plan;
+pub(crate) mod prewarm;
 pub mod program;
 pub mod watchdog;
 
@@ -86,6 +87,11 @@ pub struct Effects {
     /// What an empty texture unit samples: (0, 0, 0, 1), per format.
     dummies: std::collections::HashMap<wgpu::TextureFormat, pm_gpu::Target>,
     simple: std::collections::HashMap<(SimpleOp, wgpu::TextureFormat), wgpu::RenderPipeline>,
+    /// Programs built ahead of their first frame (decision PROBE-1).
+    prewarm: prewarm::Prewarm,
+    /// Time frames spent building programs or waiting for builds in
+    /// flight (µs; renderer telemetry).
+    pub(crate) frame_build_us: u64,
 }
 
 /// Per-pixel passes around legacy programs.
@@ -119,7 +125,7 @@ fn texel(p: vec4<f32>) -> vec4<f32> {
   return textureLoad(src, vec2<i32>(p.xy), 0);
 }
 @fragment fn clamp01(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  return clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0));
+  return store(clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0)));
 }
 fn coverage(a: f32) -> bool {
   return pm_may_unpremultiply(a) && a <= 1.0;
@@ -127,16 +133,16 @@ fn coverage(a: f32) -> bool {
 @fragment fn encode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
   let c = texel(p);
   if (coverage(c.a)) {
-    return pm_premultiplied_linear_to_e(c);
+    return store(pm_premultiplied_linear_to_e(c));
   }
-  return vec4<f32>(pm_e_encode3(c.rgb), c.a);
+  return store(vec4<f32>(pm_e_encode3(c.rgb), c.a));
 }
 @fragment fn decode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
   let c = texel(p);
   if (coverage(c.a)) {
-    return pm_premultiplied_e_to_linear(c);
+    return store(pm_premultiplied_e_to_linear(c));
   }
-  return vec4<f32>(pm_e_decode3(c.rgb), c.a);
+  return store(vec4<f32>(pm_e_decode3(c.rgb), c.a));
 }
 ";
 
@@ -240,6 +246,8 @@ impl Effects {
             fallback: Default::default(),
             dummies: Default::default(),
             simple: Default::default(),
+            prewarm: Default::default(),
+            frame_build_us: 0,
         }
     }
 
@@ -447,6 +455,7 @@ impl Effects {
                 entry.status = Status::Ready;
             }
         }
+        self.prewarm = Default::default();
         self.dummies.clear();
         self.simple.clear();
         true
@@ -515,7 +524,19 @@ impl Effects {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pm effect pixel pass"),
                 source: wgpu::ShaderSource::Wgsl(
-                    format!("{}\n{SIMPLE_WGSL}", pm_color::wgsl::COLOR).into(),
+                    // `store`: the nearest half on RGBA16F (Metal's
+                    // conversion truncates), the value itself otherwise.
+                    format!(
+                        "{}\n{}\nfn store(c: vec4<f32>) -> vec4<f32> {{ return {}; }}\n{SIMPLE_WGSL}",
+                        pm_color::wgsl::COLOR,
+                        crate::nearest_half::NEAREST_HALF_WGSL,
+                        if format == wgpu::TextureFormat::Rgba16Float {
+                            "pm_scene_half_color(c)"
+                        } else {
+                            "c"
+                        }
+                    )
+                    .into(),
                 ),
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -551,6 +572,86 @@ impl Effects {
                 cache: None,
             })
         })
+    }
+
+    /// Puts programs the worker built into their definitions (decision
+    /// PROBE-1). A build of a source that changed meanwhile is dropped; a
+    /// build the device refused turns the definition into a fallback one,
+    /// as a failed build on first use does.
+    fn absorb(&mut self, built: Vec<prewarm::Built>) {
+        for b in built {
+            let Some(entry) = self.entries.get_mut(&b.key) else {
+                continue;
+            };
+            if entry.key != b.source
+                || entry.program.is_some()
+                || !matches!(entry.status, Status::Ready)
+            {
+                continue;
+            }
+            match b.result {
+                Ok(program) => entry.program = Some(program),
+                Err(f) => entry.status = Status::NeedsFallback(f),
+            }
+        }
+    }
+
+    /// Queues the programs of `first` (the definitions a document uses),
+    /// then every other user definition, to be built off the frame thread
+    /// for `format` (decision PROBE-1). Programs already built or in flight
+    /// are skipped. Returns how many were queued.
+    pub fn prewarm(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        first: &[(DefinitionKind, DefinitionId)],
+    ) -> usize {
+        let done = self.prewarm.take();
+        self.absorb(done);
+        let mut order: Vec<(DefinitionKind, DefinitionId)> = first
+            .iter()
+            .filter(|k| self.entries.contains_key(*k))
+            .cloned()
+            .collect();
+        for key in self.entries.keys() {
+            let user = self
+                .get(key.0, key.1.as_str())
+                .is_some_and(|d| d.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn);
+            if user && !order.contains(key) {
+                order.push(key.clone());
+            }
+        }
+        let mut queued = 0;
+        for key in order {
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            let (Status::Ready, None, Some(prepared)) =
+                (&entry.status, &entry.program, &entry.prepared)
+            else {
+                continue;
+            };
+            if self
+                .prewarm
+                .queue(key.clone(), entry.key, prepared.clone(), device, format)
+            {
+                queued += 1;
+            }
+        }
+        queued
+    }
+
+    /// Programs built ahead: (built, their µs, frames that waited, their µs,
+    /// still in flight).
+    pub fn prewarm_stats(&self) -> (u64, u64, u64, u64, usize) {
+        let p = &self.prewarm;
+        (p.built, p.built_us, p.waited, p.waited_us, p.pending())
+    }
+
+    /// Time spent building or awaiting native programs since the previous
+    /// sample, in microseconds. Call from the renderer's worker.
+    pub fn take_program_build_us(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_build_us)
     }
 
     /// Builds a ready definition's GPU pipeline for the working format, as
@@ -597,6 +698,25 @@ impl Effects {
             pm_perf::Counter::ProgramCacheMisses,
             entry.program.is_some(),
         );
+        let building = entry.program.is_none().then(std::time::Instant::now);
+        if entry.program.is_none() {
+            // Built ahead (decision PROBE-1): taken if it finished, waited
+            // for if it is being built now.
+            let key = (kind, DefinitionId::from(id));
+            let done = if self.prewarm.in_flight(&key) && !self.prewarm.reclaim(&key) {
+                self.prewarm.wait_for(&key)
+            } else {
+                self.prewarm.take()
+            };
+            self.absorb(done);
+        }
+        let entry = self
+            .entries
+            .get_mut(&(kind, DefinitionId::from(id)))
+            .expect("looked up above");
+        if let Status::Refused(f) | Status::NeedsFallback(f) = &entry.status {
+            return Err(f.clone());
+        }
         if entry.program.is_none() {
             let built = entry
                 .prepared
@@ -613,7 +733,15 @@ impl Effects {
             }
         }
         let program = entry.program.as_mut().expect("built above");
-        if let Err(f) = program.pipeline(device, format) {
+        let piped = program.pipeline(device, format).map(|_| ());
+        if let Some(at) = building {
+            self.frame_build_us += at.elapsed().as_micros() as u64;
+        }
+        let entry = self
+            .entries
+            .get_mut(&(kind, DefinitionId::from(id)))
+            .expect("looked up above");
+        if let Err(f) = piped {
             entry.status = Status::NeedsFallback(f.clone());
             entry.program = None;
             return Err(f);
@@ -768,6 +896,7 @@ mod tests {
 
     #[test]
     fn every_builtin_translates() {
+        let _compiler_fixture = crate::compiler_fixture();
         let mut effects = Effects::new("test");
         let failures = effects.set_snapshot(&builtin_definitions()).unwrap();
         assert!(failures.is_empty(), "{failures:#?}");

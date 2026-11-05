@@ -15,39 +15,46 @@ pub struct NativeCheck {
 
 // This is the executable registry, shared by cargo test and the JSON report.
 macro_rules! registry {
-    ($($name:ident),+ $(,)?; known_failure $known:ident) => {
+    ($($name:ident),+ $(,)?) => {
         pub const ALL: &[NativeCheck] = &[
-            $(NativeCheck { id: stringify!($name), run: $name }),+,
-            NativeCheck { id: stringify!($known), run: $known }
+            $(NativeCheck { id: stringify!($name), run: $name }),+
         ];
         #[cfg(test)] mod tests {
             $(#[test] fn $name() { super::$name().unwrap(); })+
-            // Measured defect, NOT a passing e2e contract. The JSON runner
-            // executes the unchanged strict check above and reports FAIL.
-            // A production fix makes this guard fail until its owner removes
-            // the baseline and promotes the strict check to an ordinary test.
-            #[test] fn known_failure_easing_set_batch() {
-                let message=super::$known().expect_err("Glide regression fixed; remove the failure baseline");
-                assert!(message.starts_with("set_property: rotation at 1s is "),"{message}");
-                assert!(message.ends_with("complete glide curve was not preserved"),"{message}");
-            }
         }
     }
 }
 registry!(
-    easing_replace_batch, revision_recovery,
-    selection_preserves_redo, strip_move_and_library,
-    speed_double, speed_half, speed_undo_redo,
-    video_split_continuity, video_slip_bounds, video_trim_bounds,
-    keyframe_drag_values, markers_persist,
-    live_drag_commit, live_drag_cancel,
-    authored_fractional_rates, portable_opaque_data, portable_redo_tail,
-    library_trash_retains_work, media_folder_undo, media_delete_lock,
-    caption_srt, caption_vtt,
-    capture_preserves_document, capture_rejects_stale, capture_failure_preserves_edits,
-    surface_stable_ids, surface_unknown_ids,
-    mcp_tool_contract, pending_tools_are_explicit;
-    known_failure easing_set_batch
+    easing_replace_batch,
+    revision_recovery,
+    selection_preserves_redo,
+    strip_move_and_library,
+    speed_double,
+    speed_half,
+    speed_undo_redo,
+    video_split_continuity,
+    video_slip_bounds,
+    video_trim_bounds,
+    keyframe_drag_values,
+    markers_persist,
+    live_drag_commit,
+    live_drag_cancel,
+    authored_fractional_rates,
+    portable_opaque_data,
+    portable_redo_tail,
+    library_trash_retains_work,
+    media_folder_undo,
+    media_delete_lock,
+    caption_srt,
+    caption_vtt,
+    capture_preserves_document,
+    capture_rejects_stale,
+    capture_failure_preserves_edits,
+    surface_stable_ids,
+    surface_unknown_ids,
+    mcp_tool_contract,
+    pending_tools_are_explicit,
+    easing_set_batch
 );
 
 fn start(f: &mut Fixture) -> Check {
@@ -99,61 +106,9 @@ fn evaluate(doc: Value, id: &str, path: &str, time: f64) -> f64 {
         .unwrap()
 }
 
-/// agent-keyframe-easing.spec.ts:5: keep BOTH generated operation variants.
+/// Shared unchanged independent authored-curve oracle.
 fn easing(operation: &str) -> Check {
-    let mut f = Fixture::new()?;
-    f.add("easing")?;
-    commit(&mut f)?;
-    let before = without_revision(f.document()?);
-    start(&mut f)?;
-    let keys = json!([
-        {"time":0,"value":10,"ease":"glide"},
-        {"time":2,"value":110,"ease":"glide"},
-        {"time":3,"value":-40,"ease":"glide"}
-    ]);
-    let commands = if operation == "replace_keyframes" {
-        json!([{"type":operation,"target":"easing","path":"rotation","keyframes":keys}])
-    } else {
-        Value::Array(
-            keys.as_array()
-                .unwrap()
-                .iter()
-                .map(|k| {
-                    json!({
-                        "type":operation,"target":"easing","path":"rotation","mode":"keyframe",
-                        "time":k["time"],"value":k["value"],"ease":k["ease"]
-                    })
-                })
-                .collect(),
-        )
-    };
-    f.edit(commands)?;
-    // Independent f64 inversion of the frozen glide [0.16, 0.84, 0.24, 1].
-    // Expected values never come from pm-eval or the native preset table.
-    let bezier = |a: f64, b: f64, u: f64| {
-        3. * (1. - u).powi(2) * u * a + 3. * (1. - u) * u * u * b + u.powi(3)
-    };
-    let (mut lo, mut hi) = (0., 1.);
-    for _ in 0..80 {
-        let mid = (lo + hi) / 2.;
-        if bezier(0.16, 0.24, mid) < 0.5 {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let eased = bezier(0.84, 1., (lo + hi) / 2.);
-    for (t, expected) in [(1., 10. + 100. * eased), (2.5, 110. - 150. * eased)] {
-        let actual = evaluate(f.document()?, "easing", "rotation", t);
-        if (actual - expected).abs() >= 1e-4 {
-            return Err(format!(
-                "{operation}: rotation at {t}s is {actual}, expected {expected}; complete glide curve was not preserved"
-            ));
-        }
-    }
-    f.call("finish_session", json!({"commit":false}))?;
-    assert_eq!(without_revision(f.document()?), before);
-    Ok(())
+    pm_acceptance::curve_oracle::easing(operation)
 }
 fn easing_replace_batch() -> Check {
     easing("replace_keyframes")
@@ -930,22 +885,47 @@ fn surface_unknown_ids() -> Check {
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 67);
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 68);
+    assert_eq!(
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        67
+    );
     Ok(())
 }
 fn pending_tools_are_explicit() -> Check {
     let mut f = Fixture::new()?;
     let before = f.document()?;
+    let revision = f.revision();
     for spec in pm_mcp::catalog::tools() {
         let name = spec["name"].as_str().unwrap();
         if pm_mcp::catalog::IMPLEMENTED.contains(&name) {
             continue;
         }
         let args = pm_acceptance::scenarios::pending_arguments(&spec["inputSchema"])?;
+        if name == "project_memory" {
+            assert_eq!(f.call(name, args)?, json!({"memory":[],"total":0}));
+            let error = tool_error(
+                &mut f.session,
+                name,
+                json!({
+                    "operation":"add", "kind":"goal", "text":"Synthetic durable goal"
+                }),
+            )?;
+            assert_eq!(error["code"], "not_available_in_this_build");
+            assert_eq!(
+                error["backing"],
+                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback"
+            );
+            continue;
+        }
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(error["code"], "not_available_in_this_build");
         assert_eq!(error["backing"], pm_mcp::catalog::backing(name));
     }
     assert_eq!(f.document()?, before);
+    assert_eq!(f.revision(), revision);
     Ok(())
 }

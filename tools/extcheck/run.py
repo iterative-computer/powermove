@@ -4,19 +4,24 @@ import argparse
 from collections import Counter
 import hashlib
 import io
+import math
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
+from resources import disk_ready
 
-REFERENCE = "07ed5fa17ee640659cb075f9cad1af2095011d60"
+REFERENCES = json.loads(Path(__file__).with_name("references.json").read_text())
+REFERENCE = REFERENCES["current"]
 FAMILIES = ("PM facade", "sync services", "raster override", "recorder canvas", "DOM panel", "lifecycle")
 SOURCES = ("owner", "local-corpus", "store")
+EXPECTED_POPULATION = {"owner": 44, "local-corpus": 10, "store": 4}
 ROOT = Path(__file__).resolve().parents[2]
 WORK = Path("/tmp/pm-extcheck")
 PAUSE_LOCAL = Path("/tmp/pm-shots/PAUSE_LOCAL")
@@ -53,8 +58,8 @@ def digest(data):
 def disk_check():
     while True:
         wait_for_local_execution()
-        if shutil.disk_usage(WORK).free >= 6.5 * 1024**3:return
-        print("Waiting for disk space at or above 6.5 GiB", flush=True)
+        if disk_ready():return
+        print("Waiting for APFS container free space at or above 5 GB", flush=True)
         time.sleep(120)
 
 
@@ -285,6 +290,8 @@ def compare(left, right, script):
 def capture(command, request, output, timeout):
     if not command:
         raise Blocked("native-integrated-runner-unavailable")
+    if sys.platform != "darwin":
+        raise Blocked("macos-capture-unavailable")
     while True:
         disk_check()
         try:
@@ -304,7 +311,7 @@ def capture_unlocked(command, request, output, timeout):
     if not command:
         raise Blocked("native-integrated-runner-unavailable")
     output.mkdir()
-    if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+    if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or not disk_ready():
         raise LocalPause()
     env = dict(os.environ)
     env.pop("ELECTRON_RUN_AS_NODE", None)
@@ -317,7 +324,7 @@ def capture_unlocked(command, request, output, timeout):
             deadline=time.monotonic()+timeout
             data=json.dumps({**request, "output": str(output)}).encode()
             while True:
-                if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+                if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or not disk_ready():
                     stop_capture(child)
                     raise LocalPause()
                 remaining=deadline-time.monotonic()
@@ -343,18 +350,20 @@ def capture_unlocked(command, request, output, timeout):
         reason = status.get("reason")
         # Adapters may only expose these reviewed public codes.
         if reason not in ("reference-not-ready", "reference-extension-not-active", "unsupported-script-step",
-                          "reference-store-profile-adapter-unavailable",
-                          "reference-capture-failed", "native-integrated-runner-unavailable",
+                          "reference-store-profile-adapter-unavailable", "native-reference-revision-mismatch",
+                          "reference-capture-failed", "reference-clock-fixture-unavailable", "native-integrated-runner-unavailable",
                           "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
                           "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
             reason = "capture-driver-blocked"
         raise Blocked(reason)
+    if status.get("clock_fixture") != request.get("clock_fixture") or not request.get("clock_fixture"):
+        raise Blocked("capture-clock-fixture-mismatch")
     expected = {"case": request["case"], "input_sha256": request["input_sha256"],
                 "script_sha256": request["script_sha256"]}
     if any(status.get(k) != v for k, v in expected.items()):
         raise Blocked("capture-identity-mismatch")
     if request["role"] == "reference":
-        if status.get("revision") != REFERENCE:
+        if status.get("revision") != request.get("reference_revision", REFERENCE):
             raise Blocked("reference-revision-mismatch")
     elif status.get("path") != {"logic": "runtime-v8", "panels": "webkit-remote-dom", "canvas": "native-recorder"}:
         raise Blocked("native-path-unverified")
@@ -366,6 +375,13 @@ def validate_script(script):
         raise Blocked("invalid-script")
     labels = []
     for step in script["steps"]:
+        if not isinstance(step, dict) or step.get("op") not in (
+                "reload", "dispose", "seek", "panel", "command", "advance", "click", "fill", "key", "assert", "screenshot"):
+            raise Blocked("invalid-script")
+        if step["op"] in ("advance", "seek"):
+            value = step.get("ms" if step["op"] == "advance" else "time")
+            if type(value) not in (float, int) or not math.isfinite(value) or (step["op"] == "advance" and not 0 <= value <= 60_000):
+                raise Blocked("invalid-script")
         if step.get("op") == "screenshot":
             label = step.get("label", "")
             if not re.fullmatch(r"[a-zA-Z0-9_-]+", label) or label in labels:
@@ -377,22 +393,49 @@ def validate_script(script):
         raise Blocked("script-needs-visual-oracle")
 
 
+def load_script(scripts, case):
+    path = scripts / (case + ".json") if scripts else None
+    try:
+        script = json.loads(path.read_text()) if path and path.is_file() else DEFAULT_SCRIPT
+        validate_script(script)
+        return script
+    except (OSError, ValueError, TypeError, AttributeError):
+        raise Blocked("invalid-script") from None
+
+
+def population_counts(source, observed, enumerated):
+    expected = EXPECTED_POPULATION[source]
+    missing = max(0, expected - observed)
+    return {"total": max(expected, observed), "expected": expected, "observed": observed,
+            "unavailable": missing, "match": 0, "mismatch": 0, "cant_run": missing,
+            "reference_captured": 0, "native_captured": 0, "native_logic_executed": 0,
+            "native_activated": 0, "enumerated": enumerated}
+
+
+def fixture_identity():
+    script = Path(__file__).with_name("clock-source.mjs").as_uri()
+    result = subprocess.check_output(["node", "--input-type=module", "-e",
+        "import {CLOCK_FIXTURE} from " + json.dumps(script) + ";process.stdout.write(JSON.stringify(CLOCK_FIXTURE))"], text=True)
+    return json.loads(result)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner-root", type=Path, default=Path.home()/"Library/Application Support/Powermove/extensions")
     parser.add_argument("--corpus-root", type=Path, default=ROOT/"apps/desktop/e2e/fixtures/compat-corpus")
     parser.add_argument("--store", action="store_true")
     parser.add_argument("--reference-root", type=Path, required=True)
+    parser.add_argument("--reference-revision", choices=list(REFERENCES.values()), default=REFERENCE)
     parser.add_argument("--native-command", help="JSON argv array; adapter reads one request on stdin")
     parser.add_argument("--native-runner", type=Path, help="Built pm-compat-runner executable (uses bundled native adapter)")
     parser.add_argument("--scripts", type=Path, help="Private per-case scripts, e.g. owner-0001.json")
     parser.add_argument("--summary", type=Path, default=WORK/"summary.json")
     parser.add_argument("--timeout", type=float, default=90)
-    parser.add_argument("--repeat", type=int, default=2, help="Paired repeat captures required before accepting a match")
+    parser.add_argument("--repeat", type=int, default=3, help="Paired repeat captures required before accepting a match")
     args = parser.parse_args()
     WORK.mkdir(mode=0o700, exist_ok=True)
-    if args.repeat < 2:
-        parser.error("at least two captures are required for an oracle")
+    if args.repeat < 3:
+        parser.error("at least three captures are required for an oracle")
     disk_check()
     if args.summary.resolve().is_relative_to(ROOT):
         parser.error("raw output belongs outside the public checkout")
@@ -403,8 +446,12 @@ def main():
         if args.native_runner else None)
     if native is not None and (not isinstance(native, list) or not native or not all(isinstance(x, str) for x in native)):
         parser.error("native command must be a nonempty JSON string array")
-    summary = {"gate": "OPEN", "reference": REFERENCE, "sources": {}, "families": {}, "reasons": {}}
+    summary = {"gate": "OPEN", "reference": args.reference_revision,
+               "reference_scope": "current-main" if args.reference_revision == REFERENCE else "legacy-input", "sources": {}, "families": {}, "reasons": {}}
     families, reasons, build_blockers = Counter(), Counter(), Counter()
+    clock_fixture = fixture_identity()
+    summary["clock_fixture"] = clock_fixture
+    summary["recordings_per_role"] = args.repeat
     with tempfile.TemporaryDirectory(prefix="run-", dir=WORK) as run:
         root = Path(run)
         os.chmod(root, 0o700)
@@ -425,9 +472,13 @@ def main():
         for source in SOURCES:
             rows = populations.get(source, [])
             source_reasons = Counter()
-            counts = {"total": len(rows), "match": 0, "mismatch": 0, "cant_run": 0,
-                      "reference_captured": 0, "native_captured": 0, "native_logic_executed": 0, "native_activated": 0,
-                      "enumerated": source in populations}
+            counts = population_counts(source, len(rows), source in populations)
+            if counts["unavailable"]:
+                source_reasons["population-input-unavailable"] += counts["unavailable"]
+                reasons["population-input-unavailable"] += counts["unavailable"]
+            if source in populations and len(rows) != counts["expected"]:
+                reasons["population-count-changed"] += 1
+                source_reasons["population-count-changed"] += 1
             summary["sources"][source] = counts
             for index, item in enumerate(rows, 1):
                 case = f"{source}-{index:04d}"
@@ -440,10 +491,9 @@ def main():
                     manifest = json.loads((extension/"manifest.json").read_text())
                     if manifest.get("apiVersion", 1) not in (1, 2, 3):
                         raise Blocked("unsupported-api-version")
-                    script_path = args.scripts / (case + ".json") if args.scripts else None
-                    script = json.loads(script_path.read_text()) if script_path and script_path.is_file() else DEFAULT_SCRIPT
-                    validate_script(script)
+                    script = load_script(args.scripts, case)
                     request = {"version": 1, "case": case, "extension": str(extension), "input_sha256": sha,
+                               "clock_fixture": clock_fixture, "reference_revision": args.reference_revision,
                                "script_sha256": digest(json.dumps(script, sort_keys=True).encode()), "script": script}
                     if source == "store":
                         request["store"] = {"repoId": item["repoId"], "releaseId": item["latest"]["id"]}
@@ -453,11 +503,15 @@ def main():
                                           ("native",native)):
                         try:
                             capture(command,{**request,"role":role},case_root/role,args.timeout)
+                            repeats = []
                             for repeat in range(1,args.repeat):
                                 repeated=case_root/(role+"-repeat-"+str(repeat))
                                 capture(command,{**request,"role":role},repeated,args.timeout)
-                                if compare(case_root/role,repeated,script):
-                                    raise Blocked(role+"-nondeterministic")
+                                repeats.append(repeated)
+                            # Always collect three complete recordings before inspecting
+                            # instability; a differing second capture cannot hide the third.
+                            if any(compare(case_root/role, repeated, script) for repeated in repeats):
+                                raise Blocked(role+"-nondeterministic")
                             counts[role+"_captured"]+=1
                         except Blocked as error:
                             failures.append(str(error))
@@ -507,11 +561,11 @@ def main():
     summary["native_build_blockers"]=dict(build_blockers)
     if (all(v["enumerated"] and v["total"] and v["match"] == v["total"] for v in summary["sources"].values())
             and not reasons):
-        summary["gate"] = "PASS"
+        summary["gate"] = "PASS" if args.reference_revision == REFERENCE else "LEGACY_PASS"
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
-    return 0 if summary["gate"] == "PASS" else 2
+    return 0 if summary["gate"] in ("PASS", "LEGACY_PASS") else 2
 
 
 if __name__ == "__main__":

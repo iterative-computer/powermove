@@ -237,7 +237,13 @@ fn json_projects_with_linked_media_render_to_verified_files() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with('.'))
         .collect();
-    assert!(names.is_empty(), "temporary files left: {names:?}");
+    assert_eq!(names, [".powermove-export-archive"]);
+    let archived: Vec<_> = std::fs::read_dir(dir.join(".powermove-export-archive"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(archived.len(), 1, "exactly the replaced output is retained");
+    assert_eq!(std::fs::read(&archived[0]).unwrap(), before);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -392,7 +398,9 @@ fn every_preset_and_the_phase_3b_formats_render_from_the_cli() {
         (Some("vp09"), Some("opus")),
         "{s}"
     );
-    assert_eq!(s["audioSamples"], 48_000);
+    // Match the shipped Opus muxer's exact pre-skip/final-packet padding,
+    // independently checked by pm-export's opus_webm decoded-sample test.
+    assert_eq!(s["audioSamples"], 48_648);
     // Image sequence · PNG: a new folder of frames named after it.
     let s = summary(&cli(&[p, "-o", &out("Frames"), "--preset", "png"]));
     assert_eq!(

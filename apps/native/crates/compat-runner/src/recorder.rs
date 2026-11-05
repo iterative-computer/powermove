@@ -8,6 +8,7 @@ use std::{
 
 #[derive(Default)]
 struct State {
+    transport: crate::transport::Transport,
     storage: Value,
     next: u64,
     surfaces: BTreeMap<String, Canvas>,
@@ -357,6 +358,15 @@ impl EngineProxy for NativeHost {
     ) -> Result<Value> {
         budget.check()?;
         match operation {
+            "transport.command" => {
+                let document = self.kernel.lock().unwrap().publication()["document"].clone();
+                return self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .transport
+                    .command(input, &document);
+            }
             "presentation.invalidate" => {
                 self.state.lock().unwrap().invalidated = true;
                 return Ok(Value::Null);

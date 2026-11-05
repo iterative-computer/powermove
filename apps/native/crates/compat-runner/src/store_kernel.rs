@@ -116,18 +116,24 @@ mod tests {
             permissions: BTreeMap::new(),
         }
     }
-    fn kernel(profile: &std::path::Path) -> Kernel {
+    fn kernel(profile: &std::path::Path, stage: &str) -> Kernel {
         let mut kernel = Kernel::new(KernelConfig::default());
-        assert!(matches!(
-            kernel
-                .shell(ShellCall::AttachLibrary {
-                    profile: profile.into(),
-                    format: DiskFormat::V1_2,
-                    electron_profile: None,
-                })
-                .unwrap(),
-            ShellReply::Library(pm_kernel::locks::OpenDecision::Writable)
-        ));
+        let profile = profile.canonicalize().unwrap();
+        let reply = kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: profile.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                reply,
+                ShellReply::Library(pm_kernel::locks::OpenDecision::Writable)
+            ),
+            "synthetic library {stage} admission refused: {reply:?}; lock={:?}",
+            std::fs::read_to_string(profile.join("store/library.lock"))
+        );
         kernel
     }
     #[test]
@@ -137,7 +143,7 @@ mod tests {
         let id = ExtensionId::new("synthetic-store").unwrap();
         let initial = state(&id, "synthetic-profile");
         {
-            let mut kernel = kernel(profile.path());
+            let mut kernel = kernel(profile.path(), "initial");
             let mut store = KernelStoreAdapter::new(&mut kernel);
             store.compare_exchange(&id, None, &initial).unwrap();
             assert_eq!(
@@ -151,7 +157,7 @@ mod tests {
                 Err(Error::Invalid("Store state identity/revision"))
             );
         }
-        let mut kernel = kernel(profile.path());
+        let mut kernel = kernel(profile.path(), "reopen");
         let mut store = KernelStoreAdapter::new(&mut kernel);
         assert_eq!(store.load(&id).unwrap(), Some(initial.clone()));
         let mut next = initial;

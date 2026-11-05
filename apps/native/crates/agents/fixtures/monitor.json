@@ -1,0 +1,518 @@
+{
+  "baseline": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "source": "apps/desktop/src/main/agent-thread-monitor.ts",
+  "sourceSha256": "a3388120e33d4c51a95b6ad3edb78e83603136bfbe6cbdf80955bfff7e7f20ef",
+  "captureSha256": "ee8223dee1346fb32abbf11bd3c86ab64cf3b7f287e9c23702cfd2ba73629065",
+  "operations": [
+    {
+      "at": 100,
+      "op": {
+        "kind": "begin",
+        "request": {
+          "projectId": "p",
+          "threadId": "a",
+          "id": "root",
+          "provider": "chatgpt",
+          "model": null,
+          "reasoningEffort": null
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "a",
+          "runId": "root",
+          "status": "running",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": null,
+          "startedAt": 100
+        }
+      }
+    },
+    {
+      "at": 110,
+      "op": {
+        "kind": "begin",
+        "request": {
+          "projectId": "p",
+          "threadId": "b",
+          "id": "child",
+          "provider": "chatgpt",
+          "model": null,
+          "reasoningEffort": null
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "child",
+          "status": "running",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": null,
+          "startedAt": 110
+        }
+      }
+    },
+    {
+      "at": 120,
+      "op": {
+        "kind": "reserve",
+        "project": "p",
+        "thread": "b",
+        "run": "future"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "future",
+          "status": "queued",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": null,
+          "startedAt": 120
+        }
+      }
+    },
+    {
+      "at": 130,
+      "op": {
+        "kind": "watch",
+        "project": "p",
+        "parent": "root",
+        "target": "child",
+        "lease": "one"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 140,
+      "op": {
+        "kind": "watch",
+        "project": "p",
+        "parent": "root",
+        "target": "child",
+        "lease": "two"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 150,
+      "op": {
+        "kind": "release",
+        "lease": "one"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 151,
+      "op": {
+        "kind": "release",
+        "lease": "one"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 160,
+      "op": {
+        "kind": "watch",
+        "project": "p",
+        "parent": "child",
+        "target": "root",
+        "lease": "cycle"
+      },
+      "result": {
+        "ok": false,
+        "error": "Watching this run would create a cycle."
+      }
+    },
+    {
+      "at": 170,
+      "op": {
+        "kind": "get",
+        "project": "q",
+        "thread": "b",
+        "run": "child"
+      },
+      "result": {
+        "ok": false,
+        "error": "This run belongs to another thread."
+      }
+    },
+    {
+      "at": 180,
+      "op": {
+        "kind": "trace",
+        "project": "p",
+        "thread": "b",
+        "run": "child",
+        "trace": {
+          "kind": "question",
+          "blocking": true
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 190,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "child"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "child",
+          "status": "waiting",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "Waiting for your answer…",
+          "summary": null,
+          "startedAt": 110
+        }
+      }
+    },
+    {
+      "at": 200,
+      "op": {
+        "kind": "progress",
+        "project": "p",
+        "thread": "b",
+        "run": "child",
+        "text": "Waiting for watched threads…"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 210,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "child"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "child",
+          "status": "waiting",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "Waiting for watched threads…",
+          "summary": null,
+          "startedAt": 110
+        }
+      }
+    },
+    {
+      "at": 220,
+      "op": {
+        "kind": "trace",
+        "project": "p",
+        "thread": "b",
+        "run": "child",
+        "trace": {
+          "kind": "tool-start",
+          "label": "Read  file\ncontents"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 230,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "child"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "child",
+          "status": "running",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "Read file contents",
+          "summary": null,
+          "startedAt": 110
+        }
+      }
+    },
+    {
+      "at": 240,
+      "op": {
+        "kind": "finish",
+        "project": "p",
+        "thread": "b",
+        "run": "child",
+        "result": {
+          "ok": true,
+          "text": "Authored child result",
+          "access": "editor"
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 250,
+      "op": {
+        "kind": "finish",
+        "project": "p",
+        "thread": "b",
+        "run": "child",
+        "result": {
+          "ok": false,
+          "error": "late failure",
+          "cancelled": false
+        }
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 260,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "child"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "child",
+          "status": "completed",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "Read file contents",
+          "summary": "Authored child result",
+          "startedAt": 110,
+          "endedAt": 240
+        }
+      }
+    },
+    {
+      "at": 270,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "future",
+          "status": "queued",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": null,
+          "startedAt": 120
+        }
+      }
+    },
+    {
+      "at": 280,
+      "op": {
+        "kind": "begin",
+        "request": {
+          "projectId": "p",
+          "threadId": "b",
+          "id": "child",
+          "provider": "chatgpt",
+          "model": null,
+          "reasoningEffort": null
+        }
+      },
+      "result": {
+        "ok": false,
+        "error": "This agent request has already finished. Start a new run."
+      }
+    },
+    {
+      "at": 290,
+      "op": {
+        "kind": "release",
+        "lease": "two"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 300,
+      "op": {
+        "kind": "watch",
+        "project": "p",
+        "parent": "child",
+        "target": "root",
+        "lease": "reverse"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 30119,
+      "op": {
+        "kind": "tick"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 30119,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "future"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "future",
+          "status": "queued",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": null,
+          "startedAt": 120
+        }
+      }
+    },
+    {
+      "at": 30120,
+      "op": {
+        "kind": "tick"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 30120,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "b",
+        "run": "future"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "b",
+          "runId": "future",
+          "status": "failed",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": "The thread did not start its agent run.",
+          "startedAt": 120,
+          "endedAt": 30120
+        }
+      }
+    },
+    {
+      "at": 30130,
+      "op": {
+        "kind": "shutdown"
+      },
+      "result": {
+        "ok": true,
+        "value": null
+      }
+    },
+    {
+      "at": 30130,
+      "op": {
+        "kind": "get",
+        "project": "p",
+        "thread": "a",
+        "run": "root"
+      },
+      "result": {
+        "ok": true,
+        "value": {
+          "projectId": "p",
+          "threadId": "a",
+          "runId": "root",
+          "status": "cancelled",
+          "providerInstanceId": "chatgpt",
+          "model": null,
+          "reasoningEffort": null,
+          "progress": "",
+          "summary": "Powermove closed before the run finished.",
+          "startedAt": 100,
+          "endedAt": 30130
+        }
+      }
+    }
+  ]
+}

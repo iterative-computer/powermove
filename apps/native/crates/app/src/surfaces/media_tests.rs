@@ -852,11 +852,11 @@ fn cloud_banner_is_once_per_document_open_across_batches_and_revisions() {
 fn stale_sequence_target_closes_and_uses_only_the_supplied_object_label() {
     let mut s = sequence();
     assert_eq!(
-        s.target_disappeared(Some("Composition")).unwrap().text,
-        "Composition was changed, so the dialog closed."
+        s.target_disappeared(Some("The media")).unwrap().text,
+        "The media was changed, so the dialog closed."
     );
     assert!(s.respond(&target("seq"), Action::ImportSequence).is_none());
-    assert!(s.target_disappeared(Some("Composition")).is_none());
+    assert!(s.target_disappeared(Some("The media")).is_none());
 }
 #[test]
 fn relink_all_skips_mismatching_metadata_and_deduplicates_asset_ids() {
@@ -970,4 +970,22 @@ fn individual_cloud_retry_keeps_other_downloads_live_and_rejects_late_failed_att
     let retried = c.file_target("0").unwrap();
     assert!(c.observe(&retried, "0", FileState::Downloaded));
     assert_eq!(c.task_title(), "2 of 2 downloaded");
+}
+
+#[test]
+fn reviewed_stale_sequence_uses_media_or_project_noun_with_article() {
+    for (label, noun) in [
+        (None, "The media"),
+        (Some("The media"), "The media"),
+        (Some("Composition"), "The media"),
+        (Some("The project"), "The project"),
+        (Some("Project"), "The project"),
+    ] {
+        let mut s = sequence();
+        assert_eq!(
+            s.target_disappeared(label).unwrap().text,
+            format!("{noun} was changed, so the dialog closed.")
+        );
+        assert!(s.target_disappeared(label).is_none());
+    }
 }

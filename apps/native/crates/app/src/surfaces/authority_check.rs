@@ -53,10 +53,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let text = format!(
         "[package]\nname = \"pm-authority-check\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
          [workspace]\n[lib]\npath = {:?}\n\
+         [dependencies]\npm-design = {{ path = {:?} }}\n\
          [target.'cfg(target_os = \"macos\")'.dependencies]\n\
          objc2 = \"=0.6.5\"\nobjc2-app-kit = \"=0.3.2\"\n\
          objc2-foundation = \"=0.3.2\"\nblock2 = \"=0.6.2\"\n",
-        library.to_str().ok_or("UTF-8 source path")?
+        library.to_str().ok_or("UTF-8 source path")?,
+        root.join("apps/native/crates/design")
+            .to_str()
+            .ok_or("UTF-8 design path")?
     );
     fs::write(&manifest, text)?;
     if !work.join("Cargo.lock").exists() {

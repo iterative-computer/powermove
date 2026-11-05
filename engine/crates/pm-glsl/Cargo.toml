@@ -28,6 +28,9 @@ path = "src/bin/compiler.rs"
 # The production Metal inventory also pulls the macOS renderer/media stack.
 macos-inventory = []
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[example]]
 name = "inventory"
 required-features = ["macos-inventory"]
@@ -37,5 +40,7 @@ pm-render = { path = "../pm-render" }
 pm-gpu = { path = "../pm-gpu", default-features = false, features = ["glsl"] }
 
 [dev-dependencies]
+pm-color = { path = "../pm-color" }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 wgpu = { version = "30", default-features = false, features = ["metal", "naga-ir"] }
 pollster = "0.4"

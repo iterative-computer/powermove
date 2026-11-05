@@ -38,6 +38,7 @@ struct Turn {
     unscoped: bool,
     question_messages: BTreeSet<String>,
     questions: BTreeMap<String, Value>,
+    question_order: VecDeque<String>,
     queued: VecDeque<Value>,
     reconnecting: bool,
     cancelled: bool,
@@ -49,6 +50,7 @@ enum Purpose {
     Initialize,
     Thread(String),
     Turn(String),
+    Interrupt(String),
     Other,
 }
 struct Pending {
@@ -63,6 +65,7 @@ pub struct Client {
     next: u64,
     pending: BTreeMap<u64, Pending>,
     turns: BTreeMap<String, Turn>,
+    admission: VecDeque<String>,
 }
 impl Client {
     pub fn start(&mut self, now: u64) -> Effects {
@@ -112,6 +115,7 @@ impl Client {
                 unscoped: false,
                 question_messages: BTreeSet::new(),
                 questions: BTreeMap::new(),
+                question_order: VecDeque::new(),
                 queued: VecDeque::new(),
                 reconnecting: false,
                 cancelled: false,
@@ -119,6 +123,7 @@ impl Client {
                 deadline: now.saturating_add(3_600_000),
             },
         );
+        self.admission.push_back(id.clone());
         let mut e = self.start(now);
         if self.ready {
             self.start_thread(&id, now, &mut e);
@@ -163,6 +168,9 @@ impl Client {
         now: u64,
     ) -> Result<Effects, String> {
         let t = self.turns.get_mut(id).ok_or("Unknown active run")?;
+        if t.cancelled {
+            return Err("The Codex run was cancelled.".into());
+        }
         let input = Self::input(prompt, images);
         let mut e = Effects::default();
         if t.turn.is_none() {
@@ -179,7 +187,12 @@ impl Client {
         item: &str,
         answers: &BTreeMap<String, Vec<String>>,
     ) -> Option<Effects> {
-        let rpc = self.turns.get_mut(id)?.questions.remove(item)?;
+        let t = self.turns.get_mut(id)?;
+        if t.cancelled {
+            return None;
+        }
+        let rpc = t.questions.remove(item)?;
+        t.question_order.retain(|id| id != item);
         let answers: serde_json::Map<_, _> = answers
             .iter()
             .map(|(k, v)| (k.clone(), json!({"answers":v})))
@@ -191,36 +204,43 @@ impl Client {
     }
     pub fn cancel(&mut self, id: &str, now: u64) -> Option<Effects> {
         let t = self.turns.get_mut(id)?;
-        if t.reported {
+        if t.cancelled {
             return Some(Effects::default());
         }
         t.cancelled = true;
-        t.reported = true;
+        t.queued.clear();
         let mut e = Effects::default();
-        e.events.push(Event::Completed {
-            run: id.into(),
-            result: RunResult::failure("The Codex run was cancelled.", true),
-        });
-        for rpc in std::mem::take(&mut t.questions).into_values() {
-            e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
-        }
-        if t.thread.is_some() && t.turn.is_none() {
-            return Some(e);
-        }
         if t.turn.is_some() {
+            // Cancellation is complete when interruption settles, not when the
+            // request enters our writer queue. No UI thread waits for that RPC.
             let p = json!({"threadId":t.thread,"turnId":t.turn});
-            self.request("turn/interrupt", p, Purpose::Other, now, &mut e);
+            self.request(
+                "turn/interrupt",
+                p,
+                Purpose::Interrupt(id.into()),
+                now,
+                &mut e,
+            );
+        } else if t.thread.is_some() {
+            // turn/start is in flight. Report once now, but retain the turn as a
+            // cleanup tombstone so its eventual identity can be interrupted.
+            t.reported = true;
+            for rpc in drain_questions(t) {
+                e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
+            }
+            e.events.push(Event::Completed {
+                run: id.into(),
+                result: cancelled(),
+            });
+        } else {
+            self.finish(id, cancelled(), &mut e);
         }
-        self.finish(
-            id,
-            RunResult::failure("The Codex run was cancelled.", true),
-            &mut e,
-        );
         Some(e)
     }
     fn finish(&mut self, id: &str, result: RunResult, e: &mut Effects) {
-        if let Some(t) = self.turns.remove(id) {
-            for rpc in t.questions.into_values() {
+        self.admission.retain(|r| r != id);
+        if let Some(mut t) = self.turns.remove(id) {
+            for rpc in drain_questions(&mut t) {
                 e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
             }
             if !t.reported {
@@ -230,15 +250,15 @@ impl Client {
                 });
             }
         }
-        // Interrupt acknowledgements carry no run result but must remain tracked.
+        // Drop run-owned requests at the same terminal boundary.
         self.pending.retain(|_, p| match &p.purpose {
             Purpose::Initialize | Purpose::Other => true,
-            Purpose::Thread(r) | Purpose::Turn(r) => r != id,
+            Purpose::Thread(r) | Purpose::Turn(r) | Purpose::Interrupt(r) => r != id,
         });
     }
     pub fn stopped(&mut self, reason: &str) -> Effects {
         let mut e = Effects::default();
-        for id in self.turns.keys().cloned().collect::<Vec<_>>() {
+        for id in self.admission.clone() {
             self.finish(&id, RunResult::failure(reason, false), &mut e);
         }
         self.pending.clear();
@@ -265,6 +285,7 @@ impl Client {
                     Purpose::Thread(r) | Purpose::Turn(r) => {
                         self.finish(&r, RunResult::failure(msg, false), &mut e)
                     }
+                    Purpose::Interrupt(r) => self.finish(&r, cancelled(), &mut e),
                     Purpose::Other => e.events.push(Event::Warning(msg)),
                 }
             }
@@ -313,6 +334,7 @@ impl Client {
                     Purpose::Thread(r) | Purpose::Turn(r) => {
                         self.finish(&r, RunResult::failure(err, false), &mut e)
                     }
+                    Purpose::Interrupt(r) => self.finish(&r, cancelled(), &mut e),
                     Purpose::Other => e.events.push(Event::Warning(err)),
                 }
                 return e;
@@ -322,7 +344,7 @@ impl Client {
                     self.ready = true;
                     e.outgoing.push(json!({"method":"initialized","params":{}}));
                     e.events.push(Event::Ready);
-                    for r in self.turns.keys().cloned().collect::<Vec<_>>() {
+                    for r in self.admission.clone() {
                         self.start_thread(&r, now, &mut e);
                     }
                 }
@@ -359,8 +381,13 @@ impl Client {
                             t.turn = Some(turn.into());
                             if t.cancelled {
                                 let p = json!({"threadId":t.thread,"turnId":turn});
-                                self.request("turn/interrupt", p, Purpose::Other, now, &mut e);
-                                self.turns.remove(&r);
+                                self.request(
+                                    "turn/interrupt",
+                                    p,
+                                    Purpose::Interrupt(r.clone()),
+                                    now,
+                                    &mut e,
+                                );
                             } else {
                                 let thread = t.thread.clone();
                                 let queued = std::mem::take(&mut t.queued);
@@ -377,6 +404,7 @@ impl Client {
                         );
                     }
                 }
+                Purpose::Interrupt(r) => self.finish(&r, cancelled(), &mut e),
                 Purpose::Other => {}
             }
             return e;
@@ -407,14 +435,11 @@ impl Client {
                 .find(p)
                 .filter(|_| !item.is_empty() && !questions.is_empty())
             {
-                if let Some(old) = self
-                    .turns
-                    .get_mut(&r)
-                    .unwrap()
-                    .questions
-                    .insert(item.clone(), rpc.clone())
-                {
+                let t = self.turns.get_mut(&r).unwrap();
+                if let Some(old) = t.questions.insert(item.clone(), rpc.clone()) {
                     e.outgoing.push(json!({"id":old,"result":{"answers":{}}}));
+                } else {
+                    t.question_order.push_back(item.clone());
                 }
                 e.trace(&r,json!({"kind":"question","itemId":item,"questions":questions,"transport":"reply","blocking":p["isBlocking"]!=false}));
             } else {
@@ -435,7 +460,11 @@ impl Client {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            for (id, t) in &mut self.turns {
+            for id in &self.admission {
+                let t = self.turns.get_mut(id).unwrap();
+                if t.cancelled {
+                    continue;
+                }
                 if p["threadId"]
                     .as_str()
                     .is_none_or(|th| t.thread.as_deref() == Some(th))
@@ -459,13 +488,14 @@ impl Client {
         let t = self.turns.get_mut(&id).unwrap();
         if method_is(m, "serverRequest/resolved") {
             let items = t
-                .questions
+                .question_order
                 .iter()
-                .filter(|(_, v)| **v == p["requestId"])
-                .map(|(k, _)| k.clone())
+                .filter(|id| t.questions.get(*id) == Some(&p["requestId"]))
+                .cloned()
                 .collect::<Vec<_>>();
             for item in items {
                 t.questions.remove(&item);
+                t.question_order.retain(|id| id != &item);
                 e.trace(&id, json!({"kind":"question-closed","itemId":item}));
             }
             return;
@@ -753,4 +783,15 @@ pub(crate) fn tool_trace(item: &Value, end: bool) -> Option<Value> {
         v["output"] = json!(output);
     }
     Some(v)
+}
+
+fn cancelled() -> RunResult {
+    RunResult::failure("The Codex run was cancelled.", true)
+}
+
+fn drain_questions(t: &mut Turn) -> Vec<Value> {
+    t.question_order
+        .drain(..)
+        .filter_map(|id| t.questions.remove(&id))
+        .collect()
 }

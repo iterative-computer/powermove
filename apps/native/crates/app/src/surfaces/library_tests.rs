@@ -151,6 +151,7 @@ fn all_empty_states_and_quoted_search_copy() {
         empty_state(&Query::default()),
         EmptyState {
             title: "No Projects",
+            symbol: "square.grid.2x2",
             detail: "Projects you create appear here.".into(),
             action: Some("New Project")
         }
@@ -162,6 +163,7 @@ fn all_empty_states_and_quoted_search_copy() {
         }),
         EmptyState {
             title: "No Deleted Projects",
+            symbol: "trash",
             detail: "Projects you move to the Trash appear here.".into(),
             action: None
         }
@@ -173,6 +175,7 @@ fn all_empty_states_and_quoted_search_copy() {
         }),
         EmptyState {
             title: "No Results",
+            symbol: "magnifyingglass",
             detail: "No projects match “Launch”.".into(),
             action: None
         }
@@ -327,8 +330,11 @@ fn voiceover_and_card_facts_use_system_date_and_authored_dimensions() {
     r.edited = true;
     assert_eq!(r.edited_label(), Some("Edited"));
     r.summary = None;
-    assert_eq!(r.ax_label("Yesterday"), None);
-    assert_eq!(r.facts("Yesterday"), None);
+    assert_eq!(
+        r.ax_label("Yesterday"),
+        Some("Launch Film, edited Yesterday".into())
+    );
+    assert_eq!(r.facts("Yesterday"), Some("Yesterday".into()));
     let mut c = ready();
     assert_eq!(c.presentation(Duration::ZERO, 0..10).ax_container, "AXList");
     assert_eq!(c.presentation(Duration::ZERO, 0..10).ax_item, "AXGroup");
@@ -633,7 +639,7 @@ fn new_project_defaults_current_format_and_uniqued_untitled_name() {
     );
     assert_eq!(f.name, "Untitled 3");
     assert_eq!(f.values().unwrap().format, current);
-    assert_eq!(f.linked, None);
+    assert_eq!(f.linked, Some(true));
     let f = NewProjectForm::new("owner".into(), None, &format(), &[]);
     assert_eq!(f.name, "Untitled");
     assert_eq!(f.values().unwrap().format, format());
@@ -866,16 +872,16 @@ fn service_errors_use_spec_sentences_and_never_show_diagnostics() {
 }
 
 #[test]
-fn unresolved_tokens_stay_symbolic_and_resolved_metrics_follow_theme() {
+fn reviewed_tokens_resolve_and_metrics_follow_theme() {
     let mut tokens = metrics();
     let m = WindowMetrics::resolve(&tokens);
     assert_eq!(m.min_width, tokens.metrics.min_width);
     assert_eq!(m.min_height, tokens.metrics.min_height / 1.25);
     assert_eq!(m.sidebar, tokens.metrics.settings_sidebar);
-    assert_eq!(m.thumbnail_min, "metrics.thumbnail_min");
-    assert_eq!(m.sheet_inset, "metrics.sheet_inset");
-    assert_eq!(m.sheet_value_column, "metrics.sheet_value_column");
-    assert_eq!(m.media_badge, "colors.media_badge");
+    assert_eq!(m.thumbnail_min, tokens.metrics.thumbnail_min);
+    assert_eq!(m.sheet_inset, tokens.metrics.sheet_inset);
+    assert_eq!(m.sheet_value_column, tokens.metrics.sheet_value_column);
+    assert_eq!(m.media_badge, tokens.colors.media_badge);
     tokens.apply_patch([("metrics.row", 32.0)]).unwrap();
     assert_eq!(WindowMetrics::resolve(&tokens).row, 32.0);
 }
@@ -1258,4 +1264,145 @@ fn stale_owner_closes_even_when_creation_is_in_flight() {
     c.owner_changed("editor:1");
     assert!(c.form.is_none());
     assert_eq!(c.create(), Err(Failure::Stale));
+}
+
+#[test]
+fn reviewed_timecode_rejects_skipped_labels_and_non_drop_rates() {
+    for (fps, drop) in [
+        (29.97, 2_u32),
+        (59.94, 4),
+        (30000. / 1001., 2),
+        (60000. / 1001., 4),
+    ] {
+        assert_eq!(parse_duration("00:01:00;00", fps), None);
+        assert_eq!(
+            parse_duration(&format!("00:01:00;{drop:02}"), fps),
+            Some(f64::from(fps.ceil() as u32 * 60) / fps)
+        );
+        assert_eq!(
+            parse_duration("00:10:00;00", fps),
+            Some((fps.ceil() * 600. - f64::from(drop) * 9.) / fps)
+        );
+    }
+    let mut f = NewProjectForm::new("w".into(), None, &format(), &[]);
+    f.fps = "24".into();
+    f.duration = "00:01:00;00".into();
+    assert_eq!(f.validation().duration, Some(DROP_FRAME_ERROR));
+    assert!(!f.can_create());
+    f.duration = "00:01:00:00".into();
+    assert!(f.can_create());
+}
+#[test]
+fn reviewed_link_and_admitted_creation_have_exact_controls() {
+    let mut f = NewProjectForm::new("w".into(), None, &format(), &[]);
+    assert_eq!(f.linked, Some(true));
+    assert_eq!(
+        f.link_presentation(),
+        ("link", "Lock aspect ratio", "Unlock Aspect Ratio")
+    );
+    f.edit_dimension(true, "960".into()).unwrap();
+    assert_eq!(f.height, "540");
+    f.linked = Some(false);
+    f.edit_dimension(true, "1920".into()).unwrap();
+    assert_eq!(f.height, "540");
+    f.submitting = true;
+    assert_eq!(f.buttons(), ("Creating…", false, false));
+    assert_eq!(f.edit_dimension(false, "1080".into()), Err(Failure::Busy));
+    f.submitting = false;
+    assert_eq!(f.buttons(), ("Create", true, true));
+}
+#[test]
+fn reviewed_missing_facts_omit_separators_and_zero_dimensions() {
+    let mut r = row("a", "Film", false);
+    r.modified_ms = None;
+    assert_eq!(r.facts(""), Some("1920×1080".into()));
+    assert_eq!(r.ax_label(""), Some("Film, 1920 by 1080".into()));
+    r.summary.as_mut().unwrap().width = Some(0);
+    assert_eq!(r.facts(""), None);
+    assert_eq!(r.ax_label(""), Some("Film".into()));
+}
+#[test]
+fn reviewed_numeric_sorts_descend_first_reverse_and_omit_popup_check() {
+    let mut a = row("a", "A", false);
+    let mut b = row("b", "B", false);
+    let mut missing = row("m", "Missing", false);
+    a.summary.as_mut().unwrap().duration_seconds = Some(5.);
+    b.summary.as_mut().unwrap().duration_seconds = Some(15.);
+    a.summary.as_mut().unwrap().fps = Some(24.);
+    b.summary.as_mut().unwrap().fps = Some(60.);
+    a.summary.as_mut().unwrap().width = Some(1080);
+    a.summary.as_mut().unwrap().height = Some(1920);
+    missing.summary = None;
+    let snapshot = Snapshot {
+        rows: vec![a, b, missing],
+        ..Default::default()
+    };
+    for sort in [
+        Sort::Duration { ascending: false },
+        Sort::Size { ascending: false },
+        Sort::FrameRate { ascending: false },
+    ] {
+        let mut q = Query {
+            sort,
+            ..Default::default()
+        };
+        assert_eq!(
+            q.apply(&snapshot)
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a", "m"]
+        );
+        let label = match sort {
+            Sort::Duration { .. } => "Duration",
+            Sort::Size { .. } => "Size",
+            _ => "Frame Rate",
+        };
+        assert_eq!(Sort::Name.click_header(label), Some(sort));
+        assert_eq!(sort.click_header(label), Some(sort.reversed()));
+        assert_eq!(sort.popup_check(), None);
+        q.sort = sort.reversed();
+        assert_eq!(
+            q.apply(&snapshot)
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "m"]
+        );
+    }
+}
+#[test]
+fn reviewed_duplicate_clears_only_nonmatching_search_before_select_and_rename() {
+    let mut c = ready();
+    c.query.text = "Film".into();
+    c.menu("a", MenuAction::Duplicate).unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(&mut c, serial, Ok(Outcome::Duplicated("copy".into())));
+    let serial = c.port.sent.last().unwrap().serial;
+    let mut snapshot = c.snapshot.clone();
+    snapshot.rows.push(row("copy", "Other copy", false));
+    complete(
+        &mut c,
+        serial,
+        Ok(Outcome::Loaded {
+            snapshot: snapshot.clone(),
+            rows: vec![],
+        }),
+    );
+    assert!(c.query.text.is_empty());
+    assert_eq!(
+        c.port.sent.last().unwrap().command,
+        Command::Load(c.query.clone())
+    );
+    let serial = c.port.sent.last().unwrap().serial;
+    complete(
+        &mut c,
+        serial,
+        Ok(Outcome::Loaded {
+            snapshot,
+            rows: vec![row("copy", "Other copy", false)],
+        }),
+    );
+    assert_eq!(c.selected.as_deref(), Some("copy"));
+    assert_eq!(c.rename.as_ref().unwrap().id, "copy");
 }

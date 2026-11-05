@@ -1,6 +1,6 @@
 // Pure tagged bodies + synthetic PM services. This does not claim a live
 // Electron editor trace. Native outputs are never used as expected outputs.
-import { tag, evaluate } from './tag-oracle.mjs';
+import { tag, evaluate } from './main-oracle.mjs';
 import fs from 'node:fs';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
 const PM={proj:input.project,sel:input.selection??{layers:[],keys:[],chan:null},time:input.time??0,CH:{},round:(n,p)=>Math.round(n*10**p)/10**p};
@@ -18,7 +18,8 @@ evaluate(anim.slice(anim.indexOf('PM.allProps ='),anim.indexOf('PM.findProp ='))
 const h=tag('apps/desktop/src/renderer/src/legacy/assistant/harness.ts');
 const constants=h.slice(h.indexOf('const SCENE_OPERATIONS'),h.indexOf('function safeTimes'));
 const bodies=h.slice(h.indexOf('function propertyDigest'),h.indexOf('async function capture('));
-const bindings={PM,videoAssets:()=>[],Object,Set};
+const memory=evaluate(tag('apps/desktop/src/renderer/src/core/memory.ts'),['memoryEnabled','memoryIndex'],{MEMORY_KINDS:['goal','constraint','decision','rejected','feedback','open']});
+const bindings={...memory,PM,videoAssets:()=>[],Object,Set};
 const {projectState}=evaluate(constants+bodies,['projectState'],bindings);
 const timeline=tag('apps/desktop/src/renderer/src/legacy/assistant/layer-strips.ts');
 const {timelineState}=evaluate(timeline.slice(timeline.indexOf('export function timelineState'),timeline.indexOf('/** Batch gestures')),['timelineState'],{PM,isProperty,resolveContent:(_PM,l)=>Object.fromEntries(Object.entries(l.d??{}).map(([k,v])=>[k,isProperty(v)?PM.evP(l,v,l.from):v])),finite:(n,k,min,max)=>{if(typeof n!=='number'||n<min||n>max)throw Error('Invalid '+k);return n;}});

@@ -278,6 +278,55 @@ fn targets(c: &Value, p: &Value, selection: &[String]) -> Result<Vec<String>> {
         Ok(selection.to_vec())
     }
 }
+/// The tagged harness cleans the entire batch before revision admission or
+/// command semantics. In particular a malformed later command cannot expose a
+/// stale-revision/earlier-target error or apply a prefix of a batch.
+pub fn clean_commands(raw: &[Value]) -> Result<Vec<Value>> {
+    const LIMIT: usize = 1_000_000;
+    if raw.is_empty() {
+        return Err(Error::invalid(
+            "No valid Powermove edit commands were supplied.",
+        ));
+    }
+    raw.iter().enumerate().map(|(index, raw)| {
+        let invalid = || Error::invalid(format!("Invalid or oversized command at index {index}. No commands were applied. Each command must be valid JSON with a supported type and at most {LIMIT} characters."));
+        let source = if let Some(text) = raw.as_str() {
+            if text.encode_utf16().count() > LIMIT { return Err(invalid()); }
+            serde_json::from_str::<Value>(text).map_err(|_| invalid())?
+        } else { raw.clone() };
+        let kind = source["type"].as_str().filter(|k| OPERATIONS.contains(k)).ok_or_else(invalid)?;
+        let fields = crate::catalog::catalog()["commandFields"][kind].as_array().ok_or_else(invalid)?;
+        let mut cleaned = serde_json::Map::new();
+        for key in fields {
+            let key = key.as_str().unwrap();
+            if let Some(value) = source.get(key) {cleaned.insert(key.into(),value.clone());}
+        }
+        let mut command = Value::Object(cleaned);
+        let serialized = pm_model::json::to_canonical_string(&model(&command));
+        if serialized.encode_utf16().count() > LIMIT {return Err(invalid());}
+        if ["replace_keyframes", "set_easing"].contains(&kind) && !command["keyframes"].is_array() {return Err(invalid());}
+        if kind == "add_layer" && command.get("from").is_none() {command["from"] = json!(0);}
+        if kind == "create_section" {
+            if !command["section"]["layers"].is_array() {return Err(invalid());}
+            if let Some(section) = command["section"].as_object_mut() {
+                for key in ["__proto__", "prototype", "constructor"] {section.remove(key);}
+            }
+        }
+        if kind == "update_section" && (!truthy(&command["sectionId"]) || command["layers"].as_array().is_none_or(|l| l.is_empty())) {return Err(invalid());}
+        if ["set_property", "replace_keyframes"].contains(&kind) {command["preserveHandEdits"] = json!(command["preserveHandEdits"] != false);}
+        Ok(command)
+    }).collect()
+}
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        _ => true,
+    }
+}
+
 pub fn plan(project: &Value, selection: &[String], raw: &[Value], time: f64) -> Result<Batch> {
     plan_with_definitions(project, selection, raw, time, None)
 }
@@ -288,11 +337,17 @@ pub fn plan_with_definitions(
     time: f64,
     state: Option<&pm_kernel::state::StateSnapshot>,
 ) -> Result<Batch> {
-    if raw.is_empty() {
-        return Err(Error::invalid(
-            "No valid Powermove edit commands were supplied.",
-        ));
-    }
+    let cleaned = clean_commands(raw)?;
+    plan_cleaned_with_definitions(project, selection, &cleaned, time, state)
+}
+
+pub(crate) fn plan_cleaned_with_definitions(
+    project: &Value,
+    selection: &[String],
+    cleaned: &[Value],
+    time: f64,
+    state: Option<&pm_kernel::state::StateSnapshot>,
+) -> Result<Batch> {
     let mut scratch = DocumentStore::new_untitled(model(project));
     let mut batch = Batch {
         commands: vec![],
@@ -300,37 +355,8 @@ pub fn plan_with_definitions(
         descriptions: vec![],
         selection: selection.to_vec(),
     };
-    for (i, raw) in raw.iter().enumerate() {
-        let mut c = if let Some(s) = raw.as_str() {
-            if s.len() > 1_000_000 {
-                return Err(Error::invalid(format!("Oversized command at index {i}")));
-            }
-            serde_json::from_str(s)
-                .map_err(|_| Error::invalid(format!("Invalid command at index {i}")))?
-        } else {
-            raw.clone()
-        };
-        if c.to_string().len() > 1_000_000 {
-            return Err(Error::invalid(format!("Oversized command at index {i}")));
-        }
-        let kind = required(&c, "type")?;
-        if let Some(fields) = crate::catalog::catalog()["commandFields"]
-            .get(&kind)
-            .and_then(Value::as_array)
-        {
-            let mut cleaned = serde_json::Map::new();
-            for key in fields {
-                let key = key.as_str().unwrap();
-                if let Some(value) = c.get(key) {
-                    cleaned.insert(key.into(), value.clone());
-                }
-            }
-            c = Value::Object(cleaned);
-        }
-
-        if !OPERATIONS.contains(&kind.as_str()) {
-            return Err(Error::invalid(format!("Unsupported command: {kind}")));
-        }
+    for mut c in cleaned.iter().cloned() {
+        let kind = c["type"].as_str().unwrap().to_owned();
         if ["transform_layers", "add_captions", "edit_captions"].contains(&kind.as_str()) {
             return Err(Error::unavailable(format!(
                 "kernel command/runtime definition: {kind}"

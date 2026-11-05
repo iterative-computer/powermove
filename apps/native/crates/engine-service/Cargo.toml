@@ -7,8 +7,10 @@ publish = false
 [features]
 default = ["kernel"]
 kernel = ["dep:pm-kernel"]
+studio-oidn = ["pm-studio/oidn"]
 
 [dependencies]
+pm-studio = { path = "../../../../engine/crates/pm-studio" }
 anyhow = "1"
 async-channel = "2"
 pm-kernel = { path = "../kernel", optional = true }

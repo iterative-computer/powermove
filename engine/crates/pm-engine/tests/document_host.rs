@@ -314,7 +314,43 @@ fn media_resolves_through_host_handles_and_retries_when_offline() {
         at(10),
     );
     let mut calls = host_calls(&out);
-    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    let source_calls: Vec<_> = calls
+        .iter()
+        .filter(|(_, body)| matches!(body, Request::MintHandle(m) if matches!(m.kind, CapabilityKind::SourceRead { .. })))
+        .cloned()
+        .collect();
+    let source_assets: Vec<_> = source_calls
+        .iter()
+        .map(|(_, body)| match body {
+            Request::MintHandle(m) => {
+                assert_eq!(m.session, session);
+                match &m.kind {
+                    CapabilityKind::SourceRead { asset } => asset.as_str(),
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(source_assets, ["clip", "logo"]);
+    // Original source access is independent of decoded-media access. Refusal
+    // of both source requests must leave the decoded-media flow below intact.
+    for (id, _) in source_calls {
+        engine.receive(
+            HOST,
+            &encode(Envelope::new(Message::Error {
+                id,
+                error: EngineError::new(
+                    ErrorCode::MediaOffline,
+                    ErrorScope::Connection,
+                    "source offline",
+                ),
+            })),
+            at(10),
+        );
+    }
+    calls.retain(|(_, body)| matches!(body, Request::MintHandle(m) if matches!(m.kind, CapabilityKind::MediaRead { .. })));
     let assets: Vec<String> = calls
         .iter()
         .map(|(_, body)| match body {
@@ -381,9 +417,12 @@ fn media_resolves_through_host_handles_and_retries_when_offline() {
     assert!(host_calls(&engine.tick(at(now))).is_empty());
     let out = engine.tick(at(now + MEDIA_RETRY_US[1] + 1));
     let retry = host_calls(&out);
-    assert_eq!(retry.len(), 1);
+    assert_eq!(retry.len(), 2);
     assert!(
-        matches!(&retry[0].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::MediaRead { asset } if asset.as_str() == "logo"))
+        matches!(&retry[0].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::SourceRead { asset } if asset.as_str() == "logo"))
+    );
+    assert!(
+        matches!(&retry[1].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::MediaRead { asset } if asset.as_str() == "logo"))
     );
 
     // An unchanged record is not resolved again; a relinked one is, and an
@@ -395,9 +434,12 @@ fn media_resolves_through_host_handles_and_retries_when_offline() {
         at(now + 20_000_000),
     );
     let calls = host_calls(&out);
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     assert!(
-        matches!(&calls[0].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::MediaRead { asset } if asset.as_str() == "clip"))
+        matches!(&calls[0].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::SourceRead { asset } if asset.as_str() == "clip"))
+    );
+    assert!(
+        matches!(&calls[1].1, Request::MintHandle(m) if matches!(&m.kind, CapabilityKind::MediaRead { asset } if asset.as_str() == "clip"))
     );
     assert!(
         recorder

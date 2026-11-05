@@ -1,5 +1,5 @@
 // File-only reference; every path is supplied by an isolated synthetic fixture.
-import {tag,evaluate} from './tag-oracle.mjs';
+import {tag,evaluate} from './main-oracle.mjs';
 import fs from 'node:fs/promises';
 import {readFileSync} from 'node:fs';
 import path from 'node:path';

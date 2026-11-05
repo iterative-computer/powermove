@@ -13,8 +13,8 @@ use crate::scene3d::model::{Material3d, MaterialKind, Mesh3d};
 use crate::three::materials::{LightCounts, Side};
 use crate::three::program::{Parameters, ToneMapping, chunk};
 
-/// Where a draw renders: the canvas (ACES Filmic, sRGB output) or the
-/// transmission render target (no tone mapping, linear output).
+/// Where a draw renders: the linear scene color target or its transmission
+/// render target. Tone mapping and encoding happen after the scene resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Canvas,
@@ -123,7 +123,7 @@ pub fn parameters(
     material: &Material3d,
     side: Side,
     lights: &LightCounts,
-    target: Target,
+    _target: Target,
 ) -> Result<Parameters, String> {
     let src = source(material);
     let x = extra(mesh);
@@ -159,20 +159,15 @@ pub fn parameters(
                 Vec::new(),
             ),
         };
-    let canvas = target == Target::Canvas;
     let mut p = Parameters {
         shader_type: shader_type.into(),
         shader_name: material.name.clone(),
         defines,
         vertex_shader: chunk(vs).ok_or(vs)?.into(),
         fragment_shader: chunk(fs).ok_or(fs)?.into(),
-        tone_mapping: if canvas {
-            ToneMapping::AcesFilmic
-        } else {
-            ToneMapping::None
-        },
+        tone_mapping: ToneMapping::None,
         opaque: !material.transparent,
-        output_srgb: canvas,
+        output_srgb: false,
         ..Parameters::default()
     };
     let lit = matches!(
@@ -720,18 +715,14 @@ pub fn shadow_parameters(
             vertex_shader: chunk("distanceRGBA_vert")
                 .ok_or("distanceRGBA_vert")?
                 .into(),
-            fragment_shader: chunk("distanceRGBA_frag")
-                .ok_or("distanceRGBA_frag")?
-                .into(),
+            fragment_shader: crate::three::materials::shadow_fragment(true).into(),
             ..Parameters::default()
         }
     } else {
         Parameters {
             shader_type: "MeshDepthMaterial".into(),
             vertex_shader: chunk("depth_vert").ok_or("depth_vert")?.into(),
-            fragment_shader: chunk("depth_frag").ok_or("depth_frag")?.into(),
-            use_depth_packing: true,
-            depth_packing: 3201,
+            fragment_shader: crate::three::materials::shadow_fragment(false).into(),
             ..Parameters::default()
         }
     };

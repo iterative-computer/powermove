@@ -1,0 +1,11 @@
+{
+  "id": "design", "name": "Design", "builtin": true, "agentDockMigration": 3,
+  "chrome": {"timelineChromeSchema": 5, "timeline": {"rowHeight": 37, "gutterWidth": 417}, "futureChrome": true},
+  "layout": {"futureLayout": 7, "docks": [
+    {"id":"left", "futureDock":true, "panels":[{"id":"assets","flex":true,"futurePanel":7}, {"id":"layer-effects","size":350}]},
+    {"id":"center", "panels":[{"id":"viewer","flex":true},{"id":"timeline","size":321,"futurePanel":true}]},
+    {"id":"right", "panels":[{"id":"inspector","flex":true}]}
+  ]},
+  "hiddenPanels": [{"id":"fxbrowser","spec":{"id":"fxbrowser","size":287,"futurePanel":true}}],
+  "futureWorkspace": {"keep":true}
+}

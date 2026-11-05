@@ -542,3 +542,371 @@ macOS verification still required: real Headless pixels/fonts/extension producer
 source media decode/rotation/retiming/scan, labelled sheets, measured waveforms,
 original-only child exports, no-clobber/cancel/reap behavior and full app-actor
 hosting. Linux doubles do not certify those integrations or physical UI behavior.
+
+## 2026-11-04 — MCP admission, error content and memory contract
+
+This dated section supersedes the earlier statement that MCP errors serialize
+`{code,message,backing}` into a text block. `McpSession::dispatch` still returns
+those structured Rust diagnostics; **MCP text blocks now contain the error's
+message verbatim**, as the tagged `mcp-stdio.mjs` does. Existing Rust diagnostic
+assertions use `dispatch`; actual `call`/JSON-RPC tests assert the wire content.
+JSON-RPC also treats null tool arguments as `{}`, matching the tag's `?? {}`;
+arrays/nonobjects still receive the protocol-level invalid-arguments response.
+
+`scripts/error-pairs.mjs` executes the actual tagged external-session class and
+bridge admission method. Its committed fixture records **209 refusals**, covering
+all 67 tool names across closed/no-session/planning/app access and competing
+argument errors, plus session parser cases and unknown tools. The oracle uses
+Zod **4.6.5** only when regenerating fixtures; ordinary Rust tests do not require
+npm/Zod. Generation refuses unexpected TypeError/ReferenceError failures instead
+of recording broken seams as expected tool errors:
+
+```sh
+PM_ORACLE_MODULE_ROOT=/absolute/disposable-npm-prefix \
+  node apps/native/crates/mcp/scripts/error-pairs.mjs --write
+```
+
+External session admission now precedes ordinary body/schema validation. The
+publish and direct-timeline-import exceptions retain their tagged gate order;
+publish payload parsing runs before the explicit unavailable-promotion error.
+The native session/publish parsers reproduce Zod issue ordering, paths and message
+format. Zod's string limits count Unicode code points in this pinned version;
+the tagged command JSON limit separately counts UTF-16 units. These are distinct
+contracts, exercised by Unicode cases.
+
+`apply_commands` cleans **the entire batch** before checking revisions or resolving
+command targets. Unsupported types, invalid JSON, malformed keyframe/section
+payloads and oversized commands report the tagged first-invalid-index message.
+Ignored fields are removed before the cleaned-object size limit; default start
+time and hand-edit protection are explicit; section prototype keys are removed.
+The typed scratch planner and single guarded kernel transaction remain the write
+authority. Source-paired tests include a malformed later command competing with
+an earlier missing target and a foreign revision, with no partial publication.
+`select_layers` now uses the actual body validation/message and deliberate
+ID-deduplication behavior. Extra body fields do not change selection. The frozen
+catalog's `uniqueItems` declaration remains unchanged; tagged `Set` normalization
+is authored logic, not a Chromium quirk.
+
+### A511/A512: resolved attribution, retained cutover requirements
+
+The frozen reference is `v1.2.0`, commit
+`07ed5fa17ee640659cb075f9cad1af2095011d60`. Executing its complete external +
+agent catalog gives **67 tools and no `project_memory`**. Its `get_project_state`
+description and renderer projection contain no project-memory index, even when
+the supplied synthetic project has memory fields. `scripts/memory-contract.mjs`
+and the Rust regression pin these facts against the actual tag; they do not
+infer them from native output.
+
+**Contract reconciliation:** W1 A511/A512's attributed *shipped-tag* provenance is
+incorrect. Retain both IDs and their full memory-index/read-write requirements
+as **additive native cutover requirements**, separately from frozen 67-tool
+conformance. Neither requirement is deleted, marked passed, nor silently
+implemented by adding a tool to the frozen catalog. The additive memory schema,
+authority/agent-access policy, durable kernel admission and read/write/index
+adapter still need an explicit contract and implementation. In particular,
+preserving an opaque `memory` field is not a working `project_memory` tool.
+The acceptance/W1 owners must append this attribution correction and retain
+both cases as blocked on that additive implementation; those files are outside
+this lane's ownership. The existing acceptance blocker therefore remains visible.
+
+### Real PMV ingress for A506 consumers
+
+`Automation::open_file(id, absolute_working_path)` exposes the kernel's
+`PrepareOpen(File)`/adoption path without changing any frozen tool schema. It
+retains kernel file locks, recovery/copy refusals, session generation and the
+resident original-media table. It performs no metadata-only media import.
+Call this on the MCP worker with an explicitly selected working copy before
+starting a session. Recovery/copy outcomes remain errors requiring the host's
+existing decision flow; they are never silently accepted as writable originals.
+
+A synthetic real PCM WAV is packed into a PMV, copied to a working file, opened
+through this public ingress, edited and saved through MCP, then reopened with the
+production reader and again through public ingress. The test verifies every WAV
+byte, native persisted Undo history, opaque memory/unknown fields and unchanged
+original PMV bytes. This supplies the previously missing MCP-owned ingress for
+A506's acceptance fixture. It does not certify every real-project media case,
+decoding, migration or audible playback.
+
+Decisions and selecting rules:
+
+- **N6/N7:** error messages cross MCP unchanged; structured diagnostics stay on
+  Rust `Result`. Session/access failures win over body validation where the tag
+  specifies that order.
+- **N3/N4/N6:** clean complete batches before admission, then use one atomic
+  kernel transaction; malformed later commands never publish earlier ones.
+- **N3/N4/N6:** retain A511/A512 as additive requirements with corrected
+  provenance, and preserve opaque memory data without inventing a shipped API.
+- **N4/N7:** expose explicit working-file ingress through kernel sessions,
+  retaining original bytes and history rather than creating another packer.
+
+## 2026-11-04 — Native creative inspection and remaining backing
+
+**Current status, superseding the historical opening/table: 67 frozen tools /
+67 schema-identical / 23 concrete bodies + 10 existing host adapters /
+34 pending bodies.** The two new concrete bodies are
+`inspect_creative_workspace` and `inspect_creative_extension`. The 34 pending
+calls remain explicit failures; the new tests do not convert their absence into
+body-conformance passes.
+
+The worker-only `CreativeInspection` trait binds `creative::CreativeReader`, which reads actual saved After Effects preference/layout,
+script-panel, CEP and compiled-plugin inventories. It ports the frozen bounded
+Adobe property-map parser, normalized bounds/tab groups/visibility/windows,
+newest numeric preference version, current/named selection, modified-layout
+precedence and parse warnings. It does not guess a missing workspace or execute
+Adobe code. Tool IDs are opaque SHA-256-derived identities; responses omit local
+inventory roots. Script sources follow only bounded literal local includes;
+CEP file lists apply the frozen source allowlist, traversal/private-file rules,
+file/depth/count limits and explicit per-file reads. Compiled/protected sources
+remain metadata-only. All response copy comes from the tagged implementation.
+
+On macOS the default reader uses the tagged platform locations. Linux's default
+returns the tagged unsupported-platform result/error. Portable tests inject
+`CreativePaths { home, applications, system_cep }` rooted in canonicalized
+synthetic temporary directories. Kernel documents and edit observations are not
+refreshed by these main-host read tools. Planning sessions retain the frozen
+inspection allowlist (which excludes these tools); project-access and app
+sessions can use them.
+
+Inventory enumeration and reads use descriptor-relative `openat`,
+`O_NOFOLLOW` and `fstatat`, including every ancestor component, without `/proc`
+or GNU paths. Final file reads are capped again after opening and are nonblocking
+for special files. Authored source is never executed, copied into an extension,
+modified or removed. In addition to the tagged per-tool limits, a single
+inventory directory exceeding 65,536 entries returns a visible budget error.
+Source-tree ordering uses native ICU root Unicode collation rather than ASCII
+sorting or an inherited process locale; cross-locale Electron ordering is not
+claimed. Tests compare the source listings directly to the tagged reader under
+the recorded oracle locale, including uppercase names and Unicode content.
+
+`libc` supplies portable Darwin/Linux descriptor APIs; `icu_collator` supplies
+native Unicode collation. The root native lockfile adds only the MCP dependency
+edges and four required collation packages, with no version upgrades. The owned
+backend lockfile is also reconciled with the real dependency graph (including
+its previously absent pm-promedia→pm-protocol edges); no dependency was bulk-upgraded.
+No new crate/workspace member, Node runtime, Chromium dependency or visual
+surface was introduced. **No DESIGN-TODO(opus) was added:** no design choice or
+provisional UI was made.
+
+### Remaining 34 tool bodies — not completed by this lane
+
+| Tools | Required backing still absent on this base |
+| --- | --- |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_list`, `thread_read`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
+| `publish_extensions`, `stage_fork_rebase` | Complete API pack, provenance/base inventory, compiler/scanner/isolated activation admission and atomic promotion/reload/rebase coordinator. |
+| `import_media_to_timeline`, `import_media`, `replace_media` | Durable original-byte/fingerprint/probe admission, retained runtime versions and native media Undo coordinated with the kernel. File-open ingress does not implement media import. |
+| `edit_3d` | Complete scene edit/validation admission: `kernel/src/commands/scene3d.rs` still returns `NotImplemented`. |
+| `set_panel_layout`, `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel`, `computer_use_panel`, `get_workspace_state` | Workspace editing + external history continuations; registered live native/remote-DOM panel/input/capture/semantic-reference and renderer/workspace diagnostics hosts. Saved layout facts are insufficient. |
+| `transcribe_media`, `generate_captions` | Speech model/download/job/cache/original-PCM service and caption command admission; `kernel/src/commands/captions.rs` still returns `NotImplemented`. |
+| `store_library`, `store_install`, `store_update`, `store_uninstall`, `store_publish_prepare`, `store_publish` | Durable StoreKernel + permission/trust/provenance/local-tree/activation/publish-confirmation coordinator. `store-host/src/install.rs` supplies an in-memory StoreKernel test implementation and primitives, not this production coordinator. |
+
+`fixtures/unavailable-wave4.json` and its regression exercise all 34 names with
+schema-valid requests, require inspectable unavailable errors, and verify no
+project or history changes. **These are 34 missing-capability refusal cases,
+not 34 implemented tool bodies.** No optimistic flags, placeholder jobs, metadata
+imports, fake pixel outputs or success-shaped catalogs replace the missing
+services. Existing ten worker adapters also still require real application
+injection. Broader per-tool error/body identity beyond the source-paired cases
+remains an integration gate.
+
+Decisions and selecting rules:
+
+- **N3/N6/N7:** use the actual bounded native filesystem reader and frozen result
+  adapter, opaque IDs and explicit roots, rather than a catalog-only claim.
+- **N1/N3/N4:** refuse linked ancestors and unbounded directories even where the
+  tag's pathname reader could follow them; such filesystem exposure is not
+  authored creative intent. Preserve all source/configuration bytes. Digest truncation does not split a Unicode scalar: a
+  boundary-crossing emoji is omitted from the bounded label rather than producing
+  the tag’s lone surrogate; the original XML/source remains byte-identical. This
+  JS string-slicing artifact is not authored naming intent (N3 quirk policy).
+- **N7/N8:** use deterministic native Unicode collation and worker-only I/O;
+  Node executes tagged code only in tests, never in the application.
+- **N1/N3/N4/N6:** keep each absent coordinator/body visible. The overall request
+  to complete every remaining MCP tool is **BLOCKED**, not merge-ready completion.
+
+## 2026-11-05 — Owner-pinned main contract, registration and recovery
+
+This section supersedes the two preceding v1.2.0 checkpoint sections wherever
+scope or current status differs. The behavior reference is now exactly
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, following the owner's reference change
+and P0 decision. It is **68 tools**, including `project_memory`; the v1.2.0
+67-tool fixture/oracle remains executable backward-compatibility evidence.
+The earlier W1 A511/A512 discrepancy is resolved by provenance: the tag has no
+memory tool, pinned main does, and the latter is now required. It is no longer
+an optional future API. Existing rows above are historical, not current claims.
+
+Current body status: **23 concrete bodies, 10 host adapters, one partially
+implemented memory tool, 34 remaining unavailable bodies**. The earlier table
+of 34 missing coordinators still applies. `project_memory` adds a 35th
+schema-valid missing-capability refusal case for its valid write operation;
+this case is not counted as an implemented write. There is no full lane
+completion or Mac/application conformance claim.
+
+### Main behavior and native backing
+
+- The main catalog and 213 admission/parser error cases are independently
+  generated from immutable main sources. Existing command, layout, media,
+  creative, Store and effect comparisons now execute that same reference.
+  Historical tag fixtures remain separately available. Tool errors retain the
+  source message and validation precedence; Rust errors retain diagnostics.
+- `memory.rs` ports the actual main sanitizer, six kinds, UTF-16 clipping,
+  single-goal replacement, 100-entry eviction, update/remove validation, sorted
+  list and compact index. Main's `get_project_state` now includes that index.
+  Disabled memory is retained in the project but hidden from agent indexes,
+  lists and staged input snapshots, including nested compositions. The pure
+  mutation planner returns displaced entries for archival; it does not publish
+  them. Tests execute main memory functions with synthetic entries.
+- **Memory add/update/remove remain blocked.** Kernel document publication
+  always increments edit revision; there is no actor admission that durably
+  autosaves metadata without composition Undo/revision. Using a raw edit or
+  MCP side store would violate authored behavior and the single writer rule.
+  Required outside-owned change: a kernel actor memory-metadata admission,
+  durable archival of displaced notes, autosave/event delivery, and overlay of
+  current metadata during all composition rollback paths. MCP's rollback
+  overlay preserves current `memory` and `memoryEnabled`, including explicit
+  true versus absence, but cannot supply the missing durable write API.
+- `registration.rs` exposes read-only status/review and explicit application of
+  a prepared change for all nine main clients: Claude Code, Codex, Claude
+  Desktop, Gemini CLI, Cursor, VS Code, Windsurf, LM Studio and OpenCode. Seven
+  JSON variants and Codex TOML have native writers; Claude Code uses an injected
+  CLI trait with source-paired argument/result checks. Missing CLI backing is
+  a visible error. Native `powermove-native` bundle paths are recognized alongside
+  legacy `Powermove` paths. No Node launcher or automatic startup setup is added.
+- **Claude Desktop connect requires `RegistrationConsent::ask` approval.** An
+  absent or denying consent host returns before settings, archives, directories
+  or receipts are written. Inspection and constructors cannot register a client.
+  Review is bound to its issuer and exact prior bytes; changes during approval
+  are refused. A private receipt preserves intentional disconnect. All tests
+  operate on canonicalized synthetic roots; no person's settings were changed.
+  Unrelated settings/comments and hand-written entries are retained/refused as
+  in main. Every displaced settings file is retained in a private archive.
+  Descriptor-relative no-follow access and atomic exchange/no-replace protect
+  publication; a late conflict preserves both versions and reports an explicit
+  `configuration_conflict`, including uncertain publication outcome.
+- `ExportJobs` supplies resumable `export_video` waiting with main's optional
+  jobId-only resume, running response/progress, duplicate-export refusal and
+  single consumption. Immutable kernel snapshots and an injected `ExportChild`
+  back each job; waits and progress callbacks release the shared host mutex.
+  Workers survive the requesting session ending, and document identities fence
+  later polling. Native progress is omitted when the host supplies none.
+  A deadline does not claim cancellation: still-running workers remain tracked
+  and `drain` visibly refuses while they remain. Tests use explicitly labeled
+  synthetic worker bytes, not fake video evidence. Production encode, progress,
+  cancellation/reaping and stage-timing reports still require the real host.
+- Replacing a document retires its portable MCP run while retaining/archiving
+  its staged sources; the same connection can start a new run. No old snapshot
+  is restored into the replacement. The stdio bridge rereads the descriptor and
+  credentials on the next explicit request after a broken connection, creates
+  a new server session, and never replays the failed mutation. Connection
+  teardown runs on error and preserves the original failure over cleanup errors.
+- `validate_effect` now follows main's typed inputs, generated-uniform
+  collisions, contextual defaults, sampling, temporal/source/grid/path/LUT
+  declarations, revision history and action validation, with direct source
+  comparisons. It remains validation, not compilation or activation proof.
+
+### A01–A10 ownership and remaining acceptance
+
+All ten rows are in scope; none is dropped because its application owner is
+outside this lane. The following is a dependency ledger, not completion by
+catalog/schema correspondence.
+
+| Main delta | MCP result and remaining dependency |
+| --- | --- |
+| A01 | Provider presets/discovery/address-scoped credentials and live error/context behavior still require agents/services/application owners; no MCP capability flag claims them. |
+| A02 | Native review/consent/configuration/receipt/archive APIs and paired tests added. App Settings binding, actual CLI execution, installed signed executable, restart behavior and user-visible consent remain. |
+| A03 | Claude Auto classifier/authority requires the real provider runner owner; not synthesized in MCP. |
+| A04 | Markdown, safe local/remote media grants, work grouping and duration/steering require agent-panel/media-host integration. |
+| A05 | `publish_visual_reply` remains unavailable without durable thread/artifact coordinator and inert viewer. Existing artifacts must be retained. |
+| A06 | Working-file ingress, body/error/source comparisons and existing adapters advanced; the earlier 34-body dependency table remains open. |
+| A07 | Current catalog, reads, disabled visibility, index, pure mutation/archival plan and rollback overlay implemented. Durable non-Undo metadata admission and actor binding remain blocked. |
+| A08 | Rebase/publication/theme/workspace lifecycle requires extension/app coordinator and native DOM integration; saved facts do not substitute for it. |
+| A09 | Portable document retirement, reconnect without replay, original-error teardown and export identity fencing tested. App publication/authorization queue and panel-generation capture/input fencing remain. |
+| A10 | Original-error teardown tested. Real provider frame review, capture error/edit preservation, supervised command approval and complete event ordering still need provider/application integration. |
+
+**Application integration boundary:** the GPUI app owns a separate
+`apps/native/crates/app/src/mcp.rs` dispatcher on the real kernel actor. It does
+not instantiate the portable `McpSession`. Shared catalog/validation/view changes
+are reusable, but new portable dispatch bodies, `ExportJobs`, registration and
+memory admission must be bound there by its owner. Do not replace the app actor
+with a second `Automation` kernel. Both host adapters and that binding require
+actual application acceptance; Linux standalone tests alone cannot prove them.
+
+**S070 update consumed from the final native-engine merge.** Opus has now supplied
+[the consent and Other Agent Apps spec](design/surfaces/agent-auth.md#s070-subscriptions-and-external-clients).
+The earlier design dependency is resolved; there is no remaining missing-design
+placeholder in this lane. The app owner must still bind its specified alert and
+Settings button to `RegistrationConsent`, persist `externalClients.claudeDesktop`
+(`added`/`declined`/`skipped`) before any client-setting write, and implement the
+specified installed/legacy/customized/intentional-removal skip rules. The native
+registration API is explicit-action-only and does not implement that first-window
+presentation or per-profile prompt scheduler. No provisional visual surface or
+new copy/design choice was created in this lane.
+
+Decisions and selecting rules:
+
+- **N3/N6:** use owner-pinned main for current behavior and retain tag evidence
+  for backwards compatibility; do not rewrite history to invent a tagged tool.
+- **N3/N4/N7:** expose memory reads/plans but refuse writes until durable
+  non-Undo single-writer admission exists; archive displaced notes/settings.
+- **Owner consent decision, N3/N4:** never add Claude Desktop settings without
+  explicit approval, preserve intentional removal and custom configuration.
+- **N1/N3/N4:** protect native settings publication against links/races and keep
+  uncertain outcomes visible; preserve every displaced version, never delete it.
+- **N3/N7/N8:** native worker jobs/reconnect use immutable identities, no
+  automatic mutation replay, no host-lock waits, no Node/Chromium runtime.
+- **N3/N4:** hide disabled notes from staged agent snapshots and preserve current
+  metadata through composition rollback; a raw snapshot leak/metadata rollback
+  is not recorded authored intent and is not copied as an Electron quirk.
+- **N1/N3/N6:** all absent bodies/providers/coordinators stay blockers, even with
+  passing catalog, planner or source-comparison tests. Prune no old consumers.
+
+Mac acceptance still required: APFS atomic exchange/exclusion and archive
+permissions; real profile/system-root links and default Adobe roots; signed
+bundle launch and all external clients (including CLI and declined/approved
+Claude consent); app actor binding, real export/video/progress/cancel/reap and
+provider/panel/extension flows. None was exercised in this Linux container.
+
+### Final merged Linux validation — 2026-11-05
+
+Integration base merged without conflicts:
+`d7a0b01d430d7ec9977f52d784f047c027801b14`. Both native lockfiles are committed;
+all final Cargo builds/tests use `--locked`. No Mac target was built or run.
+Commands below run from the repository root after sourcing the activation script.
+
+| Command | Final result |
+| --- | --- |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-mcp` | 126 passed, zero failed/ignored, normal parallel harness. |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-mcp -p pm-kernel -- --test-threads=1` | 399 passed (126 MCP + 273 kernel), zero failed, one pre-existing optional real-profile smoke test ignored. |
+| `cargo test --locked --manifest-path apps/native/crates/mcp/backends/Cargo.toml` | 10 passed, zero failed/ignored. |
+| `cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-mcp --all-targets -- -D warnings` | Clean. |
+| `cargo clippy --locked --manifest-path apps/native/crates/mcp/backends/Cargo.toml --all-targets -- -D warnings` | Clean. |
+| `cargo fmt --manifest-path apps/native/Cargo.toml -p pm-mcp -- --check` | Clean. |
+| `cargo fmt --manifest-path apps/native/crates/mcp/backends/Cargo.toml -- --check` | Clean. |
+| `node apps/native/crates/mcp/scripts/main-oracle.mjs` | 68 current tool names/descriptions/schemas identical. |
+| `node apps/native/crates/mcp/scripts/tag-oracle.mjs` | 67 historical tool names/descriptions/schemas identical. |
+| `PM_ORACLE_MODULE_ROOT=work/oracle node apps/native/crates/mcp/scripts/main-error-pairs.mjs` | 213 current source gate/parser refusals unchanged. |
+| `PM_ORACLE_MODULE_ROOT=work/oracle node apps/native/crates/mcp/scripts/error-pairs.mjs` | 209 historical source gate/parser refusals unchanged. |
+
+The last two optional fixture-regeneration checks require a disposable npm
+prefix with the source's Zod 4.6.5; committed fixtures suffice for normal Rust
+regressions. Node 24's TypeScript stripping runs source oracles in tests only.
+No test invokes a real external-client registration or live provider.
+
+Earlier validation exposed an untouched kernel event-order race in the default
+parallel combined run:
+`kernel/tests/slice2.rs::workspace_mutations_keep_partial_writes_without_document_undo_and_emit_events`
+received a non-`Published` event at its first-event assertion. Its exact retry
+passed; the final full combined run uses a serial test harness. The kernel test
+and its assertion were not changed, skipped or widened. This remains a kernel
+owner follow-up, not evidence that the race has been fixed. The sole existing
+ignored test is `smoke_real_store_copy_counts_only`, which needs an explicitly
+provided copy of a real profile; none was supplied. No new test was ignored.
+Registration's new late-publication race regression also initially exposed a
+misclassified project-revision error; it was fixed to `configuration_conflict`,
+with the byte-preservation assertion retained. Final export tests additionally
+prove worker completion/drain while a host progress callback is blocked.
+
+**Finish status: BLOCKED.** Passing tests cover the implemented behaviors and
+visible refusals, not the 34 missing tool bodies, memory publication, A01–A10
+application/provider dependencies, S070 answer persistence/presentation or Mac
+acceptance. The branch finish signal must therefore be `BLOCKED`, never a false
+`MERGE-READY` completion signal.

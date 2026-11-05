@@ -11,6 +11,8 @@ pub mod media;
 pub mod settings;
 pub mod storage;
 pub mod store;
+pub mod surface_backing;
+pub mod surfaces;
 pub mod updater;
 pub mod worker;
 

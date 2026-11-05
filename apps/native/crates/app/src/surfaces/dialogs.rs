@@ -4,8 +4,13 @@
 //! Decisions (2026-11-01): N3 uses the authored specs, including Cancel as the
 //! destructive default; N4 requires durable preset archival before removal;
 //! N7 uses stable IDs and publication fences; N8 queues all edits/evaluation.
-//! Missing design tokens are unresolved references, never guessed dimensions.
+//! Sheet geometry resolves the approved host tokens without guessed dimensions.
 //! All native output remains provisional until Opus review.
+
+// Each surface also builds as an independent portable verification target.
+#[allow(clippy::duplicate_mod)]
+#[path = "sheet_layout.rs"]
+pub mod sheet_layout;
 
 #[cfg(target_os = "macos")]
 #[path = "dialogs_appkit.rs"]
@@ -19,13 +24,8 @@ mod tests;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-pub const DESIGN_TODOS: &[&str] = &[
-    "DESIGN-TODO(opus): pm-design lacks m.sheet_inset, m.sheet_value_column and m.sheet_width_wide; supply tokens before form rendering.",
-    "DESIGN-TODO(opus): specify the unnamed layer substitution in the disabled Leave Attributes option for multi-selection.",
-    "DESIGN-TODO(opus): specify export-preset empty/duplicate rename validation and expression preview pending/unavailable states.",
-    "DESIGN-TODO(opus): specify keyframe Time/Value percentage validation copy (only collision copy is supplied).",
-    "DESIGN-TODO(opus): engine diagnostics without a source span need a neutral line placeholder; do not fabricate a line number.",
-];
+/// Review answers implemented on 2026-11-01 (N3: authored intent).
+pub const DESIGN_TODOS: &[&str] = &[];
 
 pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
@@ -34,6 +34,8 @@ pub const DURATION_ERROR: &str = "Enter a duration up to 1 hour.";
 pub const NUMBER_ERROR: &str = "Enter a number.";
 pub const VELOCITY_ERROR: &str = "Enter a speed, and an influence from 0.1 % to 100 %.";
 pub const COLLISION_ERROR: &str = "This would overlap another keyframe or go past the layer’s end.";
+pub const TIME_PERCENT_ERROR: &str = "Enter a percentage greater than 0.";
+pub const PRESET_NAME_ERROR: &str = "A preset with that name already exists.";
 pub const SCALE_TOOLTIP: &str = "Only number values can be scaled.";
 pub const ADJUST_DURATION: &str =
     "Adjust composition duration to the time span of the selected layers";
@@ -394,8 +396,9 @@ impl PrecomposeDraft {
             &self
                 .layer_name
                 .as_ref()
+                .filter(|_| self.can_leave)
                 .map(|n| format!("Leave all attributes in “{n}”"))
-                .unwrap_or_default(),
+                .unwrap_or_else(|| "Leave all attributes in the layer".into()),
             NativePiece::Radio,
             vec![(self.leave && self.can_leave).to_string()],
         );
@@ -662,8 +665,11 @@ impl ScaleDraft {
             && !self.collision
     }
     pub fn surface(&self, id: DialogId, owner: WindowId) -> Surface {
-        let time = Field::number("time", "Time", vec![self.time_percent.to_string()], "%");
+        let mut time = Field::number("time", "Time", vec![self.time_percent.to_string()], "%");
         let mut value = Field::number("value", "Value", vec![self.value_percent.to_string()], "%");
+        time.error = (!self.time_percent.is_finite() || self.time_percent <= 0.)
+            .then_some(TIME_PERCENT_ERROR);
+        value.error = (self.numeric && !self.value_percent.is_finite()).then_some(NUMBER_ERROR);
         value.enabled = self.numeric;
         if !self.numeric {
             value.tooltip = Some(SCALE_TOOLTIP);
@@ -695,7 +701,11 @@ impl Preview {
             Self::Syntax { line, message } | Self::Runtime { line, message } => {
                 Some(format!("Line {line}: {message}"))
             }
-            _ => None,
+            Self::SyntaxUnlocated { message } | Self::RuntimeUnlocated { message } => {
+                Some(message.clone())
+            }
+            Self::Unavailable => Some("No value at the playhead.".into()),
+            Self::Pending => None,
         }
     }
 }
@@ -706,6 +716,8 @@ pub struct ExpressionDraft {
     pub layer: String,
     pub property: String,
     pub preview: Preview,
+    previous_result: Option<String>,
+    previous_result_error: bool,
     generation: u64,
     due: Option<Instant>,
 }
@@ -722,6 +734,8 @@ impl ExpressionDraft {
             layer,
             property,
             preview: Preview::Pending,
+            previous_result: None,
+            previous_result_error: false,
             generation: 0,
             due: Some(Instant::now() + Duration::from_millis(250)),
         }
@@ -729,6 +743,16 @@ impl ExpressionDraft {
     pub fn edit(&mut self, source: String, now: Instant) {
         self.source = source;
         self.generation += 1;
+        if !matches!(self.preview, Preview::Pending) {
+            self.previous_result = self.preview.line();
+            self.previous_result_error = matches!(
+                self.preview,
+                Preview::Syntax { .. }
+                    | Preview::Runtime { .. }
+                    | Preview::SyntaxUnlocated { .. }
+                    | Preview::RuntimeUnlocated { .. }
+            );
+        }
         self.preview = Preview::Pending;
         self.due = Some(now + Duration::from_millis(250));
     }
@@ -760,10 +784,19 @@ impl ExpressionDraft {
         owner: WindowId,
         host: &mut impl DialogHost,
     ) -> bool {
+        let previous = if matches!(self.preview, Preview::Pending) {
+            self.previous_result.clone()
+        } else {
+            self.preview.line()
+        };
         if !self.complete(job, preview) {
             return false;
         }
-        if let Some(text) = self.preview.line() {
+        if let Some(text) = self
+            .preview
+            .line()
+            .filter(|text| Some(text) != previous.as_ref())
+        {
             host.enqueue(HostEvent::Announce {
                 owner,
                 text,
@@ -809,14 +842,19 @@ impl ExpressionDraft {
         s.width_token = "metrics.sheet_width_wide";
         s.line = Some(format!("{} · {}", self.layer, self.property));
         s.expression_editor = true;
-        s.result_line = self.preview.line();
-        s.result_error = matches!(
-            self.preview,
-            Preview::Syntax { .. }
-                | Preview::Runtime { .. }
-                | Preview::SyntaxUnlocated { .. }
-                | Preview::RuntimeUnlocated { .. }
-        );
+        s.result_line = if matches!(self.preview, Preview::Pending) {
+            self.previous_result.clone()
+        } else {
+            self.preview.line()
+        };
+        s.result_error = (matches!(self.preview, Preview::Pending) && self.previous_result_error)
+            || matches!(
+                self.preview,
+                Preview::Syntax { .. }
+                    | Preview::Runtime { .. }
+                    | Preview::SyntaxUnlocated { .. }
+                    | Preview::RuntimeUnlocated { .. }
+            );
         s.buttons[1].enabled = !matches!(
             self.preview,
             Preview::Syntax { .. }
@@ -891,6 +929,44 @@ pub fn rename_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str
     s.first_selected = Some("name".into());
     s
 }
+/// S043 review answer: validate without mutating or submitting an unchanged name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenameValidation {
+    Empty,
+    Unchanged,
+    Duplicate,
+    Ready(String),
+}
+impl RenameValidation {
+    pub fn check(original: &str, draft: &str, other_names: &[String]) -> Self {
+        let name = draft.trim();
+        if name.is_empty() {
+            Self::Empty
+        } else if name == original {
+            Self::Unchanged
+        } else if other_names.iter().any(|other| other == name) {
+            Self::Duplicate
+        } else {
+            Self::Ready(name.into())
+        }
+    }
+    pub fn apply(&self, surface: &mut Surface) {
+        surface.fields[0].error = matches!(self, Self::Duplicate).then_some(PRESET_NAME_ERROR);
+        surface.buttons[0].enabled = !matches!(self, Self::Empty | Self::Duplicate);
+        surface.buttons[0].id = if matches!(self, Self::Unchanged) {
+            "cancel"
+        } else {
+            "apply"
+        };
+    }
+    pub fn key_effect(&self) -> KeyEffect {
+        match self {
+            Self::Unchanged => KeyEffect::Cancel,
+            Self::Ready(_) => KeyEffect::Apply,
+            _ => KeyEffect::Unhandled,
+        }
+    }
+}
 pub fn delete_preset(id: DialogId, owner: WindowId, export: DialogId, name: &str) -> Surface {
     let mut s = alert(
         id,
@@ -912,7 +988,7 @@ pub fn preset_menu(current: Option<&str>) -> Vec<String> {
         ]
     })
 }
-/// Accessory width 240 is explicit in S043, unlike unresolved sheet tokens.
+/// Accessory width 240 is explicit in S043.
 pub const PRESET_RENAME_ACCESSORY_WIDTH: f64 = 240.;
 
 /// Nonblocking host seam: AppKit uses NSAlert.beginSheetModal / NSWindow.beginSheet;
@@ -1013,7 +1089,7 @@ impl DialogQueue {
 }
 
 /// Platform presentation boundary shared by the real AppKit alerts and Linux
-/// double. Form rendering remains blocked on the named Opus token additions.
+/// double. Sheet forms use the resolved shared sheet_layout geometry.
 pub trait AlertHost {
     type Error;
     fn show_alert(&mut self, surface: &Surface) -> Result<(), Self::Error>;

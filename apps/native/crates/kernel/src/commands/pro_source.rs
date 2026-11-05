@@ -115,8 +115,8 @@ pub struct ProSourceCommand {
 impl ProSourceCommand {
     pub fn label(&self) -> String {
         match self.mode {
-            SourceEditMode::Insert => "Insert Source",
-            SourceEditMode::Overwrite => "Overwrite Source",
+            SourceEditMode::Insert => "Insert",
+            SourceEditMode::Overwrite => "Overwrite",
         }
         .into()
     }

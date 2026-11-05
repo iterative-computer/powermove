@@ -239,7 +239,7 @@ fn main() -> anyhow::Result<()> {
                             let done = update.finished;
                             native.borrow_mut().update(&update);
                             if done {
-                                let _ = cx.update(|cx| cx.quit());
+                                cx.update(|cx| cx.quit());
                                 break;
                             }
                         }

@@ -11,6 +11,7 @@ export type Access = "editor" | "supervised" | "auto" | "full";
 export interface Snapshot {
   projectId: string;
   threadId: string;
+  threadTitle?: string;
   runId: string | null;
   phase: string;
   sendable: boolean;
@@ -75,7 +76,15 @@ export type Action =
   | { type: "draft"; text: string; selection: [number, number] }
   | { type: "focus"; focused: boolean }
   | { type: "key"; key: EventDetail }
-  | { type: "submit" | "stop" | "newThread" | "keepResult" | "undoResult" }
+  | {
+      type:
+        | "submit"
+        | "stop"
+        | "newThread"
+        | "openSettings"
+        | "keepResult"
+        | "undoResult";
+    }
   | {
       type: "shell";
       action: "open" | "close" | "pin" | "beginDrag" | "cancelDrag";

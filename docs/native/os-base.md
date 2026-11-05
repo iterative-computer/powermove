@@ -34,15 +34,13 @@ Cutover must retain the signing identity relationship. The beta's second bundle 
 
 ## Privacy/TCC usage descriptions
 
-There are **zero custom TCC usage strings** in the tag's `electron-builder.yml` `extendInfo`; it only adds the document UTI. The Electron-44-based installed application plist contains **five** default usage-description keys:
+There are **zero custom TCC usage strings** in the tag's `electron-builder.yml` `extendInfo`; it only adds the document UTI. The Electron-44-based installed application plist supplied defaults. The **three remaining historical entries** below are research evidence, not native usage declarations. The unused camera and microphone entries have been removed per the 2026-11-04 authorization spec:
 
 | Plist key | Observed default text |
 |---|---|
 | `NSAudioCaptureUsageDescription` | `This app needs access to audio capture` |
 | `NSBluetoothAlwaysUsageDescription` | `This app needs access to Bluetooth` |
 | `NSBluetoothPeripheralUsageDescription` | `This app needs access to Bluetooth` |
-| `NSCameraUsageDescription` | `This app needs access to the camera` |
-| `NSMicrophoneUsageDescription` | `This app needs access to the microphone` |
 
 These are bundle declarations, **not evidence that the app exercises every permission**. No custom Photos, Speech Recognition, Screen Capture, Apple Events or Desktop/Documents/Downloads usage-description key was found in the tag builder config or the inspected application plist. TCC grants themselves are OS-owned, not profile JSON to import. Retain bundle id/signing requirement at cutover and test exercised capabilities; choose native usage strings for the capabilities the native app actually requests. Local browser permission decisions (`apps/desktop/src/main/permissions.ts`) are distinct from macOS TCC consent and extension permission approvals.
 
@@ -76,3 +74,36 @@ Do not reregister `.pmv` as a directory package or replace it with a new extensi
 ## Verification limits / remaining evidence
 
 Source declarations, public plist facts and code paths were inspected without running Electron. No signed v1.2.0 archive was built/downloaded/authenticated, no update was installed, and no feed telemetry or TCC/Keychain ACL was read. Before distribution, verify exact production main/helper entitlements, deployment targets of bundled native runtimes/dylibs, signed-identity continuity, LaunchServices ownership under beta/cutover, macOS-13 feed retention and macOS-14 transition behavior. Those are acceptance gates; the facts above do not claim they have passed.
+
+
+## 2026-11-04 — approved native authorization contract
+
+[Opus os-authorization.md](design/surfaces/os-authorization.md) supersedes the
+research-only native usage-string choice above. Native asks for no camera,
+microphone or screen capture permission; extension requests fail in the host
+without opening a system prompt. Do not carry those unused Electron placeholders
+into the native bundle. The complete native usage list is Documents, Desktop,
+Downloads, Removable Volumes, Network Volumes and Local Network, with the exact
+copy in that spec and `pm-first-launch::surfaces::native::USAGE_STRINGS`.
+
+System permission denials route to the owning failed surface; returning from
+System Settings never automatically repeats an action. Signed Mac TCC, Local
+Network and Keychain behavior remains unverified. Reverse migration is not built;
+the latest owner decision supersedes migration.md's older going-back wording.
+No way-back action or native-file compatibility is promised; fileguard belongs
+to its dedicated lane.
+
+
+## 2026-11-04 — current reference audit
+
+The owner now pins behavior to main
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; the preceding tag facts remain historical
+input evidence. At that commit, electron-builder.yml still declares the same
+production id, URL/document types, arm64 ZIP target, hardened-runtime release
+policy and no native minimum-OS override. The package still says 1.1.3, so that
+value is not a release identity proof. The updater still waits 30 seconds, polls
+every four hours and uses ordinary quit with native Squirrel staging confirmation.
+No signed-main artifact was inspected, and no placeholder camera/microphone
+permission is carried into the native authorization model. The latest owner policy
+permits no reverse-migration or way-back promise; the fileguard lane owns old-app
+refusal of unsupported native files.

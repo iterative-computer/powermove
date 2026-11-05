@@ -522,7 +522,8 @@ pub fn transition(
     let p = |i: usize| params.get(i).copied().unwrap_or(Param::Float(0.0)).float();
     let (w, h) = (from.width, from.height);
     let prog = progress.clamp(0.0, 1.0);
-    let mix = |a: Rgba, b: Rgba, t: f64| -> Rgba { std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t) };
+    let mix =
+        |a: Rgba, b: Rgba, t: f64| -> Rgba { std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t) };
     let mut open = vec![None; w * h];
     let mut resampled = false;
     let image = match id {
@@ -554,15 +555,26 @@ pub fn transition(
             let mut out = Image::new(w, h);
             for y in 0..h {
                 for x in 0..w {
-                    let st = [(x as f64 + 0.5) / w as f64, 1.0 - (y as f64 + 0.5) / h as f64];
+                    let st = [
+                        (x as f64 + 0.5) / w as f64,
+                        1.0 - (y as f64 + 0.5) / h as f64,
+                    ];
                     let from_uv = [st[0] - dir[0] * prog, st[1] - dir[1] * prog];
                     let to_uv = [st[0] + dir[0] * (1.0 - prog), st[1] + dir[1] * (1.0 - prog)];
                     let clamp = |uv: [f64; 2]| uv.map(|v| v.clamp(0.0, 1.0));
                     let (fi, fnear) = inside(from_uv);
                     let (ti, tnear) = inside(to_uv);
                     let value = |fi: bool, ti: bool| -> Rgba {
-                        let f = if fi { from.sample(clamp(from_uv)) } else { [0.0; 4] };
-                        let t = if ti { to.sample(clamp(to_uv)) } else { [0.0; 4] };
+                        let f = if fi {
+                            from.sample(clamp(from_uv))
+                        } else {
+                            [0.0; 4]
+                        };
+                        let t = if ti {
+                            to.sample(clamp(to_uv))
+                        } else {
+                            [0.0; 4]
+                        };
                         std::array::from_fn(|k| t[k] + f[k] * (1.0 - t[3]))
                     };
                     out.put(x, y, value(fi, ti));
@@ -927,15 +939,22 @@ mod tests {
     fn transitions_run_from_the_first_stack_to_the_second() {
         let from = flat(8, 6, [1.0, 0.0, 0.0, 1.0]);
         let to = flat(8, 6, [0.0, 0.0, 1.0, 1.0]);
-        let at = |id: &str, params: &[Param], p: f64| transition(id, params, &from, &to, p).unwrap();
+        let at =
+            |id: &str, params: &[Param], p: f64| transition(id, params, &from, &to, p).unwrap();
         // Crossfade halfway is the even mix.
-        assert_eq!(at("crossfade", &[], 0.5).image.at(3, 3), [0.5, 0.0, 0.5, 1.0]);
+        assert_eq!(
+            at("crossfade", &[], 0.5).image.at(3, 3),
+            [0.5, 0.0, 0.5, 1.0]
+        );
         // A wipe at 0° (left to right, no softness) reveals `to` on the left.
         let wipe = at("wipe", &[Param::Float(0.0), Param::Float(0.0)], 0.5).image;
         assert_eq!(wipe.at(0, 3), [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(wipe.at(7, 3), [1.0, 0.0, 0.0, 1.0]);
         // Slide and zoom begin at `from` and end at `to`.
-        for (id, params) in [("slide", vec![Param::Float(0.0)]), ("zoom", vec![Param::Float(25.0)])] {
+        for (id, params) in [
+            ("slide", vec![Param::Float(0.0)]),
+            ("zoom", vec![Param::Float(25.0)]),
+        ] {
             assert_eq!(at(id, &params, 0.0).image.at(4, 3), from.at(4, 3), "{id}");
             assert_eq!(at(id, &params, 1.0).image.at(4, 3), to.at(4, 3), "{id}");
         }

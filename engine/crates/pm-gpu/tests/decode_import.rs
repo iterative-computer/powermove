@@ -105,15 +105,17 @@ fn ulps(a: f32, b: f32) -> u32 {
 
 /// Imports, normalizes, and compares with the CPU reference; returns the
 /// worst ULP difference.
-fn check_frame(g: &Gpu, f: &DecodedFrame, what: &str) -> u32 {
+fn check_frame(g: &Gpu, f: &DecodedFrame, what: &str, require_zero_copy: bool) -> u32 {
     let imp = g
         .importer
         .import(f)
         .unwrap_or_else(|e| panic!("{what}: import: {e}"));
-    assert!(
-        imp.aliased,
-        "{what}: textures do not alias the decoder's memory"
-    );
+    if require_zero_copy {
+        assert!(
+            imp.aliased,
+            "{what}: textures do not alias the decoder's memory"
+        );
+    }
     assert_eq!(imp.textures.len(), f.format.planes.len());
     let mut enc = g.device.create_command_encoder(&Default::default());
     let n = g.importer.normalize(&g.queue, &mut enc, &imp).unwrap();
@@ -195,6 +197,7 @@ fn run(g: &Gpu, path: &Path, purpose: DecodePurpose) -> Vec<String> {
                 g,
                 &f,
                 &format!("{} [{b:?}] frame {k}", path.display()),
+                true,
             ));
         }
         assert!(
@@ -244,25 +247,10 @@ fn still_images() {
         "still.avif",
     ] {
         let img = pm_media::image::read(&fixtures().join(name), &pool).unwrap();
-        // Image readers copy into pool memory once (decoded pixels are not
-        // GPU-shareable as they come out of the decoders); the import itself
-        // is zero-copy over that memory.
-        let imp = g.importer.import(&img.frame).unwrap();
-        assert_eq!(imp.textures.len(), 1);
-        let mut enc = g.device.create_command_encoder(&Default::default());
-        let Normalized::Rgb { rgba } = g.importer.normalize(&g.queue, &mut enc, &imp).unwrap()
-        else {
-            panic!("{name}: RGB expected")
-        };
-        g.queue.submit([enc.finish()]);
-        let gv = read_texture(&g, &rgba);
-        let (l, c) = img.frame.reference().unwrap();
-        let worst = gv.iter().enumerate().fold(0, |w, (i, v)| {
-            w.max(ulps(v[1], l[i][0]))
-                .max(ulps(v[3], l[i][1]))
-                .max(ulps(v[2], c[i][0]))
-                .max(ulps(v[0], c[i][1]))
-        });
+        // AVIF retains its native Y′CbCr planes; other readers return
+        // packed RGB. The frame's copy flag includes the reader's one
+        // decoded-to-pool copy; normalization must match the f64 reference.
+        let worst = check_frame(&g, &img.frame, name, false);
         assert!(worst <= 1, "{name}: {worst} ULP");
     }
 }
@@ -303,7 +291,7 @@ fn planar_rgb_dpx() {
     let pool = pm_media::pool::FramePool::new(0);
     let img = pm_media::image::read(&dpx, &pool).unwrap();
     assert_eq!(img.frame.format.label, "gbrp10le");
-    let worst = check_frame(&g, &img.frame, "frame.dpx");
+    let worst = check_frame(&g, &img.frame, "frame.dpx", true);
     assert!(worst <= 1, "{worst} ULP");
 }
 

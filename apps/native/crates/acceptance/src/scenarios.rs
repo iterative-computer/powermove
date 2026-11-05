@@ -20,6 +20,24 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "W061.frozen-set-easing",
+            workflow: "W061",
+            title: "Frozen sequential set_property Glide retains both complete authored handles",
+            run: crate::curve_oracle::set,
+        },
+        Scenario {
+            id: "W061.frozen-replace-easing",
+            workflow: "W061",
+            title: "Frozen replace_keyframes Glide matches independent complete-curve oracle",
+            run: crate::curve_oracle::replace,
+        },
+        Scenario {
+            id: "A532",
+            workflow: "W037",
+            title: "MCP actual effect validator: frozen acceptance, exact diagnostic order and no project edits",
+            run: crate::mcp_cases::validate_effect,
+        },
+        Scenario {
             id: "A539",
             workflow: "W031",
             title: "MCP evaluated structural lint, source bounds and measured audio peaks",
@@ -616,6 +634,20 @@ fn unavailable() -> Check {
         }
         let args = pending_arguments(&spec["inputSchema"])?;
         pm_mcp::catalog::validate(name, &args).map_err(|e| format!("{name}: {e}"))?;
+        if name == "project_memory" {
+            let before = f.document()?;
+            assert_eq!(f.call(name, args)?, json!({"memory":[],"total":0}));
+            // Reading is available; actor-owned writes are still an explicit blocker.
+            assert_eq!(f.document()?, before);
+            let error = tool_error(
+                &mut f.session,
+                name,
+                json!({"operation":"add","kind":"goal","text":"Synthetic goal"}),
+            )?;
+            assert_eq!(error["code"], "not_available_in_this_build");
+            assert_eq!(f.document()?, before);
+            continue;
+        }
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(
             error["code"], "not_available_in_this_build",
@@ -1085,7 +1117,19 @@ pub fn corpus_copy(source: &Path, ordinal: usize) -> Check {
         .map_err(|_| "cannot reopen saved corpus copy")?;
     let reopened = pm_kernel::DocumentStore::open(reopened);
     // Report faults without copying authored contents, paths or bytes to logs.
-    if reopened.file().envelope.extra != envelope.extra {
+    let mut saved_extra = reopened.file().envelope.extra.clone();
+    // The fileguard writer adds this known requirement when native-only state
+    // (including archived history) needs it. It is not an unknown input field.
+    // Preserve exact equality for every original field and any other addition.
+    if !envelope.extra.contains_key("requiresEngine")
+        && saved_extra
+            .get("requiresEngine")
+            .and_then(pm_model::Value::as_str)
+            == Some("native")
+    {
+        saved_extra.remove("requiresEngine");
+    }
+    if saved_extra != envelope.extra {
         return Err("corpus unknown envelope fields changed".into());
     }
     if reopened

@@ -120,6 +120,10 @@ impl<K: KernelData> HostDataService<K> {
             .collect())
     }
 
+    pub fn subscription_count(&self) -> usize {
+        self.subscriptions.len()
+    }
+
     fn snapshot(
         &mut self,
         query: &Query,

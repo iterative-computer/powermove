@@ -27,11 +27,11 @@ PY
 }
 case "${1:-test}" in
   build)
-    run_guarded cargo build -p pm-compat-host --features smoke --examples
+    run_guarded cargo build -p pm-compat-host --features smoke,macos-probes --examples
     ;;
   test)
     run_guarded cargo test -p pm-compat-host --lib
-    run_guarded cargo build -p pm-compat-host --example offscreen-probe
+    run_guarded cargo build -p pm-compat-host --features macos-probes --example offscreen-probe
     run_guarded "$CARGO_TARGET_DIR/debug/examples/offscreen-probe"
     ;;
   smoke)

@@ -263,15 +263,22 @@ impl PixelBuffer {
     /// example `BGRA` from a decoder, in tests and measurements).
     pub fn bytes(&self) -> Result<Vec<u8>, Error> {
         let (w, h) = (self.width(), self.height());
-        let bytes_per_pixel = match &self.format().to_be_bytes() {
-            b"BGRA" | b"RGBA" | b"ARGB" => 4,
-            b"l64r" | b"RGhA" => 8,
-            other => {
-                return Err(Error::Verify(format!(
-                    "'{}' is not a packed RGB format",
-                    String::from_utf8_lossy(other)
-                )));
-            }
+        let format = self.format();
+        let bytes_per_pixel = if [
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_32RGBA,
+            kCVPixelFormatType_32ARGB,
+        ]
+        .contains(&format)
+        {
+            4
+        } else if [kCVPixelFormatType_64RGBALE, kCVPixelFormatType_64RGBAHalf].contains(&format) {
+            8
+        } else {
+            return Err(Error::Verify(format!(
+                "'{}' is not a packed RGB format",
+                String::from_utf8_lossy(&format.to_be_bytes())
+            )));
         };
         self.with_lock(true, |pb| {
             let (base, bpr, rows) = Self::geometry(pb, false, 0);
@@ -321,6 +328,16 @@ pub fn color_constants(
 ) -> (&'static CFString, &'static CFString, &'static CFString) {
     unsafe {
         match tags {
+            ColorTags::Rec2100Pq { .. } => (
+                kCVImageBufferColorPrimaries_ITU_R_2020,
+                kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+                kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            ),
+            ColorTags::Rec2100Hlg { .. } => (
+                kCVImageBufferColorPrimaries_ITU_R_2020,
+                kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+                kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            ),
             ColorTags::Rec709Broadcast | ColorTags::Rec709Image => (
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
                 kCVImageBufferTransferFunction_ITU_R_709_2,

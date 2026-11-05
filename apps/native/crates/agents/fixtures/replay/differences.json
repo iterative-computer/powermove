@@ -84,18 +84,9 @@
     ]
   },
   "codex-cancel": {
-    "rule": "N1/N3/N7 — observable cancellation scheduling difference; P4 remains open",
-    "reason": "Native completion is emitted with cancel at stimulus 5; the frozen runner resolves after the interrupt acknowledgement at stimulus 6. Result and interrupt values match. Native also publishes Ready and Session inspection events. No production behavior is changed by the replay lane; application integration must resolve/verify timing.",
+    "rule": "N3 — interrupt acknowledgement is the cancellation completion boundary; N7 — retain native inspection",
+    "reason": "Cancellation now completes after interrupt settlement, matching the frozen runner. Native Ready/Session inspection events remain explicit pending compatibility/application boundary integration.",
     "differences": [
-      {
-        "path": "/events/0/after",
-        "expected": {
-          "Present": 6
-        },
-        "actual": {
-          "Present": 5
-        }
-      },
       {
         "path": "/lifecycle/0",
         "expected": "Missing",
@@ -408,48 +399,6 @@
             "value": "thr_123",
             "after": 3
           }
-        }
-      }
-    ]
-  },
-  "mcp-tool-errors": {
-    "rule": "N3/N4/N7 — pending compatibility fix outside replay ownership",
-    "reason": "Native MCP changes shipped plain-text tool errors to JSON text, replaces the shipped Zod diagnostic, and validates an unknown tool before the no-session error. This is a recorded gap, not an approved identical result. MCP owner must preserve frozen content text/precedence or resolve authored intent explicitly.",
-    "differences": [
-      {
-        "path": "/wire/1/value/result/content/0/text",
-        "expected": {
-          "Present": "Call start_session before using Powermove tools."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Call start_session before using Powermove tools.\"}"
-        }
-      },
-      {
-        "path": "/wire/2/value/result/content/0/text",
-        "expected": {
-          "Present": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Missing arguments.commit\"}"
-        }
-      },
-      {
-        "path": "/wire/3/value/result/content/0/text",
-        "expected": {
-          "Present": "Call start_session before using Powermove tools."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"Unknown tool: synthetic_unknown_tool\"}"
-        }
-      },
-      {
-        "path": "/wire/4/value/result/content/0/text",
-        "expected": {
-          "Present": "No MCP session is active."
-        },
-        "actual": {
-          "Present": "{\"code\":\"invalid_arguments\",\"message\":\"No MCP session is active.\"}"
         }
       }
     ]

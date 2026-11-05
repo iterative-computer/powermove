@@ -253,6 +253,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("actualSize"),
                 m("fitComposition"),
                 m("toggleLayerControls"),
+                Item::command("Composition Flowchart", "composition.flowchart", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
                 sep(),

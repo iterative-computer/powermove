@@ -340,6 +340,11 @@ pub(crate) fn make_layer(
     properties: &Map,
 ) -> Result<Value, CommandError> {
     let (w, h, dur) = comp;
+    if layer_type == "extension"
+        && let Some(result) = super::scene3d::make_known_layer(id, name, comp, content, properties)
+    {
+        return result;
+    }
     if matches!(layer_type, "captions" | "extension" | "shader") {
         return Err(CommandError::NotImplemented(match layer_type {
             "captions" => "add_layer (captions: use add_captions)",

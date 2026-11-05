@@ -7,11 +7,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pm-scene3d = { path = "../scene3d" }
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
+libc = "0.2"
+icu_collator = "2"
 
 [[bin]]
 name = "powermove-mcp"

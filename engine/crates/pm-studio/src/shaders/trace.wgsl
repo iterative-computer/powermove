@@ -75,7 +75,8 @@ fn vector_to_world(i: u32, v: vec3f) -> vec3f {
 // w: first-hit distance (-1 for the void)
 @group(0) @binding(9) var<storage, read_write> gbuf: array<vec4f>;
 // rgb: sum of emission seen directly by the camera (a product's screen):
-// exact per pixel, so Live denoises only what is noisy.
+// exact per pixel, so Live denoises only what is noisy. a: Σ luminance² of
+// each sample's radiance + emission (their noise, for Final's denoiser).
 @group(0) @binding(10) var<storage, read_write> ebuf: array<vec4f>;
 // Corner positions, 3 per triangle in BVH order (intersection reads only these).
 @group(0) @binding(11) var<storage, read> pos: array<vec4f>;
@@ -204,7 +205,13 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   return h;
 }
 
-fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m.z)]; }
+// Native instances may share one BLAS across different materials/layer IDs.
+// Zero metadata retains the source's per-triangle assignments.
+fn tri_material(h: Hit) -> Material {
+  let assigned = sdata[inst_base(h.inst) + 4u].w;
+  let index = select(u32(tris[u32(h.tri)].uv2m.z), u32(max(assigned - 1.0, 0.0)), assigned > 0.0);
+  return materials[index];
+}
 
 // How much light gets from `ro` to a point `dist` along `rd`: opaque surfaces
 // block it; glass and partly transparent surfaces tint and dim it.
@@ -216,7 +223,7 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
   for (var k = 0; k < 6; k++) {
     let h = intersect(o, rd, left, !nearest);
     if (h.tri < 0) { return t; }
-    let m = tri_material(h.tri);
+    let m = tri_material(h);
     // With caustics on, light through glass arrives as photons (bent and
     // focused); here glass then blocks it like any solid. Live has no
     // photons and lets it through tinted instead.
@@ -651,7 +658,7 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   var n = normal_to_world(h.inst, t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
   if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
   let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
-  var m = materials[u32(t.uv2m.z)];
+  var m = tri_material(h);
   if (m.maps.x >= 0.0) {
     let c = map_texel(m.maps.x, uv);
     m.base = vec4f(m.base.xyz * decode_srgb(c.rgb), m.base.w);
@@ -673,7 +680,9 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
   m.spec.x = max(m.spec.x, 0.002);
-  return Surface(p, n, ng, uv, m, u32(t.uv2m.w));
+  let assigned = sdata[inst_base(h.inst) + 5u].w;
+  let object = select(u32(t.uv2m.w), u32(max(assigned - 1.0, 0.0)), assigned > 0.0);
+  return Surface(p, n, ng, uv, m, object);
 }
 
 fn hash2(c: vec2f) -> vec2f {
@@ -976,6 +985,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var bg = vec3f(0.0);
   var nbg = 0.0;
   var em = vec3f(0.0);
+  // Σ luminance² (radiance + emission) of the samples: each pixel's noise, for Final's denoiser.
+  var l2 = 0.0;
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
   for (var i = 0u; i < P.dims.w; i++) {
@@ -986,6 +997,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
     rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
+    let x = min(lum, f32(P.counts.w)) + dot(smp.emit, vec3f(0.2126, 0.7152, 0.0722));
+    l2 += x * x;
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
@@ -996,11 +1009,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     accum[idx] = vec4f(rad, n);
     bgsum[idx] = vec4f(bg, nbg);
     gbuf[idx] = vec4f(oct_encode(nd.xyz), f32(object), nd.w);
-    ebuf[idx] = vec4f(em, n);
+    ebuf[idx] = vec4f(em, l2);
   } else {
     accum[idx] += vec4f(rad, n);
     bgsum[idx] += vec4f(bg, nbg);
-    ebuf[idx] += vec4f(em, n);
+    ebuf[idx] += vec4f(em, l2);
   }
 }
 

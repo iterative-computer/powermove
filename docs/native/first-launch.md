@@ -204,3 +204,26 @@ Signed Keychain consent/ACL, APFS behavior, quarantine/Gatekeeper, updater/TR an
 physical power-loss verification require macOS. These tests do not close those
 rows or authorize cutover. The kernel's headless journal/old-reader/FPS rows and
 soak reproduction are recorded in [kernel.md](kernel.md).
+
+## 2026-11-04 — beta2 worker integration and retained attempts
+
+See [beta2 readiness](beta2-readiness.md) for the real-coordinator first-run/final-
+delta bridge, direct/skipped-TR and consent-denial tests, experimental unpublished store merge preparation, retained failed/duplicate attempts and exact remaining
+application bindings. This is Linux preparation; N001–N007 await Opus specs and
+signed full-profile/secret Restore remains open.
+
+
+## 2026-11-04 — consent decline and current going-back contract
+
+The new [Opus migration spec](design/surfaces/migration.md) and
+[beta2 alignment report](beta2-readiness.md) supersede earlier presentation gaps.
+`skip_secret_consent` makes Not Now / Continue Without Them durable without any
+Keychain read. Explicit later retries capture current encrypted inputs; an
+attached-library retry registers locators through the kernel actor.
+
+Reverse migration is not built. Earlier Restore descriptions are intended
+cutover requirements or experimental store preparation, not an available beta
+feature. The latest owner decision permits no way-back or file-compatibility promise.
+The original data stays unchanged; no Restore, How to Go Back or three-way
+conflict-resolution UI is shipped. `feat/na-cloud-fileguard` owns the old app
+refusing native files.

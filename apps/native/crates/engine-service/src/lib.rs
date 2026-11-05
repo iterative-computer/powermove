@@ -7,6 +7,7 @@ pub mod policy;
 mod present;
 mod render;
 pub mod resources;
+pub mod studio;
 pub mod trace;
 pub mod transport;
 

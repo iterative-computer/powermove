@@ -110,11 +110,14 @@ fn selection_is_atomic_ephemeral_deduplicated_and_published_before_event() {
     let root = common::TempDir::new("selection-actor");
     let actor = KernelActor::spawn(Default::default());
     let k = actor.handle();
+    // Open replies before emitting Opened. Subscribe first and consume that
+    // exact setup event, so it cannot race into the selection assertions.
+    let events = k.subscribe();
     k.open("p", OpenSource::Untitled(value()))
         .wait()
         .unwrap()
         .unwrap();
-    let events = k.subscribe();
+    assert!(matches!(events.recv().unwrap(), KernelEvent::Opened { project } if project == "p"));
     let actor = k.for_actor(caller(8));
     actor
         .call(

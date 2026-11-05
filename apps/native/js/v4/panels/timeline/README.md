@@ -233,3 +233,73 @@ panel Prettier, frozen dependency installation and both browser builds pass.
 Decision: retain the frozen shape and submit missing capabilities as additive
 requests (orchestrator freeze; N3/N6/N8), preserving existing consumers and the
 single-writer worker boundary.
+
+## Renderer follow-ups — 2026-11-01
+
+`pm-panel-timeline::render` now owns the native paint plan, separate from the
+six-op control tree. `Scene::from_model` consumes the real immutable model on a
+worker; the native `ModelPresenter` supplies schema/AX names, label colours,
+media readiness, interpolation and track labels. Layers use exact authored
+seconds. Tracks use the existing indexed track packer, including property
+sub-rows. No presentation callback runs on a display tick.
+
+The retained `Frame` paints via `Painter`; Linux uses `Recorder`.
+`Frame::transport` changes only playhead and visible property diamonds.
+`Scene::prepare` visits the viewport plus one viewport of overscan, binary
+searches visible keys and track clip times, and exposes full AX row count.
+`Scene::navigate`, `scroll_for`, `anchor` and `reanchor` support virtual row
+navigation and identity-based scrolling. The host retains its RowId→NodeId map.
+Graph segments come from the evaluator and are painted by `graph_render`;
+the renderer does not fit, sample, normalize or modify curves.
+
+The header separator (review F3) and kind-badge slots are wired. A missing
+native kind/label remains a neutral, noninteractive slot. Existing kit-owned
+F1/F4/F5/F6 remain with UI-kit-2; this lane does not change the frozen v4 API.
+
+Decisions and selecting rules:
+
+- N3: preserve negative starts/subframes and exact native timing; no frame
+  snapping on read and no Chromium paint behavior is reproduced.
+- N2/N8: build geometry/key/track indexes on publication; repaint retained
+  overlays independently of JS or row layout at playback cadence.
+- N7: stable row-scoped key operation IDs, inspectable JSON, actual AccessKit
+  row counts and explicit virtual navigation; missing native presentation fails.
+- N1/design ownership: shapes/tokens follow the spec. Named custom paths are
+  requests to the native painter, not fabricated vector art.
+- N4/N6/prune: no Electron/compat consumer or user data is removed or changed.
+
+DESIGN-TODO(opus): the native `marker` and `keyframe.hold` paths, and Rendering
+stripe pitch/period, need the approved art/cadence. They remain named paint
+requests; no substitute art or animation constants were chosen here. All
+visual output remains provisional pending Opus review.
+
+Run from `apps/native`:
+
+```sh
+cargo test --locked -p pm-panel-timeline
+cargo clippy --locked -p pm-panel-timeline --all-targets --no-deps -- -D warnings
+cargo run --locked --release -p pm-panel-timeline --example render_budget
+cd js/v4
+bun test panels/timeline
+bun panels/timeline/bench.tsx
+bunx tsc --noEmit -p panels/timeline/tsconfig.json
+```
+
+Release Linux evidence (synthetic 60,000 layers, 960×1080, 1,080 measured
+frames after 120 warmup): max 114 mounted rows / 246 paint ops / 89,938 JSON
+bytes; prepare p95 **292.821 µs**, p99 **412.181 µs**; JSON inspection p95
+**1,607.909 µs**; retained playhead p95 **0.972 µs**. Half of a 120 Hz frame is
+4,166.667 µs. A separate 60,000-clip single-track test verifies horizontal
+culling. Worker index construction was 28.854 ms, outside the frame loop.
+The v4 control tree benchmark (90 mounted rows, 842 nodes, 1,200 samples)
+measured frame p95 **1,062.097 µs**, p99 **1,428.059 µs**, at most 42 commit ops
+per frame (5,117 at initial mount). These are CPU/operation-tree measurements,
+not macOS GPU, scanout or Electron comparison evidence.
+
+macOS integration still required outside this lane's ownership: attach the
+native painter to the shell's timeline bounds and display link, supply native
+schema/media/evaluator/font services, route native hit/AX navigation into the
+existing model, and enqueue native AX announcements. Test light/dark/Increase
+Contrast, Reduce Motion, symbol paths, clipping, both timeline modes, resize,
+VoiceOver navigation into unmounted rows, and physical 120 Hz cadence. Existing
+menus, fields and gesture acknowledgements remain the host's responsibility.

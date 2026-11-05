@@ -44,17 +44,22 @@ function Button({
   label,
   disabled,
   onClick,
+  destructive = false,
 }: {
   label: string;
+  destructive?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
-  // API GAP: kit exposes ToolbarItem but no regular system PushButton.
-  // Neutral, labelled action placeholder; no invented shape or button recipe.
   return (
-    <UI.ToolbarItem label={label} disabled={disabled} onClick={onClick}>
+    <UI.PushButton
+      label={label}
+      role={destructive ? "destructive" : "normal"}
+      disabled={disabled}
+      onClick={onClick}
+    >
       {label}
-    </UI.ToolbarItem>
+    </UI.PushButton>
   );
 }
 function RowControl({
@@ -77,10 +82,18 @@ function RowControl({
     onChange: change,
   };
   if (row.busy) return <UI.ProgressRow label="Checking…" />;
-  // DESIGN-TODO(opus): unresolved kit Switch/SecureTextField/NSColorWell recipes.
-  // Keep the labelled row and help, without substituting a checkbox, plaintext
-  // secret input, or inspector colour popover. No secret value reaches the tree.
-  if (["switch", "secure", "colour"].includes(row.control)) return null;
+  if (row.control === "switch" && typeof row.value === "boolean")
+    return <UI.Switch {...common} value={row.value} />;
+  if (row.control === "secure")
+    return row.binding ? (
+      <UI.SecureField
+        label={row.label}
+        binding={row.binding}
+        disabled={disabled}
+      />
+    ) : null;
+  if (row.control === "colour" && typeof row.value === "string")
+    return <UI.ColorWell {...common} minimal value={row.value} />;
   if (row.control === "action")
     return (
       <Button
@@ -130,7 +143,11 @@ function SettingRow({
       id={`settings.row.${row.id}`}
       role="group"
       label={row.label}
-      style={column}
+      style={{
+        ...column,
+        minHeight: t("metrics.form_row"),
+        padding: t("metrics.inset"),
+      }}
     >
       <div
         style={{
@@ -233,11 +250,19 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         </UI.ToolbarItem>
         <Copy>{detail.name}</Copy>
         <div role="group" label="About">
-          <Copy>About</Copy>
+          <text
+            style={{ color: t("colors.text"), fontSize: t("typography.title") }}
+          >
+            About
+          </text>
           <Copy>{detail.about}</Copy>
         </div>
         <div role="group" label="Includes">
-          <Copy>Includes</Copy>
+          <text
+            style={{ color: t("colors.text"), fontSize: t("typography.title") }}
+          >
+            Includes
+          </text>
           {detail.includes.map((entry, i) => (
             <Copy key={i}>{entry}</Copy>
           ))}
@@ -267,6 +292,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         {detail.canArchive && (
           <Button
             label="Delete…"
+            destructive
             disabled={!model.services || model.pending.has(detail.id)}
             onClick={() => {
               void model.perform({ type: "extension.archive", id: detail.id });
@@ -301,7 +327,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         }}
       />
       {model.publication.extensionsState === "loading" ? (
-        <UI.ProgressRow label="Checking…" />
+        <UI.ProgressRow label="Loading extensions…" />
       ) : model.publication.extensionsState === "error" ? (
         <UI.EmptyState
           label="Extensions couldn’t be loaded."
@@ -364,7 +390,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
             >
               <Copy>{extension.name}</Copy>
               <Copy secondary>{`${extension.type} · ${extension.source}`}</Copy>
-              {/* Switch intentionally absent pending kit support, as in RowControl. */}
+              {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
             </UI.ListItem>
           ))}
         </virtual-list>
@@ -393,7 +419,12 @@ function SectionContent({
   );
   const groups = [...new Set(rows.map((row) => row.group))];
   return (
-    <div id={`settings.section.${section}`} role="group" label={copy.title}>
+    <div
+      id={`settings.section.${section}`}
+      role="group"
+      label={copy.title}
+      style={{ padding: t("metrics.sheet_inset"), gap: t("metrics.inset") }}
+    >
       <text
         role="heading"
         style={{ fontSize: t("typography.heading"), color: t("colors.text") }}
@@ -410,16 +441,14 @@ function SectionContent({
           ? `Settings for “${model.publication.project!.name}”.`
           : copy.description}
       </text>
-      {/* API GAP: SettingsGroup recipe and sheet_inset token are not available.
-        Keep semantic AXGroup placeholders instead of an invented card recipe. */}
       {groups.map((group) => (
-        <div key={group} role="group" label={group}>
+        <UI.FormGroup key={group} title={group}>
           {rows
             .filter((row) => row.group === group)
             .map((row) => (
               <SettingRow key={row.id} row={row} model={model} />
             ))}
-        </div>
+        </UI.FormGroup>
       ))}
       {section === "transcription" &&
         model.publication.speech

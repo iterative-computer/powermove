@@ -48,6 +48,57 @@ pub enum Sort {
     #[default]
     Modified,
     Name,
+    Duration {
+        ascending: bool,
+    },
+    Size {
+        ascending: bool,
+    },
+    FrameRate {
+        ascending: bool,
+    },
+}
+impl Sort {
+    pub fn popup_check(self) -> Option<usize> {
+        match self {
+            Self::Modified => Some(0),
+            Self::Name => Some(1),
+            _ => None,
+        }
+    }
+    /// S017 table header input; numeric columns start descending and reverse
+    /// only when the same header is clicked again. Work remains on the worker.
+    pub fn click_header(self, label: &str) -> Option<Self> {
+        let next = match label {
+            "Name" => Self::Name,
+            "Date Modified" => Self::Modified,
+            "Duration" => Self::Duration { ascending: false },
+            "Size" => Self::Size { ascending: false },
+            "Frame Rate" => Self::FrameRate { ascending: false },
+            _ => return None,
+        };
+        Some(
+            if std::mem::discriminant(&self) == std::mem::discriminant(&next) {
+                self.reversed()
+            } else {
+                next
+            },
+        )
+    }
+    pub fn reversed(self) -> Self {
+        match self {
+            Self::Duration { ascending } => Self::Duration {
+                ascending: !ascending,
+            },
+            Self::Size { ascending } => Self::Size {
+                ascending: !ascending,
+            },
+            Self::FrameRate { ascending } => Self::FrameRate {
+                ascending: !ascending,
+            },
+            other => other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,22 +131,32 @@ impl Row {
         self.edited.then_some("Edited")
     }
     pub fn facts(&self, relative_date: &str) -> Option<String> {
-        let summary = self.summary.as_ref()?;
-        self.modified_ms?;
-        Some(format!(
-            "{relative_date} · {}×{}",
-            summary.width?, summary.height?
-        ))
+        let mut facts = vec![];
+        if self.modified_ms.is_some() && !relative_date.is_empty() {
+            facts.push(relative_date.to_owned());
+        }
+        if let Some((w, h)) = self.dimensions() {
+            facts.push(format!("{w}×{h}"));
+        }
+        (!facts.is_empty()).then(|| facts.join(" · "))
     }
-    /// Dates must be supplied by the system relative formatter, never cached
-    /// English text. Unknown summary data has no fabricated AX description.
-    pub fn ax_label(&self, relative_date: &str) -> Option<String> {
+    fn dimensions(&self) -> Option<(u32, u32)> {
         let summary = self.summary.as_ref()?;
-        self.modified_ms?;
-        Some(format!(
-            "{}, edited {relative_date}, {} by {}",
-            self.name, summary.width?, summary.height?
-        ))
+        summary
+            .width
+            .zip(summary.height)
+            .filter(|(w, h)| *w > 0 && *h > 0)
+    }
+    /// Keep every known fact, including the name when no summary is available.
+    pub fn ax_label(&self, relative_date: &str) -> Option<String> {
+        let mut facts = vec![self.name.clone()];
+        if self.modified_ms.is_some() && !relative_date.is_empty() {
+            facts.push(format!("edited {relative_date}"));
+        }
+        if let Some((w, h)) = self.dimensions() {
+            facts.push(format!("{w} by {h}"));
+        }
+        Some(facts.join(", "))
     }
 }
 
@@ -142,6 +203,34 @@ impl Query {
                 .cmp(&a.modified_ms)
                 .then_with(|| a.id.cmp(&b.id)),
             Sort::Name => compare_names(&a.name, &b.name).then_with(|| a.id.cmp(&b.id)),
+            Sort::Duration { ascending } => compare_fact(a, b, ascending, |r| {
+                r.summary
+                    .as_ref()?
+                    .duration_seconds
+                    .filter(|v| v.is_finite() && *v >= 0.)
+            }),
+            Sort::FrameRate { ascending } => compare_fact(a, b, ascending, |r| {
+                r.summary.as_ref()?.fps.filter(|v| v.is_finite() && *v > 0.)
+            }),
+            Sort::Size { ascending } => {
+                let size = |r: &Row| {
+                    r.dimensions()
+                        .map(|(w, h)| (u64::from(w) * u64::from(h), w))
+                };
+                let order = match (size(a), size(b)) {
+                    (Some(a), Some(b)) => {
+                        if ascending {
+                            a.cmp(&b)
+                        } else {
+                            b.cmp(&a)
+                        }
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                };
+                order.then_with(|| a.id.cmp(&b.id))
+            }
         });
         // Authored v1.2.0 recents behavior: 12 until a search is entered.
         // The native spec removes pagination, not this deliberate limit.
@@ -152,9 +241,32 @@ impl Query {
     }
 }
 
+fn compare_fact(
+    a: &Row,
+    b: &Row,
+    ascending: bool,
+    fact: impl Fn(&Row) -> Option<f64>,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let order = match (fact(a), fact(b)) {
+        (Some(a), Some(b)) => {
+            if ascending {
+                a.total_cmp(&b)
+            } else {
+                b.total_cmp(&a)
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        _ => Ordering::Equal,
+    };
+    order.then_with(|| a.id.cmp(&b.id))
+}
+pub const LOADING_AX: &str = "Loading Projects";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmptyState {
     pub title: &'static str,
+    pub symbol: &'static str,
     pub detail: String,
     pub action: Option<&'static str>,
 }
@@ -162,18 +274,21 @@ pub fn empty_state(query: &Query) -> EmptyState {
     if !query.text.trim().is_empty() {
         EmptyState {
             title: "No Results",
+            symbol: "magnifyingglass",
             detail: format!("No projects match “{}”.", query.text),
             action: None,
         }
     } else if query.section == Section::Deleted {
         EmptyState {
             title: "No Deleted Projects",
+            symbol: "trash",
             detail: "Projects you move to the Trash appear here.".into(),
             action: None,
         }
     } else {
         EmptyState {
             title: "No Projects",
+            symbol: "square.grid.2x2",
             detail: "Projects you create appear here.".into(),
             action: Some("New Project"),
         }
@@ -368,10 +483,10 @@ pub struct WindowMetrics {
     pub sheet_width: f32,
     pub row: f32,
     pub radius: f32,
-    pub thumbnail_min: &'static str,
-    pub sheet_inset: &'static str,
-    pub sheet_value_column: &'static str,
-    pub media_badge: &'static str,
+    pub thumbnail_min: f32,
+    pub sheet_inset: f32,
+    pub sheet_value_column: f32,
+    pub media_badge: u32,
 }
 impl WindowMetrics {
     pub fn resolve(tokens: &pm_design::Tokens) -> Self {
@@ -382,10 +497,10 @@ impl WindowMetrics {
             sheet_width: tokens.metrics.sheet_width,
             row: tokens.metrics.row,
             radius: tokens.metrics.control_radius,
-            thumbnail_min: "metrics.thumbnail_min",
-            sheet_inset: "metrics.sheet_inset",
-            sheet_value_column: "metrics.sheet_value_column",
-            media_badge: "colors.media_badge",
+            thumbnail_min: tokens.metrics.thumbnail_min,
+            sheet_inset: tokens.metrics.sheet_inset,
+            sheet_value_column: tokens.metrics.sheet_value_column,
+            media_badge: tokens.colors.media_badge,
         }
     }
 }

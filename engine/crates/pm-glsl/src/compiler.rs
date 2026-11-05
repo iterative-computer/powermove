@@ -5,6 +5,10 @@
 //! worker before its admission permit is released.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -13,6 +17,16 @@ use std::time::{Duration, Instant};
 
 use crate::{Failure, FailureStage, Prepared, Program};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_request_start() -> Option<Instant> {
+    TEST_REQUEST_START.get()
+}
 
 pub const PROCESS_SLOTS: usize = 2;
 pub const MAX_FRAME: usize = 64 << 20;
@@ -197,6 +211,78 @@ fn linux_resident_bytes(status: &str) -> std::io::Result<u64> {
     }
 }
 
+#[cfg(unix)]
+fn wait_for_io(
+    host: &UnixStream,
+    events: libc::c_short,
+    deadline: Instant,
+    pid: u32,
+    resident_limit: u64,
+) -> Result<(), Failure> {
+    loop {
+        let timeout = budget(pid, deadline, resident_limit)?;
+        let millis = timeout.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+        let mut fd = libc::pollfd {
+            fd: host.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd, valid for the entire call. The
+        // host owns its descriptor until this request finishes.
+        let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(process_error(format!("compiler IPC poll failed: {error}")));
+        }
+        if fd.revents & libc::POLLNVAL != 0 {
+            return Err(process_error("compiler IPC descriptor is invalid"));
+        }
+        if ready > 0 {
+            // poll rounds up to milliseconds; never admit I/O after the
+            // original deadline or without the resident-memory check.
+            budget(pid, deadline, resident_limit)?;
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_response(
+    host: &mut UnixStream,
+    data: &mut [u8],
+    deadline: Instant,
+    pid: u32,
+    resident_limit: u64,
+) -> Result<(), Failure> {
+    let mut remaining = data;
+    while !remaining.is_empty() {
+        wait_for_io(host, libc::POLLIN, deadline, pid, resident_limit)?;
+        match host.read(remaining) {
+            Ok(0) => {
+                return Err(process_error("compiler exited without a complete response"));
+            }
+            Ok(n) => remaining = &mut remaining[n..],
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                return Err(process_error(format!("compiler IPC read failed: {e}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Pool {
     pub fn new(executable: PathBuf, capacity: usize) -> Self {
         Self {
@@ -231,19 +317,26 @@ impl Pool {
     #[cfg(unix)]
     pub fn run(&self, request: Request, timeout: Duration) -> Result<Response, Failure> {
         use std::os::fd::OwnedFd;
-        use std::os::unix::net::UnixStream;
         // Independent unit tests expecting success must not compete for the
         // deliberately tiny production pool; integration tests exercise real admission.
         #[cfg(test)]
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        TEST_REQUEST_START.set(Some(Instant::now()));
         let _permit = self.admit()?;
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| process_error("invalid compiler deadline"))?;
-        let (mut host, child) = UnixStream::pair().map_err(|e| process_error(e.to_string()))?;
+        let (mut host, child) = UnixStream::pair()
+            .map_err(|e| process_error(format!("cannot create compiler IPC socket: {e}")))?;
+        // Darwin refuses timeout socket options once the peer has closed,
+        // even with a complete response still buffered. Configure the host
+        // before spawning, then poll without mutating socket options.
+        host.set_nonblocking(true)
+            .map_err(|e| process_error(format!("cannot make compiler IPC nonblocking: {e}")))?;
         let input: OwnedFd = child
             .try_clone()
-            .map_err(|e| process_error(e.to_string()))?
+            .map_err(|e| process_error(format!("cannot clone compiler IPC socket: {e}")))?
             .into();
         let output: OwnedFd = child.into();
         let mut worker = Worker(
@@ -281,8 +374,7 @@ impl Pool {
         for data in [&(bytes.len() as u64).to_le_bytes()[..], &bytes] {
             let mut remaining = data;
             while !remaining.is_empty() {
-                host.set_write_timeout(Some(budget(pid, deadline, self.resident_limit)?))
-                    .map_err(io_error)?;
+                wait_for_io(&host, libc::POLLOUT, deadline, pid, self.resident_limit)?;
                 match host.write(remaining) {
                     Ok(0) => return Err(process_error("compiler closed its input")),
                     Ok(n) => remaining = &remaining[n..],
@@ -300,45 +392,14 @@ impl Pool {
                 }
             }
         }
-        fn read(
-            host: &mut UnixStream,
-            data: &mut [u8],
-            deadline: Instant,
-            pid: u32,
-            resident_limit: u64,
-        ) -> Result<(), Failure> {
-            let mut remaining = data;
-            while !remaining.is_empty() {
-                host.set_read_timeout(Some(budget(pid, deadline, resident_limit)?))
-                    .map_err(|e| process_error(e.to_string()))?;
-                match host.read(remaining) {
-                    Ok(0) => {
-                        return Err(process_error("compiler exited without a complete response"));
-                    }
-                    Ok(n) => remaining = &mut remaining[n..],
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::TimedOut
-                                | std::io::ErrorKind::WouldBlock
-                                | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(e) => return Err(process_error(e.to_string())),
-                }
-            }
-            Ok(())
-        }
         let mut header = [0; 8];
-        read(&mut host, &mut header, deadline, pid, self.resident_limit)?;
+        read_response(&mut host, &mut header, deadline, pid, self.resident_limit)?;
         let length = u64::from_le_bytes(header);
         if length > MAX_FRAME as u64 {
             return Err(process_error("compiler response exceeds IPC budget"));
         }
         let mut bytes = vec![0; length as usize];
-        read(&mut host, &mut bytes, deadline, pid, self.resident_limit)?;
+        read_response(&mut host, &mut bytes, deadline, pid, self.resident_limit)?;
         let response = serde_json::from_slice::<Result<Response, Failure>>(&bytes)
             .map_err(|e| process_error(format!("invalid compiler response: {e}")))?;
         // Never block on normal exit after a complete response: Drop kills
@@ -694,6 +755,50 @@ mod tests {
             "VmRSS: 18446744073709551615 kB",
         ] {
             assert!(linux_resident_bytes(status).is_err());
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ipc_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn a_complete_response_is_read_after_the_worker_socket_closes() {
+        let (mut host, mut child) = UnixStream::pair().unwrap();
+        host.set_nonblocking(true).unwrap();
+        child.write_all(b"complete").unwrap();
+        drop(child);
+        let mut bytes = [0; 8];
+        read_response(
+            &mut host,
+            &mut bytes,
+            Instant::now() + Duration::from_secs(20),
+            std::process::id(),
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(&bytes, b"complete");
+    }
+
+    #[test]
+    fn a_closed_worker_socket_never_completes_an_incomplete_response() {
+        for response in [&b""[..], &b"short"[..]] {
+            let (mut host, mut child) = UnixStream::pair().unwrap();
+            host.set_nonblocking(true).unwrap();
+            child.write_all(response).unwrap();
+            drop(child);
+            let failure = read_response(
+                &mut host,
+                &mut [0; 8],
+                Instant::now() + Duration::from_secs(20),
+                std::process::id(),
+                u64::MAX,
+            )
+            .unwrap_err();
+            assert_eq!(failure.stage, FailureStage::CompilerProcess);
+            assert!(failure.message.contains("without a complete response"));
         }
     }
 }

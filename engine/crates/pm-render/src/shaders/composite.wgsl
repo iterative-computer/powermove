@@ -28,8 +28,12 @@ struct Quad {
     uv: vec4<f32>,
     // Solid: premultiplied color. Texture: x = alpha, y = 1 when the source
     // is in GL row order, z = 1 when it holds premultiplied E values to be
-    // read into linear light.
+    // read into linear light. A linear 3D source: z = 2 (linear working
+    // frame) or 3, w = 1 with a display background, + 2 for luminance-weighted
+    // samples.
     color: vec4<f32>,
+    // Display background RGB and authored exposure for a linear 3D source.
+    scene: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> q: Quad;
@@ -57,8 +61,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 
 // `FRAG_DRAW`: no mipmaps, bilinear, hard edges outside the UV window;
 // `color.y` = 1 for sources in GL row order (`u_fromFbo`).
-@fragment
-fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
+fn sample_quad(in: VsOut) -> vec4<f32> {
     var uv = in.uv;
     if (q.color.y > 0.5) {
         uv = vec2<f32>(uv.x, 1.0 - uv.y);
@@ -67,6 +70,14 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         c = vec4<f32>(0.0);
     }
+    return c;
+}
+
+// Ordinary 2D textures only need the authored E-to-linear decode. Keeping
+// the scene curve out of this entry point avoids compiling it for 2D draws.
+@fragment
+fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
+    var c = sample_quad(in);
     if (q.color.z > 0.5) {
         c = pm_premultiplied_e_to_linear(c);
     }

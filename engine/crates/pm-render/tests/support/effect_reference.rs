@@ -1,0 +1,1661 @@
+//! Reference frames of documents for the quality gates
+//! (docs/engine/gate-policy.md).
+//!
+//! Authored values (keyframes, world matrices, anchors, opacity, blend
+//! names, colors, fills) are evaluated by `pm-eval`, whose own gates keep
+//! them exact. Coverage, compositing and color math come from
+//! `pm-reference`, never from the engine's renderer. The reading of the
+//! document is shared with the engine (`plan::derived_scale`,
+//! `normalize_fill`, `project_color`, `blend_mode`, `has_masks`,
+//! `vector::level2`): a bug there would be in both, which the interior
+//! check against today's capture still catches.
+//!
+//! Modelled so far: the composition background (solid, linear and radial
+//! gradients, none), 2D solid layers (world matrix, size anchor, opacity,
+//! blend mode, radius) and 2D shape layers (shapes and editable paths:
+//! fills and strokes) in projects that composite in E, with their built-in
+//! effects (`pm_reference::effects`, from the kernel's GLSL; Grain and
+//! Displace excepted).
+//! SVG paths, gradients, normal groups and clips use independent f64 paint
+//! on a 16× grid. Unsupported SVG constructs use separate resvg 32× samples;
+//! their RGBA8 paint quantization remains a reference limitation. Other image
+//! layers and unmodelled content leave their affected footprint unreferenced
+//! (NaN), or the whole frame when that footprint cannot be bounded. The comparator judges unreferenced
+//! pixels against today's capture until the lane that owns that content
+//! models it here (gate-policy.md, "Who converts what").
+
+use pm_eval::node;
+use pm_eval::{Comp, Evaluator, Scope};
+use pm_model::{Document, Node};
+use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
+use pm_reference::compare::{Class, classify};
+use pm_reference::composite::{Blend, Rgba, blend, scale};
+use pm_reference::coverage::{FillRule, fill};
+use pm_reference::effects::Open;
+use pm_render::AssetResolver;
+use pm_vector::kurbo::{Affine, Point};
+
+use super::svg_f64;
+
+/// Coverage cells per pixel side for paths and solids.
+pub const PATH_SAMPLES: usize = 16;
+
+/// A proof variant with only one open-composition layer drawing. The other
+/// layers remain as null transform parents, so authored world transforms do
+/// not change. Effects, mattes, and transitions belong to later lanes; the
+/// layer's content, opacity, masks and motion channels remain authored. The
+/// float project depth exposes native geometry instead of RGBA8 quantization.
+pub fn isolated_own_layer(document: &Document, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = document.to_value().expect("project root");
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    fields.insert("colorDepth", Value::Number(32.0));
+    let Value::Array(layers) = fields.get_mut("layers").expect("open composition layers") else {
+        panic!("open composition layers are not an array");
+    };
+    isolate_layer_list(layers, index);
+    Document::new(Some(root), document.revision())
+}
+
+/// Isolate one native source within a nested composition, at that
+/// composition's own geometry and evaluated source time. Parent precomp
+/// placement and resampling remain a separate compositing question.
+pub fn isolated_own_layer_in_comp(document: &Document, comp_id: &str, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = document.to_value().expect("project root");
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    fields.insert("colorDepth", Value::Number(32.0));
+    let Value::Object(comps) = fields.get_mut("comps").expect("project compositions") else {
+        panic!("project compositions are not an object");
+    };
+    let Value::Object(comp) = comps.get_mut(comp_id).expect("nested composition") else {
+        panic!("nested composition is not an object");
+    };
+    let Value::Array(layers) = comp.get_mut("layers").expect("nested composition layers") else {
+        panic!("nested composition layers are not an array");
+    };
+    isolate_layer_list(layers, index);
+    Document::new(Some(root), document.revision())
+}
+
+fn isolate_layer_list(layers: &mut [pm_model::Value], index: usize) {
+    use pm_model::Value;
+    assert!(index < layers.len());
+    for (i, layer) in layers.iter_mut().enumerate() {
+        let Value::Object(fields) = layer else {
+            panic!("layer is not an object");
+        };
+        if i == index {
+            fields.insert("fx", Value::Array(Vec::new()));
+            fields.insert("transitionIn", Value::Null);
+            fields.insert("transitionOut", Value::Null);
+            fields.insert("matteSource", Value::Null);
+            fields.insert("blend", Value::String("normal".into()));
+            fields.insert("group", Value::Null);
+        } else {
+            fields.insert("type", Value::String("null".into()));
+            fields.insert("group", Value::Null);
+            fields.insert("matteSource", Value::Null);
+            fields.insert("solo", Value::Bool(false));
+        }
+    }
+}
+
+/// A proof variant for one layer's effects (L6): only the layer at `index`
+/// draws, at full opacity, normal blend, without motion blur, transitions
+/// or matte, at float depth; with its effects or (`effects` false)
+/// without them. Content, masks and transforms stay authored.
+pub fn isolated_effect_layer(document: &Document, index: usize, effects: bool) -> Document {
+    use pm_model::Value;
+    let mut root = isolated_own_layer(document, index)
+        .to_value()
+        .expect("isolated project");
+    let original = document.to_value().expect("project root");
+    let fx = match &original {
+        Value::Object(fields) => match fields.get("layers") {
+            Some(Value::Array(layers)) => match &layers[index] {
+                Value::Object(layer) => layer.get("fx").cloned(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    let Some(Value::Array(layers)) = fields.get_mut("layers") else {
+        panic!("open composition layers are not an array");
+    };
+    let Value::Object(layer) = &mut layers[index] else {
+        panic!("layer is not an object");
+    };
+    if effects && let Some(fx) = fx {
+        layer.insert("fx", fx);
+    }
+    layer.insert("mblur", Value::Bool(false));
+    if let Some(Value::Object(properties)) = layer.get_mut("p")
+        && let Some(Value::Object(channel)) = properties.get_mut("opacity")
+    {
+        channel.insert("v", Value::Number(100.0));
+        channel.insert("kf", Value::Array(Vec::new()));
+        channel.insert("expr", Value::Null);
+    }
+    Document::new(Some(root), document.revision())
+}
+
+/// The intrinsic solid source before a 2.5D plane projects it. Content,
+/// opacity, masks and motion channels remain authored. Its 3D placement and
+/// 2D pose are deliberately canonical: those belong to the projection gate.
+pub fn isolated_local_solid(document: &Document, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = isolated_own_layer(document, index)
+        .to_value()
+        .expect("isolated project");
+    let Value::Object(root_fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    let Value::Array(layers) = root_fields.get_mut("layers").expect("open layers") else {
+        panic!("open layers are not an array");
+    };
+    let Value::Object(layer) = &mut layers[index] else {
+        panic!("solid layer is not an object");
+    };
+    assert_eq!(layer.get("type").and_then(Value::as_str), Some("solid"));
+    layer.insert("threeD", Value::Bool(false));
+    let Value::Object(properties) = layer.get_mut("p").expect("solid properties") else {
+        panic!("solid properties are not an object");
+    };
+    for (name, value) in [
+        ("position.x", 0.0),
+        ("position.y", 0.0),
+        ("anchor.x", 0.0),
+        ("anchor.y", 0.0),
+        ("scale.x", 100.0),
+        ("scale.y", 100.0),
+        ("rotation", 0.0),
+        ("skew", 0.0),
+    ] {
+        let Value::Object(channel) = properties.get_mut(name).expect("pose channel") else {
+            panic!("pose channel is not a property");
+        };
+        channel.insert("v", Value::Number(value));
+        channel.insert("kf", Value::Array(Vec::new()));
+        channel.insert("expr", Value::Null);
+    }
+    Document::new(Some(root), document.revision())
+}
+
+/// A reference frame.
+#[derive(Clone)]
+pub struct Reference {
+    pub width: usize,
+    pub height: usize,
+    /// Premultiplied RGBA in the working encoding; NaN where not modelled.
+    pub rgba: Vec<f64>,
+    /// Pixels where modelled content is partially covered.
+    pub edge: Vec<bool>,
+    /// Pixels an effect took from fractional texture positions.
+    pub resampled: Vec<bool>,
+    /// Pixels whose value the formula leaves open (a Posterize level at a
+    /// storage boundary, Gradient's hash dither), composited like `rgba`.
+    pub open: Vec<Option<Open>>,
+    /// What the frame holds that is not modelled (empty when nothing).
+    pub unmodelled: Vec<String>,
+    /// An unmodelled layer's footprint could not be bounded: the whole
+    /// frame is unreferenced.
+    pub whole_frame: bool,
+}
+
+impl Reference {
+    /// Pixel classes: edges and resampled pixels grown by 2 pixels;
+    /// interior elsewhere.
+    pub fn classes(&self) -> Vec<Class> {
+        classify(&self.edge, &self.resampled, self.width, self.height, 2)
+    }
+
+    /// The reference with each open pixel at the value its formula allows
+    /// nearest to `engine` (E-R3: the nearest level of the reference).
+    pub fn resolved(&self, engine: &[f64]) -> Reference {
+        let mut out = self.clone();
+        for (i, open) in self.open.iter().enumerate() {
+            // An unreferenced pixel stays unreferenced.
+            if self.rgba[i * 4 + 3].is_nan() {
+                continue;
+            }
+            if let Some(open) = open {
+                let e = [
+                    engine[i * 4],
+                    engine[i * 4 + 1],
+                    engine[i * 4 + 2],
+                    engine[i * 4 + 3],
+                ];
+                out.rgba[i * 4..][..4].copy_from_slice(&open.nearest(e));
+            }
+        }
+        out
+    }
+
+    /// [`Reference::opaque`] of the frame resolved against an opaque
+    /// engine frame.
+    pub fn opaque_resolved(&self, engine: &[f64]) -> Reference {
+        let mut opaque = Reference {
+            rgba: self.opaque(),
+            ..self.clone()
+        };
+        let over_black = |c: Rgba| -> Rgba {
+            [
+                c[0].clamp(0.0, 1.0),
+                c[1].clamp(0.0, 1.0),
+                c[2].clamp(0.0, 1.0),
+                1.0,
+            ]
+        };
+        opaque.open = self
+            .open
+            .iter()
+            .map(|o| {
+                o.as_ref().map(|o| match o {
+                    Open::Points(p) => Open::Points(p.iter().map(|c| over_black(*c)).collect()),
+                    Open::Range(lo, hi) => Open::Range(over_black(*lo), over_black(*hi)),
+                })
+            })
+            .collect();
+        opaque.resolved(engine)
+    }
+
+    /// The capture's opaque view: color over black clamped to 0…1, alpha 1.
+    pub fn opaque(&self) -> Vec<f64> {
+        self.rgba
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = if p[3].is_nan() { f64::NAN } else { 1.0 };
+                [
+                    p[0].clamp(0.0, 1.0),
+                    p[1].clamp(0.0, 1.0),
+                    p[2].clamp(0.0, 1.0),
+                    a,
+                ]
+            })
+            .collect()
+    }
+
+    /// The share of pixels the reference models.
+    pub fn modelled(&self) -> f64 {
+        let n = self.rgba.chunks_exact(4).filter(|p| !p[3].is_nan()).count();
+        n as f64 / (self.width * self.height).max(1) as f64
+    }
+
+    pub fn alpha(&self) -> Vec<f64> {
+        self.rgba.chunks_exact(4).map(|p| p[3]).collect()
+    }
+}
+
+/// `#RRGGBB` or `#RRGGBBAA` as straight E values; `None` for anything the
+/// reference does not read.
+fn hex(s: &str) -> Option<[f64; 4]> {
+    let d = s.strip_prefix('#')?;
+    if !(d.len() == 6 || d.len() == 8) || !d.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let c = |i: usize| f64::from(u8::from_str_radix(&d[i..i + 2], 16).unwrap()) / 255.0;
+    Some([c(0), c(2), c(4), if d.len() == 8 { c(6) } else { 1.0 }])
+}
+
+/// The background fill (`FRAG_BACKGROUND_FILL`, the authored formula): `t`
+/// along the angle (or the radius × 1.4142) from the pixel center with y up,
+/// colors mixed stop by stop with `smoothstep` (a hard step where two stops
+/// coincide), in E.
+fn gradient(
+    fill: &pm_render::plan::Fill,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Option<[f64; 3]> {
+    let stops: Vec<([f64; 4], f64)> = fill
+        .stops
+        .iter()
+        .map(|(c, pos)| hex(c).map(|c| (c, pos / 100.0)))
+        .collect::<Option<_>>()?;
+    let p = [
+        (x as f64 + 0.5) / w as f64 - 0.5,
+        (h as f64 - (y as f64 + 0.5)) / h as f64 - 0.5,
+    ];
+    // 1.4142 is the formula's literal, not √2.
+    #[allow(clippy::approx_constant)]
+    let t = if fill.kind == "radial" {
+        (p[0].hypot(p[1]) * 1.4142).clamp(0.0, 1.0)
+    } else {
+        let a = fill.angle.to_radians();
+        (p[0] * a.cos() + p[1] * a.sin() + 0.5).clamp(0.0, 1.0)
+    };
+    let mut color = [stops[0].0[0], stops[0].0[1], stops[0].0[2]];
+    for pair in stops.windows(2) {
+        let ((_, e0), (right, e1)) = (pair[0], pair[1]);
+        let amount = if e1 <= e0 {
+            if t >= e0 { 1.0 } else { 0.0 }
+        } else {
+            let k = ((t - e0) / (e1 - e0)).clamp(0.0, 1.0);
+            k * k * (3.0 - 2.0 * k)
+        };
+        for i in 0..3 {
+            color[i] += (right[i] - color[i]) * amount;
+        }
+    }
+    Some(color)
+}
+
+fn reference_blend(mode: BlendMode) -> Blend {
+    match mode {
+        BlendMode::Normal => Blend::Normal,
+        BlendMode::Add => Blend::LinearDodge,
+        BlendMode::Screen => Blend::Screen,
+        BlendMode::Multiply => Blend::Multiply,
+        BlendMode::Overlay => Blend::Overlay,
+        BlendMode::SoftLight => Blend::SoftLightPhotoshop,
+        BlendMode::Difference => Blend::Difference,
+        BlendMode::Lighten => Blend::Lighten,
+        BlendMode::Darken => Blend::Darken,
+    }
+}
+
+/// The reference frame of `composition` at `time`, `width × height`
+/// output pixels at the legacy derived scale, with or without the
+/// background (transparent captures draw none), with `samples` motion-blur
+/// samples per blurred layer (1: none). `effects`: the definitions the
+/// engine draws with (for effect padding). `assets` resolves SVG source bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn render(
+    document: &Document,
+    composition: &str,
+    time: pm_protocol::common::Ticks,
+    width: u32,
+    height: u32,
+    background: bool,
+    samples: u32,
+    effects: &pm_render::effects::Effects,
+    assets: &dyn AssetResolver,
+) -> Reference {
+    let (w, h) = (width as usize, height as usize);
+    let mut out = Reference {
+        width: w,
+        height: h,
+        rgba: vec![0.0; w * h * 4],
+        edge: vec![false; w * h],
+        resampled: vec![false; w * h],
+        open: vec![None; w * h],
+        unmodelled: Vec::new(),
+        whole_frame: false,
+    };
+    if let Err(why) = draw(
+        document,
+        composition,
+        time,
+        &mut out,
+        background,
+        samples,
+        effects,
+        assets,
+    ) {
+        out.unmodelled.push(why);
+        out.rgba.fill(f64::NAN);
+    }
+    for (i, open) in out.open.iter_mut().enumerate() {
+        if out.rgba[i * 4 + 3].is_nan() {
+            *open = None;
+        }
+        // A value the formula leaves open is judged against the reference,
+        // like a resampled one: today's is one value of it.
+        out.resampled[i] |= open.is_some();
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw(
+    document: &Document,
+    composition: &str,
+    time: pm_protocol::common::Ticks,
+    out: &mut Reference,
+    background: bool,
+    samples: u32,
+    effects: &pm_render::effects::Effects,
+    assets: &dyn AssetResolver,
+) -> Result<(), String> {
+    let (w, h) = (out.width, out.height);
+    let root = document.root().ok_or("no document")?;
+    let color = pm_render::composite::color::project_color(root)?;
+    if color.working() != WorkingEncoding::Standard {
+        return Err("linear-light compositing".into());
+    }
+    // 8-bit storage holds 0…1 only.
+    let clamp = |c: Rgba| -> Rgba {
+        if color.precision == Precision::Unorm8 {
+            c.map(|v| v.clamp(0.0, 1.0))
+        } else {
+            c
+        }
+    };
+    let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
+    let seconds = comp.seconds_at(time.get());
+    if background {
+        let fill =
+            pm_render::plan::normalize_fill(comp.member("backgroundFill"), comp.member("bg"));
+        for y in 0..h {
+            for x in 0..w {
+                let c: Rgba = match fill.kind.as_str() {
+                    "none" => [0.0; 4],
+                    "solid" => {
+                        let c = hex(&fill.stops[0].0).ok_or("background color")?;
+                        [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
+                    }
+                    _ => {
+                        let c = gradient(&fill, x, y, w, h).ok_or("background stops")?;
+                        [c[0], c[1], c[2], 1.0]
+                    }
+                };
+                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&clamp(c));
+            }
+        }
+    }
+    let (sx, sy) = pm_render::plan::derived_scale(&comp, w as u32, h as u32);
+    // Expressions evaluate as the engine evaluates them (pm-eval with pm-expr).
+    let mut ev =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut ev, &comp, &comp);
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let layers: Vec<&Node> = comp.layers().iter().collect();
+    let solo = layers
+        .iter()
+        .any(|l| node::truthy(node::member(Some(l), "solo")));
+    // Motion blur (C-K4): a blurred layer is the average of its content at
+    // `t + ((s + ½)/n − ½) · shutter / fps`, masked at the center time.
+    let blur = (samples > 1).then(|| {
+        let fps = pm_render::motion::level_fps(&comp);
+        let shutter = pm_render::motion::shutter_frames(comp.node()) / fps;
+        (0..samples)
+            .map(|s| ((f64::from(s) + 0.5) / f64::from(samples) - 0.5) * shutter)
+            .collect::<Vec<f64>>()
+    });
+    // Layers used as track mattes draw only through their targets.
+    let matte_sources: Vec<pm_model::JsString> = layers
+        .iter()
+        .filter_map(|l| node::string(node::member(Some(l), "matteSource")).cloned())
+        .collect();
+    // Bottom (last) to top (first), with today's skip rules.
+    for &layer in layers.iter().rev() {
+        let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+        let flag = |k: &str| node::truthy(node::member(Some(layer), k));
+        let group = flag("group") || ty == "group";
+        if (solo && !flag("solo")) || matches!(ty.as_str(), "null" | "audio") {
+            continue;
+        }
+        if node::string(node::member(Some(layer), "id"))
+            .is_some_and(|id| matte_sources.contains(id))
+        {
+            continue;
+        }
+        if !group && !scope.active(layer, seconds).map_err(fail)? {
+            continue;
+        }
+        let opacity = scope.num(layer, "opacity", seconds).map_err(fail)? / 100.0;
+        let opacity = if opacity.is_nan() {
+            opacity
+        } else {
+            opacity.clamp(0.0, 1.0)
+        };
+        if !group && opacity <= 0.001 {
+            continue;
+        }
+        // What this reference does not model: the layer's footprint, grown
+        // by its effects' padding, is unreferenced (and anything drawn over
+        // it); the rest of the frame keeps its reference.
+        let chain = if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+            effect_chain(&mut scope, effects, layer, seconds)?
+        } else {
+            Some(Vec::new())
+        };
+        // A transition reads the whole stack below the layer and the stack
+        // with it, so it is applied to the frame after the composite.
+        let transition = layer_transition(&mut scope, effects, layer, seconds)?;
+        let unmodelled = if group || ty == "precomp" {
+            Some("groups and precomps")
+        } else if !matches!(ty.as_str(), "solid" | "image" | "shape") {
+            Some("other layer types")
+        } else if flag("matteSource") {
+            Some("mattes")
+        } else if scope.is_3d_layer(layer).map_err(fail)? {
+            Some("2.5D planes")
+        } else if matches!(transition, Some(Err(_))) {
+            Some("transitions")
+        } else if chain.is_none() {
+            Some("effects")
+        } else {
+            None
+        };
+        let chain = chain.unwrap_or_default();
+        // A layer this reference does not draw under a transition leaves
+        // the whole moved stack unreferenced.
+        let transition = transition.map(|t| t.expect("unmodelled transitions are refused above"));
+        macro_rules! skip_layer {
+            () => {{
+                if transition.is_some() {
+                    out.rgba.fill(f64::NAN);
+                    out.whole_frame = true;
+                }
+                continue;
+            }};
+        }
+        let world = scope.world_matrix(layer, seconds).map_err(fail)?;
+        let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
+        let scaled = kurbo::Affine::new([
+            world[0] * sx,
+            world[1] * sy,
+            world[2] * sx,
+            world[3] * sy,
+            world[4] * sx,
+            world[5] * sy,
+        ]);
+        let device = scaled * kurbo::Affine::translate((offset.x, offset.y));
+        if let Some(why) = unmodelled {
+            if !out.unmodelled.iter().any(|u| u == why) {
+                out.unmodelled.push(why.into());
+            }
+            let times: Vec<f64> = match &blur {
+                Some(offsets) if flag("mblur") => offsets.iter().map(|o| seconds + o).collect(),
+                _ => vec![seconds],
+            };
+            footprint(
+                &mut scope,
+                effects,
+                layer,
+                &ty,
+                &times,
+                seconds,
+                (sx, sy),
+                out,
+            )?;
+            skip_layer!();
+        }
+        let d = scope
+            .ev
+            .resolve_content(scope.comp, layer, seconds)
+            .map_err(fail)?;
+        let svg = if ty == "image" {
+            svg_source(scope.comp.root(), &d, assets)?
+        } else {
+            None
+        };
+        if ty == "image" && svg.is_none() {
+            // Resampled content no lane models yet: its box (centered on
+            // the anchor), grown by a pixel, is unreferenced.
+            if !out
+                .unmodelled
+                .iter()
+                .any(|reason| reason == "resampled image content")
+            {
+                out.unmodelled.push("resampled image content".into());
+            }
+            if !chain.is_empty() {
+                // Its effects reach as far as their padding.
+                footprint(
+                    &mut scope,
+                    effects,
+                    layer,
+                    &ty,
+                    &[seconds],
+                    seconds,
+                    (sx, sy),
+                    out,
+                )?;
+                skip_layer!();
+            }
+            let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+            let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+            let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
+            unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
+            skip_layer!();
+        }
+        let mode = reference_blend(
+            pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
+        );
+        let blurred = blur.as_ref().filter(|_| {
+            scope
+                .evaluated(
+                    layer,
+                    node::member(Some(layer), "mblur"),
+                    seconds,
+                    "l.mblur",
+                )
+                .is_ok_and(|v| v.truthy())
+        });
+        // The layer's own pixels: one draw, or the samples' average.
+        let times: Vec<f64> = match blurred {
+            Some(offsets) => offsets.iter().map(|o| seconds + o).collect(),
+            None => vec![seconds],
+        };
+        let mut layer_px = vec![([0.0f64; 4], false); w * h];
+        for &t in &times {
+            let sample = if let Some(svg) = &svg {
+                svg_pixels(&mut scope, layer, t, (sx, sy), w, h, svg)?
+            } else {
+                content_pixels(&mut scope, layer, &ty, t, (sx, sy), w, h)?
+            };
+            for (acc, (px, edge)) in layer_px.iter_mut().zip(sample) {
+                for (sum, value) in acc.0.iter_mut().zip(px) {
+                    *sum += value / times.len() as f64;
+                }
+                acc.1 |= edge;
+            }
+        }
+        if blurred.is_some() {
+            // Averaged edges are partial coverage wherever samples differ.
+            for p in &mut layer_px {
+                p.1 |= p.0[3] > 0.0 && p.0[3] < 1.0 - 1e-12;
+            }
+        }
+        // Masks (at the center time), from the mask reference.
+        if let Some((mask, band)) =
+            super::mask_reference::layer_mask(&mut scope, layer, seconds, scaled, w, h)?
+        {
+            for (i, p) in layer_px.iter_mut().enumerate() {
+                p.0 = scale(p.0, mask[i]);
+                p.1 |= band[i];
+            }
+        }
+        // Effects (after masks, before the composite), on the frame-sized
+        // effect buffer the compositor gives a full-frame pass; a blurred
+        // layer's accumulated samples are its input, at the center time
+        // (docs/engine/motion.md).
+        let mut layer_open: Vec<Option<Open>> = vec![None; w * h];
+        if !chain.is_empty() {
+            let applied = apply_effects(&chain, &layer_px, w, h, seconds, color.precision);
+            let Some((image, open, resampled)) = applied else {
+                if !out.unmodelled.iter().any(|u| u == "effects") {
+                    out.unmodelled.push("effects".into());
+                }
+                footprint(
+                    &mut scope,
+                    effects,
+                    layer,
+                    &ty,
+                    &[seconds],
+                    seconds,
+                    (sx, sy),
+                    out,
+                )?;
+                skip_layer!();
+            };
+            for (i, p) in layer_px.iter_mut().enumerate() {
+                let was = p.0;
+                p.0 = image.at(i % w, i / w);
+                if resampled && (p.0.iter().any(|v| *v != 0.0) || was.iter().any(|v| *v != 0.0)) {
+                    out.resampled[i] = true;
+                }
+            }
+            layer_open = open;
+        }
+        let before = transition.as_ref().map(|_| out.rgba.clone());
+        for (i, (px, edge)) in layer_px.iter().enumerate() {
+            if px[3] <= 0.0 && !edge && layer_open[i].is_none() && px.iter().all(|v| *v == 0.0) {
+                continue;
+            }
+            out.edge[i] |= *edge;
+            let dst = [
+                out.rgba[i * 4],
+                out.rgba[i * 4 + 1],
+                out.rgba[i * 4 + 2],
+                out.rgba[i * 4 + 3],
+            ];
+            // Normal is source-over on premultiplied values, which also adds
+            // the light an effect writes at zero alpha (Chroma's fringes);
+            // the W3C form drops it there and is equal everywhere else.
+            let over = |src: Rgba, dst: Rgba| {
+                let src = scale(src, opacity);
+                clamp(if mode == Blend::Normal {
+                    pm_reference::composite::porter_duff(
+                        pm_reference::composite::Operator::SourceOver,
+                        src,
+                        dst,
+                    )
+                } else {
+                    blend(mode, src, dst)
+                })
+            };
+            out.rgba[i * 4..][..4].copy_from_slice(&over(*px, dst));
+            out.open[i] =
+                composite_open(*px, layer_open[i].as_ref(), dst, out.open[i].as_ref(), over);
+        }
+        if let (Some((id, params, edge_in, progress)), Some(before)) = (transition, before) {
+            apply_transition(out, before, &id, &params, edge_in, progress);
+        }
+    }
+    Ok(())
+}
+
+/// What stays open after compositing `src` (open at `mine`) over `dst`
+/// (open at `below`): every allowed source over every allowed destination.
+/// A range's extremes after compositing lie at its corners, colour and
+/// alpha each at either end (source-over is bilinear in them; the blend
+/// modes are monotone per channel).
+pub fn composite_open(
+    src: Rgba,
+    mine: Option<&Open>,
+    dst: Rgba,
+    below: Option<&Open>,
+    over: impl Fn(Rgba, Rgba) -> Rgba,
+) -> Option<Open> {
+    let corners = |lo: &Rgba, hi: &Rgba| -> Vec<Rgba> {
+        [lo, hi]
+            .iter()
+            .flat_map(|c| [lo[3], hi[3]].map(|a| [c[0], c[1], c[2], a]))
+            .collect()
+    };
+    let values_of = |open: Option<&Open>, value: Rgba| match open {
+        Some(Open::Points(points)) => points.clone(),
+        Some(Open::Range(lo, hi)) => corners(lo, hi),
+        None => vec![value],
+    };
+    let ranged = matches!(mine, Some(Open::Range(..))) || matches!(below, Some(Open::Range(..)));
+    let (mine, below) = (values_of(mine, src), values_of(below, dst));
+    let values: Vec<Rgba> = mine
+        .iter()
+        .flat_map(|m| below.iter().map(|b| over(*m, *b)))
+        .collect();
+    if values.len() < 2 {
+        return None;
+    }
+    Some(if ranged {
+        let fold = |f: fn(f64, f64) -> f64, from: f64| -> Rgba {
+            std::array::from_fn(|k| values.iter().map(|v| v[k]).fold(from, f))
+        };
+        Open::Range(
+            fold(f64::min, f64::INFINITY),
+            fold(f64::max, f64::NEG_INFINITY),
+        )
+    } else {
+        Open::Points(values)
+    })
+}
+
+/// A built-in transition step: definition, parameters, `edge === 'in'`,
+/// progress.
+pub type Transition = (String, Vec<pm_reference::effects::Param>, bool, f64);
+
+/// The layer's active transition (`runTransition`): `None` when none runs,
+/// `Some(Err)` when it is not a built-in the reference models.
+pub fn layer_transition<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    seconds: f64,
+) -> Result<Option<Result<Transition, String>>, String> {
+    use pm_protocol::definitions::DefinitionKind;
+    use pm_reference::effects::Param;
+    use pm_render::effects::plan::{Binding, transition_at};
+    let step =
+        transition_at(scope, effects, layer, seconds).map_err(|e| format!("evaluation: {e:?}"))?;
+    let step = match step {
+        Ok(Some(step)) => step,
+        Ok(None) => return Ok(None),
+        Err(feature) => return Ok(Some(Err(format!("transition: {feature}")))),
+    };
+    // A fork or an override by id is a user program, not the built-in.
+    let builtin = pm_render::builtin_definitions()
+        .definitions
+        .iter()
+        .any(|d| {
+            d.id.as_str() == step.definition
+                && d.kind == DefinitionKind::Transition
+                && effects
+                    .get(DefinitionKind::Transition, &step.definition)
+                    .and_then(|drawn| drawn.glsl.as_ref().map(|g| &g.source))
+                    == d.glsl.as_ref().map(|g| &g.source)
+        });
+    if !builtin || !pm_reference::effects::models_transition(&step.definition) {
+        return Ok(Some(Err(format!("transition {}", step.definition))));
+    }
+    let params = step
+        .params
+        .iter()
+        .map(|p| match p.value {
+            Binding::Float(v) => Param::Float(v),
+            Binding::Color(c) => Param::Color(c),
+        })
+        .collect();
+    Ok(Some(Ok((
+        step.definition,
+        params,
+        step.edge_in,
+        step.progress,
+    ))))
+}
+
+/// Runs a transition on the frame: `before` the stack below the layer,
+/// `out` the stack with it. Moved pixels are resampled where the
+/// transition samples away from the pixel; an open value below makes the
+/// frame unreferenced where it is moved (the transition would mix it).
+/// Returns the pixels the transition moved.
+pub fn apply_transition(
+    out: &mut Reference,
+    before: Vec<f64>,
+    id: &str,
+    params: &[pm_reference::effects::Param],
+    edge_in: bool,
+    progress: f64,
+) -> Vec<bool> {
+    use pm_reference::effects::Image;
+    let (w, h) = (out.width, out.height);
+    let with_layer = out.rgba.clone();
+    let (from, to) = if edge_in {
+        (before, with_layer)
+    } else {
+        (with_layer, before)
+    };
+    let image = |rgba: Vec<f64>| Image {
+        width: w,
+        height: h,
+        rgba,
+    };
+    let (from, to) = (image(from), image(to));
+    let result = pm_reference::effects::transition(id, params, &from, &to, progress)
+        .expect("a modelled transition");
+    let open_below = out.open.iter().any(Option::is_some);
+    fn px(img: &Image, i: usize) -> &[f64] {
+        &img.rgba[i * 4..][..4]
+    }
+    let moved: Vec<bool> = (0..w * h)
+        .map(|i| px(&from, i) != px(&to, i) || px(&result.image, i) != px(&to, i))
+        .collect();
+    for i in (0..w * h).filter(|&i| moved[i]) {
+        if open_below {
+            out.rgba[i * 4..][..4].fill(f64::NAN);
+            out.open[i] = None;
+            continue;
+        }
+        out.rgba[i * 4..][..4].copy_from_slice(px(&result.image, i));
+        out.resampled[i] |= result.resampled;
+        if let Some(open) = &result.open[i] {
+            out.open[i] = Some(open.clone());
+        }
+    }
+    moved
+}
+
+/// A built-in effect chain: each step's definition and parameters.
+pub type Chain = Vec<(String, Vec<pm_reference::effects::Param>)>;
+
+/// A layer's built-in effect chain as `(definition, parameters)`, when the
+/// reference models every step (`pm_reference::effects::model`) and each is
+/// the kernel's own definition; `None` otherwise.
+pub fn effect_chain<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    seconds: f64,
+) -> Result<Option<Chain>, String> {
+    use pm_reference::effects::Param;
+    use pm_render::effects::plan::Binding;
+    let steps = pm_render::effects::plan::effect_steps(scope, effects, layer, seconds)
+        .map_err(|e| format!("evaluation: {e:?}"))?;
+    let Ok(steps) = steps else {
+        return Ok(None);
+    };
+    let builtins = pm_render::builtin_definitions();
+    let mut chain = Vec::new();
+    for step in steps {
+        let kernel = builtins.definitions.iter().find(|d| {
+            d.id.as_str() == step.definition
+                && d.kind == pm_protocol::definitions::DefinitionKind::Effect
+        });
+        let drawn = effects.get(
+            pm_protocol::definitions::DefinitionKind::Effect,
+            &step.definition,
+        );
+        // A fork or an override by id is a user program: its formula is
+        // its own GLSL, not the built-in's.
+        let builtin = match (kernel, drawn) {
+            (Some(k), Some(d)) => {
+                k.glsl.as_ref().map(|g| &g.source) == d.glsl.as_ref().map(|g| &g.source)
+            }
+            _ => false,
+        };
+        if !builtin || step.clamp || pm_reference::effects::model(&step.definition).is_none() {
+            return Ok(None);
+        }
+        let params = step
+            .params
+            .iter()
+            .map(|p| match p.value {
+                Binding::Float(v) => Param::Float(v),
+                Binding::Color(c) => Param::Color(c),
+            })
+            .collect();
+        chain.push((step.definition, params));
+    }
+    Ok(Some(chain))
+}
+
+/// The chain over a `w × h` effect buffer holding the layer's pixels, as
+/// the full-frame pass runs it: each effect's output stored at the
+/// project's precision (8-bit storage holds 0…1). The image, what is open
+/// at each pixel, and whether any step resampled; `None` when a step
+/// leaves values open that a later step would transform.
+#[allow(clippy::type_complexity)]
+pub fn apply_effects(
+    chain: &Chain,
+    layer: &[(Rgba, bool)],
+    w: usize,
+    h: usize,
+    seconds: f64,
+    precision: Precision,
+) -> Option<(pm_reference::effects::Image, Vec<Option<Open>>, bool)> {
+    use pm_reference::effects::{Frame, Image, run};
+    let mut image = Image {
+        width: w,
+        height: h,
+        rgba: layer.iter().flat_map(|(p, _)| *p).collect(),
+    };
+    // The storage error of a value going into an effect.
+    let storage = match precision {
+        Precision::Unorm8 => 0.5 / 255.0,
+        Precision::Float16 => 1.0 / 2048.0,
+        _ => 1e-7,
+    };
+    let mut open = vec![None; w * h];
+    let mut resampled = false;
+    for (n, (id, params)) in chain.iter().enumerate() {
+        if open.iter().any(Option::is_some) {
+            return None;
+        }
+        let frame = Frame::full(&image, seconds);
+        let out = run(id, params, &image, &frame, storage)?;
+        resampled |= out.resampled;
+        image = out.image;
+        if precision == Precision::Unorm8 {
+            for v in &mut image.rgba {
+                *v = v.clamp(0.0, 1.0);
+            }
+        }
+        open = out.open;
+        if n + 1 == chain.len() && precision == Precision::Unorm8 {
+            for o in open.iter_mut().flatten() {
+                *o = match o {
+                    Open::Points(p) => {
+                        Open::Points(p.iter().map(|c| c.map(|v| v.clamp(0.0, 1.0))).collect())
+                    }
+                    Open::Range(lo, hi) => {
+                        Open::Range(lo.map(|v| v.clamp(0.0, 1.0)), hi.map(|v| v.clamp(0.0, 1.0)))
+                    }
+                };
+            }
+        }
+    }
+    Some((image, open, resampled))
+}
+
+struct SvgSource {
+    tree: usvg::Tree,
+    /// Natural image size saved with the asset, used by the authored fit.
+    natural: (f64, f64),
+}
+
+/// SVG image fit in authored UV coordinates. Kept in the reference so the
+/// renderer's image planning cannot determine both sides of the comparison.
+fn svg_fit_window(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
+    let source_aspect = sw / sh;
+    let box_aspect = bw / bh;
+    match fit {
+        "cover" if source_aspect > box_aspect => {
+            let size = box_aspect / source_aspect;
+            [(1.0 - size) / 2.0, 0.0, size, 1.0]
+        }
+        "cover" => {
+            let size = source_aspect / box_aspect;
+            [0.0, (1.0 - size) / 2.0, 1.0, size]
+        }
+        "contain" if source_aspect > box_aspect => {
+            let size = source_aspect / box_aspect;
+            [0.0, (1.0 - size) / 2.0, 1.0, size]
+        }
+        "contain" => {
+            let size = box_aspect / source_aspect;
+            [(1.0 - size) / 2.0, 0.0, size, 1.0]
+        }
+        _ => [0.0, 0.0, 1.0, 1.0],
+    }
+}
+
+fn svg_source(
+    root: &Node,
+    content: &pm_eval::Content,
+    assets: &dyn AssetResolver,
+) -> Result<Option<SvgSource>, String> {
+    let id = pm_render::js::string(pm_render::js::get(content, "asset"));
+    let Some(record) = node::member(node::member(Some(root), "assets"), &id) else {
+        return Ok(None);
+    };
+    let format = node::string(node::member(Some(record), "format"))
+        .map(|s| s.to_string_lossy().to_ascii_lowercase());
+    if format.as_deref() != Some("svg") {
+        return Ok(None);
+    }
+    let path = assets
+        .path(&id, Some(record))
+        .ok_or("SVG reference asset is offline")?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("SVG reference asset: {e}"))?;
+    let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default())
+        .map_err(|e| format!("SVG reference parse: {e}"))?;
+    let n = |key: &str| {
+        pm_render::js::or_number(&node::js_value_opt(node::member(Some(record), key)), 1.0)
+    };
+    Ok(Some(SvgSource {
+        tree,
+        natural: (n("w"), n("h")),
+    }))
+}
+
+/// Direct usvg geometry feeds the independent f64 path/gradient/group/clip
+/// painter. Unsupported constructs use separate resvg 32× RGBA8 samples
+/// averaged in f64, with a half-CV paint quantization limitation. Placement,
+/// fit, crop and layer compositing are independent f64 math in both paths.
+#[allow(clippy::too_many_arguments)]
+fn svg_pixels<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    (sx, sy): (f64, f64),
+    w: usize,
+    h: usize,
+    source: &SvgSource,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    const RATE: usize = 32;
+    let rate = RATE;
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let world = scope.world_matrix(layer, time).map_err(fail)?;
+    let offset = scope.size_anchor_offset(layer, time).map_err(fail)?;
+    let device = Affine::new([
+        world[0] * sx,
+        world[1] * sy,
+        world[2] * sx,
+        world[3] * sy,
+        world[4] * sx,
+        world[5] * sy,
+    ]) * Affine::translate((offset.x, offset.y));
+    let content = scope
+        .ev
+        .resolve_content(scope.comp, layer, time)
+        .map_err(fail)?;
+    let bw = pm_render::js::or_number(pm_render::js::get(&content, "w"), w as f64);
+    let bh = pm_render::js::or_number(pm_render::js::get(&content, "h"), h as f64);
+    let fit = pm_render::js::string(pm_render::js::get(&content, "fit"));
+    let [u0, v0, us, vs] = svg_fit_window(&fit, source.natural.0, source.natural.1, bw, bh);
+    let sw = f64::from(source.tree.size().width());
+    let sh = f64::from(source.tree.size().height());
+    if !(bw > 0.0 && bh > 0.0 && us > 0.0 && vs > 0.0 && sw > 0.0 && sh > 0.0) {
+        return Ok(vec![([0.0; 4], false); w * h]);
+    }
+    let to_layer = Affine::translate((-bw / 2.0 - u0 * bw / us, -bh / 2.0 - v0 * bh / vs))
+        * Affine::scale_non_uniform(bw / (us * sw), bh / (vs * sh));
+    let fine = Affine::scale(rate as f64) * device * to_layer;
+    let clip = [
+        Point::new((u0 * sw).max(0.0), (v0 * sh).max(0.0)),
+        Point::new(((u0 + us) * sw).min(sw), (v0 * sh).max(0.0)),
+        Point::new(((u0 + us) * sw).min(sw), ((v0 + vs) * sh).min(sh)),
+        Point::new((u0 * sw).max(0.0), ((v0 + vs) * sh).min(sh)),
+    ]
+    .map(|p| fine * p);
+    let mut out = vec![([0.0; 4], false); w * h];
+    let bounds = |axis: usize, extent: usize| {
+        let min = clip
+            .iter()
+            .map(|p| [p.x, p.y][axis])
+            .fold(f64::INFINITY, f64::min);
+        let max = clip
+            .iter()
+            .map(|p| [p.x, p.y][axis])
+            .fold(f64::NEG_INFINITY, f64::max);
+        (
+            ((min / rate as f64).floor() - 1.0).clamp(0.0, extent as f64) as usize,
+            ((max / rate as f64).ceil() + 1.0).clamp(0.0, extent as f64) as usize,
+        )
+    };
+    let (left, right) = bounds(0, w);
+    let (top, bottom) = bounds(1, h);
+    if left >= right || top >= bottom {
+        return Ok(out);
+    }
+    let crop_device = clip.map(|point| Point::new(point.x / rate as f64, point.y / rate as f64));
+    if let Some(pixels) = svg_f64::paint(
+        &source.tree,
+        device * to_layer,
+        &crop_device,
+        (left, top, right, bottom),
+        w,
+        h,
+    ) {
+        return Ok(pixels);
+    }
+    let fw = (right - left)
+        .checked_mul(rate)
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or("SVG reference width overflow")?;
+    let fh = (bottom - top)
+        .checked_mul(rate)
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or("SVG reference height overflow")?;
+    let mut pixmap = tiny_skia::Pixmap::new(fw, fh).ok_or("SVG reference pixmap allocation")?;
+    let shifted = Affine::translate((-((left * rate) as f64), -((top * rate) as f64))) * fine;
+    let c = shifted.as_coeffs().map(|value| value as f32);
+    resvg::render(
+        &source.tree,
+        tiny_skia::Transform::from_row(c[0], c[1], c[2], c[3], c[4], c[5]),
+        &mut pixmap.as_mut(),
+    );
+    let mut path = tiny_skia::PathBuilder::new();
+    for (i, point) in clip.iter().enumerate() {
+        let x = point.x - (left * rate) as f64;
+        let y = point.y - (top * rate) as f64;
+        if i == 0 {
+            path.move_to(x as f32, y as f32);
+        } else {
+            path.line_to(x as f32, y as f32);
+        }
+    }
+    path.close();
+    let path = path.finish().ok_or("SVG reference crop path")?;
+    let mut mask = tiny_skia::Mask::new(fw, fh).ok_or("SVG reference crop mask")?;
+    mask.fill_path(
+        &path,
+        tiny_skia::FillRule::Winding,
+        true,
+        tiny_skia::Transform::identity(),
+    );
+    pixmap.apply_mask(&mask);
+    let raster = pixmap.take();
+    let fine_width = fw as usize;
+    let divisor = 255.0 * (rate * rate) as f64;
+    for y in 0..bottom - top {
+        for x in 0..right - left {
+            let dst = &mut out[(top + y) * w + left + x];
+            let mut low = [u8::MAX; 4];
+            let mut high = [u8::MIN; 4];
+            for fy in 0..rate {
+                for fx in 0..rate {
+                    let at = ((y * rate + fy) * fine_width + x * rate + fx) * 4;
+                    for (channel, (sum, byte)) in
+                        dst.0.iter_mut().zip(&raster[at..at + 4]).enumerate()
+                    {
+                        *sum += f64::from(*byte) / divisor;
+                        low[channel] = low[channel].min(*byte);
+                        high[channel] = high[channel].max(*byte);
+                    }
+                }
+            }
+            // A hard internal contour may leave the final image opaque.
+            // Fine-cell colour variation still identifies its coverage edge.
+            dst.1 = (dst.0[3] > 1e-8 && dst.0[3] < 1.0 - 1e-8)
+                || (0..4).any(|c| high[c].saturating_sub(low[c]) > 2);
+        }
+    }
+    Ok(out)
+}
+
+/// A solid or shape layer's own pixels at `time` (premultiplied, before
+/// opacity and masks), and where they are partially covered.
+fn content_pixels<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    (sx, sy): (f64, f64),
+    w: usize,
+    h: usize,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let world = scope.world_matrix(layer, time).map_err(fail)?;
+    let offset = scope.size_anchor_offset(layer, time).map_err(fail)?;
+    let device = kurbo::Affine::new([
+        world[0] * sx,
+        world[1] * sy,
+        world[2] * sx,
+        world[3] * sy,
+        world[4] * sx,
+        world[5] * sy,
+    ]) * kurbo::Affine::translate((offset.x, offset.y));
+    let d = scope
+        .ev
+        .resolve_content(scope.comp, layer, time)
+        .map_err(fail)?;
+    if ty == "shape" {
+        // The authored geometry and paint (pm-vector's, gated exactly by its
+        // own tests), covered and composited here.
+        let has_paths = node::array(node::member(node::member(Some(layer), "d"), "paths"))
+            .is_some_and(|p| !p.is_empty());
+        let scene = if has_paths {
+            let (_, colors, paths) = pm_render::vector::paths(scope, layer, time).map_err(fail)?;
+            pm_render::vector::paths_scene(&paths, &colors, &device.as_coeffs())
+        } else {
+            let (content, colors) = pm_render::vector::shape_content(&d);
+            match pm_render::vector::shape_scene(&content, &colors, &device.as_coeffs()) {
+                Some(scene) => scene,
+                None => return Ok(vec![([0.0; 4], false); w * h]),
+            }
+        };
+        return scene_pixels(&scene, w, h);
+    }
+    let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+    let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+    let paint =
+        hex(&pm_render::js::string(pm_render::js::get(&d, "color"))).ok_or("solid color")?;
+    // `radius` rounds the corners, at most half of either side
+    // (SOLID-RADIUS-1: the inspector edits it).
+    let radius = pm_render::js::get(&d, "radius").to_number();
+    let radius = if radius > 0.0 {
+        radius.min(sw.abs() / 2.0).min(sh.abs() / 2.0)
+    } else {
+        0.0
+    };
+    let outline = kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
+    let coverage = fill(&(device * outline), FillRule::NonZero, PATH_SAMPLES, w, h);
+    let src: Rgba = [
+        paint[0] * paint[3],
+        paint[1] * paint[3],
+        paint[2] * paint[3],
+        paint[3],
+    ];
+    let mut out = vec![([0.0; 4], false); w * h];
+    for y in coverage.y0..coverage.y0 + coverage.height {
+        for x in coverage.x0..coverage.x0 + coverage.width {
+            let k = coverage.at(x, y);
+            if k > 0.0 {
+                out[y * w + x] = (scale(src, k), k < 1.0 - 1e-12);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Marks the pixels `outline` (output pixels) touches, grown by `grow`
+/// pixels, unreferenced.
+fn unreference(out: &mut Reference, outline: &kurbo::BezPath, grow: usize) {
+    let (w, h) = (out.width, out.height);
+    let c = fill(outline, FillRule::NonZero, 1, w, h);
+    let mut inside = vec![false; w * h];
+    for y in c.y0..c.y0 + c.height {
+        for x in c.x0..c.x0 + c.width {
+            inside[y * w + x] = c.at(x, y) > 0.0;
+        }
+    }
+    for (i, _) in pm_reference::compare::dilate(&inside, w, h, grow)
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| **g)
+    {
+        out.rgba[i * 4..][..4].fill(f64::NAN);
+    }
+}
+
+/// An unmodelled layer's footprint: the device-aligned bounds of its full
+/// input texture for effects (including transparent rotated corners), otherwise its painted content
+/// for solids and shapes, at every time it is drawn. Effect read padding and
+/// pixelate's output block reach are in output pixels, with two more pixels
+/// for raster/edge filtering. It is
+/// unreferenced. A footprint this cannot bound (groups, precomps, 2.5D
+/// planes, transitions, which move content) is the whole frame.
+#[allow(clippy::too_many_arguments)]
+fn footprint<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    ty: &str,
+    times: &[f64],
+    seconds: f64,
+    (sx, sy): (f64, f64),
+    out: &mut Reference,
+) -> Result<(), String> {
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let (w, h) = (out.width, out.height);
+    let content = matches!(ty, "solid" | "shape");
+    let boxed = matches!(ty, "image" | "shader" | "extension");
+    let bounded = (content || boxed)
+        && !node::truthy(node::member(Some(layer), "group"))
+        && !scope.is_3d_layer(layer).map_err(fail)?
+        && scope
+            .active_transition(layer, seconds, &|_| true)
+            .map_err(fail)?
+            .is_none();
+    let steps =
+        pm_render::effects::plan::effect_steps(scope, effects, layer, seconds).map_err(fail)?;
+    let (effectful, padding, output_reach) = match steps {
+        Ok(steps) => {
+            // Pixelate samples the center of each device-space block and
+            // paints that sample across the whole block. Its declared
+            // viewportPadding is zero because it needs no source outside
+            // the input texture; that does not bound where its output lands.
+            // One block width per pass bounds the spread for any grid phase.
+            let output_reach = steps
+                .iter()
+                .filter(|step| step.definition == "pixelate")
+                .map(|step| {
+                    let size = step
+                        .params
+                        .iter()
+                        .find_map(|param| (param.key == "size").then_some(param.value));
+                    let block = match size {
+                        Some(pm_render::effects::plan::Binding::Float(value)) => value.max(1.0),
+                        _ => 1.0,
+                    };
+                    block.ceil().clamp(0.0, f64::from(u32::MAX / 4)) as u32
+                })
+                .fold(0_u32, u32::saturating_add);
+            (
+                !steps.is_empty(),
+                pm_render::effects::plan::chain_padding(&steps),
+                output_reach,
+            )
+        }
+        Err(_) => (true, pm_render::composite::Padding::Full, 0),
+    };
+    if !bounded || padding == pm_render::composite::Padding::Full {
+        out.rgba.fill(f64::NAN);
+        out.whole_frame = true;
+        return Ok(());
+    }
+    let mut covered = vec![false; w * h];
+    let pm_render::composite::Padding::Pixels(padding) = padding else {
+        unreachable!()
+    };
+    let grow = padding.saturating_add(output_reach).saturating_add(2) as usize;
+    for &t in times {
+        let world = scope.world_matrix(layer, t).map_err(fail)?;
+        let offset = scope.size_anchor_offset(layer, t).map_err(fail)?;
+        let device = kurbo::Affine::new([
+            world[0] * sx,
+            world[1] * sy,
+            world[2] * sx,
+            world[3] * sy,
+            world[4] * sx,
+            world[5] * sy,
+        ]) * kurbo::Affine::translate((offset.x, offset.y));
+        if content && !effectful {
+            for (i, (px, edge)) in content_pixels(scope, layer, ty, t, (sx, sy), w, h)?
+                .into_iter()
+                .enumerate()
+            {
+                covered[i] |= px[3] > 0.0 || edge;
+            }
+        } else {
+            let d = scope
+                .ev
+                .resolve_content(scope.comp, layer, t)
+                .map_err(fail)?;
+            let rect = match ty {
+                "solid" => {
+                    let bw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+                    let bh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+                    kurbo::Rect::new(0.0, 0.0, bw, bh)
+                }
+                "shape" => {
+                    let has_paths =
+                        node::array(node::member(node::member(Some(layer), "d"), "paths"))
+                            .is_some_and(|paths| !paths.is_empty());
+                    if has_paths {
+                        let (_, _, paths) =
+                            pm_render::vector::paths(scope, layer, t).map_err(fail)?;
+                        let b = paths.bounds;
+                        kurbo::Rect::new(b.x0, b.y0, b.x1, b.y1)
+                    } else {
+                        let (shape, _) = pm_render::vector::shape_content(&d);
+                        let raster = pm_vector::shape::ShapeRaster::new(&shape, 1.0);
+                        kurbo::Rect::new(
+                            -raster.w / 2.0,
+                            -raster.h / 2.0,
+                            raster.w / 2.0,
+                            raster.h / 2.0,
+                        )
+                    }
+                }
+                _ => {
+                    let bw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+                    let bh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+                    kurbo::Rect::new(-bw / 2.0, -bh / 2.0, bw / 2.0, bh / 2.0)
+                }
+            };
+            // Native effects run on an axis-aligned device viewport texture.
+            // Its transparent corner pixels can be painted by a later effect;
+            // a rotated polygon would incorrectly leave those pixels modelled.
+            let rect = if effectful {
+                device.transform_rect_bbox(rect)
+            } else {
+                rect
+            };
+            let outline = if effectful {
+                kurbo::Shape::to_path(&rect, 1e-9)
+            } else {
+                device * kurbo::Shape::to_path(&rect, 1e-9)
+            };
+            let f = fill(&outline, FillRule::NonZero, 1, w, h);
+            for y in f.y0..f.y0 + f.height {
+                for x in f.x0..f.x0 + f.width {
+                    covered[y * w + x] |= f.at(x, y) > 0.0;
+                }
+            }
+        }
+    }
+    for (i, g) in pm_reference::compare::dilate(&covered, w, h, grow)
+        .into_iter()
+        .enumerate()
+    {
+        if g {
+            out.rgba[i * 4..][..4].fill(f64::NAN);
+        }
+    }
+    Ok(())
+}
+
+/// Device-pixel tolerance of the reference's stroke outlines.
+const STROKE_TOLERANCE: f64 = 1e-4;
+
+/// A vector layer's own pixels (premultiplied, source-over item by item in
+/// order) over a `w × h` frame, and where any item is partially covered.
+/// Fills are covered exactly; strokes are the exact region their joins and
+/// caps define (`pm_reference::stroke`), covered the same way.
+pub fn scene_pixels(
+    scene: &pm_vector::render::scene::CoverageScene,
+    w: usize,
+    h: usize,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    use pm_vector::render::scene::{FillRule as Rule, ItemStyle};
+    let mut out = vec![([0.0; 4], false); w * h];
+    for item in &scene.items {
+        let (device, rule, cells) = match &item.style {
+            ItemStyle::Fill(rule) => (
+                item.transform * item.path.clone(),
+                match rule {
+                    Rule::NonZero => FillRule::NonZero,
+                    Rule::EvenOdd => FillRule::EvenOdd,
+                },
+                PATH_SAMPLES,
+            ),
+            ItemStyle::Stroke(stroke) => {
+                let c = item.transform.as_coeffs();
+                let scale = c[0].hypot(c[1]).max(c[2].hypot(c[3])).max(1e-12);
+                let region =
+                    pm_reference::stroke::outline(&item.path, stroke, STROKE_TOLERANCE / scale)
+                        .ok_or("invalid stroke parameters")?;
+                // Overlapping pieces at the edge count within a cell: finer
+                // cells bound that error (1/n² of a pixel per cell).
+                let cells = if region.folds {
+                    4 * PATH_SAMPLES
+                } else {
+                    PATH_SAMPLES
+                };
+                (item.transform * region.path, FillRule::NonZero, cells)
+            }
+        };
+        let coverage = fill(&device, rule, cells, w, h);
+        // A contour can coincide with a pixel boundary: neither adjoining
+        // pixel then has partial coverage, although both touch the edge.
+        // Mark the occupancy transition before the comparator grows it by
+        // two pixels. This also covers an item's boundary hidden beneath a
+        // later, fully opaque item of another color.
+        let x0 = coverage.x0.saturating_sub(1);
+        let y0 = coverage.y0.saturating_sub(1);
+        let x1 = (coverage.x0 + coverage.width + 1).min(w);
+        let y1 = (coverage.y0 + coverage.height + 1).min(h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let here = coverage.at(x, y) > 0.0;
+                let boundary = (x > 0 && (coverage.at(x - 1, y) > 0.0) != here)
+                    || (x + 1 < w && (coverage.at(x + 1, y) > 0.0) != here)
+                    || (y > 0 && (coverage.at(x, y - 1) > 0.0) != here)
+                    || (y + 1 < h && (coverage.at(x, y + 1) > 0.0) != here);
+                out[y * w + x].1 |= boundary;
+            }
+        }
+        let paint = item.premultiplied().map(f64::from);
+        for y in coverage.y0..coverage.y0 + coverage.height {
+            for x in coverage.x0..coverage.x0 + coverage.width {
+                let k = coverage.at(x, y);
+                if k <= 0.0 {
+                    continue;
+                }
+                let (px, edge) = &mut out[y * w + x];
+                *edge |= k < 1.0 - 1e-12;
+                *px = blend(Blend::Normal, scale(paint, k), *px);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Preview == export (gate-policy.md): the frame the paused viewer asks for
+/// and the frame an export asks for, from contract 2 requests, with the
+/// same motion-blur samples (sample counts per output kind are a setting,
+/// not a pipeline difference).
+pub fn preview_and_export(
+    renderer: &mut pm_render::Renderer,
+    document: &Document,
+    composition: &str,
+    time: pm_protocol::common::Ticks,
+    size: pm_protocol::common::Size,
+    motion_blur: pm_render::motion::MotionBlur,
+    resolver: &pm_render::MapResolver,
+) -> (Vec<f32>, Vec<f32>) {
+    use pm_protocol::color::{OutputColor, ViewerColorSpace};
+    use pm_protocol::frame::{
+        FramePurpose, FrameRequest, MediaPreference, MotionBlurKind, PreviewResolution,
+    };
+    use pm_protocol::priority::PriorityClass;
+    let export = FrameRequest {
+        composition: pm_protocol::common::CompositionId::new(composition),
+        time,
+        purpose: FramePurpose::Export,
+        priority: PriorityClass::UserJob,
+        output_size: size,
+        region: None,
+        scale: 1.0,
+        resolution: PreviewResolution::Full,
+        media: MediaPreference::Originals,
+        color: OutputColor::SrgbImage,
+        precision: Precision::Float16,
+        motion_blur: MotionBlurKind::Export,
+        view: None,
+        draft_3d: false,
+        draft_render: false,
+        depth_id: false,
+        overlay: false,
+    };
+    let preview = FrameRequest {
+        purpose: FramePurpose::Viewer,
+        priority: PriorityClass::Interactive,
+        color: OutputColor::Viewer {
+            space: ViewerColorSpace::Srgb,
+        },
+        motion_blur: MotionBlurKind::PreviewPaused,
+        ..export.clone()
+    };
+    let mut frame = |request: &FrameRequest| {
+        let mut r = pm_render::RenderRequest::from_frame_request(request).unwrap();
+        // The legacy scale of the composition, as the corpus renders it.
+        r.scale = None;
+        r.motion_blur = motion_blur;
+        let f = renderer
+            .render(document, composition, time, &r, resolver)
+            .unwrap();
+        renderer.read_rgba(&f).unwrap()
+    };
+    (frame(&preview), frame(&export))
+}
+
+#[cfg(test)]
+mod svg_sampling_tests {
+    /// A fractional rounded contour, nested clip, gradient, and group
+    /// opacity exercise the same resvg storage and f64 accumulation as the
+    /// corpus reference, without reading any engine-rendered pixels.
+    #[test]
+    fn supersampled_rgba8_reference_converges() {
+        const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48">
+          <defs><linearGradient id="g"><stop stop-color="#23a7f4"/><stop offset="1" stop-color="#ec4760"/></linearGradient>
+          <clipPath id="c"><circle cx="25.37" cy="23.19" r="18.23"/></clipPath></defs>
+          <g opacity="0.73" clip-path="url(#c)"><rect x="4.31" y="5.17" width="38.41" height="35.86" rx="6.47" fill="url(#g)"/></g>
+        </svg>"##;
+        let tree = usvg::Tree::from_data(SVG.as_bytes(), &usvg::Options::default()).unwrap();
+        let raster = |rate: usize| {
+            let side = (48 * rate) as u32;
+            let mut pixmap = tiny_skia::Pixmap::new(side, side).unwrap();
+            resvg::render(
+                &tree,
+                tiny_skia::Transform::from_scale(rate as f32, rate as f32),
+                &mut pixmap.as_mut(),
+            );
+            let data = pixmap.data();
+            let mut pixels = vec![[0.0_f64; 4]; 48 * 48];
+            for y in 0..48 {
+                for x in 0..48 {
+                    for sy in 0..rate {
+                        for sx in 0..rate {
+                            let index = ((y * rate + sy) * 48 * rate + x * rate + sx) * 4;
+                            for c in 0..4 {
+                                pixels[y * 48 + x][c] +=
+                                    f64::from(data[index + c]) / (255.0 * (rate * rate) as f64);
+                            }
+                        }
+                    }
+                }
+            }
+            pixels
+        };
+        let (at8, at16, at32) = (raster(8), raster(16), raster(32));
+        let delta = |a: &[[f64; 4]], b: &[[f64; 4]]| {
+            let mut max: f64 = 0.0;
+            let mut sum = 0.0;
+            for (a, b) in a.iter().zip(b) {
+                for c in 0..4 {
+                    let cv = (a[c] - b[c]).abs() * 255.0;
+                    max = max.max(cv);
+                    sum += cv;
+                }
+            }
+            (max, sum / (a.len() * 4) as f64)
+        };
+        let coarse = delta(&at8, &at16);
+        let fine = delta(&at16, &at32);
+        assert!(fine.1 < coarse.1, "8→16 {coarse:?}, 16→32 {fine:?}");
+        assert!(fine.1 <= 0.05, "16→32 mean CV {fine:?}");
+        // Each RGBA8 fine sample introduces at most 0.5 CV per channel;
+        // averaging samples in f64 does not accumulate that storage bound.
+        // A contour still moves across individual sample cells, so its
+        // pointwise convergence is bounded separately from storage error.
+        assert!(
+            fine.0 < coarse.0 && fine.0 <= 2.0,
+            "8→16 {coarse:?}, 16→32 {fine:?}"
+        );
+    }
+}

@@ -368,6 +368,16 @@ impl StoreCompatRunner {
         bundle: &str,
         init: &Value,
     ) -> Result<Self> {
+        Self::with_prelude(executable, host, bundle, init, "")
+    }
+    /// Comparison-only prelude, evaluated in the confined helper before code.
+    pub fn with_prelude(
+        executable: &Path,
+        host: Arc<StoreRuntimeHost>,
+        bundle: &str,
+        init: &Value,
+        prelude: &str,
+    ) -> Result<Self> {
         if init["id"] != host.session.data_store.extension.as_str()
             || init["manifest"]["id"] != init["id"]
         {
@@ -413,6 +423,9 @@ impl StoreCompatRunner {
             helper: pool.helper(&cluster)?,
             _pool: pool,
         };
+        if !prelude.is_empty() {
+            runner.eval(prelude)?;
+        }
         runner.eval(bundle)?;
         runner.eval(include_str!("store-bootstrap.js"))?;
         runner.json(&format!("__storeCheck.create({init})"))?;
@@ -748,7 +761,25 @@ mod tests {
             executable.is_file(),
             "build pm-runtime-v8's pm-store-helper before this suite"
         );
-        let runner = StoreCompatRunner::new(&executable, host.clone(), &bundle, &init).unwrap();
+        let fixture = include_str!("../../../../../tools/extcheck/clock-fixture.mjs").replacen(
+            "export function installClockFixture",
+            "function installClockFixture",
+            1,
+        );
+        let fixture = format!("(()=>{{{fixture}\ninstallClockFixture(globalThis,0x504d5032);}})()");
+        let runner =
+            StoreCompatRunner::with_prelude(&executable, host.clone(), &bundle, &init, &fixture)
+                .unwrap();
+        assert_eq!(
+            runner.json("[Date.now(),performance.now()]").unwrap(),
+            json!([1_600_000_060_000_u64, 60_000])
+        );
+        assert_eq!(
+            runner
+                .json("__extcheckClock.advance(16).then(()=>performance.now())")
+                .unwrap(),
+            60_016
+        );
         let pid = runner.status().pid;
         let result = runner
             .activate(

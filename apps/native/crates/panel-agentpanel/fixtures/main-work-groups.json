@@ -1,0 +1,1023 @@
+{
+  "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "source": "apps/desktop/src/renderer/src/panels/agent/work-groups.ts",
+  "cases": [
+    {
+      "name": "empty",
+      "conversation": [],
+      "liveFrom": null,
+      "expected": []
+    },
+    {
+      "name": "notice",
+      "conversation": [
+        {
+          "role": "system",
+          "text": "Restored"
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "system",
+            "text": "Restored"
+          },
+          "key": "system-0"
+        }
+      ]
+    },
+    {
+      "name": "prompt",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        }
+      ]
+    },
+    {
+      "name": "unfinished",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            }
+          ]
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "t",
+                "kind": "tool",
+                "label": "Build"
+              }
+            ]
+          },
+          "key": "trace-1"
+        }
+      ]
+    },
+    {
+      "name": "trailing-text",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-1:work"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-1:reply"
+        }
+      ]
+    },
+    {
+      "name": "assistant-notes",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "text": "Notes"
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-1:work"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-1:reply"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "assistant",
+            "text": "Notes"
+          },
+          "key": "assistant-2"
+        }
+      ]
+    },
+    {
+      "name": "steered",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 30000,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "steering": true,
+          "text": "Steer"
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "text": "Final"
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 30000,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-1"
+            },
+            {
+              "index": 2,
+              "message": {
+                "role": "user",
+                "steering": true,
+                "text": "Steer"
+              },
+              "key": "user-2"
+            },
+            {
+              "index": 3,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-3:work"
+            }
+          ],
+          "durationMs": 30000
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-3:reply"
+        },
+        {
+          "kind": "message",
+          "index": 4,
+          "message": {
+            "role": "assistant",
+            "text": "Final"
+          },
+          "key": "assistant-4"
+        }
+      ]
+    },
+    {
+      "name": "live",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": 0,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "t",
+                "kind": "tool",
+                "label": "Build"
+              },
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-1"
+        }
+      ]
+    },
+    {
+      "name": "live-steer",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "user",
+          "steering": true,
+          "text": "Steer"
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": 1,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "user",
+            "steering": true,
+            "text": "Steer"
+          },
+          "key": "user-1"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "t",
+                "kind": "tool",
+                "label": "Build"
+              },
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-2"
+        }
+      ]
+    },
+    {
+      "name": "two-turns",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-1:work"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-1:reply"
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-2"
+        },
+        {
+          "kind": "work",
+          "key": "work-2",
+          "items": [
+            {
+              "index": 3,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-3:work"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 3,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-3:reply"
+        }
+      ]
+    },
+    {
+      "name": "reply-only",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "assistant",
+          "text": "Reply"
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "assistant",
+            "text": "Reply"
+          },
+          "key": "assistant-1"
+        }
+      ]
+    },
+    {
+      "name": "text-only-trace",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "steps": [
+            {
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "trace",
+            "steps": [
+              {
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-1"
+        }
+      ]
+    },
+    {
+      "name": "steering-trace-before-reply",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ],
+          "steering": true
+        },
+        {
+          "role": "assistant",
+          "text": "Final"
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-0"
+        },
+        {
+          "kind": "work",
+          "key": "work-0",
+          "items": [
+            {
+              "index": 1,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  },
+                  {
+                    "id": "r",
+                    "kind": "text",
+                    "text": "Reply"
+                  }
+                ],
+                "steering": true
+              },
+              "key": "trace-1"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "assistant",
+            "text": "Final"
+          },
+          "key": "assistant-2"
+        }
+      ]
+    },
+    {
+      "name": "preamble",
+      "conversation": [
+        {
+          "role": "system",
+          "text": "Restored"
+        },
+        {
+          "role": "user",
+          "text": "Authored 日本🙂",
+          "future": {
+            "keep": true
+          }
+        },
+        {
+          "role": "trace",
+          "durationMs": 12345,
+          "steps": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "label": "Build"
+            },
+            {
+              "id": "r",
+              "kind": "text",
+              "text": "Reply"
+            }
+          ]
+        }
+      ],
+      "liveFrom": null,
+      "expected": [
+        {
+          "kind": "message",
+          "index": 0,
+          "message": {
+            "role": "system",
+            "text": "Restored"
+          },
+          "key": "system-0"
+        },
+        {
+          "kind": "message",
+          "index": 1,
+          "message": {
+            "role": "user",
+            "text": "Authored 日本🙂",
+            "future": {
+              "keep": true
+            }
+          },
+          "key": "user-1"
+        },
+        {
+          "kind": "work",
+          "key": "work-1",
+          "items": [
+            {
+              "index": 2,
+              "message": {
+                "role": "trace",
+                "durationMs": 12345,
+                "steps": [
+                  {
+                    "id": "t",
+                    "kind": "tool",
+                    "label": "Build"
+                  }
+                ]
+              },
+              "key": "trace-2:work"
+            }
+          ],
+          "durationMs": 12345
+        },
+        {
+          "kind": "message",
+          "index": 2,
+          "message": {
+            "role": "trace",
+            "durationMs": 12345,
+            "steps": [
+              {
+                "id": "r",
+                "kind": "text",
+                "text": "Reply"
+              }
+            ]
+          },
+          "key": "trace-2:reply"
+        }
+      ]
+    }
+  ],
+  "durations": [
+    {
+      "ms": 0,
+      "expected": "0s"
+    },
+    {
+      "ms": 999,
+      "expected": "0s"
+    },
+    {
+      "ms": 1000,
+      "expected": "1s"
+    },
+    {
+      "ms": 59999,
+      "expected": "59s"
+    },
+    {
+      "ms": 60000,
+      "expected": "1m 0s"
+    },
+    {
+      "ms": 3599999,
+      "expected": "59m 59s"
+    },
+    {
+      "ms": 3600000,
+      "expected": "1h 0m 0s"
+    },
+    {
+      "ms": 3750000,
+      "expected": "1h 2m 30s"
+    }
+  ]
+}

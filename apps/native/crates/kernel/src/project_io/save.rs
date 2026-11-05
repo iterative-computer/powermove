@@ -55,6 +55,9 @@
 //!   renderer upload protocol are not ported (the shell lane owns file
 //!   associations; there is no renderer upload in a native app).
 
+#[path = "file_guard.rs"]
+mod file_guard;
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
@@ -118,6 +121,11 @@ pub enum WriteFault {
 /// Knobs of [`SavePlan::run`].
 #[derive(Clone, Debug, Default)]
 pub struct SaveOptions {
+    /// Project export embeds admitted source links. Ordinary Save/Save As
+    /// leaves links external, including sources that are currently offline.
+    /// Unavailable links stay in the document and are listed on the receipt;
+    /// changed/corrupt admitted sources still fail verification.
+    pub portable: bool,
     pub verify: VerifyLevel,
     /// Keep the replaced version in a backup directory first (the old
     /// app's `Backups/<projectId>/<timestamp>.pmv` with retention).
@@ -145,6 +153,9 @@ pub(crate) enum HistoryToWrite {
 /// [`DocumentStore::finish_save`](crate::DocumentStore::finish_save).
 #[derive(Clone)]
 pub struct SavePlan {
+    pub(crate) container_index: Option<Value>,
+    pub(crate) live_media: std::collections::HashSet<String>,
+    pub(crate) source_links: std::collections::HashSet<JsString>,
     /// The document revision being written.
     pub revision: u64,
     /// Identity of the document session (guards `finish_save`).
@@ -193,6 +204,11 @@ pub enum SaveLayout {
 /// What a successful save produced.
 #[derive(Clone, Debug)]
 pub struct SaveReceipt {
+    /// Export receipts must not replace the live document's association.
+    pub portable: bool,
+    /// These sources were already offline when portable export began. Callers
+    /// must surface incomplete media closure rather than claiming completeness.
+    pub unavailable_links: Vec<JsString>,
     pub path: PathBuf,
     /// The document revision that is now on disk.
     pub revision: u64,
@@ -359,7 +375,8 @@ fn read_index(file: &File, size: u64) -> Result<Vec<Record>, ProjectIoError> {
             .map(|n| n as u64)
     };
     let mut out = Vec::with_capacity(media.len());
-    for item in media {
+    let archived = index.get("nativeArchivedMedia").and_then(Value::as_array);
+    for item in media.iter().chain(archived.into_iter().flatten()) {
         let s = |k: &str| item.get(k).and_then(Value::as_js_string).cloned();
         let (Some(id), Some(revision), Some(media_type), Some(offset), Some(length), Some(sha256)) = (
             s("id"),
@@ -416,6 +433,84 @@ fn index_text(doc: (u64, u64, &str), records: &[Record]) -> String {
     }
     s.push_str("]}");
     s
+}
+
+/// Retain future metadata while replacing only the ranges/digests owned by
+/// this writer. Preserve the existing byte layout when there are no extras.
+fn retain_index_metadata(text: String, original: Option<&Value>) -> String {
+    fn extras(target: &mut Value, source: &Value, known: &[&str]) -> bool {
+        let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else {
+            return false;
+        };
+        let mut changed = false;
+        for (key, value) in source {
+            if !key.as_str().is_some_and(|k| known.contains(&k)) {
+                target.insert(key.clone(), value.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+    let Some(original) = original else {
+        return text;
+    };
+    let mut next = pm_model::json::parse(&text).expect("generated index");
+    let mut changed = extras(
+        &mut next,
+        original,
+        &["version", "document", "media", "nativeArchivedMedia"],
+    );
+    if let (Some(doc), Some(old)) = (
+        next.as_object_mut().unwrap().get_mut("document"),
+        original.get("document"),
+    ) {
+        changed |= extras(doc, old, &["offset", "length", "sha256"]);
+    }
+    let old: Vec<_> = ["media", "nativeArchivedMedia"]
+        .into_iter()
+        .filter_map(|key| original.get(key).and_then(Value::as_array))
+        .flatten()
+        .collect();
+    for field in ["media", "nativeArchivedMedia"] {
+        if let Some(Value::Array(media)) = next.as_object_mut().unwrap().get_mut(field) {
+            for record in media {
+                if let Some(prior) = old.iter().find(|m| m.get("id") == record.get("id")) {
+                    changed |= extras(
+                        record,
+                        prior,
+                        &["id", "type", "revision", "offset", "length", "sha256"],
+                    );
+                }
+            }
+        }
+    }
+    if changed {
+        pm_model::json::to_canonical_string(&next)
+    } else {
+        text
+    }
+}
+
+fn index_with_archives(
+    doc: (u64, u64, &str),
+    records: &[Record],
+    live: &std::collections::HashSet<String>,
+) -> String {
+    let (active, archived): (Vec<_>, Vec<_>) = records
+        .iter()
+        .cloned()
+        .partition(|r| r.id.as_str().is_some_and(|id| live.contains(id)));
+    let text = index_text(doc, &active);
+    if archived.is_empty() {
+        return text;
+    }
+    let mut next = pm_model::json::parse(&text).expect("generated index");
+    let archived = pm_model::json::parse(&index_text(doc, &archived)).expect("generated index");
+    next.as_object_mut().unwrap().insert(
+        "nativeArchivedMedia",
+        archived.get("media").unwrap().clone(),
+    );
+    pm_model::json::to_canonical_string(&next)
 }
 
 fn sha_of_range(file: &File, offset: u64, length: u64, buf: &mut [u8]) -> io::Result<String> {
@@ -524,7 +619,16 @@ impl SavePlan {
             index.iter().flatten().map(|r| (&r.id, r)).collect();
         let mut reused: Vec<Record> = Vec::new();
         let mut required: Vec<&MediaEntry> = Vec::new();
+        let mut unavailable_links = Vec::new();
         for entry in &self.media {
+            if self.options.portable
+                && self.source_links.contains(&entry.id)
+                && let MediaSource::File { path, .. } = &entry.source
+                && matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+            {
+                unavailable_links.push(entry.id.clone());
+                continue;
+            }
             match available.get(&entry.id) {
                 Some(saved)
                     if saved.revision == entry.revision && saved.length == entry.length() =>
@@ -632,6 +736,11 @@ impl SavePlan {
             HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
             HistoryToWrite::Raw(value) => value.clone(),
         };
+        // Freeze the requirement alongside this exact document/history revision.
+        // Old shipped readers ignore it; the transition refusal is specified in
+        // docs/native/file-guard.md. Never advertise a new container version that
+        // our own production reader cannot reopen.
+        let extra = file_guard::save_extra(self.document.root(), &history, &self.extra);
         let doc_offset = out.offset;
         let mut sink = DocSink {
             out: &mut out,
@@ -645,7 +754,7 @@ impl SavePlan {
                 had_comps: self.had_comps,
                 history: &history,
                 workspace: self.workspace.as_ref(),
-                extra: &self.extra,
+                extra: &extra,
             },
             &mut sink,
         );
@@ -679,7 +788,10 @@ impl SavePlan {
         }
 
         // Index and footer.
-        let index_text = index_text((doc_offset, doc_len, &doc_sha), &records);
+        let index_text = retain_index_metadata(
+            index_with_archives((doc_offset, doc_len, &doc_sha), &records, &self.live_media),
+            self.container_index.as_ref(),
+        );
         let index_bytes = index_text.as_bytes();
         if index_bytes.len() as u64 > MAX_INDEX_BYTES {
             return Err(ProjectIoError::Invalid("Invalid project index".into()));
@@ -769,6 +881,8 @@ impl SavePlan {
             });
         }
         Ok(SaveReceipt {
+            portable: self.options.portable,
+            unavailable_links,
             path: dest.clone(),
             revision: self.revision,
             doc_id: self.doc_id,
@@ -808,10 +922,18 @@ impl SavePlan {
                 verify_media: false,
             },
         )?;
-        if container.format != ContainerFormat::Pmv4 || container.media.len() != records.len() {
+        if container.format != ContainerFormat::Pmv4
+            || container.media.len() + container.archived_media.len() != records.len()
+        {
             return Err(bad("record count"));
         }
-        for (got, want) in container.media.iter().zip(records) {
+        for want in records {
+            let got = container
+                .media
+                .iter()
+                .chain(&container.archived_media)
+                .find(|r| r.id == want.id)
+                .ok_or_else(|| bad("missing media index"))?;
             if got.id != want.id
                 || got.offset != want.offset
                 || got.length != want.length

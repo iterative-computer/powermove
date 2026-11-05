@@ -6726,14 +6726,10 @@ impl Thread {
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        // The live viewer renders its region at the project's format, then
-        // places it in the display working texture before color conversion.
-        // A pinned canvas captures those display pixels.
-        let format = if job.request.viewer.is_some() {
-            pm_gpu::bridge_out::display::WORKING_FORMAT
-        } else {
-            renderer.device_target_format(doc.document(), &request)
-        };
+        // Keep a pinned snapshot in the project's working format until its
+        // requested API encoding. In particular, 32-bit projects must not
+        // pass through the display's half-float texture here.
+        let format = renderer.device_target_format(doc.document(), &request);
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -7685,7 +7681,9 @@ mod tests {
         thread.configure(key, headless_test_state(false), None, None);
         thread.apply(Command::Compat {
             key,
-            message: CompatMessage::Producers { sources: vec![CompatSource::RasterOverride] },
+            message: CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
         });
         let view = thread.views.get_mut(&key).unwrap();
         view.reported = Some(Route::Engine);
@@ -7695,8 +7693,14 @@ mod tests {
         view.armed.clear();
         view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
         thread.arm(key);
-        assert!(thread.views[&key].paused_sent.is_some(), "producers refuse the start frames");
-        assert!(thread.next_wake() >= Duration::from_millis(10), "a refused arm must not spin");
+        assert!(
+            thread.views[&key].paused_sent.is_some(),
+            "producers refuse the start frames"
+        );
+        assert!(
+            thread.next_wake() >= Duration::from_millis(10),
+            "a refused arm must not spin"
+        );
     }
 
     /// A paused document update of a session with producers waits for the
@@ -7717,7 +7721,10 @@ mod tests {
             posted: 0,
             provisional: false,
         };
-        assert!(!thread.settles(&update()), "no producers: nothing follows the batch");
+        assert!(
+            !thread.settles(&update()),
+            "no producers: nothing follows the batch"
+        );
         thread.apply(Command::Compat {
             key,
             message: CompatMessage::Producers {
@@ -7765,9 +7772,15 @@ mod tests {
         view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
         thread.work_view(key);
         let view = &thread.views[&key];
-        assert!(!matches!(view.reported, Some(Route::Engine)), "no document routes nothing to the engine");
+        assert!(
+            !matches!(view.reported, Some(Route::Engine)),
+            "no document routes nothing to the engine"
+        );
         assert!(!view.dirty && view.paused_sent.is_none());
-        assert!(thread.next_wake() >= Duration::from_millis(10), "an undrawn view must not spin");
+        assert!(
+            thread.next_wake() >= Duration::from_millis(10),
+            "an undrawn view must not spin"
+        );
     }
 
     #[test]

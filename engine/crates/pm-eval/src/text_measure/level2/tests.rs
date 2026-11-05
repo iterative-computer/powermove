@@ -389,6 +389,9 @@ fn uncovered_characters_keep_their_place_as_notdef() {
     let before = measure.level2_cache_stats();
     assert_eq!(measure.level2(&d, &[]).unwrap().layout, layout);
     let after = measure.level2_cache_stats();
-    assert_eq!(after.layouts, before.layouts, "the .notdef layout is cached");
+    assert_eq!(
+        after.layouts, before.layouts,
+        "the .notdef layout is cached"
+    );
     assert_eq!(after.layout_hits, before.layout_hits + 1);
 }

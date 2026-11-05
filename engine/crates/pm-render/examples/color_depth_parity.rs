@@ -1,6 +1,8 @@
-//! Compare a fresh app capture. Text is judged against independent f64
-//! coverage of its outlines and paint; capture pixels remain the witness of
-//! today's rendering. All images stay in the supplied external directory.
+//! Project-depth quality gate: authored values and high-precision reference
+//! closeness, plus the same-size preview/export contract. Text is judged
+//! against independent f64 coverage of its outlines and paint; capture pixels
+//! remain the witness of today's rendering. Evidence stays in the supplied
+//! external directory.
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -19,7 +21,8 @@ fn export_png(
     comp: &str,
     sample: &serde_json::Value,
     destination: PathBuf,
-    reference: &[u8],
+    working: &[f32],
+    media: &MapResolver,
 ) -> usize {
     use pm_export::render::{
         ExportJob, MediaPaths, Unrestricted, plan_export_for, run_export_into, sink_for,
@@ -59,7 +62,9 @@ fn export_png(
             draft_from_proxies: false,
             delivery: DeliveryOptions::default(),
         },
-        media: Arc::new(MediaPaths::default()),
+        media: Arc::new(MediaPaths {
+            paths: media.paths.clone(),
+        }),
         destination: destination.clone(),
         overwrite: pm_export::Overwrite::Replace,
         mode: Some(0o600),
@@ -81,22 +86,42 @@ fn export_png(
     assert_eq!(info.bit_depth, 8);
     let decoded = decoded.unwrap();
     let actual = decoded.planes[0].u8().unwrap();
-    assert_eq!(actual.len(), reference.len());
-    let exported_reference;
-    let reference = if let Some(name) = sample["exportReference"].as_str() {
-        let (_, decoded) =
-            pm_export::png::read(&destination.parent().unwrap().join(name), true).unwrap();
-        exported_reference = decoded.unwrap();
-        exported_reference.planes[0].u8().unwrap()
-    } else {
-        // Opaque PNG pixels coincide with the premultiplied app readback.
-        assert!(reference.chunks_exact(4).all(|p| p[3] == 255));
-        reference
-    };
+    assert_eq!(actual.len(), working.len());
+    let straight = sample["exportReference"].is_string();
+    // PNG is straight alpha; compare its API conversion with f64 arithmetic
+    // on the exact working frame. Today's early 8-bit unpremultiplication
+    // is not a reference. RGB allows only quantization plus half-code dither;
+    // alpha is never dithered and its quantized code must be exact.
     actual
         .chunks_exact(4)
-        .zip(reference.chunks_exact(4))
-        .filter(|(a, b)| a != b)
+        .zip(working.chunks_exact(4))
+        .filter(|(actual, pixel)| {
+            let alpha = if straight {
+                f64::from(pixel[3]).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let alpha_code = (alpha * 255.0).round() as u8;
+            if actual[3] != alpha_code {
+                return true;
+            }
+            (0..3).any(|channel| {
+                if !straight && sample["depth"] == 8 {
+                    return actual[channel]
+                        != (pixel[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                let color = if straight {
+                    if alpha < 1.0 / 4096.0 {
+                        0.0
+                    } else {
+                        f64::from(pixel[channel]) / alpha
+                    }
+                } else {
+                    f64::from(pixel[channel])
+                };
+                (f64::from(actual[channel]) - color.clamp(0.0, 1.0) * 255.0).abs() > 1.00001
+            })
+        })
         .count()
 }
 
@@ -163,6 +188,20 @@ fn main() {
         let comp = pm_eval::node::string(pm_eval::node::member(doc.root(), "compId"))
             .unwrap()
             .to_string_lossy();
+        let mut media = MapResolver::default();
+        if let Some(pm_model::NodeKind::Object(assets)) = doc
+            .root()
+            .and_then(|root| root.get("assets"))
+            .map(|n| n.kind())
+        {
+            for (id, record) in assets.iter() {
+                if let Some(path) = pm_eval::node::string(record.get("sourcePath")) {
+                    media
+                        .paths
+                        .insert(id.to_string_lossy(), PathBuf::from(path.to_string_lossy()));
+                }
+            }
+        }
         let mut req = RenderRequest::sized(Size::new(w, h), Precision::Float32);
         req.background = !s["transparent"].as_bool().unwrap_or(false);
         if let Some(samples) = s["mbSamples"].as_u64().filter(|n| *n > 0) {
@@ -174,7 +213,7 @@ fn main() {
                 &comp,
                 support::ticks(s["time"].as_f64().unwrap()),
                 &req,
-                &MapResolver::default(),
+                &media,
             )
             .unwrap();
         assert!(frame.failures.is_empty(), "{id}: {:?}", frame.failures);
@@ -199,7 +238,7 @@ fn main() {
             .count();
         // Text sampling is judged against the f64 reference below; its
         // export must equal the engine's own preview.
-        let text = s.get("source").is_some();
+        let text = s["source"]["layer"].is_string() && s["source"]["scale"].is_number();
         let export_different =
             if s["exportReference"].is_string() || (s["depth"] == 8 && s["exportPng"] != false) {
                 let different = export_png(
@@ -208,7 +247,8 @@ fn main() {
                     &comp,
                     s,
                     dir.join(format!("{id}.export.png")),
-                    if text { &native } else { &ref_bytes },
+                    &pixels,
+                    &media,
                 );
                 println!("{id} exported PNG: different={different}");
                 Some(different)
@@ -220,10 +260,48 @@ fn main() {
             .zip(&reference)
             .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
             .fold(0.0, f64::max);
-        // Pixel-exact is the DEPTH-1 bar, except text sampling (below).
-        let mut pass = (text || different == 0) && export_different.is_none_or(|n| n == 0);
+        let at = support::ticks(s["time"].as_f64().unwrap());
+        let samples = s["mbSamples"].as_u64().unwrap_or(1).max(1) as u32;
+        let ideal = support::reference::render(
+            &doc,
+            &comp,
+            at,
+            w,
+            h,
+            req.background,
+            samples,
+            r.effects(),
+            &media,
+        );
+        let wide = |v: &[f32]| v.iter().map(|&c| f64::from(c)).collect::<Vec<_>>();
+        let report = pm_reference::compare::compare(
+            &wide(&pixels),
+            &wide(&reference),
+            &ideal.rgba,
+            &ideal.classes(),
+        );
+        let bounds = if s["depth"] == 8 {
+            pm_reference::compare::Bounds::EIGHT_BIT
+        } else {
+            pm_reference::compare::Bounds::HALF_FLOAT
+        };
+        let quality_failures = report.failures(&bounds);
+        let (preview, export) = support::reference::preview_and_export(
+            &mut r,
+            &doc,
+            &comp,
+            at,
+            Size::new(w, h),
+            req.motion_blur,
+            &media,
+        );
+        let equality = pm_reference::compare::identical(&preview, &export);
+        println!("{id} reference:{report}; preview/export {equality:?}");
+        let mut pass = (text || quality_failures.is_empty())
+            && equality.is_ok()
+            && export_different.is_none_or(|n| n == 0);
         let mut source_result = serde_json::Value::Null;
-        if let Some(source) = s.get("source") {
+        if let Some(source) = s.get("source").filter(|_| text) {
             let source_w = source["width"].as_u64().unwrap() as usize;
             let source_h = source["height"].as_u64().unwrap() as usize;
             let raster = r
@@ -314,7 +392,7 @@ fn main() {
                 req.background,
                 1,
                 r.effects(),
-                &MapResolver::default(),
+                &media,
             );
             assert!(
                 background_reference.unmodelled.is_empty(),
@@ -423,7 +501,7 @@ fn main() {
                     &comp,
                     support::ticks(s["time"].as_f64().unwrap()),
                     &req,
-                    &MapResolver::default(),
+                    &media,
                 )
                 .unwrap();
             r.device()
@@ -439,7 +517,7 @@ fn main() {
             r.target_pool_bytes()
         );
         failures += usize::from(!pass);
-        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"source":source_result,"p50Ms":p50,"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
+        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"modelled":ideal.modelled(),"qualityFailures":quality_failures,"previewEqualsExport":equality.is_ok(),"source":source_result,"p50Ms":p50,"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
     }
     std::fs::write(
         dir.join("parity.json"),

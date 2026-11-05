@@ -9,6 +9,14 @@ pub mod bvh;
 pub mod gpu;
 pub mod math;
 pub mod mesh;
-pub mod scene;
 #[cfg(feature = "oidn")]
 pub mod oidn;
+pub mod scene;
+
+pub mod extract;
+
+pub mod service;
+
+pub mod swatch;
+
+pub mod status;

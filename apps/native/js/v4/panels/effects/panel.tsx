@@ -85,6 +85,7 @@ export function EffectsPanel({
           title="Search effects"
           binding={bindings.search}
           value={model.query}
+          disabled={model.installedCount() === 0}
           tabIndex={0}
           onFocus={() => model.setFocus("search")}
           onInput={(event) => {
@@ -102,6 +103,7 @@ export function EffectsPanel({
           title="Show Category"
           binding={bindings.scope}
           value={model.scope}
+          disabled={model.installedCount() === 0}
           options={model
             .scopes()
             .map((scope) => ({ v: scope.value, label: scope.label }))}
@@ -121,58 +123,71 @@ export function EffectsPanel({
           }}
         />
       </div>
-      <Tree
-        id={ids.list}
-        label="Effects"
-        tabIndex={0}
-        style={hitStyle}
-        metadata={{
-          rowCount: window.count,
-          range: [window.from, window.to],
-          acceptsDrops: false,
-          selectionMode: "single",
-        }}
-        onFocus={() => model.setFocus("list")}
-        onPointerMove={(event) => {
-          if (event.target === event.currentTarget) model.hover(null);
-        }}
-        preventDefault={{
-          keydown: [
-            "ArrowUp",
-            "ArrowDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "Enter",
-            "Escape",
-          ],
-        }}
-        onKeyDown={(event) => {
-          void model.key(event.key ?? "", event);
-        }}
-      >
-        {model.installedCount() === 0 ? (
-          <EmptyState
-            label="No Effects"
-            explanation="Installed effects and presets appear here."
-            attr={{ symbol: "wand.and.rays" }}
-            action={null}
-          />
-        ) : window.count === 0 && !model.searching ? (
-          <text
-            style={{
-              color: token("colors.secondary"),
-              fontSize: token("typography.reading"),
-              textAlign: "center",
-            }}
-          >
-            {model.query.trim()
-              ? `No effects match “${model.query}”`
-              : "Nothing here yet"}
-          </text>
-        ) : (
-          window.rows.map((row) => {
+      {model.error ? (
+        <text
+          role="status"
+          label={model.error}
+          metadata={{ symbol: "exclamationmark.triangle.fill" }}
+          style={{
+            color: token("colors.warning"),
+            fontSize: token("typography.body"),
+          }}
+        >
+          {model.error}
+        </text>
+      ) : null}
+      {model.installedCount() === 0 ? (
+        <EmptyState
+          label="No Effects"
+          explanation="Installed effects and presets appear here."
+          attr={{ symbol: "wand.and.rays" }}
+          action={null}
+        />
+      ) : window.count === 0 && !model.searching ? (
+        <text
+          style={{
+            color: token("colors.secondary"),
+            fontSize: token("typography.reading"),
+            textAlign: "center",
+          }}
+        >
+          {model.query.trim()
+            ? `No effects match “${model.query}”`
+            : "Nothing here yet"}
+        </text>
+      ) : (
+        <Tree
+          id={ids.list}
+          label="Effects"
+          tabIndex={0}
+          style={hitStyle}
+          metadata={{
+            rowCount: window.count,
+            range: [window.from, window.to],
+            acceptsDrops: false,
+            selectionMode: "single",
+          }}
+          onFocus={() => model.setFocus("list")}
+          onPointerMove={(event) => {
+            if (event.target === event.currentTarget) model.hover(null);
+          }}
+          preventDefault={{
+            keydown: [
+              "ArrowUp",
+              "ArrowDown",
+              "ArrowLeft",
+              "ArrowRight",
+              "Home",
+              "End",
+              "Enter",
+              "Escape",
+            ],
+          }}
+          onKeyDown={(event) => {
+            void model.key(event.key ?? "", event);
+          }}
+        >
+          {window.rows.map((row) => {
             const selected =
               row.type === "item" && model.selected === row.item.id;
             const hovered = model.hovered === row.key;
@@ -336,9 +351,9 @@ export function EffectsPanel({
                 </div>
               </TreeItem>
             );
-          })
-        )}
-      </Tree>
+          })}
+        </Tree>
+      )}
     </div>
   );
 }

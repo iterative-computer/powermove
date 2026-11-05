@@ -27,6 +27,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "alsa"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "android_system_properties"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -59,6 +74,15 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "ash"
+version = "0.38.0+1.3.281"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+dependencies = [
+ "libloading 0.8.9",
+]
 
 [[package]]
 name = "audio-codec-algorithms"
@@ -932,6 +956,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-allocator"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51255ea7cfaadb6c5f1528d43e92a82acb2b96c43365989a28b2d44ee38f8795"
+dependencies = [
+ "ash",
+ "hashbrown 0.16.1",
+ "log",
+ "presser",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,6 +1021,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "foldhash 0.1.5",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -2020,6 +2068,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "ordered-float"
+version = "5.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2192,6 +2249,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-cache"
+version = "0.1.0"
+
+[[package]]
 name = "pm-captions"
 version = "0.1.0"
 dependencies = [
@@ -2228,6 +2289,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "pm-protocol",
+ "serde_json",
  "sha2",
 ]
 
@@ -2290,12 +2352,14 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "pm-audio",
+ "pm-color",
  "pm-eval",
  "pm-export",
  "pm-gpu",
  "pm-media",
  "pm-model",
  "pm-protocol",
+ "pm-reference",
  "pm-render",
  "pm-time",
  "png",
@@ -2340,7 +2404,9 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
+ "libc",
  "naga",
+ "pm-color",
  "pm-gpu",
  "pm-render",
  "pollster",
@@ -2367,6 +2433,7 @@ dependencies = [
  "objc2-io-surface",
  "objc2-metal",
  "objc2-quartz-core",
+ "pm-color",
  "pm-media",
  "pm-perf",
  "pm-protocol",
@@ -2393,6 +2460,7 @@ dependencies = [
  "bindgen",
  "blake3",
  "encoding_rs",
+ "half",
  "image",
  "libc",
  "md-5",
@@ -2428,6 +2496,7 @@ dependencies = [
  "objc2",
  "pm-audio",
  "pm-bridge",
+ "pm-color",
  "pm-engine",
  "pm-eval",
  "pm-export",
@@ -2437,6 +2506,7 @@ dependencies = [
  "pm-node",
  "pm-perf",
  "pm-protocol",
+ "pm-reference",
  "pm-render",
  "pm-text",
  "pm-time",
@@ -2495,6 +2565,22 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "ts-rs",
+]
+
+[[package]]
+name = "pm-proxy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pm-color",
+ "pm-media",
+ "pm-protocol",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2571,6 +2657,17 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "pm-studio-host"
+version = "0.1.0"
+dependencies = [
+ "pm-studio",
+ "png",
+ "serde_json",
+ "tempfile",
  "wgpu",
 ]
 
@@ -2704,6 +2801,12 @@ dependencies = [
  "writeable",
  "zerovec",
 ]
+
+[[package]]
+name = "presser"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "prettyplease"
@@ -3880,13 +3983,17 @@ version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 dependencies = [
+ "android_system_properties",
  "arrayvec",
+ "ash",
  "bitflags",
  "block2",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
+ "gpu-allocator",
  "hashbrown 0.17.1",
+ "libc",
  "libloading 0.8.9",
  "log",
  "naga",
@@ -3897,6 +4004,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+ "ordered-float",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -3909,6 +4017,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wgpu-naga-bridge",
  "wgpu-types",
+ "windows",
 ]
 
 [[package]]

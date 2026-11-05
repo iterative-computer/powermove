@@ -1263,3 +1263,399 @@ The requested Linux `cargo test --locked -p pm-native-app --no-run` stops in the
 existing Apple-only `objc2` dependency; the Linux harness is the actual-source
 substitute, not a claim that the app runs here. No Mac runtime/visual gate is
 closed by these checks.
+
+## Cloud surface backing, part A — 2026-11-04
+
+`pm-services::surfaces` adds non-visual Rust models for the five assigned
+families. These are opt-in public APIs, not attached application views and not
+macOS/Opus acceptance. The original inventory rows remain unchanged; this dated
+addendum supplies the narrower implementation status without rewriting tables.
+
+| Surface family | Backing added in `apps/native/crates/services/src/surfaces/` | Remaining production integration |
+| --- | --- | --- |
+| Agent/auth (S070–S072, S083–S086) | `agent_auth`: browser pending-state/PKCE exchange, exact registry binding/expiry/one-shot callback, email-code/handle steps and stale-result fence, account identity, compatible endpoint/key isolation, Codex browser-host validation. | Keychain/session and provider-account workers, runtime install/status integration, external MCP registration/undo, account deletion and registry confirmation hosts. Existing agent/provider consumers remain. |
+| Store/publishing (S075–S082) | `store`: stale-safe search/pagination with real `StoreClient` worker adapter, retryable later-page failure, local library precedence, ownership, API-version and permission facts. `publishing`: tagged UTF-16 field/version/waiver validation, first-publish-only wire fields, icon preflight, frozen-snapshot/account/origin-bound confirmation and measured file progress. | Complete browse/detail/remembered library hosts, fork/rebase, project/search/crop pickers, scanner/compiler/sandbox coordinator, fully decoded icon validation, native confirmation, immutable upload and durable provenance/yank adapters. None is advertised as working through a model-only success. |
+| Captions/transcription (S087–S093) | `captions`: cue/layer/search/follow/selection projection, retained cue draft and revision-guarded update/delete/split wire plans, actual `pm-captions` SRT/VTT import/export with retained original text and range rebasing. `transcription`: language-safe word-model selection/chooser, explicit availability, request/progress/cancel/result lifetime state and worker capability seam. | App/kernel command dispatch, full captions Inspector/style wiring, source-span/time-map/segmentation generation coordinator, decoding/download execution, verified model catalog/storage/archival and native file pickers. A trait alone is not an installed transcription engine. |
+| Easing (S094–S095) | `easing`: tagged curve/library bounds, global ID validation, exact raw/unknown-field retention, rejected-input retention, group/preset rename/move/remove/merge plans, mirror and macOS section-target policy; durable archive/CAS capability required before publication. | Application/library durable store adapter, full keyframe-application tools, `.kease`/folder import and export pickers. No replaced consumer or authored library is deleted. |
+| Shader Lab (S096) | `shader`: tagged layer fallback, UTF-16 editing, Escape/Tab state, 420 ms undo-burst write plans, focused/failed draft retention, applied-ACK/revision fence, compile worker adapter and full diagnostics/uniform result retention. | Kernel write dispatch and source/preset/uniform binding, actual GLSL/engine cache invalidation/compiler adapter, app lifecycle routing and native editor/IME. No successful compile is fabricated. |
+
+Source evidence is frozen `v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`):
+`main/cloud/auth.ts`, `main/codex/app-server-account.ts`,
+`shared/{cloud-ipc,compatible-provider,publish,transcription,transcription-pick}.ts`,
+`renderer/src/cloud/{account.ts,SignInSheet.svelte}`,
+`store/{data.ts,publish-form.ts,StoreScreen.svelte}`, `main/cloud/publish.ts`,
+`captions/{CaptionsPanel.svelte,install.ts,generate.ts}`, `transcription/format.ts`,
+`panels/easing/{library,curve,operations}.ts`, `panels/ShaderPanel.svelte` and
+`panels/shader/ShaderEditor.svelte`. Paths are under `apps/desktop/src/` unless
+qualified otherwise. All fixtures are synthetic inline Rust; tests do not need
+spikes, a user profile, live accounts or a particular ffmpeg build.
+
+Decisions and selecting rules:
+
+- **N3:** preserve raw-byte PKCE hashing, same-origin key reuse, numeric version
+  grammar (including leading zeroes), UTF-16 field limits, caption source versus
+  composition time and Shader Lab's 420 ms burst intent from the actual tag.
+- **N1/N3:** fully retain compiler diagnostics rather than copy the tag's 90-code-
+  unit truncation; reject zero-size/non-IHDR icon preflight false positives.
+  Icon preflight is explicitly not a PNG decoding/scanner/admission receipt.
+- **N4:** rejected/unknown Easing input is retained instead of the tag's silent
+  default-library replacement; unknown authored fields remain exact. Deletion
+  requires an archive-and-CAS host transaction. Caption source text and rejected
+  shader/cue drafts stay recoverable. No profile data or consumer is pruned.
+- **N7:** process-unique tickets fence stale/replayed work; document session and
+  revision stamp every edit/compile/generation target. Tickets are ephemeral,
+  not persisted authentication/session credentials.
+- **N8:** reducers perform no IO/JS; Store/compiler work runs through the existing
+  bounded Rust `ServiceWorker`, with nonblocking submit/poll. Required native
+  capabilities remain explicit, unavailable until installed. **N4/N6/prune:**
+  existing v1–3 runtime contracts and synchronous clusters are untouched.
+- **N1/N2 and Opus ownership:** add no views, copy, dimensions, colours, layout or
+  animation. **DESIGN-TODO(opus):** all uncovered presentation/interaction/copy
+  states for these rows remain typed neutral facts pending their visual specs.
+
+One production dependency is added: existing pure-Rust `pm-captions` by path.
+`cargo update -p pm-services` updates only its new dependency closure in
+`apps/native/Cargo.lock` and the already-existing services isolated lockfile;
+no workspace crate or engine lockfile change is needed.
+
+### Part A reconciliation with Opus specs — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`ce36cb6fc` (full merged hash recorded in the final validation addendum below),
+including `design/surfaces/{agent-auth,store,captions,easing,shader-lab}.md` and
+README §§6–7. This section supersedes the part A notes above wherever the newer
+spec changes the tag's behavior or closes a design question. No visual output is
+produced, and no token values are substituted. These families request no new
+tokens. The nine requested tokens remain with their owning design lane.
+
+- **S070–S072, S083–S086:** added registry-bound account worker tasks with
+  exchange/verify → secure session save → account refresh ordering. Failed
+  saves return their real error and never publish an account. Secret/session
+  payloads are excluded from serialization and redacted in Debug. The existing
+  `entrypoints::AuthLink` parser handles native admission; ambiguous callback
+  targets/duplicate fields are refused. S083's sheet-open gate prevents an
+  off-screen return link from exchanging credentials. Compatible connections
+  retain the active configuration until a test succeeds; explicit key clearing
+  differs from an untouched Saved placeholder. Disconnect retains entered fields.
+- **S075–S080/S082:** the public catalog query has no sort option. Search has the
+  specified 120 UTF-16-unit limit and retains visible rows until replaced.
+  Detail actions follow the spec's trust/setup/fork/update/publish precedence
+  and exact labels. There is no remembered-install list (the existing preference
+  switch remains), so the earlier reference to a remote remember-list host is
+  **not remaining work**. A sandbox result must be Passed or explicit Full
+  Access before the publish form can be submitted. Upload adapters accept
+  immutable bytes and recheck the confirmed snapshot/account/origin. Cancel
+  disables at Publishing; an earlier cancellation race retains an actual server
+  receipt rather than reporting a false cancellation. A mismatched receipt is
+  retained for reconciliation and produces an explicit failure.
+- **S087–S093:** Shift extends selection and Command toggles it. Follow stops
+  during search, list keyboard focus and row editing, as Opus specifies. Generation
+  remains an action on the selection; no source/language form was added. Language
+  and per-cue text controls were not added to the Captions Inspector. The model
+  manager requires a fresh native-delete confirmation and an observed host result.
+  **S092's explicit exception** applies only to re-downloadable speech model and
+  partial-download bytes: the worker seam is `remove_model`, not archival claiming
+  to free space. Transcripts, caption edits and preferences are never removed by
+  that capability. Invalid transcripts cannot become successful generation results.
+- **S094/S095:** save/group/duplicate/colour operations preserve all authored
+  fields. Non-conflicting imported IDs remain unchanged; only conflicts consume
+  supplied fresh IDs. Stored blue/green/violet graph preferences project as Accent
+  while their stored values and user preset colours remain intact. Library edits
+  and panel-lifetime Undo continue in memory after a write failure; every pending
+  before-image is retained and archived atomically with the next successful CAS.
+  The original single-change API also refuses publication on archive failure.
+- **S096:** 420 ms source flushes share **one focus gesture**, committed only on
+  blur/unmount after acknowledged work; the earlier per-burst undo note is
+  superseded. A commit-only work item closes an already flushed gesture. Locked
+  layers refuse source input. Escape exit is disarmed by every other key.
+  Compilation holds its previous status and adds the spinner only at 500 ms.
+  Full diagnostics/uniform metadata remain available; native column truncation
+  belongs to the renderer. The renderer's last good program must remain visible.
+- `surfaces::copy` projects supplied state/error/outcome/confirmation strings from
+  the new specs. It adds no rendering or metrics. Destructive confirmation defaults
+  and the safe return-to-default-registry default are tested. There are no new
+  part A `DESIGN-TODO(opus)` placeholders after reconciliation.
+
+Decisions: **N3** selects Opus's explicit behavior over the tag for caption follow,
+selection, shader gesture grouping and graph hue presentation. **N4** preserves
+exact libraries, rejected inputs, drafts, all interim before-images and real upload
+receipts; the S092 exception is limited to reproducible model binaries. **N7/N8**
+select ticket/stamp-driven worker protocols and real applied acknowledgments.
+**N4/N6/prune** retain every existing consumer and extension contract. Per the
+orchestrator's explicit restriction and README §6, **S066 is not built**. No thread
+rename, Mixer pan, Store sort control or remembered-installs list is added.
+
+All 88 new surface tests are inline synthetic Rust fixtures. Production account
+HTTP/Keychain/provider/runtime/external-client registration, full Store browse/
+detail/installed-state dispatch, immutable scanner/compiler/sandbox/upload and
+provenance services, actual speech download/decode/source-time mapping and cue
+segmentation, Easing keyframe tool dispatch/import pickers, and kernel/engine
+shader/caption host wiring remain integration work. The traits and plans expose
+these requirements; they do not claim working production services. Existing
+agent panels/runtime/store-host/engine consumers continue to own their behavior.
+No macOS UI or phase gate is accepted by this backing-only change.
+
+### Part A pinned-main delta backing — 2026-11-04
+
+The owner's reference change supersedes the earlier v1.2.0-only provenance in
+this lane: current behavior target is **main
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`**; the tag remains a required compatible
+input. Merged integration base
+`711f44ba0667f81ce8388c4ec57565d1d0378630`, including `main-delta.md`, the owner
+decisions and README §6's updated consent decision. No historical source or test
+oracle was rewritten. `surfaces::{BEHAVIOR_REFERENCE,LEGACY_REFERENCE}` makes the
+pair inspectable by headless consumers.
+
+| Delta | Part A backing and precise boundary |
+| --- | --- |
+| A01 provider discovery/keys/context | New `providers` module: 13 pinned preset address/kind records, copied bare-address normalization, per-address key references, legacy single-address import via the same normalizer, retained overflow/replaced key archives with explicit-clear tombstones, bounded/deduplicated model projection, explicit tool-capability exclusion, unknown capabilities retained as unknown, Ollama capabilities/context facts and native discovery/configuration worker adapters. Configure offers the unused `powermove_check` tool, verifies a real chat message, tolerates optional model-list failure, then requires secure atomic config/key publication. No failed test/key save replaces the active connection. Fixed-preset local-server records require actual returned model data. HTTP failures are bounded, inert diagnostic facts; no new visible error wording is invented. Concrete transport/Keychain and locale collation remain host capabilities. |
+| A02 nine external clients | New `agent_clients` module: all nine config paths/shapes and native `--powermove-mcp` argv, Copy Setup payloads, strict JSON/manual fallback for comments, TOML document edits preserving other tables/comments, exact managed-entry receipts, handwritten-entry refusal, changed-file CAS and archive-required worker boundary. Claude Code uses its own CLI with literal argument arrays. Explicit consent is required for Connect, including Claude Desktop; there is **no launch-time registration**. Intentional removal is retained in receipts. No actual user/client config is opened by tests. Host must implement durable no-follow file/receipt publication and the verified CLI adapter. |
+| A03 Claude Project Auto | `providers::claude_project_permission_mode` records main's omitted-approval→Auto behavior and supervised→acceptEdits rule; Auto remains unavailable without observed classifier support. This is a required **policy projection, not provider execution acceptance**. `pm-agents/src/claude.rs` still chooses acceptEdits and needs the owning agent-worker lane's argument/instruction integration and pinned-runtime proof; that crate is outside this lane's owned paths. Computer consent and Editor permission behavior are untouched. |
+| A04/A05 conversation/media backing | New `agent_reply`: exact completed-turn grouping/trailing trace-prose split, steering in the original turn, max stored duration and a timer keyed to the root run; all unknown messages/steps retained. Local image/video/audio MIME/path projection, bounded media byte-range plans, inert CSP fact, safe links and explicitly requested, document-fenced HTTPS media loads. This is not a new Markdown renderer or file-serving entitlement. The richer Markdown block/inline parser, native media-file grants/streaming and panel mounting remain the agent panel/host owners' integration work; no visual layout is chosen here. |
+| A06/A07 | Rust MCP/tool/schema/provider execution is outside this services backing lane. A07 overlaps P02 and must consume the delta-data owner's project-memory authority, without a second writer or local substitute. No catalog is edited or capability advertised here. |
+| A08–A10 | Pinned source comparison found no changes to `main/extensions/{rebase,update-fork}.ts` or Store publishing versus the tag. Existing consumers and every archived source remain. Application/provider lifetime, authorization/publication/capture fences and frame-review execution still require the kernel/MCP/agent owners' concrete binding; this lane's ticket/document fences do not claim that global queue proof. |
+| Captions / Easing / Shader Lab | In these owned source families the production diff is two Captions menu/copy changes and Shader Lab CSS height; Easing has a test-only change. `captions::offers_timeline_import` now restricts the contribution to empty/unspecified contexts. Whole Composition/Work Area already follow Opus's Title Case spec. Shader CSS is presentation evidence only: no literal/token substitution. Store/cloud auth/publish/transcription and Easing algorithms compared byte-identically to the tag in the inspected paths. No Store sort, remembered-install list, thread rename or S066 was added. U-row presentation continues with the later UI lane. |
+
+Source comparisons use the immutable main hash, not a moving checkout. Main's
+provider address/metadata/key behavior selects **N3**; preserving retired key
+references, handwritten/commented configuration and every message selects **N4**.
+Native executable/worker-only IO selects **N7/N8**; unknown runtime capabilities
+stay unavailable under **N1/N3**. The owner's **ask first** decision overrides the
+previous Claude Desktop auto-registration default. Existing v1–3 consumers remain
+under **N4/N6/prune**. TOML support adds `toml_edit` to pm-services and the existing
+isolated manifest; only its required dependency closure is added to the owned
+lockfiles via `cargo update -p pm-services`, with no bulk upgrades.
+
+**DESIGN-TODO(opus):** main-delta.md marks provider discovery/context warnings
+and the nine-client setup surface **spec pending**. The new APIs expose neutral
+model facts and manual payloads only. Their views/copy are not built. The earlier
+statement of no new placeholders applies to the pre-delta spec pass, not these
+new rows. These two items remain for Opus; no substitute design is chosen.
+
+### Part A final consent/spec reconciliation — 2026-11-04
+
+Final integration fetch brought Opus's delta specs at
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`; merged without conflicts. The
+S070/S071 additions in `design/surfaces/agent-auth.md` now resolve both design
+placeholders in the preceding section. **No new part A DESIGN-TODO remains.**
+No view, visual literal, restore/archive browser, S066, Store sort control,
+remembered-install list or thread rename is introduced.
+
+`client_consent` adds the specified once-per-native-profile controller and
+`externalClients.claudeDesktop` answer contract (`added`, `declined`, `skipped`).
+It waits for installed Claude, the key editor window, completed first launch and
+onboarding, no transient, stopped playback and no text edit; hidden MCP never
+asks. Missing installation/unreadable configuration/quitting with the alert open
+consume no answer. Already-native, hand-customized and deliberately removed
+entries skip and record the outcome. A durable compare-and-set answer is required
+before the worker can return a registration permit, and a competing window's
+answer grants no duplicate mutation. Settings-button Add/Remove records the new
+answer before changing Claude's file. Exact original-app entry classification
+supports the approved Switch Original variant while preserving customized fields.
+The default buttons and both alert variants are Opus's exact copy. External-client
+row/error text and the provider's measured Ollama context warning now use the
+supplied spec as well. No raw configuration or credentials enter Debug output.
+
+Final owned-path boundary remains: services source/manifests/isolated lock,
+`apps/native/Cargo.lock`, and dated additions to this document. Upstream spec and
+owner-decision changes enter only through merge commits. No new workspace crate,
+engine lockfile change or external fixture is introduced. App/Keychain/HTTP,
+client-file/CLI/consent-store, kernel/engine/panel and provider-worker integration
+listed above remain actual host work; pure models do not pass those gates.
+
+### Part A MERGE-READY validation — 2026-11-04
+
+Merged base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`.
+Final required `git fetch origin feat/native-engine`, explicit tracking-ref fetch,
+and `git merge origin/feat/native-engine` reconciliation reported already up to
+date after the conflict-free spec merge. All commands below passed again after
+that reconciliation, on Rust 1.96.1. Tests do not read user data or require Node,
+a display, a native app, ffmpeg, private sources, spikes or platform frameworks.
+
+From `/workspace/powermove` (activate every shell first):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-services --quiet
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
+cargo +1.96.1 test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --quiet
+cargo +1.96.1 clippy --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --all-targets -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/crates/services/isolated/Cargo.toml --check
+cargo +1.96.1 test --locked --manifest-path engine/Cargo.toml -p pm-captions --quiet
+cargo +1.96.1 check --locked --manifest-path apps/native/Cargo.toml -p pm-services --target aarch64-apple-darwin
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+Results: **195 service tests passed** (120 new surface tests + 75 existing),
+**195 passed in the isolated replay** of the same source (not additional distinct
+tests), and **42 caption-engine tests passed** (11 reference + 31 edge cases).
+Zero failures or ignored tests. All listed Clippy/fmt/check commands passed;
+`git diff --check` and the 19-path ownership check passed. Staged scans in both
+required gitleaks modes precede every commit. Both needed lockfiles are committed;
+engine/Cargo.lock is unchanged. No dependency was bulk-upgraded.
+
+The Apple-target checks only type-check Rust and tests: **no macOS runtime, UI,
+visual or P1–P5 acceptance is claimed**. Mac/application verification remains:
+real kernel session/gesture/applied-ack dispatch; speech download/decode and model
+removal; source-time mapping/generation; GLSL cache invalidation and last-good
+program rendering; secure per-address Keychain migration/save; native-profile
+consent durability; real client discovery/config/CLI/MCP startup and CAS/archival
+under permissions, symlinks and running-client races; actual AppKit sheet/focus/
+IME/AX behavior and light/dark/accessibility output for Opus review. A03's provider
+argument integration and A04's complete Markdown/media/panel attachment remain
+with their owning worker/panel integration, as stated above. Those capabilities
+are not marked successful by these models. No design placeholder remains in the
+owned source; the actual views still await their owning application integration.
+
+
+## Cloud surface backing B — 2026-11-04
+
+`pm-services::surface_backing` adds CPU-only models and worker boundaries for
+Item 6B. This is **backing coverage**, not an installed application surface,
+macOS runtime pass or Opus visual acceptance. No views, visual literals, token
+substitutes, legacy consumers or user-data deletion were added. The authority is
+the family specs merged at `ce36cb6fc` and tagged `v1.2.0` sources named below.
+
+| Rows | Backing added | Remaining application/service binding |
+| --- | --- | --- |
+| S097 | Audible graph/strip projection; gain/mute command plans; captured-time gesture identity; temporary solo; real meter arithmetic and clip latch. No pan. | Kernel gesture/animation adapter, audio taps/retuning and panel visibility attachment. Animated mute follows S097's playhead rule. |
+| S098 | Existing scene field domains, property command plans, primitive/map identities, ephemeral navigation and explicit unavailable structural host. | Kernel `Scene3dCommand::{SetData,Edit}` still returns `NotImplemented`; model importer/texture admission and the new 3D replacement remain separate. |
+| S099–S102 | Full-definition JSON draft with id/revision guard and host validation; saved workspace archival and fallback; shelf/preview identity; generated local/source/parameter routing, stripped manifest authority, tool jobs and stale-result fences. | Atomic kernel `RecordHost`, definition validator/custom registration, live preview/editor, composition-fill binding, V8 tool execution and v4 control installation. Unknown schemas/payloads are retained, never silently converted into another binding. |
+| S103–S105 | Session-scoped notes debounce/flush/failure retention; 24 visible Takes with archived overflow and guarded restore/delete; Mods health/action projection with retained provenance. | Kernel notes-without-Undo/autosave command, exact take restore transaction and atomic retained record replacement; extension lifecycle/store adapters. No optimistic enablement. |
+| S107–S110 | Ordered onboarding choices, worker completion/marker outcomes and explicit agent-before-import ordering; speech download ownership contract; unchanged-draft/thread import handoff guard. | Welcome/window lifecycle, shared transcription service and real agent handoff. Animation remains inside the Welcome window under the new spec; no overlay or suitcase implementation was added. |
+| S111–S112 | Existing TR-gated metadata checker; downloading/verifying/ready/failure states and staged receipt requirement; normal-quit barrier contract; per-version notices/skip; semantic release filtering, one-window claim and seen-on-shown receipt. | Signed Sparkle/download/cancel/timer implementation, durable preferences and frontmost-sheet scheduling. No installer, signing or publishing is claimed. |
+| S115 | Native typed/missing metric snapshots, visibility gate and 2 Hz admission. Exact native label catalog; no Pause control or GL-label imitation. | Presented-frame/CPU+GPU/render-graph telemetry and real composition counters. |
+| N001–N003 | Real first-launch event/outcome adapter; durable-boundary pause and fresh consent requests; every outcome count retained; private review port; explicit unavailable reverse migration. | Gate/library lifecycle, private report inventory and blocked-owner relink. **DESIGN-TODO(opus):** N002's visible Not Now/Continue Without Them cannot complete until the first-launch owner supplies `skip_secret_consent`; `decline_secrets` returns Unavailable. |
+| N004 | Real pm-promedia scope/LUT worker calls with explicit stage/frame/pipeline identity, HDR values retained, invalid pixels rejected and stale results refused. | Engine frame-stage provider, panel scheduling/selection/workspace persistence and embedded LUT effect/export adoption. No tone mapping or document-local LUT simulation. |
+| S045–S046/N005 | Existing task queue/storage adapters; window-scoped control, indeterminate summary, archive-before-retire, preserved frozen render-queue project/options and complete-reference-closure archival gate. | Native task events, retry worker identities, rendition/cache/location/settings integration and actual utility/popover hosts. Archive moves do not promise reclaimed space on the same disk. |
+| S114/N007 | Session/resource-scoped OS outcomes; notification first-run authorization, foreground/visible/stopped guards, thread identifiers, exact event copy and system-owned sound contract. | Signed UNUserNotificationCenter/TCC/bookmark/local-network adapters and click-to-question/current-thread fallback. Extensions' camera/microphone/screen requests are refused; NSColorSampler requires no authorization. |
+
+Source evidence: `git show v1.2.0:apps/desktop/src/` followed by
+`renderer/src/mixer/{strips,edits,levels,level-control}.ts`,
+`renderer/src/panels/{MixerPanel,GeneratedPanel,TakesPanel,NotesPanel,WorkspacesPanel,PerfPanel}.svelte`,
+`renderer/src/core/{generated-bindings.ts,types/workspace.ts}`,
+`renderer/src/legacy/core/{workspace,history,render-queue}.ts`,
+`extensions/{mods,layers-3d}/`, `renderer/src/onboarding/{welcome,workspace-import}.ts`,
+`main/{onboarding,updates,whats-new,agent-notifications,permissions}.ts`,
+`renderer/src/shell/{app-updates,tasks.svelte}.ts` and
+`shared/{creative-workspace,agent-notifications}.ts`. Native additions call the
+existing first-launch/promedia implementations, not Electron emulations.
+
+Decisions and selecting rules:
+
+- N3: Opus's new family specs supersede tagged details for animated mute,
+  24-visible archived Takes, seen-on-shown release notes, window-contained welcome,
+  notification timing/sound and observer-only Performance. No Mixer pan added.
+- N4/N6: preserve full authored/unknown JSON and every archived generation; notes
+  never switch ownership; queued renders retain frozen source/options/output.
+  `RecordHost` requires atomic revision comparison plus archival, not get/set.
+- N1/N3: structural 3D, missing generated bindings, unknown reference closure and
+  unverified updates fail explicitly; model existence does not establish capability.
+- N7: stable object ids, per-open session incarnations and unique worker tickets
+  fence callbacks after project/window replacement.
+- N8: adapters are worker-side Rust; app callbacks submit/poll `ServiceWorker`.
+  No Node/Chromium dependency or synchronous JavaScript wait was introduced.
+- Opus ownership/prune rule: no new view or token fallback; no old consumer removed.
+
+Production lockfile change adds only the two existing local crate dependencies
+to pm-services; no workspace member or engine lockfile change is needed. The
+services-owned isolated manifest/lock also includes these real dependencies.
+All fixtures are synthetic, self-contained Rust source. Filesystem fixtures
+canonicalize temporary roots for macOS system symlinks; no ffmpeg is required.
+
+Validation and final reconciliation are recorded in the dated follow-up below.
+macOS still requires full app build; audio/3D sound and Undo; actual panel/session
+switches, IME and AX; Welcome focus; signed updater/save/export barrier; migration,
+secret-decline API, Keychain/TCC/bookmarks/notifications; live scopes/LUT pipeline;
+storage volume outcomes; and Opus review of actual light/dark/accessibility output.
+
+
+### Surface backing B: main reference reconciliation — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`711f44ba0667f81ce8388c4ec57565d1d0378630`. The owner’s later reference decision
+supersedes the earlier tag-only source label above: behavior now follows pinned
+main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, with v1.2.0 inputs retained.
+No main implementation or other lane was merged wholesale.
+
+Direct tag-to-pinned-main source comparison of these families found:
+
+- U02/generated controls: actual control membership, five-primary/explicit
+  secondary grouping, paired X/Y bindings and independent authored increments.
+  `generated_points` supplies grouping and minimum-anchored quantization, including
+  ECMAScript’s exact six-decimal halfway behavior. Numeric edits clamp; imported
+  out-of-range values/unknown metadata remain untouched. Inspector parameter
+  layout and other U-row view work remain with their UI/effects owners.
+- E18/Mixer: the meter backing-size adapter requests no invalidation for unchanged
+  logical/pixel size and scale. Hidden/not-playing gates were already modeled.
+  Actual GPU resource reuse and pacing remain an engine/Mac assertion.
+- P01/workspaces: full definitions, group/active-tab metadata, custom chrome and
+  authored colours survive the adapter unchanged. Historical schema-5/schema-6
+  stock-only migrations and durable settings remain delta-data/kernel work;
+  this lane does not copy main’s stock dimensions or colour literals into native.
+- The pinned-main 3D context contribution is empty-canvas/empty-timeline only.
+  That predicate is tested. The owner’s new-system decision supersedes the old
+  S098 legacy-system scope: `SceneUpgradeHost` requires automatic archive-safe
+  upgrade before new-system inspection, without a compatibility-mode switch.
+  Source-defined Studio numeric domains (coat/transmission/IOR, softbox dimensions,
+  focus/f-stop, etc.) are inspectable from the read-only source branch pinned at
+  `b81b94c663d2d4b380ba14a322fa2f6b14b769df`. No engine/schema port is claimed.
+- Mods has a Title Case menu wording delta already covered by Opus’s spec.
+  Onboarding’s compatible-provider ids/model validation are unchanged; provider
+  discovery/connection A01 belongs to its owner. The different Electron detail
+  sentence does not authorize new native copy over the approved spec.
+- Takes, Notes, generated action/source bindings, updates, release notes,
+  notification/permission logic and their tagged backing source are otherwise
+  unchanged in the compared paths. Main’s storage/upgrade/retention P rows and LUT
+  rendering E rows retain their assigned delta-data/delta-fx integration routes.
+
+Additional spec checks cover workspace-scoped generated-state publication,
+apply-vs-preview publication revisions, queued tasks offering Cancel only, 5 s
+popover terminal retention versus session-long window rows, 5 s ETA sampling,
+unknown-owner/low-disk/profile/Keychain migration states, first-sent-run notification
+consent, provisional authorization, separate question/completion events, and
+window-isolated task subscriptions. These strengthen the backing; none is a Mac
+UI or physical-performance pass.
+
+**Remaining outside-owned-path changes:** kernel atomic retained-record/notes/
+3D commands; automatic Studio schema/engine upgrade and media closure; first-launch
+`skip_secret_consent` plus typed low-space/profile/access facts; application worker
+and telemetry attachment; signed OS/update adapters. First-launch’s generic waiting
+outcome cannot establish a local owner, so the backing uses the spec’s unknown-owner
+wording unless the host supplies that fact. Reverse migration stays unavailable
+under the owner’s decision; the reviewed `.pmv` guidance is retained.
+
+**DESIGN-TODO(opus):** (1) N002 Not Now/Continue Without Them remains visible but
+returns Unavailable until `skip_secret_consent` exists; (2) the replacement Studio
+surface needs its own spec. New Studio data has a neutral nonvisual placeholder,
+not inferred labels/layout. No scope trace, welcome or mixer token was substituted;
+this lane creates no views and consumes none of the nine pending visual tokens.
+
+Post-merge validation (Rust 1.96.1; synthetic fixtures; zero failed/ignored tests):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-services -p pm-first-launch -p pm-promedia
+# pm-services: 177 passed (102 new + 75 existing)
+# pm-first-launch: 17 passed; pm-promedia: 94 passed; total: 288 passed
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --no-deps -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
+CARGO_TARGET_DIR="$PWD/apps/native/target" cargo +1.96.1 check --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml
+git diff --check
+gitleaks git --pre-commit --staged --redact
+gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow
+```
+
+The isolated lock’s only existing-package version change is `smallvec` 1.16.4 →
+1.16.3, required by the existing pm-expr exact `=1.16.3` dependency newly reached
+through first-launch/kernel. The workspace lock changes only the two local
+pm-services dependency names. No bulk upgrade, engine lock change or new crate.
+All checks above pass; staged secret scans are repeated before each commit.
+
+Mac verification remains exactly the application/OS/physical/Opus checks above,
+including the actual new Studio port and automatic old-project upgrade. No Linux
+check closes a Mac gate. N002 and 3D kernel/host gaps are explicit blockers to
+those user workflows, not exceptions hidden by passing model tests.

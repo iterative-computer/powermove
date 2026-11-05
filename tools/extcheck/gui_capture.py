@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from resources import disk_ready
 
 def gui_unavailable():
     return (Path('/tmp/pm-shots/PAUSE_LOCAL').exists()
@@ -24,7 +25,7 @@ def gui_slot():
                 time.sleep(60)
                 continue
             state = subprocess.check_output(['/tmp/pm-shots/is_locked.sh'], text=True).strip()
-            if state == 'unlocked' and not gui_unavailable():
+            if state == 'unlocked' and not gui_unavailable() and disk_ready():
                 break
             fcntl.lockf(lock, fcntl.LOCK_UN)
             time.sleep(60)
@@ -54,12 +55,12 @@ def stop_owned_process(child):
     child.wait()
 
 def guarded_run(command):
-    if gui_unavailable():
+    if gui_unavailable() or not disk_ready():
         return 77
     child = subprocess.Popen(command, start_new_session=True)
     try:
         while True:
-            if gui_unavailable():
+            if gui_unavailable() or not disk_ready():
                 stop_owned_process(child)
                 return 77
             try:

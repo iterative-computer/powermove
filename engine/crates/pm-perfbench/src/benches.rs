@@ -22,7 +22,6 @@ use serde_json::{Value, json};
 use crate::BenchReport;
 use crate::fixtures::{self, ROOT, Synthetic};
 
-
 /// The viewer's device-pixel size in the Phase 2 rows (a 1496 × 904 stage
 /// at DPR 2).
 pub const VIEW: (u32, u32) = (1496, 904);
@@ -89,6 +88,7 @@ pub fn correlation() -> Vec<(String, BoxedBench)> {
 pub fn all() -> Vec<Bench> {
     vec![
         ("playback_500", playback_500),
+        ("pyramid_playback_30", pyramid_playback_30),
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
@@ -298,6 +298,44 @@ pub fn playback_500(ctx: &Ctx) -> BenchReport {
     playback(ctx, "playback_500", 500, 120)
 }
 
+/// Thirty changing video frames after the first two have established tail
+/// storage. This bench's hard zero texture allocation bar is checked per frame.
+pub fn pyramid_playback_30(ctx: &Ctx) -> BenchReport {
+    use pm_perf::Counter;
+
+    let doc = fixtures::pyramid_video_doc();
+    let media = std::collections::BTreeMap::from([("clip".to_owned(), fixtures::video_fixture())]);
+    let mut v = Viewer::new(ctx, &doc, &media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    assert!(
+        v.composer.renderer().pyramid_bytes() > 0,
+        "warmup must exercise a physical video pyramid"
+    );
+    let scope = Scope::begin();
+    let mut wall = Vec::with_capacity(30);
+    for k in 2..32 {
+        let before = pm_perf::snapshot().get(Counter::TextureAllocs);
+        wall.push(v.frame(ticks(f64::from(k) / fps)));
+        assert_eq!(
+            pm_perf::snapshot().get(Counter::TextureAllocs) - before,
+            0,
+            "frame {k} allocated a texture after warmup"
+        );
+    }
+    let m = measured(scope);
+    report(
+        "pyramid_playback_30",
+        "frames",
+        m,
+        wall,
+        json!({ "source": "public h264-aac.mp4", "source_px": [320, 180], "draw_px": [64, 36] }),
+    )
+}
+
 /// Playback of `frames` consecutive frames of the `layers`-layer synthetic
 /// project (after two warm-up frames).
 pub fn playback(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchReport {
@@ -428,7 +466,12 @@ pub fn paused_svg_drop_shadow(ctx: &Ctx) -> BenchReport {
 
 /// A full-frame Figma layer blur of 40 user units (`fixtures::layer_blur`).
 pub fn paused_svg_large_blur(ctx: &Ctx) -> BenchReport {
-    paused_svg_filter(ctx, "paused_svg_large_blur", fixtures::layer_blur(), (1496, 842))
+    paused_svg_filter(
+        ctx,
+        "paused_svg_large_blur",
+        fixtures::layer_blur(),
+        (1496, 842),
+    )
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn

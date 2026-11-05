@@ -1,11 +1,14 @@
 // Execute frozen validators and Store gateway bodies over synthetic services.
-import { tag, evaluate } from './tag-oracle.mjs';
+import { tag, evaluate } from './main-oracle.mjs';
 import fs from 'node:fs';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
 let result;
 try {
   if(input.tool==='validate_effect') {
-    const {validateEffect}=evaluate(tag('apps/desktop/src/renderer/src/kernel/glsl.ts'),['validateEffect']);
+    const inputs=evaluate(tag('apps/desktop/src/renderer/src/core/effect-inputs.ts'),['referenceParam']);
+    const defaults=evaluate(tag('apps/desktop/src/renderer/src/kernel/effect-defaults.ts'),['validEffectParameterDefault']);
+    const versions=evaluate(tag('apps/desktop/src/renderer/src/kernel/effect-versions.ts'),['effectVersion']);
+    const {validateEffect}=evaluate(tag('apps/desktop/src/renderer/src/kernel/glsl.ts'),['validateEffect'],{...inputs,...defaults,...versions});
     const d=validateEffect(input.arguments.definition);
     result={valid:true,id:d.id,parameterCount:d.params.length,note:'Definition validation only. This does not register the effect or compile/render its shader.'};
   } else {
@@ -18,4 +21,4 @@ try {
     else throw Error('Unsupported service oracle');
   }
   process.stdout.write(JSON.stringify({result}));
-} catch(e) {process.stdout.write(JSON.stringify({error:e.message}));}
+} catch(e) {if(e.name==='ReferenceError')throw e;process.stdout.write(JSON.stringify({error:e.message}));}

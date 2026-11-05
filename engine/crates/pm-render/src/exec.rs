@@ -11,6 +11,7 @@ use crate::error::LayerFailure;
 use crate::media::{MediaCache, MediaFailure};
 use crate::pipelines::{FillUniform, PassBlend, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
 use crate::plan::{Background, CompPlan, Content, Draw, Source};
+use crate::sampling::gpu::DRAW_UNIFORM_SIZE;
 use crate::scene3d::Scene3dRenderer;
 
 pub use crate::composite::region::Region;
@@ -29,18 +30,29 @@ pub(crate) struct Resolved {
     /// The texture holds premultiplied E values whatever the working
     /// encoding (the 3D pass output, section 9 "3D layers").
     pub encoded: bool,
+    /// A linear 3D source: exposure, display background, weighted samples.
+    pub scene: Option<(f32, Option<[f32; 3]>, bool)>,
     pub uv: [f64; 4],
     pub layer: String,
     /// A 2.5D plane: replaces `matrix` (unit quad to target pixels,
     /// column-major 3×3).
     pub plane: Option<[f64; 9]>,
-    /// Level 2 raster content (`crate::sampling`).
+    /// Raster sampling policy (`crate::sampling`).
     pub level2: Option<crate::sampling::Sampling>,
-    /// The level 2 source's mip pyramid.
+    /// The sampled source, with mips only when the draw can read them.
     pub pyramid: Option<crate::sampling::gpu::Pyramid>,
 }
 
 impl Resolved {
+    /// Whether this draw can read beyond mip zero. Projective draws retain
+    /// the full pyramid because their Jacobian changes across the quad.
+    fn mip_levels(&self, texture: &wgpu::Texture, sampling: crate::sampling::Sampling) -> u32 {
+        if self.plane.is_some() {
+            return texture.width().max(texture.height()).ilog2() + 1;
+        }
+        crate::sampling::gpu::mip_levels(&self.matrix, self.uv, texture, sampling)
+    }
+
     /// The quad's `mat3` uniform: the plane, or the affine matrix.
     pub fn uniform_matrix(&self) -> [[f32; 4]; 3] {
         match &self.plane {
@@ -54,42 +66,57 @@ impl Resolved {
     }
 }
 
-/// The quad uniform buffers of a renderer's passes, reused frame after frame
-/// (the n-th pass of a frame takes the n-th buffer): creating one per pass
-/// per frame was 8% of a viewer frame at 500 layers (docs/engine/perf.md).
+/// A frame's draw uniforms, kept frame after frame: each pass takes a
+/// 256-byte-aligned range of the first chunk with room, so passes share
+/// chunks (and their quad bind group) instead of one buffer each. A new
+/// chunk is the next power of two of the pass that needed it, so a frame
+/// never allocates more than one buffer per pass did (creating a buffer per
+/// pass per frame was 8% of a viewer frame at 500 layers, docs/engine/perf.md).
 /// `queue.write_buffer` lands before the next submission's commands, after
-/// the earlier submissions that read the buffer.
+/// the earlier submissions that read the same bytes.
 #[derive(Default)]
 pub(crate) struct UniformPool {
-    buffers: Vec<wgpu::Buffer>,
-    next: usize,
+    chunks: Vec<UniformChunk>,
+}
+
+struct UniformChunk {
+    buffer: wgpu::Buffer,
+    used: u64,
 }
 
 impl UniformPool {
-    /// A frame starts: hand the buffers out from the first again.
+    /// A frame starts: drop the chunks the last frame left unused and hand
+    /// the rest out from their start again.
     pub fn reset(&mut self) {
-        self.next = 0;
+        self.chunks.retain(|chunk| chunk.used > 0);
+        for chunk in &mut self.chunks {
+            chunk.used = 0;
+        }
     }
 
-    /// A buffer of at least `size` bytes for this frame's next pass.
-    fn take(&mut self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-        let i = self.next;
-        self.next += 1;
-        if let Some(b) = self.buffers.get(i).filter(|b| b.size() >= size) {
-            return b.clone();
+    /// `size` bytes of this frame's uniforms: a chunk and the range's start.
+    fn take(&mut self, device: &wgpu::Device, size: u64) -> (wgpu::Buffer, u64) {
+        let span = size.next_multiple_of(UNIFORM_STRIDE);
+        if let Some(chunk) = self
+            .chunks
+            .iter_mut()
+            .find(|chunk| chunk.used + size <= chunk.buffer.size())
+        {
+            let at = chunk.used;
+            chunk.used += span;
+            return (chunk.buffer.clone(), at);
         }
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm quads"),
-            size: size.next_power_of_two().max(4096),
+            size: size.next_power_of_two().max(UNIFORM_STRIDE),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        if i < self.buffers.len() {
-            self.buffers[i] = buffer.clone();
-        } else {
-            self.buffers.push(buffer.clone());
-        }
-        buffer
+        self.chunks.push(UniformChunk {
+            buffer: buffer.clone(),
+            used: span,
+        });
+        (buffer, 0)
     }
 }
 
@@ -141,6 +168,7 @@ pub(crate) struct Exec<'a> {
 /// A nested composition's target this frame, by its plan's address.
 pub(crate) struct RenderedComp {
     first: usize,
+    revision: u64,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
@@ -211,6 +239,30 @@ pub(crate) fn instance_of(layer: &str) -> u64 {
 /// A region of interest renders the full frame's geometry through a
 /// viewport placed so the region lands at the target's origin. Targets are in
 /// GL row order: the region's bottom row is full row `H − y − h`.
+/// The pipeline and source group a draw pass last bound.
+#[derive(Default)]
+struct Bound<'p> {
+    pipeline: Option<&'p wgpu::RenderPipeline>,
+    source: Option<&'p wgpu::BindGroup>,
+}
+
+impl<'p> Bound<'p> {
+    fn pipeline(&mut self, pass: &mut wgpu::RenderPass<'_>, pipeline: &'p wgpu::RenderPipeline) {
+        if self.pipeline != Some(pipeline) {
+            pass.set_pipeline(pipeline);
+            self.pipeline = Some(pipeline);
+            self.source = None;
+        }
+    }
+
+    fn source(&mut self, pass: &mut wgpu::RenderPass<'_>, group: &'p wgpu::BindGroup) {
+        if self.source != Some(group) {
+            pass.set_bind_group(1, group, &[]);
+            self.source = Some(group);
+        }
+    }
+}
+
 fn region_viewport(
     pass: &mut wgpu::RenderPass<'_>,
     region: Option<Region>,
@@ -270,6 +322,7 @@ impl Exec<'_> {
                 solid: None,
                 from_fbo: false,
                 encoded: false,
+                scene: None,
                 uv: [0.0, 0.0, 1.0, 1.0],
                 layer: draw.layer.clone(),
                 plane: None,
@@ -330,8 +383,9 @@ impl Exec<'_> {
                             && let Some(kept) = self.comps.iter().find(|c| c.first == first)
                         {
                             let texture = kept.texture.clone();
+                            let revision = kept.revision;
                             r.view = Some(kept.view.clone());
-                            self.prepare_level2(encoder, r, &texture, false);
+                            self.prepare_level2(encoder, r, &texture, Some(revision));
                             r.from_fbo = true;
                             return;
                         }
@@ -355,6 +409,7 @@ impl Exec<'_> {
                         } else {
                             self.render_comp(encoder, child, child_region, &target)
                         };
+                        let revision = self.pyramids.changed();
                         if !accumulate
                             && !self.depth_id
                             && !group
@@ -369,12 +424,13 @@ impl Exec<'_> {
                         {
                             self.comps.push(RenderedComp {
                                 first: address,
+                                revision,
                                 texture: target.texture.clone(),
                                 view: target.view.clone(),
                             });
                         }
                         r.view = Some(target.view.clone());
-                        self.prepare_level2(encoder, r, &target.texture, false);
+                        self.prepare_level2(encoder, r, &target.texture, Some(revision));
                         r.from_fbo = true;
                         // The depth and id surface sees 3D inside the
                         // composition: its own surface's depth (GL row
@@ -412,10 +468,7 @@ impl Exec<'_> {
                         self.taken.push(target);
                     }
                     Source::Image {
-                        path,
-                        interpret,
-                        level2,
-                        ..
+                        path, interpret, ..
                     } => {
                         match self.media.image(
                             self.device,
@@ -426,11 +479,10 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                             interpret.as_ref(),
-                            !*level2,
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, true);
+                                self.prepare_level2(encoder, r, &t.texture, Some(0));
                             }
                             Err(e) => self.fail(plan, draw, e),
                         }
@@ -460,7 +512,8 @@ impl Exec<'_> {
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, false);
+                                let revision = self.media.texture_revision(&t.texture);
+                                self.prepare_level2(encoder, r, &t.texture, revision);
                             }
                             Ok(None) => {}
                             Err(e) => self.fail(plan, draw, e),
@@ -474,12 +527,10 @@ impl Exec<'_> {
                             Ok(view) => {
                                 // Level 2 content on a plane is resampled
                                 // (`crate::space25d::local`).
-                                self.prepare_level2(encoder, r, view.texture(), false);
+                                self.prepare_level2(encoder, r, view.texture(), None);
                                 r.view = Some(view);
                             }
-                            Err(message) => {
-                                self.fail(plan, draw, MediaFailure::Failed(message))
-                            }
+                            Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
                     Source::Text(text) => {
@@ -494,7 +545,7 @@ impl Exec<'_> {
                             self.working,
                         ) {
                             Ok(view) => {
-                                self.prepare_level2(encoder, r, view.texture(), false);
+                                self.prepare_level2(encoder, r, view.texture(), None);
                                 r.view = Some(view);
                             }
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
@@ -514,13 +565,18 @@ impl Exec<'_> {
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
-                            // Level 2 shader output is resampled.
-                            self.prepare_level2(encoder, r, &target.texture, false);
-                            // Legacy GLSL targets are in GL row order
-                            // and hold E-encoded values.
-                            r.view = Some(target.view.clone());
+                            // Legacy programs evaluate their authored formula in E.
+                            // Decode the texels before linear-light reconstruction.
+                            if self.working == WorkingEncoding::LinearLight && r.level2.is_some() {
+                                let linear = self.decode_sampled_source(encoder, &target);
+                                self.prepare_level2(encoder, r, &linear.texture, None);
+                                r.view = Some(linear.view.clone());
+                            } else {
+                                self.prepare_level2(encoder, r, &target.texture, None);
+                                r.view = Some(target.view.clone());
+                                r.encoded = true;
+                            }
                             r.from_fbo = true;
-                            r.encoded = true;
                             // Uploaded fallback pixels are not the
                             // pool's; wgpu keeps them alive until the
                             // frame's commands are done.
@@ -550,6 +606,18 @@ impl Exec<'_> {
                     Source::Object3d(object) => {
                         self.scene3d
                             .prepare_svg_maps(self.device, self.queue, encoder, object);
+                        let (device, queue, pipelines) = (self.device, self.queue, self.pipelines);
+                        let media = &mut *self.media;
+                        self.scene3d.prepare_image_maps(
+                            device,
+                            encoder,
+                            object,
+                            &mut |encoder, path, srgb| {
+                                crate::scene3d::textures::still_map(
+                                    media, device, queue, pipelines, encoder, path, srgb,
+                                )
+                            },
+                        );
                         match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
@@ -561,10 +629,49 @@ impl Exec<'_> {
                         ) {
                             Ok(out) => {
                                 // The pass renders in GL row order.
-                                r.view = Some(out.color.view.clone());
+                                match out.color_space {
+                                    crate::scene3d::OutputColor3d::Encoded => {
+                                        if self.working == WorkingEncoding::LinearLight
+                                            && r.level2.is_some()
+                                        {
+                                            let linear =
+                                                self.decode_sampled_source(encoder, &out.color);
+                                            self.prepare_level2(encoder, r, &linear.texture, None);
+                                            r.view = Some(linear.view.clone());
+                                        } else {
+                                            self.prepare_level2(
+                                                encoder,
+                                                r,
+                                                &out.color.texture,
+                                                None,
+                                            );
+                                            r.view = Some(out.color.view.clone());
+                                            r.encoded = true;
+                                        }
+                                    }
+                                    crate::scene3d::OutputColor3d::LinearScene {
+                                        exposure,
+                                        background,
+                                        weighted,
+                                    } => {
+                                        if r.level2.is_some() {
+                                            let converted = self.scene_output(
+                                                encoder, &out.color, exposure, background, weighted,
+                                            );
+                                            self.prepare_level2(
+                                                encoder,
+                                                r,
+                                                &converted.texture,
+                                                None,
+                                            );
+                                            r.view = Some(converted.view.clone());
+                                        } else {
+                                            r.view = Some(out.color.view.clone());
+                                            r.scene = Some((exposure, background, weighted));
+                                        }
+                                    }
+                                }
                                 r.from_fbo = true;
-                                // E-encoded: linear light decodes it.
-                                r.encoded = true;
                                 r.depth = out.depth.as_ref().map(|d| d.view.clone());
                                 self.taken.push(out.color);
                                 if let Some(d) = out.depth {
@@ -584,20 +691,24 @@ impl Exec<'_> {
         }
     }
 
-    /// The mip pyramid a level 2 draw samples (`crate::sampling`).
+    /// The source and optional mip pyramid a raster draw samples (`crate::sampling`).
     fn prepare_level2(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         r: &mut Resolved,
         texture: &wgpu::Texture,
-        still: bool,
+        revision: Option<u64>,
     ) {
-        if r.level2.is_some() {
-            r.pyramid = Some(self.pipelines.resample.pyramid(
+        if let Some(sampling) = r.level2 {
+            let levels = r.mip_levels(texture, sampling);
+            let view = r.view.as_ref().filter(|v| v.texture() == texture);
+            r.pyramid = Some(self.pipelines.resample.pyramid_for(
                 self.device,
                 encoder,
                 texture,
-                still,
+                view,
+                levels,
+                revision,
                 self.pyramids,
             ));
         }
@@ -739,7 +850,8 @@ impl Exec<'_> {
         let (fw, fh) = (plan.width, plan.height);
         // Level 2 draws: the content polygon, its bounds, and the
         // resampler's bind group (`crate::sampling`).
-        let level2: Vec<Option<(wgpu::BindGroup, [f64; 6])>> = resolved
+        let mut sample_uniforms = Vec::new();
+        let level2: Vec<Option<usize>> = resolved
             .iter()
             .map(|r| {
                 let (Some(sampling), Some(pyramid)) = (r.level2, r.pyramid.as_ref()) else {
@@ -749,7 +861,6 @@ impl Exec<'_> {
                     .plane
                     .unwrap_or_else(|| crate::sampling::gpu::affine3(&r.matrix));
                 let placement = crate::sampling::gpu::placement(matrix, r.uv)?;
-                let bounds = placement.bounds_matrix(fw, fh)?;
                 let origin = region.map_or((0, 0), |g| (g.x, g.y));
                 let u = placement.uniform(
                     r.uv,
@@ -758,14 +869,12 @@ impl Exec<'_> {
                     sampling,
                     origin,
                     target.height(),
+                    (fw, fh),
                     pyramid,
-                );
-                Some((
-                    self.pipelines
-                        .resample
-                        .bind(self.device, self.queue, pyramid, &u),
-                    bounds,
-                ))
+                )?;
+                let index = sample_uniforms.len();
+                sample_uniforms.push(u);
+                Some(index)
             })
             .collect();
         // Uniforms: one slot per draw plus the background quad.
@@ -773,14 +882,13 @@ impl Exec<'_> {
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
         // A region's origin in the full frame's GL rows (`region_viewport`):
         // solids compute coverage from full-frame pixel positions.
-        let region_origin = region.map_or([0.0, 0.0], |g| {
-            [g.x as f32, (fh - g.y - th) as f32]
-        });
+        let region_origin = region.map_or([0.0, 0.0], |g| [g.x as f32, (fh - g.y - th) as f32]);
         let quad = |m: [f64; 6], uv: [f64; 4], color: [f64; 4]| QuadUniform {
             m: m3(&m),
             res: [fw as f32, fh as f32, region_origin[0], region_origin[1]],
             uv: uv.map(|v| v as f32),
             color: color.map(|v| v as f32),
+            scene: [0.0; 4],
         };
         let background = quad(
             [f64::from(fw), 0.0, 0.0, f64::from(fh), 0.0, 0.0],
@@ -798,20 +906,40 @@ impl Exec<'_> {
             ]);
             let mut u = quad(r.matrix, r.uv, color);
             u.m = r.uniform_matrix();
-            if let Some((_, bounds)) = &level2[i] {
-                u = crate::sampling::gpu::bounds_quad(*bounds, fw, fh);
+            if let Some((exposure, background, weighted)) = r.scene {
+                u.color[2] = if self.working == WorkingEncoding::LinearLight {
+                    2.0
+                } else {
+                    3.0
+                };
+                u.color[3] = f32::from(background.is_some()) + 2.0 * f32::from(weighted);
+                let bg = background.unwrap_or([0.0; 3]);
+                u.scene = [bg[0], bg[1], bg[2], exposure];
             }
             let at = (i + 1) * UNIFORM_STRIDE as usize;
-            data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
+            if let Some(sample) = &level2[i] {
+                let raw = bytes_of(&sample_uniforms[*sample]);
+                data[at..at + raw.len()].copy_from_slice(raw);
+            } else {
+                data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
+            }
         }
-        let buffer = self.uniforms.take(self.device, data.len() as u64);
-        self.queue.write_buffer(&buffer, 0, &data);
-        let quad_bind = self.binds.quads(
-            self.device,
-            &self.pipelines.quad_layout,
-            &buffer,
-            size_of::<QuadUniform>() as u64,
-        );
+        let (buffer, base) = self.uniforms.take(self.device, data.len() as u64);
+        self.queue.write_buffer(&buffer, base, &data);
+        let base = base as u32;
+        let quad_bind = self
+            .pipelines
+            .resample
+            .bind_uniform(self.device, self.binds, &buffer);
+        let sample_binds: Vec<Option<wgpu::BindGroup>> = resolved
+            .iter()
+            .zip(&level2)
+            .map(|(r, u)| {
+                u.as_ref()
+                    .and(r.pyramid.as_ref())
+                    .map(|p| self.pipelines.resample.bind(self.device, self.binds, p))
+            })
+            .collect();
         let fill_bind = match &plan.background {
             Background::Gradient(g) if clear => {
                 let mut u = FillUniform::default();
@@ -871,7 +999,7 @@ impl Exec<'_> {
         let texture_binds: Vec<Option<wgpu::BindGroup>> = resolved
             .iter()
             .map(|r| {
-                r.view.as_ref().map(|view| {
+                r.view.as_ref().filter(|_| r.level2.is_none()).map(|view| {
                     self.binds.texture(
                         self.device,
                         &self.pipelines.texture_layout,
@@ -917,33 +1045,46 @@ impl Exec<'_> {
         region_viewport(&mut pass, region, fw, fh, th);
         if let Some(fill) = fill_bind.as_ref() {
             pass.set_pipeline(self.pipelines.background(format));
-            pass.set_bind_group(0, &quad_bind, &[0]);
+            pass.set_bind_group(0, &quad_bind, &[base]);
             pass.set_bind_group(1, fill, &[]);
             pass.draw(0..4, 0..1);
         }
+        // Consecutive draws of one kind keep their pipeline, and a repeated
+        // source keeps its group; a pipeline change rebinds the source.
+        let mut bound = Bound::default();
         for (i, r) in resolved.iter().enumerate() {
-            let offset = ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
+            let offset = base + ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
             if r.level2.is_some() && r.solid.is_none() {
                 // Level 2: the resampler, or nothing when no part of the
                 // content is in front of the camera and in the frame.
-                if let Some((bind, _)) = &level2[i] {
-                    pass.set_pipeline(self.pipelines.resample.pipeline(format, blend));
+                if let Some(bind) = &sample_binds[i] {
+                    bound.pipeline(&mut pass, self.pipelines.resample.pipeline(format, blend));
                     pass.set_bind_group(0, &quad_bind, &[offset]);
-                    pass.set_bind_group(1, bind, &[]);
+                    bound.source(&mut pass, bind);
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {
-                pass.set_pipeline(if r.uv[2] == 0.0 {
-                    self.pipelines.rect_with(format, blend)
-                } else {
-                    self.pipelines.solid_with(format, blend)
-                });
+                bound.pipeline(
+                    &mut pass,
+                    if r.uv[2] == 0.0 {
+                        self.pipelines.rect_with(format, blend)
+                    } else {
+                        self.pipelines.solid_with(format, blend)
+                    },
+                );
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {
-                pass.set_pipeline(self.pipelines.draw_with(format, blend));
+                bound.pipeline(
+                    &mut pass,
+                    if r.scene.is_some() {
+                        self.pipelines.scene_with(format, blend)
+                    } else {
+                        self.pipelines.draw_with(format, blend)
+                    },
+                );
                 pass.set_bind_group(0, &quad_bind, &[offset]);
-                pass.set_bind_group(1, bind, &[]);
+                bound.source(&mut pass, bind);
                 pass.draw(0..4, 0..1);
             }
         }
@@ -974,6 +1115,7 @@ impl Exec<'_> {
                     (id >> 11) as f32,
                     if r.from_fbo { 1.0 } else { 0.0 },
                 ],
+                scene: [0.0; 4],
             };
             let at = i * UNIFORM_STRIDE as usize;
             data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
@@ -993,7 +1135,7 @@ impl Exec<'_> {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<QuadUniform>() as u64),
+                    size: wgpu::BufferSize::new(DRAW_UNIFORM_SIZE),
                 }),
             }],
         });
@@ -1078,47 +1220,34 @@ impl Exec<'_> {
     }
 
     /// Copies `source` (GL row order) into `target` top-down, exactly.
-    pub fn flip(&self, encoder: &mut wgpu::CommandEncoder, source: &Target, target: &Target) {
+    pub fn flip(&mut self, encoder: &mut wgpu::CommandEncoder, source: &Target, target: &Target) {
         let (w, h) = (target.width(), target.height());
         let u = QuadUniform {
             m: m3(&[f64::from(w), 0.0, 0.0, f64::from(h), 0.0, 0.0]),
             res: [w as f32, h as f32, 0.0, 0.0],
             uv: [0.0, 0.0, 1.0, 1.0],
             color: [0.0; 4],
+            scene: [0.0; 4],
         };
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm flip"),
-            size: UNIFORM_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&buffer, 0, bytes_of(&u));
-        let quad = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm flip"),
-            layout: &self.pipelines.quad_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<QuadUniform>() as u64),
-                }),
-            }],
-        });
-        let tex = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm flip source"),
-            layout: &self.pipelines.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.pipelines.linear),
-                },
-            ],
-        });
+        let (buffer, base) = self.uniforms.take(self.device, UNIFORM_STRIDE);
+        // The flip entries never read the scene-output fields.
+        self.queue.write_buffer(
+            &buffer,
+            base,
+            &bytes_of(&u)[..std::mem::offset_of!(QuadUniform, scene)],
+        );
+        let quad = self.binds.quads(
+            self.device,
+            &self.pipelines.quad_layout,
+            &buffer,
+            DRAW_UNIFORM_SIZE,
+        );
+        let tex = self.binds.texture(
+            self.device,
+            &self.pipelines.texture_layout,
+            &self.pipelines.linear,
+            &source.view,
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm flip"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1136,7 +1265,7 @@ impl Exec<'_> {
             multiview_mask: None,
         });
         pass.set_pipeline(self.pipelines.flip(target.format()));
-        pass.set_bind_group(0, &quad, &[0]);
+        pass.set_bind_group(0, &quad, &[base as u32]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);
     }

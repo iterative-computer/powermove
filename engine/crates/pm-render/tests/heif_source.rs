@@ -11,7 +11,7 @@ use pm_protocol::color::AlphaMode;
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::snapshot::SourceFit;
 use pm_render::Renderer;
-use pm_render::media::{StillReader, probe_still};
+use pm_render::media::probe_image;
 
 // The encoder/decoder and reference draw use Apple's native APIs, like the
 // ImageIO orientation cases in tests/stills.rs. Reference color conversion
@@ -89,7 +89,7 @@ try JSONSerialization.data(withJSONObject: report).write(to: out.appendingPathCo
 "#;
 
 #[test]
-fn original_sdr_heif_depth_alpha_orientation_and_profile_reach_source_frames() {
+fn original_sdr_heif_precision_alpha_orientation_and_profile_reach_source_frames() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("heif-reference.swift");
     std::fs::write(&script, IMAGEIO_REFERENCE).unwrap();
@@ -115,7 +115,9 @@ fn original_sdr_heif_depth_alpha_orientation_and_profile_reach_source_frames() {
         let path = Path::new(case["path"].as_str().unwrap());
         let decoded = image::read(path, &pool).unwrap();
         assert_eq!(decoded.format, ImageFormat::Heif);
-        assert!(!decoded.float, "{name}: this test covers integer SDR");
+        // ImageIO may expose high-depth SDR HEIF as half floats on newer
+        // macOS. Its precision and independently drawn pixels still apply.
+        assert!(matches!(decoded.bit_depth, 8 | 16 | 32));
         if name.starts_with("deep") {
             assert!(
                 decoded.bit_depth > 8,
@@ -155,9 +157,7 @@ fn original_sdr_heif_depth_alpha_orientation_and_profile_reach_source_frames() {
             (decoded.frame.format.width, decoded.frame.format.height),
             (size.width as usize, size.height as usize)
         );
-        for reader in [StillReader::Chromium, StillReader::Native] {
-            assert_eq!(probe_still(path, reader), Ok(()), "{name}: {reader:?}");
-        }
+        assert_eq!(probe_image(path), Ok(()), "{name}");
         let expected = std::fs::read(temp.path().join(format!("{name}.rgba"))).unwrap();
         if name.contains("alpha") {
             assert!(

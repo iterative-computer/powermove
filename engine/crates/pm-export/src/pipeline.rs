@@ -9,7 +9,7 @@
 //! encoder input itself, so tests can compare it exactly without a codec in the way.
 
 use crate::Error;
-use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert};
+use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
 use crate::settings::ExportSpec;
 use std::sync::atomic::AtomicBool;
 
@@ -181,10 +181,11 @@ impl<S: Sink> Pipeline<S> {
         let params = ConvertParams {
             working: self.spec.working,
             alpha: self.spec.alpha,
+            tags: self.spec.tags,
             dither: self.spec.dither_enabled(),
             frame: index as u32,
         };
-        let input = convert(frame, self.spec.input_format(), &params)?;
+        let input = convert_tagged(frame, self.spec.input_format(), &params, self.spec.tags)?;
         self.sink.video_owned(index, input)?;
         self.next += 1;
         Ok(())
@@ -586,6 +587,7 @@ mod tests {
             &ConvertParams {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
+                tags: crate::settings::ColorTags::Rec709QuickTime,
                 dither: false,
                 frame: 0,
             },

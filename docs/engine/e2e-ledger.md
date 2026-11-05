@@ -244,3 +244,194 @@ one worker, no retries.
 | Flaky | 0 |
 | Skipped | 21 (environment; the `PM_PERF_PROJECT` and `PM_PLAYBACK_PROJECT` specs were run separately, above) |
 | Wall time | 996 s (16 min 36 s) |
+
+## Gate E — native engine integration, 2026-11-01
+
+**OPEN.** This section is the complete capability/work ledger, not a claim
+that the engine gates passed. The earlier Electron E2E measurements above
+remain historical evidence. Native plan v6, N1–N8 and
+`docs/native/p0-decisions.md` supersede older browser-fallback assumptions.
+No capability failure authorizes a silent legacy render or loss of source data.
+
+Base `ff42d751f`; the five author branches were merged **in order, --no-ff**.
+[etrack-integration.md](etrack-integration.md) records all conflict paths and
+rule decisions (19 L4, 2 L5, 44 Phase 4a, 67 bigrender, 22 SVG conflicts).
+Only owned engine/documentation changes were installed. Existing native
+implementations supersede much of the branches' old Chromium/Electron wiring;
+those paths remain archived in ancestry. Phase 4a backend integration alone
+is not end-to-end native-service integration.
+
+### Exhaustive category and producer inventory
+
+[gate-e.json](gate-e.json) records each enum category, its condition, evidence
+and every production `Feature::…` reference in pm-render (a conservative
+superset of constructors, including diagnostic consumers). It distinguishes
+implementation from qualification: `native` does not mean an unrun Metal gate
+passed. Run `python3 engine/tools/gate_e_inventory.py`; a new category or
+reference fails the audit until reviewed. `--require-green` deliberately fails
+while evidence/work remains unqualified. The audit is not a runtime corpus test.
+
+**Before/after: 17 enum categories → 17.** Removing diagnostic variants while
+consumers remain would violate the prune rule and hide failures. No new legacy
+route was added. EXR/DPX admission and static JPEG/AVIF/EXR/DPX recognition now
+use native readers; H.273 logarithmic tags no longer silently read as sRGB.
+The outstanding runtime unsupported set is **not empty and not measured here**.
+
+| Reason | Disposition | Condition and evidence |
+|---|---|---|
+| LayerType | native | Shipped layer types have handlers; unknown types remain explicit. `headless::capability_check_lists_what_the_renderer_cannot_draw`, `every_feature_is_supported_and_frames_are_deterministic` (Mac run required). |
+| ExtensionDefinition | native / host binding required | Fragment/mesh definitions must be installed. Raster overrides need V8/recorder producers. `shader_layers`, `compat_rasters`; native export children still need definition/font replay. |
+| Effects | native | Requires definitions/EffectHost. `effects`, `effect_proof`, corpus. Missing configuration remains a named failure. |
+| Masks | native | No constructor remains. `composite`, `path_masks`; retain variant while referenced. |
+| Transition | native | Native definition/host chains. `effects`, `effect_proof`; shader-resource gaps below also apply. |
+| MotionBlur | native | All shipped visual types sampled. `motion`, `headless`; unknown future types remain explicit. |
+| TwoAndAHalfD | native | Shipped plane types supported. `space25d_picks`, `headless`. |
+| Adjustment | native | Native accumulator effects; definitions required. `effects`, `composite`. |
+| CompatLevel2 | native | No constructor remains. `text_level2_semantics`, `sampling`. |
+| ProjectColor | blocked-by | Standard, linear blending and saved depth are implemented (`linear`, `color_depth`); future wide-gamut/HDR/ACES project modes need the professional-color implementation. Preserve unknown modes; never reinterpret them as Standard. |
+| RequiresEngine | native | Current stamp fields are drawn or checked independently. `capability::tests::every_stamping_field_is_classified` and the adjacent classification tests; retain the diagnostic for future fields. |
+| ImageSequence | blocked-by | Persisted WebM rendition is native video. Direct original animation/sequence runtime providers are still missing. `sequence_rendition`, `pm-media::image::animation`, `pm-proxy/tests/sequence.rs` are pieces, not a playback proof. |
+| Media | needs-macOS / specific blockers below | Native decode, ColorSync and Metal source pass. `stills`, `stills2`, `footage`, `video_reading`, `source_snapshot`; detailed subreasons below. |
+| Request | needs-macOS | Real adapter precision/target limits and configured fonts. `headless::requests_are_validated`, `render_into_a_callers_target_equals_render`; invalid requests remain errors. |
+| Definition | native / host binding required | Absent definition is an input/lifecycle diagnostic. `effects`, `shader_layers`; native child serialization remains required outside this lane. |
+| ShaderFallback | blocked-by | S4 still has 13 WebGL-only cases. Native sampler/resource bindings and Metal compilation must replace that need; an old Chromium runner cannot satisfy N8. `shader_gate`, `pm-glsl::const_tables`, `uniform_types`, `docs/native/s4-glsl.md`. |
+| Text | needs-macOS | CoreText/project fonts and execution-time paint diagnostics. `text_corpus`, `text_level2_semantics`, `text_gpu`, `text_raster`; a configured-font boolean alone is not the glyph-paint gate. |
+
+All cited render gates need rerunning against the merged tree. Neither Linux
+CPU tests nor historical author-branch measurements qualify them.
+
+### Media subreasons (every producer family)
+
+| Producer / subreason | Native work or precise blocker |
+|---|---|
+| `capability::check_media`, `plan` sequence branches | Persisted renditions work. Original animated GIF/APNG/WebP/AVIF and original sequence playback need an engine timestamp/frame provider and source registration. This is missing implementation, not merely unavailable hardware. |
+| `media::still_facts`, `stills::check/static_format` | Native EXR/DPX admission added; native readers already existed. New `native_exr_dpx_and_png_metadata_are_supported` compares every sample with an independent standards conversion. Run on Mac (OpenEXRCore/FFmpeg + Metal). JPEG/AVIF static-format refusals removed because native handling is present. |
+| `stills` header/layout, orientation, WebP ICC, HEIF HDR | Unsupported decoder layouts, malformed/oversized metadata and mismatched transforms remain explicit. WebP ICC admission and native HEIF PQ/HLG transfer reading need reader-to-ColorSync/float verification and any missing implementation; never call unverified reading correct. Run `stills`, `stills2`, `heif_source`, `png_gamma`, source snapshots and material maps. |
+| `media::still_reading`, `stills::avif` unknown color descriptions | H.273 Log100/Log316 supported through probe/interpretation/CPU/shader. Other unspecified or unsupported primaries/transfer/matrix readings remain named; no invented curve. Test `h273_log_png_tags_decode_in_float_at_every_sample` on Mac. |
+| `media::video_supported` comparison gates | Interlace, quarter-turn rotation, non-square pixels, clean aperture, HDR classes and other primaries have interpreted native paths but still emit conservative default-reading refusals. Run the same cases **without adding an artificial interpretation override**, prove standard reading/geometry and remove each gate only with that evidence. `footage`, `video_reading`, `source_snapshot`, `source_video`. These gates are not architectural legacy fallbacks. |
+| `media::video_probe_drawable` | Off-quarter-turn display rotation needs native geometry support. Dolby Vision without a decodable compatible base layer needs an approved native decoder/reading. Unknown primaries need explicit interpretation. Hardware alone does not implement these. |
+| `media/prewarm` and execution-time media errors | The same decode/reading checks apply at execution and ahead-of-time preparation. Prove refusal leaves caller targets untouched (`headless::exec_time_unsupported_media_leaves_the_target_untouched`) and file replacement invalidates caches (`a_video_replaced_on_disk_is_reopened`). Offline/unreadable media stays named and original data retained. |
+
+### Remaining E-track work and exact Mac handoff
+
+| Item | Current evidence and remaining work |
+|---|---|
+| L7 / AUDIO-DEV-1 | Portable `pm-audio::device_policy` has 5 passing Linux tests and a CoreAudio `SystemDeviceProbe`. **Not wired into automatic stream reopening yet.** The native audio owner must commit a snapshot only after successful stream/schedule adoption, invalidate epochs, and bind actual reopen for device/rate/channel changes. Test unplug/replug, same-id 48↔44.1 kHz and stereo↔multichannel, Bluetooth/USB/default changes, no device, latency/buffer changes and callback sizes through 8192. Existing `pm-audio` playback/clock/mixer/stretch/source suites and physical speaker/display sync remain required. AUDIO-2 cold-start bound, allocation ratchet and listening evidence remain open in pm-audio.md. |
+| N3/N8 audio | Existing Chromium `libffmpeg` decoder dependency and legacy-export retiming that ignores authored speed/remaps remain blockers. Native decode/DSP must replace those contracts with standards/authored-time tests; do not claim N8 because Node itself is absent. |
+| Log interpretation | H.273 transfer 9/10 is wired natively; CPU analytic/monotonic/round-trip proof and production WGSL validation pass. Proprietary camera log/gamut pairs are still outside the public source-reading contract; add exact curve+gamut definitions and test vectors before admitting them. Do not guess from codec/filename. No UI decisions made. |
+| Standards | CHROMA-420-1's decimation quality remains open (export.md). The current inverse preserves the round trip but is not the complete antialiasing fix. Mac: f64 lossless encoder-input bars, BT.709/sRGB tags, range, alpha, PNG depth, GPU-vs-CPU conversion and matched reference charts. |
+| WebM settings | Native libvpx realtime settings retained, no RGBA8 canvas round trip restored. Run `pm-export` WebM/Opus/format/delivery tests, check decoded alpha, every frame, tags, priming/presented duration, and matched-quality throughput against shipped Electron. A realtime setting is not itself a throughput pass. |
+| SHADER-RES-1 | Preserve source, logical resolution, `u_res`, coordinates and uniform calls. Constant-table hoisting is integrated; native compiler prewarming is source-specific and retired on device release. Run S4 inventory and `shader_gate` on Metal. Implement missing sampler/resource bindings; no Chromium fallback can close this row. |
+| Phase 4a | `pm-proxy` policy/store/manifest and `pm-cache` backend are integrated. Generation is optional for Linux tests; default Mac feature uses VideoToolbox/Apple media. Native service must bind `GenerateProxy`, store capabilities, cancellation/contention/disk pauses, policy at clip boundaries, original-only normal export/analysis, explicit draft export, and exact preview-cache identities. Native service paths are outside ownership (`apps/native/**`). Then run `pm-proxy` codec/chart/disk/sequence tests; original-vs-proxy export byte identity; moves/relinks/relaunch; paused original upgrade ≤150/300 ms; ΔE chart; hour-long memory/playback and disk guard. |
+| Bigrender | Prepared tracks coexist with channel memo, release on evaluator reset and survive counter wrap; native programs can prewarm on a worker. Actual peak resource accounting, pending corpus fingerprints, cold/warm open/seek/playback/export, shader compilation cancellation, hot reload/device retirement and required 60/120 Hz machine rows remain Mac gates. |
+| Frozen corpus / whole engine | Run every corpus/performance/local-extension project with original media, fonts and definitions present; require empty unsupported set. Run preview=export, source monitor/filmstrip, GPU loss, native child exports, audio timing and full engine clippy/tests. External captures and Apple hardware are unavailable here. |
+
+Recommended Mac commands, under the Mac lane's single-build lock and configured
+FFmpeg/native library environment:
+
+```sh
+source engine/env.sh
+cd engine
+cargo test --locked -p pm-media -p pm-gpu -p pm-render -p pm-export -p pm-audio -p pm-node -p pm-proxy -p pm-vector -p pm-eval
+cargo clippy --locked --all-targets -p pm-media -p pm-gpu -p pm-render -p pm-export -p pm-audio -p pm-node -p pm-proxy -- -D warnings
+```
+
+The unfiltered Linux protocol suite has one failing test:
+`wire::typescript_regeneration_is_a_no_op`. The protocol source hash changed;
+the generated desktop `index.ts` needs `protocol-f1801e99aec59477`.
+[etrack-desktop-protocol.patch](etrack-desktop-protocol.patch) is the exact
+one-line consumer update, prepared without editing an unowned path. The desktop
+owner must apply it with `git apply --unidiff-zero docs/engine/etrack-desktop-protocol.patch` or regenerate normally. The original test and draft
+handshake remain strict. The broad passing replay explicitly skips only that
+known cross-lane failure; it is not an all-green full-suite result.
+
+The Linux validation counts and exact command limitations are recorded in
+[etrack-integration.md](etrack-integration.md). **Gate E stays open until the
+above missing implementations and physical/corpus proofs close.**
+
+
+### macOS integration evidence — base Apple M5 (2026-11-01)
+
+The native engine integration now also includes the export-parity lane. Its
+first complete macOS replay passed **139 pm-export tests**, with **7 existing
+ignored measurements/manual cases**. The three reported export failures were
+reproduced and repaired: AAC startup/flush attribution, archive-aware atomic
+replacement, and the AVFoundation chart reader's packed RGB conversion.
+The numeric bounds, decoded lengths, rates and channel checks remain intact.
+See [export.md](export.md#macos-integration-replay-base-apple-m5-2026-11-01).
+
+The generated desktop protocol id is updated and the strict regeneration test
+passes. `cargo check -p pm-native-app` also passes after the export merge. The
+complete native replay passed **pm-native-app 28 tests (1 ignored)** and
+**pm-promedia 116 tests**. Engine totals and remaining gate results are recorded
+in [etrack-integration.md](etrack-integration.md).
+
+The original frozen corpus and the original real project are unavailable on
+this Mac. Fresh captures use the documented tool with `--label v1`, synthetic
+projects only, a temporary Electron profile, and
+`--root /private/tmp/pm-engine-corpus`. **These were recaptured on the build Mac
+(base M5); they are not the original frozen capture.** Capture and parity run
+one category at a time; captures are deleted after their results are recorded.
+No original pending fingerprint or numerical bound is replaced by these new
+measurements.
+
+The first category captured 12 layer projects, 34 frames (3 float frames),
+and 34 evaluation dumps; verification found no missing or unlisted files.
+The renderer compared 30 frames and found a binding-quirk/reference mismatch.
+The initial replay also reported unvisited pending entries outside that single
+category; subsequent category runs use the explicit category filter and retain
+the global qualification requirement. Gate E remains **OPEN**.
+
+
+G-V2 was also recaptured on this M5 using all **54** synthetic mask cases and
+the current legacy coverage source. The Metal gate passed every case against
+those new witnesses and the independent f64 coverage/Gaussian reference,
+including HD/UHD, subtraction, feathering and exact unfeathered geometry.
+Its precision and parity bounds are unchanged. Category captures were removed
+after recording results. This closes the Mac mask execution check, not the
+whole-engine frozen-corpus or physical/performance qualification.
+
+The Canvas/vector witness was also recaptured on this M5: **556 synthetic
+cases captured**, **474 compared** by G-V1, and **18 Rust tests passed**. The
+vector
+gate's edge max/p99.9/mean checks and exact stroke regions passed unchanged;
+its capture was deleted after results were recorded.
+
+The Mac S4 inventory ran the bounded native compiler and Metal draw, including
+MSL byte-equivalence checking: **812 source cases / 2,143 variants**, **656
+successful Metal draws**. The other cases stopped at ES validation (115),
+resource binding (33), source limits (5), or Naga validation (3). This set
+includes deliberate negative probes. It establishes execution evidence, not a
+claim that all input sources are supported or that the historical WebGL pixel
+gaps are qualified. Private shader sources, diagnostics and pixel digests are
+excluded from this ledger.
+
+G-V3 also passed against fresh M5 witnesses: **383 Chromium semantic probe
+captures**, **374 probe rasters compared** (existing documented intrinsic-size
+and radius decisions retained), plus **43 actual legacy-app frame captures**
+for common placements, 25–800% scale and animated scale. The latter replay
+passed **8 Rust tests**, including both frame gates. Source and frame hashes,
+versions, dimensions and premultiplied row encoding were checked. Engine
+frames stayed RGBA32F, independent f64 references and all existing numerical
+bounds stayed unchanged, and each capture set was removed after recording its
+results. These are new build-Mac witnesses, not the original frozen captures.
+
+The final replay of the 15 requested crates' library targets passed **908
+tests, 0 failed, 2 existing ignored**. The extra Mac replay passed
+**pm-node 254 tests (21 existing ignored)** and **pm-vector 73 tests**.
+
+The seven-crate Mac `cargo clippy --locked --all-targets ... -- -D warnings`
+check passes. Mechanical lint repairs retain the existing conversions and
+assertions; the two reference painters now share one SVG reference module.
+The Mac encoding-core replay with `pm-export --no-default-features` also
+passes **69 tests, 0 failed**. Its QoS callback installer is available to the
+Mac unit tests even when the renderer integration feature is disabled.
+
+### WIP owner handoff
+
+Validation was stopped at the orchestrator's request before the full engine
+integration replay finished. Jude takes over with the original frozen corpus
+and projects. The exact failure register, verified subsets, environment and
+next steps are in [the Mac engine handoff](../native/handoff/engine-macos.md).
+The branch is not all green; Gate E and the cold distinct-voice AUDIO-2 gate
+remain open. The last TIFF palette integration repair also needs a full replay.

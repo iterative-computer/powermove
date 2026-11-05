@@ -58,6 +58,10 @@ pub struct Composition {
     pub open: bool,
     pub can_nest: bool,
     pub uses: usize,
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub poster: Option<String>,
 }
 
 /// Decoding/restoration is observed, never inferred from persisted metadata.
@@ -68,6 +72,9 @@ pub enum Availability {
     Loading,
     Ready,
     Offline,
+    Changed {
+        source: String,
+    },
     Failed(String),
     Cloud {
         provider: String,
@@ -100,11 +107,22 @@ pub struct RuntimeState {
     pub proxy: ProxyStatus,
     /// Opaque host key; it may resolve even when original media is offline.
     pub poster: Option<String>,
+    #[serde(default)]
+    pub progress: Option<DownloadProgress>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub completed: u64,
+    pub total: u64,
 }
 
 /// Host adapter must classify the original and proxy separately. No IO in state().
 pub trait MediaRuntime {
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState;
+    fn composition_poster(&self, _stamp: &Stamp, _composition: &str) -> Option<String> {
+        None
+    }
 }
 #[derive(Default)]
 pub struct UnknownRuntime;
@@ -129,6 +147,19 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn search_folders(&self, folder: Option<&str>, descendants: bool) -> Vec<&String> {
+        let mut found = vec![];
+        let mut todo = vec![folder.map(str::to_owned)];
+        while let Some(parent) = todo.pop() {
+            for id in self.child_ids(parent.as_deref()) {
+                found.push(id);
+                if descendants {
+                    todo.push(Some(id.clone()));
+                }
+            }
+        }
+        found
+    }
     pub fn published(p: &Published) -> Result<Self, Error> {
         Self::new(p.project.clone(), p.snapshot.clone())
     }
@@ -324,6 +355,8 @@ impl Catalog {
                         open: open == Some(*id),
                         can_nest: open.is_some() && !blocked.contains(*id),
                         uses: uses.get(*id).copied().unwrap_or(0),
+                        background: text(c, "bg").map(str::to_owned),
+                        poster: None,
                     },
                 )
             })

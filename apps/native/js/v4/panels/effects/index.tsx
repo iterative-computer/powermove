@@ -1,4 +1,4 @@
-import { createRoot, type Transport } from "../../src";
+import { createRoot, type Transport, type RootOptions } from "../../src";
 import { EffectsHost, type EffectsHostAdapter } from "./host";
 import { HostClient } from "../../src/host-api";
 import { EffectsModel, workerSearch } from "./model";
@@ -20,6 +20,7 @@ export class EffectsMountError extends AggregateError {
  * Nothing registers a competing panel or replaces the v1–3 provider implicitly. */
 export async function createEffectsExtension(options: {
   transport: Transport;
+  rootOptions?: RootOptions;
   host: HostClient;
   adapter: EffectsHostAdapter;
   bindings: EffectsPanelProps["bindings"];
@@ -35,7 +36,7 @@ export async function createEffectsExtension(options: {
     search: workerSearch,
     report: options.onError,
   });
-  const root = createRoot(options.transport, options.onError);
+  const root = createRoot(options.transport, options.onError, options.rootOptions);
   const cleanup = async () => {
     model.dispose();
     const results = await Promise.allSettled([host.dispose(), root.dispose()]);

@@ -23,7 +23,11 @@ impl Vec3 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
     pub fn cross(self, o: Vec3) -> Vec3 {
-        v3(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
+        v3(
+            self.y * o.z - self.z * o.y,
+            self.z * o.x - self.x * o.z,
+            self.x * o.y - self.y * o.x,
+        )
     }
     pub fn length(self) -> f32 {
         self.dot(self).sqrt()
@@ -41,7 +45,7 @@ impl Vec3 {
     pub fn to_array(self) -> [f32; 3] {
         [self.x, self.y, self.z]
     }
-        pub fn to4(self, w: f32) -> [f32; 4] {
+    pub fn to4(self, w: f32) -> [f32; 4] {
         [self.x, self.y, self.z, w]
     }
     /// Rotate about +y by `radians` (turntables).
@@ -101,6 +105,12 @@ impl Neg for Vec3 {
 pub fn srgb_hex(hex: &str) -> Vec3 {
     let h = hex.trim_start_matches('#');
     let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
-    let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let lin = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
     v3(lin(c(0)), lin(c(2)), lin(c(4)))
 }

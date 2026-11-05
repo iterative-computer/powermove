@@ -136,6 +136,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "ash"
+version = "0.38.0+1.3.281"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1842,6 +1851,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-allocator"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51255ea7cfaadb6c5f1528d43e92a82acb2b96c43365989a28b2d44ee38f8795"
+dependencies = [
+ "ash",
+ "hashbrown 0.16.1",
+ "log",
+ "presser",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "gpui-ce"
 version = "0.2.2"
 dependencies = [
@@ -2187,6 +2209,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -2447,6 +2471,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "514da54e79efa36b5976232d5b3d1d8ee1b47b19ab658f1b1ebe39221696c2d8"
 
 [[package]]
+name = "icu_collator"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24cb0205c419b2036da3f9082964905d6849b3f2130dd4a517940c45899a544b"
+dependencies = [
+ "icu_collator_data",
+ "icu_collections",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_provider",
+ "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_collator_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "183f47e821a327661c1ebe152f61d5b6c2000010d228cadbbf226e0e2b8c2634"
+
+[[package]]
 name = "icu_collections"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2505,6 +2554,9 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "write16",
  "zerovec",
 ]
 
@@ -3863,6 +3915,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "ordered-float"
+version = "5.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4601,6 +4662,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-builtins"
+version = "0.1.0"
+dependencies = [
+ "futures-lite",
+ "pm-agents",
+ "pm-audio",
+ "pm-design",
+ "pm-export",
+ "pm-kernel",
+ "pm-media",
+ "pm-model",
+ "pm-panel-agentpanel",
+ "pm-panel-inspector",
+ "pm-panel-media",
+ "pm-panel-timeline",
+ "pm-panel-viewerchrome",
+ "pm-promedia",
+ "pm-protocol",
+ "pm-render",
+ "pm-runtime-v8",
+ "pm-services",
+ "pm-surface",
+ "pm-time",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "pm-captions"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-color"
 version = "0.1.0"
 dependencies = [
@@ -4661,6 +4760,7 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "pm-services",
+ "pm-update-policy",
  "reqwest",
  "semver",
  "serde",
@@ -4731,6 +4831,7 @@ dependencies = [
  "pm-node",
  "pm-protocol",
  "pm-render",
+ "pm-studio",
  "pm-time",
  "serde",
  "serde_json",
@@ -4772,6 +4873,7 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "pm-audio",
+ "pm-color",
  "pm-eval",
  "pm-gpu",
  "pm-media",
@@ -4780,6 +4882,7 @@ dependencies = [
  "pm-render",
  "pm-time",
  "png",
+ "serde_json",
  "thiserror 2.0.21",
  "wgpu",
 ]
@@ -4818,9 +4921,11 @@ dependencies = [
  "pm-kernel",
  "pm-model",
  "pm-native-migrate",
+ "pm-update-policy",
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "tempfile",
  "zeroize",
 ]
@@ -4842,6 +4947,7 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
+ "libc",
  "naga 30.0.1",
  "rspirv",
  "serde",
@@ -4860,6 +4966,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-surface",
  "objc2-metal 0.3.2",
+ "pm-color",
  "pm-media",
  "pm-perf",
  "pm-protocol",
@@ -4880,8 +4987,10 @@ dependencies = [
  "pm-eval",
  "pm-expr",
  "pm-model",
+ "pm-scene3d",
  "pm-text",
  "pm-wasm",
+ "serde",
  "serde_json",
  "sha2",
 ]
@@ -4897,8 +5006,11 @@ dependencies = [
 name = "pm-mcp"
 version = "0.1.0"
 dependencies = [
+ "icu_collator",
+ "libc",
  "pm-kernel",
  "pm-model",
+ "pm-scene3d",
  "regex",
  "serde",
  "serde_json",
@@ -4911,6 +5023,7 @@ dependencies = [
  "bindgen",
  "blake3",
  "encoding_rs",
+ "half",
  "image",
  "libc",
  "md-5",
@@ -4943,12 +5056,14 @@ dependencies = [
  "foreign-types",
  "fs2",
  "gpui-ce",
+ "gpui_ce_macos",
  "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pm-audio",
+ "pm-builtins",
  "pm-design",
  "pm-engine-service",
  "pm-eval",
@@ -4959,10 +5074,16 @@ dependencies = [
  "pm-model",
  "pm-native-migrate",
  "pm-node",
+ "pm-panel-media",
+ "pm-panel-viewerchrome",
+ "pm-promedia",
  "pm-protocol",
  "pm-render",
+ "pm-runtime-v8",
  "pm-shell",
+ "pm-surface",
  "pm-time",
+ "raw-window-handle",
  "serde_json",
  "tempfile",
 ]
@@ -5075,6 +5196,7 @@ dependencies = [
  "objc2 0.6.5",
  "pm-audio",
  "pm-bridge",
+ "pm-color",
  "pm-engine",
  "pm-eval",
  "pm-export",
@@ -5130,6 +5252,7 @@ dependencies = [
 name = "pm-panel-media"
 version = "0.1.0"
 dependencies = [
+ "pm-design",
  "pm-kernel",
  "pm-model",
  "serde",
@@ -5140,6 +5263,7 @@ dependencies = [
 name = "pm-panel-timeline"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "pm-design",
  "pm-kernel",
  "pm-model",
@@ -5282,16 +5406,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-scene3d"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "pm-geom3d",
+ "pm-model",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "pm-services"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "fs2",
+ "pm-captions",
+ "pm-first-launch",
+ "pm-promedia",
+ "pm-update-policy",
  "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml_edit",
  "url",
 ]
 
@@ -5396,6 +5537,19 @@ dependencies = [
 [[package]]
 name = "pm-time"
 version = "0.1.0"
+
+[[package]]
+name = "pm-update-policy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
 
 [[package]]
 name = "pm-vector"
@@ -5522,6 +5676,12 @@ checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
 ]
+
+[[package]]
+name = "presser"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "prettyplease"
@@ -7147,6 +7307,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -7158,6 +7319,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tower"
@@ -7390,6 +7557,15 @@ name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
+name = "utf16_iter"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c7de35d9d8757dbc1f5125dc8b51438c68b4430546a735c3a9b91aaaaf9a18a"
+dependencies = [
+ "utf_types",
+]
 
 [[package]]
 name = "utf8_iter"
@@ -7744,13 +7920,17 @@ version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 dependencies = [
+ "android_system_properties",
  "arrayvec",
+ "ash",
  "bitflags",
  "block2 0.6.2",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
+ "gpu-allocator",
  "hashbrown 0.17.1",
+ "libc",
  "libloading",
  "log",
  "naga 30.0.1",
@@ -7761,6 +7941,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "ordered-float",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -7773,6 +7954,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wgpu-naga-bridge",
  "wgpu-types",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -8268,6 +8450,12 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "write16"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1890f4022759daae28ed4fe62859b1236caebfc61ede2f63ed4e695f3f6d936"
 
 [[package]]
 name = "writeable"

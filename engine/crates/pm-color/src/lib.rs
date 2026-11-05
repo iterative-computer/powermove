@@ -27,6 +27,7 @@ pub mod alpha;
 pub mod chroma;
 pub mod cicp;
 pub mod dither;
+pub mod effect_transforms;
 pub mod gamut;
 pub mod key;
 pub mod linear;

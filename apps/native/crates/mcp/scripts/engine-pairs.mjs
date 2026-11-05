@@ -1,6 +1,6 @@
 // Actual tagged media-tool orchestration, with synthetic decoder/process seams.
 // This proves the MCP boundary shape, not Metal/FFmpeg pixels or macOS hosting.
-import { tag, evaluate } from './tag-oracle.mjs';
+import { tag, evaluate } from './main-oracle.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));

@@ -46,8 +46,7 @@ test("notices preserve exact Rust copy and generation-qualified actions", async 
     const dismiss = nodes().find((n) => n.props.label === "Dismiss")!;
     expect(dismiss.props.title).toBe("Dismiss");
     expect(dismiss.props.metadata).toEqual({
-      symbol: "xmark",
-      borderless: true,
+      pmKit: { symbol: "xmark" },
     });
   }
 });
@@ -64,7 +63,7 @@ test("passive notices have no extra action or close button", async () => {
   );
   expect(nodes().filter((n) => n.type === "button")).toHaveLength(0);
 });
-test("library notices use inline tokens and do not invent a dismiss control", async () => {
+test("library notices use the kit inline Banner", async () => {
   const { nodes } = await render(
     <DocumentNotice
       target={target}
@@ -77,11 +76,11 @@ test("library notices use inline tokens and do not invent a dismiss control", as
       onAction={() => {}}
     />,
   );
-  expect(nodes().some((n) => n.props.label === "Dismiss")).toBe(false);
-  const group = nodes().find((n) => n.props.role === "group")!;
-  expect(group.props.style).toMatchObject({
-    background: { token: "colors.panel_secondary" },
-    borderRadius: { token: "metrics.control_radius" },
+  const banner = nodes().find(
+    (n) => n.props["data-pm-component"] === "banner",
+  )!;
+  expect(banner.props.metadata).toMatchObject({
+    pmKit: { placement: "inline", symbol: "info.circle", severity: "info" },
   });
 });
 test("opening is absent before the Rust delay and uses indeterminate kit progress afterward", async () => {
@@ -199,4 +198,34 @@ test("document views replay through the real Rust six-op validator and accessibi
     expect(reply.accessibilityNodes).toBeGreaterThan(0);
     expect(reply.focusOrder.length).toBeGreaterThan(0);
   }
+});
+
+test("review notice symbols are exact kit severity recipes in viewer and inline placements", async () => {
+  for (const location of ["viewer", "library"] as const)
+    for (const [level, symbol] of [
+      ["info", "info.circle"],
+      ["warning", "exclamationmark.triangle.fill"],
+      ["error", "xmark.octagon.fill"],
+    ] as const) {
+      const { nodes, commits } = await render(
+        <DocumentNotice
+          target={target}
+          notice={{ text: "Synthetic notice", level }}
+          location={location}
+          onAction={() => {}}
+        />,
+      );
+      const banner = nodes().find(
+        (n) => n.props["data-pm-component"] === "banner",
+      )!;
+      expect(banner.props.metadata).toMatchObject({
+        pmKit: {
+          severity: level,
+          placement: location === "viewer" ? "viewer" : "inline",
+          symbol,
+        },
+      });
+      expect(JSON.stringify(commits)).not.toContain("designTodo");
+      expect(nodes().filter((n) => n.type === "button")).toHaveLength(0);
+    }
 });

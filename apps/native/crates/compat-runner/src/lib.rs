@@ -11,6 +11,7 @@ mod kernel;
 mod recorder;
 mod store_kernel;
 mod store_runtime;
+mod transport;
 pub use recorder::NativeHost;
 pub use store_kernel::KernelStoreAdapter;
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
@@ -23,6 +24,11 @@ pub struct CompatRunner {
 
 impl CompatRunner {
     pub fn new(bundle: &str, initial: &Value) -> Result<Self> {
+        Self::with_prelude(bundle, initial, "")
+    }
+    /// Disposable comparison fixtures run before the bundle or any extension.
+    /// Production embedders keep using `new`, without altered time or entropy.
+    pub fn with_prelude(bundle: &str, initial: &Value, prelude: &str) -> Result<Self> {
         let host = Arc::new(NativeHost::new(initial)?);
         let initial = host.publication();
         let pool = RuntimePool::new(
@@ -44,6 +50,9 @@ impl CompatRunner {
             _pool: pool,
             host,
         };
+        if !prelude.is_empty() {
+            runner.eval(prelude)?;
+        }
         runner.eval(bundle)?;
         runner.eval("if(typeof PowermoveCompat?.CompatRealm!=='function')throw Error('Missing compat bundle')")?;
         runner.eval(include_str!("bootstrap.js"))?;
@@ -141,6 +150,28 @@ mod tests {
     }
     fn runner() -> CompatRunner {
         CompatRunner::new(bundle(), &initial()).unwrap()
+    }
+    #[test]
+    fn native_transport_seeks_snap_without_document_edits_and_preserve_raw_time() {
+        let runner = runner();
+        assert_eq!(
+            runner
+                .json("(()=>{PM.setTime(1.25);return [PM.time,PM.playing,PM.hist.canUndo()]})()")
+                .unwrap(),
+            json!([1.2666666666666666, false, false])
+        );
+        assert_eq!(
+            runner
+                .json("(()=>{PM.setTime(.123,{raw:true});PM.setTime(NaN);return PM.time})()")
+                .unwrap(),
+            json!(0.123)
+        );
+        assert_eq!(
+            runner
+                .json("(()=>{PM.step(-100);return PM.time})()")
+                .unwrap(),
+            json!(0)
+        );
     }
     fn manifest(version: u8) -> Value {
         json!({"id":"synthetic","name":"Synthetic","version":"1.0.0","apiVersion":version})

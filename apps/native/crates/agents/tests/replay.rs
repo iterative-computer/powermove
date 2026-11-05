@@ -144,6 +144,96 @@ fn mcp(fixture: &Value) -> (Observations, Observations) {
     };
     (expected, actual)
 }
+
+/// The integration's live MCP catalog is pinned main plus the two selected
+/// Studio contracts. Keep the tagged transcript immutable and its full delta
+/// visible, while requiring that delta to match these exact source inputs.
+fn current_mcp_catalog(reference: &Observations) -> Observations {
+    let main = include_bytes!("../../mcp/fixtures/catalog-main-c7f46a056.json");
+    let studio = include_bytes!("../../mcp/fixtures/scene3d-source-catalog.json");
+    assert_eq!(
+        replay::sha256(main),
+        "8e0ae6094bd7149703ba9a49aec8e334fd21b1d58d75c4d72494fccd1a8ddddd"
+    );
+    assert_eq!(
+        replay::sha256(studio),
+        "c5c11bcbda88e89ccdd01b9ddad75787a3495f1b2cec04b084298b8b91b5c5e1"
+    );
+    let mut catalog: Value = serde_json::from_slice(main).unwrap();
+    let studio: Value = serde_json::from_slice(studio).unwrap();
+    assert_eq!(studio["tools"].as_array().unwrap().len(), 2);
+    for replacement in studio["tools"].as_array().unwrap() {
+        let tool = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == replacement["name"])
+            .unwrap();
+        *tool = replacement.clone();
+    }
+    let mut expected = Observations {
+        wire: reference.wire.clone(),
+        events: reference.events.clone(),
+        lifecycle: reference.lifecycle.clone(),
+    };
+    let mut lists = 0;
+    for message in &mut expected.wire {
+        if message.value["result"]["tools"].is_array() {
+            message.value["result"]["tools"] = catalog["tools"].clone();
+            lists += 1;
+        }
+    }
+    assert_eq!(lists, 1, "the complete tools/list response is checked");
+    expected
+}
+
+#[test]
+fn current_catalog_delta_never_accepts_unknown_catalog_or_transport_changes() {
+    let manifest = replay::load_manifest(&root());
+    let case = manifest
+        .cases
+        .iter()
+        .find(|case| case.name == "mcp-stdio")
+        .unwrap();
+    let fixture: Value =
+        serde_json::from_slice(&fs::read(root().join(&case.file)).unwrap()).unwrap();
+    let reference = Observations {
+        wire: fixture["responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| Message {
+                kind: "out".into(),
+                after: 0,
+                value: value.clone(),
+            })
+            .collect(),
+        ..Observations::default()
+    };
+    let current = current_mcp_catalog(&reference);
+    let allowed = replay::report(case, &reference, &current).differences;
+    assert!(
+        !allowed.is_empty(),
+        "tagged catalog identity is not claimed"
+    );
+    let list = current
+        .wire
+        .iter()
+        .position(|message| message.value["result"]["tools"].is_array())
+        .unwrap();
+    for catalog_change in [true, false] {
+        let mut changed = current_mcp_catalog(&reference);
+        if catalog_change {
+            changed.wire[list].value["result"]["tools"][0]["description"] = json!("unexpected");
+        } else {
+            changed.wire[0].value["unexpected"] = json!(true);
+        }
+        assert_ne!(
+            replay::report(case, &reference, &changed).differences,
+            allowed
+        );
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KnownDifference {
@@ -157,6 +247,7 @@ fn replay_all_surfaces_and_check_every_difference() {
     let ledger: BTreeMap<String, KnownDifference> =
         serde_json::from_slice(&fs::read(root().join("differences.json")).unwrap()).unwrap();
     let mut reports = vec![];
+    let mut source_deltas = BTreeMap::new();
     for c in &m.cases {
         let fixture = serde_json::from_slice(&fs::read(root().join(&c.file)).unwrap()).unwrap();
         let (expected, actual) = if c.surface == "mcp" {
@@ -164,6 +255,12 @@ fn replay_all_surfaces_and_check_every_difference() {
         } else {
             replay::provider(c, &fixture)
         };
+        if c.name == "mcp-stdio" {
+            source_deltas.insert(
+                c.name.clone(),
+                replay::report(c, &expected, &current_mcp_catalog(&expected)).differences,
+            );
+        }
         reports.push(replay::report(c, &expected, &actual));
     }
     let serialized = serde_json::to_string_pretty(&reports).unwrap();
@@ -172,7 +269,13 @@ fn replay_all_surfaces_and_check_every_difference() {
     }
     println!("{serialized}");
     for r in &reports {
-        if r.identical {
+        if let Some(expected) = source_deltas.get(&r.name) {
+            assert_eq!(
+                &r.differences, expected,
+                "{}: live MCP differs from pinned main/Studio source contracts",
+                r.name
+            );
+        } else if r.identical {
             assert!(
                 !ledger.contains_key(&r.name),
                 "stale difference for {}",
@@ -368,4 +471,29 @@ fn process_replay_drains_full_pipes_and_kills_a_stalled_peer() {
         .is_err()
     );
     assert!(before.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn provider_callback_boundary_is_strictly_identical_without_losing_inspection() {
+    let manifest = replay::load_manifest(&root());
+    let mut cases = 0;
+    let mut inspected = 0;
+    for case in manifest.cases.iter().filter(|c| c.surface != "mcp") {
+        let fixture = serde_json::from_slice(&fs::read(root().join(&case.file)).unwrap()).unwrap();
+        let (expected, actual, inspection) = replay::provider_callbacks(case, &fixture);
+        assert_eq!(expected, actual, "{} callback boundary", case.name);
+        // The disjoint native stream must reconstruct every raw observation.
+        let (_, raw) = replay::provider(case, &fixture);
+        assert_eq!(actual.events, raw.events);
+        let mut combined = actual.lifecycle.clone();
+        combined.extend(inspection.lifecycle.clone());
+        combined.sort_by_key(|m| m.after);
+        let mut raw_lifecycle = raw.lifecycle;
+        raw_lifecycle.sort_by_key(|m| m.after);
+        assert_eq!(combined, raw_lifecycle, "{} inspection lost", case.name);
+        cases += 1;
+        inspected += inspection.lifecycle.len();
+    }
+    assert_eq!(cases, 21);
+    assert_eq!(inspected, 28);
 }

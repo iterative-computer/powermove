@@ -101,7 +101,9 @@ struct Engine;
 impl EngineProxy for Engine {
     fn call(&self, _: &Generation, op: &str, input: &Value, budget: HostBudget) -> Result<Value> {
         budget.check()?;
-        Ok(json!({"op":op,"input":input}))
+        // Preserve the fixture's exact string with serde_json's preserve_order
+        // feature either enabled or disabled by the surrounding workspace.
+        Ok(json!({"input":input,"op":op}))
     }
 }
 fn config() -> (Config, Arc<Kernel>, Arc<Host>) {

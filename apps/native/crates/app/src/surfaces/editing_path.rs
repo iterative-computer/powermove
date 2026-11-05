@@ -113,8 +113,6 @@ impl PathState {
         };
         let c = &dark.colors;
         let m = &tokens.metrics;
-        // DESIGN-TODO(opus): m.gizmo_handle does not exist in pm-design yet.
-        // The spec's identical 7 pt definition is m.keyframe - 2; no new token.
         let mut plan = PathPlan {
             path_id: self.id.clone(),
             closed: self.closed,
@@ -128,8 +126,8 @@ impl PathState {
             vertices: vec![],
             tangent_stroke: c.secondary,
             tangent_fill: c.floating,
-            tangent_width: 1.0,
-            tangent_diameter: m.keyframe - 3.0,
+            tangent_width: m.gizmo_keyline,
+            tangent_diameter: m.tangent_end,
             rubber_band: None,
             rubber_band_colour: c.accent,
             rubber_band_dash: [4.0, 3.0],
@@ -151,7 +149,7 @@ impl PathState {
                         || (i == count - 1 && self.selected.contains(&self.vertices[0].id))));
             plan.vertices.push(VertexPlan {
                 vertex: vertex.clone(),
-                side: m.keyframe - 2.0
+                side: m.gizmo_handle
                     + if self.hovered.as_ref() == Some(&vertex.id) {
                         2.0
                     } else {
@@ -159,7 +157,7 @@ impl PathState {
                     },
                 fill: if selected { c.accent } else { c.floating },
                 stroke: if selected { c.selected_text } else { c.accent },
-                stroke_width: 1.0,
+                stroke_width: m.gizmo_keyline,
                 display_position: self.display(vertex.position),
                 display_incoming: self.display(vertex.position.plus(vertex.incoming)),
                 display_outgoing: self.display(vertex.position.plus(vertex.outgoing)),

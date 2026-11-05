@@ -111,6 +111,8 @@ fn entry() -> Check {
     Ok(())
 }
 fn storage() -> Check {
+    #[cfg(test)]
+    let _process_gate = crate::FIXTURE_PROCESS_GATE.lock().unwrap();
     use pm_services::storage::ServiceStorage;
     let scratch = Scratch::new()?;
     let root = scratch.0.join("services");

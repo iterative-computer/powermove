@@ -1,3 +1,4 @@
+import { UnknownReadiness } from "./readiness";
 import { HostClient, json, type Json } from "../../src";
 import type {
   Action,
@@ -14,6 +15,10 @@ export interface ProjectServiceOptions {
   command: string;
   subscription: string;
   projectStamp: (publication: Json) => Stamp | null;
+  diagnostic?: (error: unknown) => void;
+  /** Enqueue a native AX announcement; never synchronously enter the UI. */
+  announce?: (message: string, sequence: number) => void;
+  now?: () => number;
 }
 const validInteger = (n: unknown): n is number =>
   Number.isSafeInteger(n) && (n as number) >= 0;
@@ -35,6 +40,12 @@ function availability(value: unknown): boolean {
   const v = value as Record<string, unknown>;
   if (Object.keys(v).length !== 1) return false;
   if (typeof v.Failed === "string") return true;
+  if (
+    v.Changed &&
+    typeof v.Changed === "object" &&
+    typeof (v.Changed as { source: unknown }).source === "string"
+  )
+    return true;
   const cloud = v.Cloud as Record<string, unknown> | undefined;
   if (!cloud || typeof cloud.provider !== "string") return false;
   return (
@@ -115,6 +126,11 @@ export function decodeReply(value: unknown, owner: Stamp): Reply {
         !runtime ||
         !availability(runtime.availability) ||
         !nullableString(runtime.poster) ||
+        (runtime.progress != null &&
+          (!validInteger(runtime.progress.completed) ||
+            !validInteger(runtime.progress.total) ||
+            runtime.progress.total < 1 ||
+            runtime.progress.completed > runtime.progress.total)) ||
         typeof asset.kind !== "string" ||
         !validInteger(asset.references) ||
         ![
@@ -146,6 +162,12 @@ export function decodeReply(value: unknown, owner: Stamp): Reply {
       )
         throw new TypeError("Invalid media composition");
     }
+    if (
+      row.folder_path !== undefined &&
+      (!Array.isArray(row.folder_path) ||
+        !row.folder_path.every((part) => typeof part === "string"))
+    )
+      throw new TypeError("Invalid folder path");
     ids.add(JSON.stringify(row.id));
   }
   return r;
@@ -153,8 +175,24 @@ export function decodeReply(value: unknown, owner: Stamp): Reply {
 /** Worker-side bridge to pm-panel-media. Documents change only after kernel ack. */
 export class ProjectService {
   view: Projection | null = null;
-  // DESIGN-TODO(opus): specify transport/worker failure presentation; expose diagnostics without inventing product copy.
   error: unknown = null;
+  errorSequence = 0;
+  callbackError: unknown = null;
+  readonly readiness = new UnknownReadiness();
+  private readinessTimer?: ReturnType<typeof setTimeout>;
+  now() {
+    return (this.options.now ?? (() => performance.now()))();
+  }
+  private armReadiness() {
+    clearTimeout(this.readinessTimer);
+    this.readiness.observe(this.view, this.now());
+    const delay = this.view ? this.readiness.next(this.view, this.now()) : null;
+    if (delay !== null && !this.stopped)
+      this.readinessTimer = setTimeout(() => {
+        this.changed();
+        this.armReadiness();
+      }, delay);
+  }
   private owner: Stamp | null = null;
   private epoch = 0;
   private stopped = false;
@@ -211,6 +249,8 @@ export class ProjectService {
         if (changedDocument || !owner) {
           this.epoch++;
           this.view = null;
+          this.error = null;
+          this.armReadiness();
           this.window.offset = 0;
           this.changed();
         }
@@ -237,6 +277,8 @@ export class ProjectService {
     return this.send({ Menu: id }, expected);
   }
   send(action: Action, expected?: Stamp): Promise<Reply | null> {
+    if (this.error !== null && !("Page" in action))
+      return Promise.resolve(null);
     const captured = json(action) as unknown as Action;
     const origin = this.owner ? { ...this.owner } : null;
     const guard = expected ? { ...expected } : undefined;
@@ -258,29 +300,51 @@ export class ProjectService {
       (expected && !this.owns(expected))
     )
       return null;
+    if (this.error !== null && !("Page" in action)) return null;
     const owner = { ...this.owner };
     const epoch = this.epoch;
-    const ack = await this.host.command(
-      this.options.command,
-      json({ owner, action }),
-    );
-    if (this.stopped || epoch !== this.epoch) return null;
-    const reply = decodeReply(ack.value, owner);
-    if (this.owner && reply.view.page.stamp.revision < this.owner.revision)
-      return null;
-    // Only the native service can advance the document revision.
-    this.owner = { ...reply.view.page.stamp };
-    this.view = reply.view;
-    this.error = null;
-    this.changed();
-    return reply;
+    try {
+      const ack = await this.host.command(
+        this.options.command,
+        json({ owner, action }),
+      );
+      if (this.stopped || epoch !== this.epoch) return null;
+      const reply = decodeReply(ack.value, owner);
+      if (this.owner && reply.view.page.stamp.revision < this.owner.revision)
+        return null;
+      this.owner = { ...reply.view.page.stamp };
+      this.view = reply.view;
+      this.error = null;
+      this.armReadiness();
+      this.changed();
+      return reply;
+    } catch (error) {
+      this.recordFailure(error, epoch);
+      throw error;
+    }
   }
+  private recordFailure(error: unknown, epoch: number) {
+    if (this.stopped || epoch !== this.epoch || this.error === error) return;
+    const first = this.error === null;
+    if (first) this.errorSequence++;
+    this.error = error;
+    try {
+      this.options.diagnostic?.(error);
+      if (first)
+        this.options.announce?.(
+          "Project media isn’t updating right now.",
+          this.errorSequence,
+        );
+    } catch (callbackError) {
+      this.callbackError = callbackError;
+    }
+    this.changed();
+  }
+
   run(work: Promise<unknown>) {
+    const epoch = this.epoch;
     const tracked = work.catch((error) => {
-      if (!this.stopped) {
-        this.error = error;
-        this.changed();
-      }
+      this.recordFailure(error, epoch);
     });
     this.pending.add(tracked);
     void tracked.finally(() => this.pending.delete(tracked));
@@ -292,6 +356,8 @@ export class ProjectService {
     this.stopped = true;
     this.epoch++;
     this.view = null;
+    clearTimeout(this.readinessTimer);
+    this.readiness.observe(null, this.now());
     this.changed();
     await this.stopSubscription?.();
     this.listeners.clear();

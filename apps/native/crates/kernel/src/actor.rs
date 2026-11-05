@@ -264,6 +264,18 @@ struct Shared {
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
 
 enum Msg {
+    ProEditing {
+        project: String,
+        request: crate::pro_editing::ProRequest,
+        reply: Reply<Result<crate::pro_editing::ProReply, KernelFailure>>,
+    },
+    ProClock {
+        project: String,
+        document: u64,
+        comp_id: Option<String>,
+        available: bool,
+        reply: Reply<Option<u64>>,
+    },
     Profile {
         call: crate::profile::ProfileCall,
         reply: Reply<Result<crate::profile::ProfileReply, KernelFailure>>,
@@ -288,6 +300,7 @@ enum Msg {
     Call {
         project: String,
         request: Request,
+        source_finish: Option<crate::pro_editing::SourceFinish>,
         reply: Reply<Result<Ack, KernelFailure>>,
     },
     Open {
@@ -368,6 +381,42 @@ impl Drop for KernelActor {
 
 impl KernelHandle {
     /// Bind an immutable actor identity; cloned handles never change another caller's origin.
+    /// Queue native UI/MCP pro actions. Never waits on the caller thread.
+    pub fn pro_editing(
+        &self,
+        project: &str,
+        request: crate::pro_editing::ProRequest,
+    ) -> Pending<Result<crate::pro_editing::ProReply, KernelFailure>> {
+        let (reply, pending) = oneshot();
+        let _ = self.tx.send(Msg::ProEditing {
+            project: project.into(),
+            request,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
+    }
+
+    /// Native transport adapter reports real availability for this composition.
+    /// Return a fresh token; observations from replaced bindings are refused.
+    /// Default is unavailable; close/reopen fences an earlier clock binding.
+    pub fn bind_pro_clock(
+        &self,
+        project: &str,
+        document: u64,
+        comp_id: Option<String>,
+        available: bool,
+    ) -> Pending<Option<u64>> {
+        let (reply, pending) = oneshot();
+        let _ = self.tx.send(Msg::ProClock {
+            project: project.into(),
+            document,
+            comp_id,
+            available,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
+    }
+
     pub fn for_actor(&self, caller: crate::Caller) -> ActorHandle {
         ActorHandle {
             kernel: self.clone(),
@@ -458,6 +507,7 @@ impl KernelHandle {
         self.send(Msg::Call {
             project: project.to_owned(),
             request,
+            source_finish: None,
             reply: Box::new(reply),
         });
     }
@@ -642,8 +692,93 @@ fn emit(shared: &Shared, event: KernelEvent) {
 fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     // Deferred replies (external undo running in another realm).
     let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
+    let mut pro_clocks: HashMap<String, (u64, Option<String>, bool, u64)> = HashMap::new();
+    let mut pro_clock_token = 0u64;
     for msg in rx {
+        // Prepare and execute in this same actor turn: no snapshot/read/write
+        // race, and all writes retain the ordinary publication/event paths.
+        let msg = match msg {
+            Msg::ProClock {
+                project,
+                document,
+                comp_id,
+                available,
+                reply,
+            } => {
+                let valid = kernel.project(&project).is_some_and(|p| {
+                    p.store().doc_id() == document
+                        && p.store()
+                            .root()
+                            .is_some_and(|root| crate::model::open_comp_id(root) == comp_id)
+                });
+                let token = pro_clock_token.checked_add(1).filter(|_| valid);
+                if let Some(token) = token {
+                    pro_clock_token = token;
+                    pro_clocks.insert(project, (document, comp_id, available, token));
+                }
+                reply(token);
+                continue;
+            }
+            Msg::ProEditing {
+                project,
+                request,
+                reply,
+            } => {
+                let clock = pro_clocks
+                    .get(&project)
+                    .and_then(|(doc, comp, available, token)| {
+                        let current_comp = kernel
+                            .project(&project)
+                            .and_then(|p| p.store().root())
+                            .and_then(crate::model::open_comp_id);
+                        (*doc == request.document && *available && *comp == current_comp)
+                            .then_some(*token)
+                    });
+                match crate::pro_editing::prepare(&kernel, &project, request, clock) {
+                    Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
+                        project,
+                        request,
+                        source_finish: None,
+                        reply: Box::new(move |v| {
+                            reply(v.map(crate::pro_editing::ProReply::Document))
+                        }),
+                    },
+                    Ok(crate::pro_editing::Prepared::SourceEdit { request, finish }) => {
+                        let state = shared.clone();
+                        Msg::Call {
+                            project,
+                            request,
+                            source_finish: Some(finish),
+                            reply: Box::new(move |v| {
+                                reply(v.map(|ack| crate::pro_editing::ProReply::SourceEdit {
+                                    ack,
+                                    state_revision: state.state.lock().expect("state").revision,
+                                }))
+                            }),
+                        }
+                    }
+                    Ok(crate::pro_editing::Prepared::State(tx)) => Msg::State {
+                        tx,
+                        reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::State))),
+                    },
+                    Ok(crate::pro_editing::Prepared::Inspection(v)) => {
+                        reply(Ok(crate::pro_editing::ProReply::Inspection(v)));
+                        continue;
+                    }
+                    Ok(crate::pro_editing::Prepared::Declined) => {
+                        reply(Ok(crate::pro_editing::ProReply::Declined));
+                        continue;
+                    }
+                    Err(e) => {
+                        reply(Err(e));
+                        continue;
+                    }
+                }
+            }
+            other => other,
+        };
         match msg {
+            Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
             Msg::Profile { call, reply } => reply(kernel.profile(call)),
             Msg::PrepareSave {
                 session,
@@ -740,6 +875,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             Msg::Call {
                 project,
                 request,
+                source_finish,
                 reply,
             } => {
                 let actor_started = std::time::Instant::now();
@@ -747,13 +883,16 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                 let before_selection = kernel
                     .project(&project)
                     .map(|p| p.store().selection().clone());
-                let handled = match kernel.handle(&project, request) {
+                let mut handled = match kernel.handle(&project, request) {
                     Ok(h) => h,
                     Err(e) => {
                         reply(Err(e));
                         continue;
                     }
                 };
+                if let Some(finish) = source_finish {
+                    crate::pro_editing::finish_source(&mut kernel, &project, finish, &mut handled);
+                }
                 if before_state.revision != kernel.state().revision {
                     *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
                 }
@@ -833,6 +972,17 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                     );
                 }
                 if before_state.revision != kernel.state().revision {
+                    if before_state.ui.get(&project) != kernel.state().ui.get(&project) {
+                        emit(
+                            &shared,
+                            KernelEvent::StateChanged {
+                                revision: kernel.state().revision,
+                                change: crate::state::StateChange::Ui {
+                                    project: project.clone(),
+                                },
+                            },
+                        );
+                    }
                     for key in before_state
                         .settings
                         .keys()

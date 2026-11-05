@@ -1,12 +1,18 @@
 // Bundled for real V8, never run under a DOM or Node. Hosts below are explicit
 // service/recorder doubles; these assertions certify no native pixels or panels.
 import { CompatRealm, RecorderCanvas } from "../../../js/compat/src";
+import { registries, registryIDs } from "./registry-probes";
+import { controls, controlIDs } from "./control-probes";
+import * as compat from "../../../js/compat/src";
 import { RemoteDOM } from "../../../js/remote-dom/src/shim";
 import type { RecorderHost, SurfaceVersion } from "../../../js/compat/src/canvas";
 const assert = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
+Object.assign(globalThis, { PowermoveCompat: { ...compat, RemoteDOM } });
 let remoteEvidence: unknown;
 let remoteReceive: ((message: any) => void) | undefined;
-export function run(id: string): boolean {
+export function run(id: string): boolean | Promise<boolean> {
+  if (registryIDs.includes(id)) return registries(id);
+  if (controlIDs.includes(id)) return controls(id);
   if (["A659", "A689", "A691"].includes(id)) {
     for (const version of [1, 2, 3] as const) {
       const errors: unknown[] = [];

@@ -154,6 +154,8 @@ test("search failure leaves previous rows inspectable, reports failure and stops
   expect(model.rows()).toBe(rows);
   expect(model.searching).toBe(false);
   expect(errors).toHaveLength(1);
+  expect(model.error).toBe("Couldn’t search effects. Try again.");
+  expect(model.announcement.text).toBe(model.error);
 });
 test("applying without target announces exact copy; rows remain draggable", async () => {
   const { model, applied } = fixture();
@@ -191,7 +193,12 @@ test("rejected edits never claim success or change recents", async () => {
   expect(model.recent).toEqual([]);
   expect(saved).toEqual([]);
   expect(errors).toHaveLength(1);
-  expect(model.announcement.sequence).toBe(0);
+  expect(model.announcement.text).toBe(
+    "Couldn’t add Gaussian Blur. Try again.",
+  );
+  expect(model.error).toBe(model.announcement.text);
+  model.pickScope("all");
+  expect(model.error).toBeUndefined();
 });
 test("apply captures target at gesture time without mutating selection or document", async () => {
   const { model, applied } = fixture();

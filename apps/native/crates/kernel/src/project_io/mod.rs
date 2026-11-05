@@ -30,9 +30,13 @@
 //! Always writes PMV4, the format and layout of the old `ProjectSave`; see
 //! the [`save`] module for the algorithm and guarantees.
 
+pub mod autosave;
 pub(crate) mod base64;
 mod durable;
 mod envelope;
+#[cfg(test)]
+mod main_delta_tests;
+pub mod media_jobs;
 pub mod save;
 
 use std::collections::HashSet;
@@ -194,6 +198,9 @@ impl MediaEntry {
 #[derive(Clone, Debug, Default)]
 pub struct MediaTable {
     entries: Arc<Vec<MediaEntry>>,
+    /// Explicit provenance, independent of File vs Memory. Generated/imported
+    /// owned files must never be mistaken for source links.
+    linked: Arc<HashSet<JsString>>,
 }
 
 impl MediaTable {
@@ -215,6 +222,7 @@ impl MediaTable {
 
     /// Adds or replaces an entry by id; an existing id keeps its position.
     pub fn insert(&mut self, entry: MediaEntry) {
+        Arc::make_mut(&mut self.linked).remove(&entry.id);
         let entries = Arc::make_mut(&mut self.entries);
         match entries.iter_mut().find(|e| e.id == entry.id) {
             Some(slot) => *slot = entry,
@@ -222,15 +230,40 @@ impl MediaTable {
         }
     }
 
+    /// Register a source link after admission has verified its complete digest.
+    /// Normal saves retain the document reference without reading these bytes;
+    /// portable saves stream them and re-check the digest.
+    pub fn insert_link(&mut self, entry: MediaEntry) -> Result<(), ProjectIoError> {
+        if !matches!(&entry.source, MediaSource::File { sha256: Some(hash), .. }
+            if hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+        {
+            return Err(ProjectIoError::Invalid(
+                "A source link needs a verified SHA-256.".into(),
+            ));
+        }
+        let id = entry.id.clone();
+        self.insert(entry);
+        Arc::make_mut(&mut self.linked).insert(id);
+        Ok(())
+    }
+
+    pub fn is_linked(&self, id: &JsString) -> bool {
+        self.linked.contains(id)
+    }
+
     pub fn remove(&mut self, id: &str) -> Option<MediaEntry> {
         let pos = self.entries.iter().position(|e| e.id == *id)?;
-        Some(Arc::make_mut(&mut self.entries).remove(pos))
+        let entry = Arc::make_mut(&mut self.entries).remove(pos);
+        Arc::make_mut(&mut self.linked).remove(&entry.id);
+        Some(entry)
     }
 }
 
 /// The saved document minus the project.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Envelope {
+    /// Validated original index, used to retain unknown range/media metadata.
+    pub container_index: Option<Value>,
     /// `v` as read (informational: saves write [`ENVELOPE_VERSION`]).
     pub version: Option<Value>,
     /// `history` exactly as read. Written back unchanged when it could not be
@@ -252,6 +285,7 @@ pub struct Envelope {
 impl Default for Envelope {
     fn default() -> Envelope {
         Envelope {
+            container_index: None,
             version: Some(Value::from(ENVELOPE_VERSION)),
             history: None,
             workspace: None,
@@ -415,7 +449,11 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         },
     )?;
     let verify: Vec<&MediaRecord> = if options.verify_media {
-        container.media.iter().collect()
+        container
+            .media
+            .iter()
+            .chain(&container.archived_media)
+            .collect()
     } else {
         Vec::new()
     };
@@ -446,7 +484,7 @@ pub(crate) fn from_container(
 ) -> Result<OpenedProject, ProjectIoError> {
     let format = container.format;
     // `document.proj || document`.
-    let (mut fields, mut project, wrapped) = match container.document {
+    let (mut fields, project, wrapped) = match container.document {
         Value::Object(mut map) if map.get("proj").is_some_and(Value::is_truthy) => {
             let proj = map.remove("proj").unwrap_or(Value::Null);
             (map, proj, true)
@@ -454,11 +492,20 @@ pub(crate) fn from_container(
         other => (Map::new(), other, false),
     };
     validate_stored_project(&project)?;
+    if let Some(metadata) = container.legacy_metadata {
+        let key = "nativePmv3Metadata";
+        let retained = match fields.remove(key) {
+            Some(old) if old == metadata => old,
+            Some(old) => Value::Array(vec![old, metadata]),
+            None => metadata,
+        };
+        fields.insert(key, retained);
+    }
     let had_comps = project.get("comps").is_some();
 
     let mut media = MediaTable::default();
     if let Some(version) = &version {
-        for record in &container.media {
+        for record in container.media.iter().chain(&container.archived_media) {
             media.insert(MediaEntry {
                 id: record.id.clone(),
                 media_type: record.media_type.clone(),
@@ -477,16 +524,27 @@ pub(crate) fn from_container(
     }
 
     // Legacy JSON: `media: { <id>: { type, data: "<base64>" } }` beside the
-    // project (`restoreProjectFileMedia`). Only media of assets the project
-    // or its history can reach is restored; it becomes a proper PMV4 record
-    // on the next save, and the member is not written back.
-    if container.media.is_empty() {
+    // project. Preserve the raw member (including unknown per-media metadata)
+    // and every decodable payload, even if only a future consumer owns it.
+    if container.media.is_empty()
+        || fields.get("media").is_some()
+        || fields.get("nativeLegacyMediaArchive").is_some()
+    {
         let legacy = if wrapped {
-            fields.remove("media")
+            fields
+                .remove("media")
+                .or_else(|| fields.get("nativeLegacyMediaArchive").cloned())
         } else {
-            project.as_object_mut().and_then(|p| p.remove("media"))
+            project.get("media").cloned()
         };
         if let Some(legacy) = legacy {
+            let key = "nativeLegacyMediaArchive";
+            let retained = match fields.remove(key) {
+                Some(old) if old == legacy => old,
+                Some(old) => Value::Array(vec![old, legacy.clone()]),
+                None => legacy.clone(),
+            };
+            fields.insert(key, retained);
             let reachable = reachable_in_stored(&project, fields.get("history"));
             if let Value::Object(legacy) = legacy {
                 for (id, source) in legacy.iter() {
@@ -498,11 +556,19 @@ pub(crate) fn from_container(
                     let data = source.get("data").and_then(Value::as_str);
                     let bytes = data.and_then(base64::decode);
                     let (Some(ty), Some(bytes)) = (ty, bytes) else {
+                        if !reachable.contains(id_str) {
+                            continue;
+                        }
                         return Err(ProjectIoError::Media {
                             id: id.to_string_lossy(),
                             reason: "Invalid saved media".into(),
                         });
                     };
+                    // Binary records are authoritative when both representations
+                    // occur. The original JSON stays intact in the envelope.
+                    if media.get(id_str).is_some() {
+                        continue;
+                    }
                     media.insert(MediaEntry {
                         id: id.clone(),
                         media_type: ty.clone(),
@@ -528,6 +594,7 @@ pub(crate) fn from_container(
             format,
             version,
             envelope: Envelope {
+                container_index: container.index,
                 version: version_member,
                 history: raw_history,
                 workspace,
@@ -543,9 +610,48 @@ pub(crate) fn from_container(
     })
 }
 
+/// Known logical history can be re-exported without an archive. Dictionaries,
+/// refused histories and metadata the logical stack cannot represent must be
+/// retained when a later edit changes that stack.
+pub(crate) fn history_needs_archive(raw: &Value, open: Option<&str>) -> bool {
+    if History::from_saved(raw, open).is_none() {
+        return true;
+    }
+    let unknown = |value: &Value, known: &[&str]| {
+        value.as_object().is_none_or(|map| {
+            map.keys()
+                .any(|key| !key.as_str().is_some_and(|key| known.contains(&key)))
+        })
+    };
+    if unknown(raw, &["version", "paths", "index", "entries"]) {
+        return true;
+    }
+    raw.get("entries")
+        .and_then(Value::as_array)
+        .is_none_or(|entries| {
+            entries.iter().any(|entry| {
+                unknown(entry, &["label", "forward", "backward"])
+                    || ["forward", "backward"].into_iter().any(|side| {
+                        entry
+                            .get(side)
+                            .and_then(Value::as_array)
+                            .is_none_or(|patches| {
+                                patches
+                                    .iter()
+                                    .any(|patch| unknown(patch, &["path", "exists", "value"]))
+                            })
+                    })
+            })
+        })
+}
+
 /// Asset ids reachable from a *stored* project and its saved history
 /// (`fileAssets` in `legacy/core/project-file.ts`).
 fn reachable_in_stored(project: &Value, history: Option<&Value>) -> HashSet<String> {
+    let unpacked = history
+        .and_then(|h| History::from_saved(h, open_comp_id(project)))
+        .map(|h| h.snapshot().to_saved());
+    let history = unpacked.as_ref().or(history);
     let mut ids = HashSet::new();
     let mut add_keys = |obj: Option<&Value>, ids: &mut HashSet<String>| {
         if let Some(Value::Object(map)) = obj {
@@ -571,6 +677,10 @@ fn reachable_in_stored(project: &Value, history: Option<&Value>) -> HashSet<Stri
         }
     }
     add_keys(project.get("assets"), &mut ids);
+    crate::commands::scene3d::collect_original_assets(project, &mut ids);
+    if let Some(history) = history {
+        crate::commands::scene3d::collect_original_assets(history, &mut ids);
+    }
     ids
 }
 

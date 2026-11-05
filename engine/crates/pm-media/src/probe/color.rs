@@ -269,6 +269,8 @@ pub fn interpret(
         Some(1) | Some(6) | Some(13) | Some(14) | Some(15) => Transfer::DisplayE,
         Some(4) => Transfer::Gamma22,
         Some(8) => Transfer::Linear,
+        Some(9) => Transfer::Log100,
+        Some(10) => Transfer::Log316,
         Some(16) => Transfer::Pq,
         Some(18) => Transfer::Hlg,
         Some(_) => Transfer::DisplayE,

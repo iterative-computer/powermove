@@ -1,9 +1,6 @@
 //! Worker-side distribution plumbing. No UI, JS, installation helper or publishing.
 pub use pm_services::updater;
-#[path = "../../crates/services/src/update_distribution.rs"]
-pub mod update_distribution;
-#[path = "../../crates/services/src/update_handoff.rs"]
-pub mod update_handoff;
+pub use pm_update_policy::{update_distribution, update_handoff};
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};

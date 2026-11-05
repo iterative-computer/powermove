@@ -282,23 +282,24 @@ native port of the three.js r180 path):
   defines, includes, light counts, loop unrolling, and output encoding are
   ported (`three/program.rs`). Sources equal what WebGL receives byte for
   byte, including the `-0.0000` entries three.js prints for its Rec.709 round
-  trip matrix (`tests/three_programs.rs`, 12 recorded programs).
+  trip matrix (`tests/three_programs.rs`, 12 recorded programs). Scene-pass
+  output conversion is deliberately deferred to the compositor, and shadow
+  programs use native depth attachments and comparison sampling.
 - **Uniforms.** three.js's camera, light, and material uniforms through a port
   of its math (`Matrix4.lookAt`, quaternion and `compose`, `invert`,
   `makePerspective`, `makeOrthographic`, `getNormalMatrix`,
   `transformDirection`, `Color.setHex` with r180's sRGB constants): 858
   recorded values equal ours in f32.
-- **Passes.** The shared depth prepass (no color writes; depth writes only for
-  layer opacity ≥ 0.999), then the color pass (`LessEqual`, no depth writes),
-  4× MSAA into RGBA8 and resolve, as the WebGL canvas. Opaque materials draw
-  without blending; double-sided materials do not cull; single-sided ones cull
-  back faces, with the front face flipped for mirrored objects (negative
-  determinant). The bottom layer of the set clears to the environment
-  background (`setClearColor` in sRGB, opaque); others clear to transparent.
-  The resolved, premultiplied 8-bit output is drawn as a screen-space quad with
-  the layer's opacity, as today's canvas upload. The canvas is clamped to
-  1 to 8192 pixels a side and the camera's aspect comes from the clamped
-  size, as `renderPass` and `resizeCamera` do.
+- **Passes.** The depth prepass preserves shared occlusion for eligible objects.
+  The color pass uses four-sample RGBA16F in linear light and hardware resolve.
+  Masked objects retain their own depth test; masks stay in the 2D layer graph.
+  Transparent materials blend in linear light in their authored order. The
+  compositor applies the authored ACES curve once after resolve and blending,
+  adds the display background in linear light, then encodes for the working
+  composition. Project storage remains RGBA8, RGBA16F or RGBA32F. Legacy OBJ
+  mesh shaders retain their separate encoded-output contract.
+- **Shadows.** Depth-only `Depth32Float` maps and comparison samplers retain
+  the r180 PCF-soft kernel, bias, frustum and map-size constants.
 - **Metal safe math.** wgpu 30 compiles every module with fast math and has no
   option for `MTLCompileOptions.mathMode`. `pm_gpu::msl` writes the naga
   modules as MSL in wgpu-hal's slot conventions, puts MSL 3.2's
@@ -432,7 +433,6 @@ output share the matrix.
 ## Gaps
 
 - 3D layers render at the full output size even for a region of interest.
-- 3D output stays 8-bit (as today's canvas) at 32-bit precision.
 - The persisted-animation tests compare the video class against both
   Chromium and FFmpeg plus zimg; the broader video gate is in `phase3a-gate.md`.
 - No render cache: content keys for layer and precomp outputs (section 8) are
@@ -467,24 +467,15 @@ output share the matrix.
   and baseline TIFF encoder, a Display P3 ICC profile, and WebP, AVIF, and
   HEIC derived with `cwebp` and `sips`).
 
-## 8-bit working target routing
+## Output depth and gamut mapping
 
-At project color depth 8, working composition targets and their intermediate
-passes use `Rgba8Unorm`. The source conversion writes directly to RGBA8 so
-that half-float rounding cannot precede its byte quantization. Resampling
-pyramids, footage orientation, level 2 vector paint, text paint, and legacy
-OBJ mesh outputs use the same target format. Source bitmaps that were already
-RGBA8 remain separate cache entries from float source textures; their format
-alone does not indicate the composition's precision. Three.js scene canvas
-and the 3D object-id/depth planes keep their own formats.
-Compatibility video keeps its centered bilinear chroma reconstruction;
-interpreted video written into an RGBA8 working target keeps native siting
-and filtering.
+Eight-bit delivery keeps composition intermediates in RGBA16F. This preserves
+extended RGB until the final sRGB boundary, where CSS Color 4 gamut mapping runs
+on straight encoded values before optional premultiplication and quantization.
+Float and Display P3 delivery skip that mapper. Project depths 16 and 32 retain
+their float storage, including sampled sources and 3D output.
 
-The WebGL shader fallback request carries the working color depth. At depth
-8 its existing 16-bit wire slots carry exact byte codes, so the runner uploads
-and renders into RGBA8 and reads `UNSIGNED_BYTE`; no half-float stage precedes
-the working target. Older requests omit the field and continue to use RGBA16F.
-The targeted WebGL runner check preserves 24,576 byte codes across readback,
-three passes and depth switches. Full shader-corpus qualification at all
-depths remains required; see `color-depth.md` for current blockers.
+The renderer returns premultiplied E-encoded frames. CPU snapshot and export
+encoders share one output-pixel conversion. Explicit byte render targets use the
+same shared WGSL mapper in the final color pass. Existing byte compatibility
+rasters retain their API representation; their source values are not remapped.

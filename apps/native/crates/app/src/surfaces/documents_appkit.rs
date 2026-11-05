@@ -171,15 +171,12 @@ impl DocumentHost for AppKitHost {
             Presentation::Alert(alert) => self.alert(&request, alert, mtm),
             Presentation::Picker(picker) => self.picker(&request, picker, mtm),
             Presentation::Finishing(_) => {
-                // DESIGN-TODO(opus): design/surfaces/README §2 specifies
-                // m.sheet_inset and m.sheet_value_column, neither exists in
-                // pm-design. Keep an inspectable neutral placeholder; do not
-                // substitute made-up geometry or a differently styled alert.
+                // The sheet tokens now exist. This adapter still needs its
+                // native Finishing Up host and active theme publication; report
+                // an integration requirement, not a missing design decision.
                 let _ = self.output.send((
                     request.ticket,
-                    Response::Unavailable(
-                        "DESIGN-TODO(opus): missing sheet_inset / sheet_value_column tokens",
-                    ),
+                    Response::Unavailable("native Finishing Up sheet host is not attached"),
                 ));
             }
         }

@@ -8,7 +8,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1421, 0, 3177));
+    assert_eq!(r.counts(), (1424, 0, 3179));
     assert_eq!(r.exit_code(false), 0);
     assert_eq!(r.exit_code(true), 2);
     assert_eq!(
@@ -27,7 +27,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             .iter()
             .filter(|x| x.kind == "original" && x.status == Status::Pass)
             .count(),
-        20
+        21
     );
     assert_eq!(
         r.cases
@@ -63,27 +63,14 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             "{} triage acceptance drift",
             spec.legacy.file
         );
-        assert_eq!(
-            spec.supporting_probe_ids, spec.legacy.native_triage.supporting_probe_ids,
-            "{} triage probe drift",
-            spec.legacy.file
+        assert!(
+            spec.legacy
+                .native_triage
+                .supporting_probe_ids
+                .iter()
+                .all(|id| spec.supporting_probe_ids.contains(id)),
+            "historical triage links must be retained"
         );
-        let targeted = r
-            .cases
-            .iter()
-            .filter(|c| spec.acceptance_ids.contains(&c.id))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            spec.legacy.native_triage.needs_macos,
-            targeted.iter().any(|c| c.needs_macos)
-        );
-        let blockers = targeted
-            .iter()
-            .filter_map(|c| c.blocked_by.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        assert_eq!(spec.legacy.native_triage.blocked_by, blockers);
         assert!(
             spec.acceptance_ids
                 .iter()
@@ -100,7 +87,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     }
     assert_eq!(
         r.e2e_csv(),
-        include_str!("../data/e2e-map.csv"),
+        include_str!("../data/legacy-v1.2.0-e2e-map.csv"),
         "regenerate e2e mapping after inventory/scenario changes"
     );
     let csv = csv_rows(&r.e2e_csv()).unwrap();
@@ -108,7 +95,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1421 pass / 0 fail / 3177 blocked-by")
+            .contains("1424 pass / 0 fail / 3179 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
@@ -168,23 +155,34 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
     )
     .unwrap();
     if std::env::var_os("PM_UPDATE_BLOCKERS").is_some() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/remaining-blockers.csv");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/legacy-v1.2.0-remaining-blockers.csv"
+        );
         std::fs::write(path, report.blockers_csv()).unwrap();
         eprintln!("counts {:?}", report.counts());
         return;
     }
-    assert_eq!(report.counts(), (1439, 0, 3159));
+    assert_eq!(report.counts(), (1467, 0, 3136));
     assert_eq!(
         report.blockers_csv(),
-        include_str!("../data/remaining-blockers.csv")
+        include_str!("../data/legacy-v1.2.0-remaining-blockers.csv")
     );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
-    assert_eq!(rows.len(), 3160);
+    assert_eq!(rows.len(), 3137);
     assert!(rows.iter().all(|r| r.len() == 6));
     for workflow in &report.workflows {
         let row = format!(
-            "| {} | blocked-by | {} | {} | {} |",
-            workflow.id, workflow.passed, workflow.failed, workflow.blocked
+            "| {} | {} | {} | {} | {} |",
+            workflow.id,
+            if workflow.failed > 0 {
+                "fail"
+            } else {
+                "blocked-by"
+            },
+            workflow.passed,
+            workflow.failed,
+            workflow.blocked
         );
         assert!(
             pm_acceptance::catalog::WORKFLOWS.contains(&row),
@@ -253,17 +251,20 @@ fn errors_and_panics_fail_instead_of_becoming_blockers() {
 fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     use std::process::Command;
     let bin = env!("CARGO_BIN_EXE_pm-acceptance");
-    let output = Command::new(bin).args(["--case", "A517"]).output().unwrap();
+    let output = Command::new(bin)
+        .args(["--reference", "v1.2.0", "--case", "A517"])
+        .output()
+        .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["cases"][0]["id"], "A517");
     let blocked = Command::new(bin)
-        .args(["--case", "K001.normal", "--strict"])
+        .args(["--reference", "v1.2.0", "--case", "K001.normal", "--strict"])
         .output()
         .unwrap();
     assert_eq!(blocked.status.code(), Some(2));
     let bad = Command::new(bin)
-        .args(["--case", "unknown"])
+        .args(["--reference", "v1.2.0", "--case", "unknown"])
         .output()
         .unwrap();
     assert_eq!(bad.status.code(), Some(3));
@@ -278,6 +279,8 @@ fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     }
     let unavailable = Command::new(bin)
         .args([
+            "--reference",
+            "v1.2.0",
             "--case",
             "W037.v8-reload",
             "--runtime-runner",
@@ -290,7 +293,7 @@ fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
     assert_eq!(json["cases"][0]["status"], "fail");
     assert!(json["cases"][0]["blocked_by"].is_null());
     let catalog = Command::new(bin)
-        .args(["--format", "catalog"])
+        .args(["--reference", "v1.2.0", "--format", "catalog"])
         .output()
         .unwrap();
     assert!(catalog.status.success());
@@ -306,7 +309,13 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
     std::fs::write(&path, pm_acceptance::fixture::CORPUS[0].1).unwrap();
     let bin = env!("CARGO_BIN_EXE_pm-acceptance");
     let r = Command::new(bin)
-        .args(["--case", "W007.corpus-0000", "--corpus"])
+        .args([
+            "--reference",
+            "v1.2.0",
+            "--case",
+            "W007.corpus-0000",
+            "--corpus",
+        ])
         .arg(&scratch.0)
         .output()
         .unwrap();
@@ -317,7 +326,13 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
     );
     std::fs::write(&path, b"invalid synthetic input").unwrap();
     let r = Command::new(bin)
-        .args(["--case", "W007.corpus-0000", "--corpus"])
+        .args([
+            "--reference",
+            "v1.2.0",
+            "--case",
+            "W007.corpus-0000",
+            "--corpus",
+        ])
         .arg(&scratch.0)
         .output()
         .unwrap();
@@ -328,4 +343,97 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
             .contains(scratch.0.to_str().unwrap())
     );
     assert_eq!(std::fs::read(path).unwrap(), b"invalid synthetic input");
+}
+
+#[test]
+fn backing_groups_partition_every_blocker_without_hiding_failures() {
+    let catalog = Catalog::embedded().unwrap();
+    let report = run(&catalog, &Filter::default(), &[]).unwrap();
+    let blocked = report
+        .cases
+        .iter()
+        .filter(|c| c.status == Status::BlockedBy)
+        .map(|c| c.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let grouped = report
+        .blocker_groups
+        .iter()
+        .flat_map(|g| &g.case_ids)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(grouped.len(), blocked.len());
+    assert_eq!(
+        grouped
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        blocked
+    );
+    for w in &catalog.workflows {
+        let case = report
+            .cases
+            .iter()
+            .find(|c| c.id == format!("{}.contract", w.id))
+            .unwrap();
+        assert_eq!(case.status, Status::BlockedBy);
+        assert!(case.reason.contains("**Expected:**"), "{}", w.id);
+        assert!(
+            !["shell-integration", "media-service", "compat-runtime"]
+                .contains(&case.blocked_by.as_deref().unwrap())
+        );
+    }
+    let curve = report
+        .cases
+        .iter()
+        .find(|c| c.id == "W061.frozen-set-easing")
+        .unwrap();
+    assert_eq!(curve.status, Status::Pass);
+}
+
+#[test]
+fn post_tag_memory_claim_is_reconciled_without_erasing_its_original_ids() {
+    let report = run(
+        &Catalog::embedded().unwrap(),
+        &Filter {
+            workflow: Some("W030".into()),
+            case: None,
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        67
+    );
+    assert_eq!(pm_mcp::catalog::tools().len(), 68);
+    assert!(pm_mcp::catalog::spec("project_memory").is_some());
+    assert!(
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != "project_memory")
+    );
+    assert!(
+        !pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_project_state")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("memory")
+    );
+    for id in ["A511", "A512"] {
+        let case = report.cases.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(case.status, Status::BlockedBy);
+        assert_eq!(
+            case.blocked_by.as_deref(),
+            Some("memory-post-tag-requirement")
+        );
+        assert!(case.reason.contains("W1 misattributes"));
+    }
 }

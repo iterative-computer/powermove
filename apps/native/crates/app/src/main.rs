@@ -1,6 +1,10 @@
+mod builtins;
+#[cfg(test)]
+mod builtins_tests;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
+mod export_coordinator;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
@@ -17,6 +21,9 @@ mod rows;
 mod session;
 mod smoke;
 mod surfaces;
+mod v4_control;
+mod v4_native;
+mod v4_view;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

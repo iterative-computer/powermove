@@ -1,7 +1,11 @@
 //! Bounded process workers. The UI only enqueues actions and polls events.
 //! Pipe writes have their own worker so a runtime which stops reading stdin
 //! cannot prevent cancellation, timeouts, or process-group termination.
-use crate::{Effects, Event, claude, codex, codex_exec, protocol::Lines};
+use crate::{
+    Effects, Event, claude, codex, codex_exec,
+    delivery::{self, Delivery, Surface},
+    protocol::Lines,
+};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -47,6 +51,13 @@ pub enum Machine {
     },
 }
 impl Machine {
+    fn surface(&self) -> Surface {
+        match self {
+            Self::Codex(_) => Surface::Codex,
+            Self::Claude(_) => Surface::Claude,
+            Self::CodexExec { .. } => Surface::CodexExec,
+        }
+    }
     fn receive(&mut self, v: Value, now: u64) -> Effects {
         match self {
             Self::Codex(c) => c.receive(v, now),
@@ -172,6 +183,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
             }
         });
+        let surface = machine.surface();
         let start = Instant::now();
         let now = || start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut lines = Lines::new(1024 * 1024);
@@ -185,7 +197,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         if let Machine::Codex(c) = &mut machine {
             initial.append(c.start(0));
         }
-        let mut stop = apply(initial, &wtx, &etx, &mut closing).is_err();
+        let mut stop = apply(surface, initial, &wtx, &etx, &mut closing).is_err();
         while !stop {
             for _ in 0..128 {
                 let action = match rx.try_recv() {
@@ -201,7 +213,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                     break;
                 }
                 let e = machine.action(action, now());
-                if let Err(err) = apply(e, &wtx, &etx, &mut closing) {
+                if let Err(err) = apply(surface, e, &wtx, &etx, &mut closing) {
                     reason = err.to_string();
                     stop = true;
                     break;
@@ -220,7 +232,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                                 ..Effects::default()
                             },
                         };
-                        if let Err(err) = apply(e, &wtx, &etx, &mut closing) {
+                        if let Err(err) = apply(surface, e, &wtx, &etx, &mut closing) {
                             reason = err.to_string();
                             stop = true;
                             break;
@@ -234,7 +246,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
                 Ok(Input::Eof) => {
                     for v in lines.finish().into_iter().flatten() {
-                        let _ = apply(machine.receive(v, now()), &wtx, &etx, &mut closing);
+                        let _ = apply(surface, machine.receive(v, now()), &wtx, &etx, &mut closing);
                     }
                     eof = true;
                     stop = true;
@@ -242,7 +254,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 Err(mpsc::RecvTimeoutError::Disconnected) => stop = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            if let Err(err) = apply(machine.tick(now()), &wtx, &etx, &mut closing) {
+            if let Err(err) = apply(surface, machine.tick(now()), &wtx, &etx, &mut closing) {
                 reason = err.to_string();
                 stop = true;
             }
@@ -324,32 +336,38 @@ fn reader(mut r: impl Read + Send + 'static, tx: SyncSender<Input>, stderr: bool
     });
 }
 fn apply(
+    surface: Surface,
     e: Effects,
     tx: &SyncSender<Option<Vec<u8>>>,
     events: &SyncSender<Event>,
     closing: &mut Option<Instant>,
 ) -> io::Result<()> {
-    for v in e.outgoing {
-        let mut bytes = serde_json::to_vec(&v)?;
-        if bytes.len() > 32 * 1024 * 1024 {
-            return Err(crate::error("Agent request exceeds 32 MiB"));
+    for delivery in delivery::ordered(surface, e) {
+        match delivery {
+            Delivery::Wire(v) => {
+                let mut bytes = serde_json::to_vec(&v)?;
+                if bytes.len() > 32 * 1024 * 1024 {
+                    return Err(crate::error("Agent request exceeds 32 MiB"));
+                }
+                bytes.push(b'\n');
+                tx.try_send(Some(bytes))
+                    .map_err(|_| crate::error("Agent runtime is not draining its input"))?;
+            }
+            Delivery::Callback(event) | Delivery::Inspection(event) => {
+                events
+                    .try_send(event)
+                    .map_err(|_| crate::error("Agent event subscriber is not draining events"))?;
+            }
+            Delivery::CloseStdin => {
+                tx.try_send(None)
+                    .map_err(|_| crate::error("Agent runtime is not draining its input"))?;
+                *closing = Some(Instant::now() + Duration::from_secs(2));
+            }
         }
-        bytes.push(b'\n');
-        tx.try_send(Some(bytes))
-            .map_err(|_| crate::error("Agent runtime is not draining its input"))?;
-    }
-    if e.close_stdin {
-        tx.try_send(None)
-            .map_err(|_| crate::error("Agent runtime is not draining its input"))?;
-        *closing = Some(Instant::now() + Duration::from_secs(2));
-    }
-    for event in e.events {
-        events
-            .try_send(event)
-            .map_err(|_| crate::error("Agent event subscriber is not draining events"))?;
     }
     Ok(())
 }
+
 fn terminate(child: &mut Child) {
     #[cfg(unix)]
     unsafe {

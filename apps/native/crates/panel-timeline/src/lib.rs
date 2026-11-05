@@ -1,11 +1,13 @@
-//! Headless timeline model. No rendering, layout, platform dependencies or JS.
+//! Headless timeline model and native paint plans. No platform dependencies or JS.
 //! Document writes are requests to the kernel; see docs/native/panels/timeline.md.
 #![forbid(unsafe_code)]
 
 mod behaviour;
 mod client;
+pub mod graph_render;
 mod interaction;
 mod marquee;
+pub mod render;
 mod reveal;
 mod session;
 pub mod snap;

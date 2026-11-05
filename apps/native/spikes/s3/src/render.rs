@@ -16,6 +16,12 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+pub struct Presentation<'a> {
+    pub layer: Option<&'a metal::MetalLayer>,
+    pub rect: [f32; 4],
+    pub overlay: u32,
+}
+
 pub struct Scene {
     pub doc: pm_model::Document,
     pub comp: String,
@@ -162,14 +168,12 @@ impl Engine {
         scene: &Scene,
         time: Ticks,
         output: Output,
-        layer: Option<&metal::MetalLayer>,
-        rect: [f32; 4],
-        overlay: u32,
+        presentation: Presentation<'_>,
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
         objc2::rc::autoreleasepool(|_| {
-            self.encode_inner(scene, time, output, layer, rect, overlay, capture, trace)
+            self.encode_inner(scene, time, output, presentation, capture, trace)
         })
     }
     fn encode_inner(
@@ -177,12 +181,15 @@ impl Engine {
         scene: &Scene,
         time: Ticks,
         output: Output,
-        layer: Option<&metal::MetalLayer>,
-        rect: [f32; 4],
-        overlay: u32,
+        presentation: Presentation<'_>,
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        let Presentation {
+            layer,
+            rect,
+            overlay,
+        } = presentation;
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let key = crate::policy::CacheKey {
             revision: scene.doc.revision(),
@@ -258,7 +265,7 @@ impl Engine {
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();
             metal::TextureRef::from_ptr(
-                (&*hal.raw_handle() as *const _ as *mut metal::MTLTexture).cast(),
+                (hal.raw_handle() as *const _ as *mut metal::MTLTexture).cast(),
             )
             .to_owned()
         };
@@ -336,7 +343,7 @@ impl Engine {
         color.set_load_action(metal::MTLLoadAction::Clear);
         color.set_store_action(metal::MTLStoreAction::Store);
         let command = self.queue.new_command_buffer().to_owned();
-        let pass = command.new_render_command_encoder(&desc);
+        let pass = command.new_render_command_encoder(desc);
         pass.set_render_pipeline_state(&self.pipeline);
         pass.set_fragment_texture(0, Some(&source));
         #[repr(C)]

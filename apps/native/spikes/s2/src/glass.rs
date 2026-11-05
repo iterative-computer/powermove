@@ -9,8 +9,8 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSAppearanceCustomization, NSBox, NSBoxType};
 use objc2_app_kit::{
-    NSBezelStyle, NSButton, NSColor, NSControl, NSGlassEffectView, NSGlassEffectViewStyle, NSImage,
-    NSSegmentSwitchTracking, NSSegmentedControl, NSStackView, NSToolbar, NSToolbarDelegate,
+    NSBezelStyle, NSButton, NSColor, NSControl, NSImage, NSSegmentSwitchTracking,
+    NSSegmentedControl, NSStackView, NSToolbar, NSToolbarDelegate,
     NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem, NSToolbarItemIdentifier,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowOrderingMode, NSWindowToolbarStyle,
 };
@@ -359,8 +359,6 @@ pub fn toolbar_inset() -> f64 {
 /// Floating HUD contents, built once per region.
 #[derive(Clone, Copy)]
 pub enum Contents {
-    /// GPUI draws on top.
-    None,
     /// Native buttons: (SF Symbol, label, action).
     Buttons(&'static [(&'static str, &'static str, Action)]),
 }
@@ -385,11 +383,10 @@ pub fn place(id: &'static str, rect: Rect, radius: f64, layer: Layer, contents: 
             view.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
             view.setAccessibilityLabel(Some(&NSString::from_str("Transport")));
             view.setAccessibilityIdentifier(Some(&NSString::from_str("s2-transport")));
-            if let Contents::Buttons(buttons) = contents {
-                let row = button_row(mtm, &target, buttons);
-                row.setFrame(view.bounds());
-                crate::native::material_contents(&view).addSubview(&row);
-            }
+            let Contents::Buttons(buttons) = contents;
+            let row = button_row(mtm, &target, buttons);
+            row.setFrame(view.bounds());
+            crate::native::material_contents(&view).addSubview(&row);
             let order = if layer == Layer::Behind {
                 NSWindowOrderingMode::Below
             } else {
@@ -454,7 +451,7 @@ fn button_row(
                 if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some() {
                     NSBezelStyle::Glass
                 } else {
-                    NSBezelStyle::Rounded
+                    NSBezelStyle::Push
                 },
             );
             b.setTag(tag_of(*action));

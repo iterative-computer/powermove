@@ -1,0 +1,564 @@
+[
+  {
+    "id": "P01",
+    "priority": " P01 HIGH",
+    "commits": "`b7b302d1e`, `6a457a304`, `88b701c97`, `bf26d9b3e`",
+    "expected": "Bottom timeline dock; migrate project-saved workspaces on restore; rerun migration as version 4, later prototype/default-workspace migration 5 and timeline chrome schema 6. Saved groups/active tabs, Default/Animation names, Effects workspace and stock-only migrations preserve customized values. `legacy/core/workspace.ts`, `layout/model.ts`. Bottom docking is a tag carry; later schema/default changes survive.",
+    "coverage_before_reference_change": "Partial \u2014 K preserves workspace JSON; S/B models/specs cover layout. Complete historical migrations and user customizations need fixtures and Mac review. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P02",
+    "priority": " P02 HIGH",
+    "commits": "`32ffd5432`",
+    "expected": "Adds `Comp.memory[]` and `memoryEnabled`; goal/constraint/decision/rejected/feedback/open entries with identity, author, reason, timestamps/resolution. One goal, bounded history, disabled state retains notes, autosave without edit-revision/Undo bump. Settings Memory page. `core/{memory.ts,types/project.ts}`, `settings/SettingsScreen.svelte`. True tag delta.",
+    "coverage_before_reference_change": "Gap \u2014 K can preserve unknown JSON, but that does not implement memory indexing, mutation or Settings. A/M/S own behavior; frozen MCP lacks the tool. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P03",
+    "priority": " P03 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Ordinary disk imports become verified source links; normal Save/Save As retain links, while portable Project export embeds available media. Pasted/generated/converted bytes stay owned; missing links remain editable and cannot block unrelated saves. `main/library-media.ts`, `host/library-media.ts`, `legacy/core/{media,project-file}.ts`, `shared/library-media.ts`; compare `apps/desktop/docs/project-files.md` directly with tag.",
+    "coverage_before_reference_change": "Partial \u2014 K PMV4 and E/P source/proxy provenance exist. Native source resolution, durable import/replacement/Undo, save/export closure and rollback must prove both linked and embedded cases. HIGH even though PMV magic is unchanged. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P04",
+    "priority": " P04 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Disk gzip envelope `__powermoveDiskValue:1`, `encoding:gzip`, declared bytes and base64 data for project/history/session/journal/takes; decode bounds, lazy recompression and atomic queue. `main/{storage-codec,storage}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K persistence/library and P first-launch decode/preserve gzip; real profiles, interrupted recovery and reverse handoff still need acceptance. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P05",
+    "priority": " P05 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "One-time `storage-upgrade-v1.json` stages recovery/browser/source/cleanup, origin-specific browser progress, checksum-before-retirement, lease across windows, interruption retry, task progress and persisted completion acknowledgment. `main/storage-upgrade.ts`, `host/storage-upgrade.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 P snapshot/checkpoint/verified-object primitives exist; Electron's exact upgrade receipt/state machine and task UI are not the native migration. Preserve old browser/conflicting bytes; never adopt deletion merely to imitate main (N4). ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P06",
+    "priority": " P06 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Storage Settings reports categories/reclaimable bytes, automatic cleanup and backup budgets; retention/dedup rules change. Successful saves stop retaining five full backup generations; publication rollback copy is temporary, uncertain recovery survives. `main/{storage-management,backup-retention,project-files}.ts`, `settings/StorageSettings.svelte`.",
+    "coverage_before_reference_change": "Disposition + Partial \u2014 P services deliberately archive all generations (N4/N2); do not port deletion. Storage/task surface and recovery-version selection remain incomplete. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P07",
+    "priority": " P07 HIGH",
+    "commits": "`bf26d9b3e`, `70ffd6494`",
+    "expected": "Background autosave queue tracks per-project revisions, pending/failure/retry, unnamed recovery and named files; version listing/open-as-copy includes recovery/file/macOS sources. Export later waits for background save. `legacy/core/autosave-queue.ts`, `main/{project-files,native-versions}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K journals/session/dirty/hash guards and P immutable backups exist. Queue/version UI, native NSFileVersion and export-save arbitration require app/Mac checks; preserve recovery on conflicts. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P08",
+    "priority": " P08 HIGH (carry)",
+    "commits": "`16087057b`, `921687251`, `6cfdc59ae`, `87cdf3ea4`, `136f546d3`",
+    "expected": "Bounded large-document/media save/open, range-based PMV4 document, reliable whole-file hashing, transient macOS read recovery, async parsing/validation and lazy heavy store values. These are mostly baseline recovery/performance work; PMV4/PMV3/JSON support itself is already in the tag. `main/{project-files,project-document-validator,project-file-hash,storage}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K has readers/checksums/streaming writer/history and P old-profile import. Validate large/low-space/concurrent saves and actual Mac filesystem behavior; never claim a new PMV5 format. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P09",
+    "priority": " P09 HIGH (carry)",
+    "commits": "`f868f7901`",
+    "expected": "Composition-relative history dictionaries intern repeated layer/edit records while retaining forward/backward patches, Undo/Redo cursor and pending redo. Tag and main versions of `shared/history-memory.ts` are identical.",
+    "coverage_before_reference_change": "Partial \u2014 K history imports/unpacks dictionaries and exports logical history; P retains history-only media. Full real-history/rollback closure remains open. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P10",
+    "priority": " P10 HIGH",
+    "commits": "`d8d887e0e`",
+    "expected": "Reopens join unchanged in-flight video conversion; each caller gets its own output, final consumer/crash cancels. If original moved/changed, provided owned bytes are stored rather than rejecting project open. Superseded recovery checkpoint is not reported as a failed save. `main/{media-proxy,library-media}.ts`, `legacy/core/projects.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E/P queues, source identity and proxy provenance exist. Native consumer-sharing and open/save binding need proof with original offline; proxy must never become an original. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P11",
+    "priority": " P11 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Close/Quit waits for imports, recovery and staged publication; failed flush keeps edits open, multiwindow cancellation preserves earlier approved work. Last-window close quits; failed/late preparation is retryable. `main/editor-close.ts`, `legacy/core/close-preparation.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K close/session and S/P lifecycle models exist; cross-window real app and signed termination checks remain. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P12",
+    "priority": " P12 HIGH (carry + UI)",
+    "commits": "`bf26d9b3e`",
+    "expected": "Home drops open media/projects without modifying previous document; nested local/cloud folder import, download/import task state; unsupported Figma paste offers informed cancel/fallback. Underlying Figma/import/easing algorithms already exist at tag; later presentation changes are mixed. `legacy/core/figma/`, `legacy/core/{folder-import,import-progress}.ts`, `library/LibraryScreen.svelte`.",
+    "coverage_before_reference_change": "Partial \u2014 K import metadata, E/P admission/queue and S library models exist. Real clipboard/Finder/cloud/Figma byte paths and task UI remain; never hydrate unavailable sources automatically. ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "P13",
+    "priority": " P13 HIGH",
+    "commits": "`929102722`",
+    "expected": "Removes saved export format `web` from `core/export-defaults.ts` and desktop web/React/player/agent-handoff output; website preview/copy now advertises Video/Images/Project and website player remains. `legacy/core/exporter.ts`, `player/`, `apps/www/src/lib/{AppPreview,Features}.svelte`. Existing project export preferences must remain recoverable even though the action is retired.",
+    "coverage_before_reference_change": "Disposition + Partial \u2014 recorded owner removal in P0/W1. K/P preserve original records/unknown fields, S/E remove only retired delivery, W retains player consumers; no source/project deletion (N4/prune). ",
+    "owner": "delta-data",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E01",
+    "priority": " E01 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Saved `Effect.version` (absent means 1), historical full `legacy` definitions, `effects.get(id, version)`, missing-version diagnostics and capability detection. Prevents updated built-ins from reinterpreting old artwork. `kernel/{api,effect-versions}.ts`, `core/types/project.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K `commands/effects.rs` carries definition revision and inputs; X frozen registry/backend and E renderer must prove exact revision resolution, legacy pixels and missing-provider behavior. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E02",
+    "priority": " E02 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Static `Effect.inputs`: layer/stage (`source`, `masks`, `effects`), source/composition space; typed path/mask and image/LUT asset refs, four-input scheduling, stable remap on copy/delete/Undo, cycle/error diagnostics. `core/effect-inputs.ts`, `kernel/{api,install}.ts`, `legacy/gl/effect-path.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K typed input edits preserve refs; E graph/resources and X feature flags need complete producer/consumer gates. Unknown-data retention alone cannot render references. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E03",
+    "priority": " E03 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Layer `effectSpace`, owner/source rasters before transforms/opacity, off-composition bounds, source geometry/padding, exact subframe video/precomp input sampling and owner validity uniforms. `legacy/gl/{compositor,raster,effect-path}.ts`, `core/render-samples.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K `commands/layers.rs` accepts effect space; E source/evaluator/compositing foundations exist. Historical source-space fixtures, hidden sources, singular transforms, shutter phases and lease failures remain unqualified. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E04",
+    "priority": " E04 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Spatial sampling/mip contracts, bounded cell grids, layer-space radii and viewport padding; source-dimension defaults, parameter disclosures and undoable color-swap actions. Adds `supportsVersions`, `supportsLayerInputs`, `supportsInputSubframes`, `supportsSpatialSampling`, `supportsSourceRasters`, `supportsSourceOwners`, `supportsTypedReferences`, `supportsBrushGeometry`, `supportsLutAssets`, `supportsOwnerValidity`, `supportsTemporalInputs`. `kernel/api.ts`; `extensions/effects-basic/index.ts` refuses activation unless every required flag and `parameterDefault` are present.",
+    "coverage_before_reference_change": "Partial \u2014 E GLSL/native resources, K effect commands and B/X controls are pieces. No complete flag-by-flag native conformance identified; report only a demonstrated capability (N3/N6). ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E05",
+    "priority": " E05 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "New/revised color families: Tint + Swap Colors, Channel Mixer, Invert/Levels revisions, Levels (Individual Controls), Threshold, Shift Channels, Exposure, Tritone, Color Balance (HLS), Brightness & Contrast, Black & White. Straight/premultiplied alpha, signed HDR and channel persistence matter. `extensions/effects-basic/{color-correction,core-image,tonal}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E color/GLSL/effects and B controls exist; X must load correct definitions and E verify each historical/current revision at working depth. Old Invert/Levels already existed at tag. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E06",
+    "priority": " E06 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Gaussian Blur and Mosaic revisions, Unsharp Mask, Find Edges; wide kernels and layer-local cells preserve edges/HDR at cropped zoom. `extensions/effects-basic/spatial.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E spatial/GLSL support; complete per-revision source/preview/export pixel qualification remains. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E07",
+    "priority": " E07 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Revised Drop Shadow and Gradient Ramp: layer-coordinate softness/offset, Shadow Only, source-sized ramp/reset points and historical versions. `extensions/effects-basic/shadow-ramp.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E native shader path and K channels preserve authored values. Corpus still has historical generated shader failures; no completed full-project proof. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E08",
+    "priority": " E08 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Set Matte, Displacement Map, Compound Blur, Texturize, Set Channels, Blend, Calculations and Channel Combiner, including later displacement/combiner revisions. Reference stages/spaces, hidden sources, channel/alpha math and four-source scheduling. `extensions/effects-basic/{layer-effects,compound-blur,texturize,set-channels,layer-compositing}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K inputs and E graph/render primitives; no complete consumer-family native acceptance identified. Missing inputs/cycles must remain failures/diagnostics. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E09",
+    "priority": " E09 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Stroke typed animated path/mask geometry, brush hardness/spacing/trims/sequential masks; Apply Color LUT loads durable `.cube` assets with 1D/3D domain interpolation. `extensions/effects-basic/{stroke,apply-color-lut}.ts`, `core/cube-lut.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E/P LUT/pro-media jobs and K references exist. UI, exact Stroke behavior and durable LUT media/Undo/export closure still require integration. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E10",
+    "priority": " E10 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Color Profile Converter (explicit D65/transfer/clipping) and signed HDR Compander; Channel Combiner's multichannel conversion revision. `extensions/effects-basic/{color-transforms,layer-compositing}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E color management is stronger than SDR-only output but needs each saved definition/version and decoded output comparison. Do not blindly copy browser clipping (N3). ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E11",
+    "priority": " E11 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "Echo bounded owner-prefix temporal samples, seven operators, historical masks/references, multiple echo convolution and reverse-seek determinism. `extensions/effects-basic/echo.ts`, `kernel/api.ts`, `legacy/gl/compositor.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E time/graph/worker machinery exists; full exact prefix/seek/hidden-source/cancellation/memory native acceptance remains. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E12",
+    "priority": " E12 HIGH",
+    "commits": "`bf26d9b3e`",
+    "expected": "`continuousRaster` is formalized in saved layer/type/command fields; precomp raster at displayed size, sharper scaling; Release Pre-comp/layer switches exposed in AE-style UI. `core/types/{project,commands}.ts`, `legacy/core/compositions.ts`. Continuous-raster rendering tests already exist at tag; this is a mixed API/UI delta.",
+    "coverage_before_reference_change": "Partial \u2014 K layer patch and E precomp rendering exist. B UI plus picture/rig-preserving release/Undo and real output need acceptance. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E13",
+    "priority": " E13 HIGH",
+    "commits": "`cc6adc885`",
+    "expected": "HDR/log import interpretation: MP4 nclc/video tags, PQ/HLG tone-map to tagged SDR preview, BT.2020 log code values retained for grading; GPU helper with FFmpeg fallback, opaque-vs-alpha routing. `shared/video-color.ts`, `legacy/core/video-preview.ts`, `main/media-proxy.ts`, `packages/macos-haptics/src/hdr-proxy.m`.",
+    "coverage_before_reference_change": "Partial \u2014 E native color/source metadata/proxy path exists. Native spec and authored color intent govern (N3); verify tagged originals, grading, EDR/SDR/export and fallback on Mac. Main's SDR proxy is not a universal native HDR requirement. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E14",
+    "priority": " E14 HIGH",
+    "commits": "`cdab66cb4`",
+    "expected": "Sequential MP4 sample decode with B-frame/edit-list timing, fallback when WebCodecs cannot reproduce media; bounded encoder/IPC queue, VideoToolbox capability probe/fallback and matching color tags. `shared/mp4-{boxes,samples}.ts`, `legacy/core/export-video-decoder.ts`, `main/render-encoder.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E native decode/export workers supply an alternative implementation; exact frames/timestamps/color and cancellation/backpressure need same-source output comparison. No WebCodecs/Chromium port (N8). ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E15",
+    "priority": " E15",
+    "commits": "`cdab66cb4`",
+    "expected": "Long `export_video` adds optional `jobId` to its input schema and returns `{status:\"running\", jobId, progress}` after about 20 minutes; a call with only that ID resumes waiting, a second export is refused, completed/error results are consumed. Success adds stage timings and errors identify decode/render/encode/audio/finalization stage. `main/agent-tools/{bridge,spec}.ts`, `legacy/assistant/mcp-project-tools.ts`, `legacy/core/export-stats.ts`. Tool name is unchanged; schema/body/result behavior changes.",
+    "coverage_before_reference_change": "Partial \u2014 M export host adapter exists; resumable job state/wait/cancel/client-disconnect behavior is not proven by schema identity. A/E/M own coordinator. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E16",
+    "priority": " E16 (carry + extensions)",
+    "commits": "`16087057b`, `921687251`, `bf26d9b3e`",
+    "expected": "Source warmup, static preview/export reuse; opaque/alpha PNG/ProRes/WebM routes, async readback guarded against changed quality/provider/revision, GPU loss and stale ACKs. Asynchronous GPU readback is distinct from the public render API. `legacy/core/exporter.ts`, `legacy/gl/compositor.ts`. Much of the optimization already exists at tag. Neither tagged nor audited-main `kernel/api.ts` declares `renderFrameToAsync`, `snapshotAsync` or `rasterAsync`; P0 separately adopts them as a native superset, not evidence that this main range delivered them.",
+    "coverage_before_reference_change": "Partial \u2014 X `js/compat/src/extensions.ts` provides async wrappers, E export workers/alpha conversion exist. Complete native recorder/resource/pixel behavior and output parity remain open. Sync contract stays intact (N6). ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E17",
+    "priority": " E17",
+    "commits": "`70ffd6494`",
+    "expected": "Disk-backed original/preview URLs replace whole-file blob copies; ranged media server and per-file-state link validation; idle decoder/GPU eviction with fast-scrub cap, two preview installs at a time, macOS pressure into caches. `host/streamed-media.ts`, `legacy/core/video-residency.ts`, `main/{library-media,memory-pressure}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 E source/cache/decoder jobs and P media objects support this architecture. App pressure/eviction/seek/hidden-source recovery and measured memory/playback still need Mac/full-project proof. Main's reported memory reduction is not native evidence. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "E18",
+    "priority": " E18",
+    "commits": "`70ffd6494`, `c7f46a056`",
+    "expected": "Stop hidden panels/mixer/status/layout/style churn in playback; return invalidated preview framebuffers to pool so warmed numeric scrubs allocate no target each step. `layout/{PanelPool,Dock}.svelte`, `mixer/meter-loop.ts`, `legacy/gl/compositor.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 B/E bounded paints/pools and engine service exist. Actual pacing, CPU, allocations and edit-to-glass gates remain open; do not translate CSS workarounds into native requirements. ",
+    "owner": "delta-fx",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U01",
+    "priority": " U01 HIGH",
+    "commits": "`989024400`, `b7b302d1e`, `bf26d9b3e`, `4f5cf623d`",
+    "expected": "Early Blender-style corner split/join/dock/replace (tag carry) evolves to AE tab stacks and above/below drop zones; tab drag moves one panel, header moves stack, backtick maximizes pointer panel. Persist groups/active tab; column sizing/scroll and titlebar fullscreen tools change. `layout/{area,drag,dock-zones,model,maximize}.ts`, `keymap-default/keymap.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 S workspace/docking/keymap and B trees exist. No accepted full gesture/maximize/restore/IME/AX Mac proof; D specs win over main layout. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U02",
+    "priority": " U02",
+    "commits": "`1861cf88c`",
+    "expected": "Visual point controls use authored independent X/Y increments or range-derived defaults, anchored quantization; missing parameters don't create rows; generated panel grouping honors actual controls. `controls/PointField.svelte`, `inspector/parameter-layout.ts`, `panels/GeneratedPanel.svelte`, `legacy/assistant/spatial.ts`. Core point behavior is largely a tag carry.",
+    "coverage_before_reference_change": "Partial \u2014 B numeric/point binding models exist. Exact authored increment semantics and generated panel grouping need X/B comparisons. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U03",
+    "priority": " U03 HIGH (carry)",
+    "commits": "`ce36c67d8`, `aff932bc2`",
+    "expected": "Existing paste chord accepts clipboard image and Finder media, dispatches durable import/placement, text focus retains native paste; local layer/key/effect copy supersedes old system media. `main/media-paste.ts`, `legacy/core/media-paste.ts`, `legacy/ui/shortcuts.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 S clipboard/OS inventory and E/P import primitives; real pasteboard ownership/ordering/cancel/focus/media Undo remain Mac gaps. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U04",
+    "priority": " U04 HIGH (carry + UI)",
+    "commits": "`9148c961b`, `ff5181601`, `bf26d9b3e`, `4f5cf623d`",
+    "expected": "Track parent pickwhip and live property values/drags; AE Layers column headings, switches (3D/raster/audio), Link Layers, section/property rows, resizable list, timecode/empty comp, composition path and grouped Project/Effect Controls. `extensions/timeline/{track-view,timeline,comp-tabs,property-sections}.ts`. Parent links are transform parenting, not linked A/V.",
+    "coverage_before_reference_change": "Partial \u2014 K transforms/parent edits, B timeline/Inspector models and E evaluator. Real pointer/keyboard/graph actions and rendered state remain incomplete. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U05",
+    "priority": " U05 HIGH (carry + UI)",
+    "commits": "`6e0fefabe`, `b8fcb70ae`, `e8f95f1eb`",
+    "expected": "Negative-time layers/keys and graph/cache improvements; numeric key time extends beyond strip with neighbor collision guard; opened groups reveal descendants' keyframes in layers mode. `extensions/timeline/timeline.ts`, `legacy/core/anim.ts`. Negative-time support already exists at tag; group disclosure is a surviving UI delta.",
+    "coverage_before_reference_change": "Partial \u2014 K keyframe/time/lock commands and B timeline graph/reveal models; exact numeric validation, disclosure and native gestures require acceptance. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U06",
+    "priority": " U06",
+    "commits": "`c0e47ac20`",
+    "expected": "Selected keyframes become visually distinguishable in timeline and graph. `extensions/timeline/timeline.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 B selection models and D timeline spec exist; Mac/Opus visual acceptance remains. No new palette chosen here. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U07",
+    "priority": " U07 HIGH",
+    "commits": "`8eb092ee8`",
+    "expected": "Per-axis diamonds key only that axis; group diamond keys all. Timeline/Effect Controls diamonds replace stopwatches. New undoable `separateDimensions` defaults true, false joins Position keys by time while retaining per-axis values. Panel-library titlebar button returns. `inspector/ChannelRow.svelte`, `timeline/timeline.ts`, `core/types/project.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K layer patch supports `separateDimensions`; B channel/timeline actions and grouped-time semantics need full presenter and Undo/save/reopen proof. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U08",
+    "priority": " U08",
+    "commits": "`ff5181601`, `07a270030`, `bf26d9b3e`, `0e1af9e60`",
+    "expected": "Add Effect moves from section content to Layer Effects header, later explicit Add Effect in Effect Controls and + in Properties. Pointer and Enter creation remain; Inspector row well/group/disclosure and full-column fit update. `extensions/inspector/{index.ts,EffectsPanel.svelte,EffectsSection.svelte}`, `kernel/api.ts` (`fitContent`, menu contributions).",
+    "coverage_before_reference_change": "Partial \u2014 B Inspector/Effect Controls adapters exist; actual buttons/menu dispatch/keyboard/selection effects need Mac/Opus acceptance. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U09",
+    "priority": " U09",
+    "commits": "`81ed886fa`",
+    "expected": "Central tooltip delay/neighbor transition, parsed hint/shortcut, edge-aware placement, hide on input/scroll/leave, keyboard focus, accessible description and dynamic title tracking. Iframe titles retained. `controls/tooltips.ts`, `css/app.css`.",
+    "coverage_before_reference_change": "Partial \u2014 S/B UI-kit tooltip and AX primitives; final focus/placement/timing/remote-DOM behavior needs Mac review. Browser title suppression itself is not a native requirement. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U10",
+    "priority": " U10",
+    "commits": "`06d25cf64`, `8439c2ed1`",
+    "expected": "App-drawn cascading menus/selects/button popovers with type-select and press-drag-release; then text fields return to AppKit Writing Tools/Services/Look Up/spelling. Later commit restores shortcuts, dims unavailable actions and avoids repeated icons, superseding initial hide/shortcut policy. Context menus distinguish graph/ruler/lanes/keyframes/layers/canvas/media/easing/tabs/text animators; shared New order, effect category submenus. Menu bar Show All/Delete/Help; remove duplicate New Window. `overlays/{Menu.svelte,menu-rules.ts}`, `main/{menu,context-menu,text-context-menu}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 S menus/native text and B action models exist. AppKit services/shortcut precedence, nested menus and AX require Mac. D approved design overrides copied macOS measurements. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U11",
+    "priority": " U11",
+    "commits": "`ba5a8742c`, `bf26d9b3e`, `4f5cf623d`",
+    "expected": "Panel/sheet material, neutral dark chrome, title-case dialogs, aligned values; common header/row metrics, type/font/axis wells, titlebar tools/project title and in-place rename. `css/app.css`, `packages/tokens/tokens.css`, `shell/Titlebar.svelte`, Inspector/overlays.",
+    "coverage_before_reference_change": "Partial / Disposition \u2014 B/S models and D tokens/specs. Main visual choices are provisional source evidence, not instructions to alter pm-design. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U12",
+    "priority": " U12 (carry + presentation)",
+    "commits": "`bf26d9b3e`",
+    "expected": "Easing curve editor/library/preset import-export, standard/multikey/vector and motion-path tooling; Simplify only on explicit user action with its own Undo after dense edits, preserve locked/expression/unknown tracks. Most algorithms and `simplify_keyframes` already exist at tag; newer menus/controls/exports are mixed. `panels/{EasingPanel.svelte,easing/}`, `core/anim/`, `legacy/core/keyframe-simplification.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 K keyframe/temporal/handles/simplify commands and M planner exist; S/B Easing surface, presets and real evaluator proof remain incomplete. Preserve authored keys until explicit Simplify (N3/N4). ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U13",
+    "priority": " U13 HIGH (carry)",
+    "commits": "`16087057b`, `aff932bc2`",
+    "expected": "8/16/32-bit working precision/settings; embedded/nested audio gains/mute and composition output gain, Mixer strips/undoable faders/solo/meters; source-time caption cues, captions inspector/timeline/edit/export/sidecars; transcription model selection/download/cancel/cache and onboarding handoff. `core/types/project.ts`, `captions/`, `transcription/`, `mixer/`. These already exist at tag, not newly discovered main features.",
+    "coverage_before_reference_change": "Partial \u2014 K caption command declarations (their planner still returns `NotImplemented`) and audio edit primitives, E `pm-captions`/audio, B cue/Mixer models; transcription/model host, complete UI and MCP caption generation remain open. N4 preserves all cues/words/gains/model preferences. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U14",
+    "priority": " U14 HIGH",
+    "commits": "`5458b5449`",
+    "expected": "Anchor Point pointer press selects/narrows to hit layer and same drag moves its anchor; plain click only selects, including previous multiselection. `legacy/ui/shortcuts.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 B viewer/K transform gestures exist. Exact hit/selection/drag/cancel behavior needs native pointer and authored-transform test. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U15",
+    "priority": " U15 (carry)",
+    "commits": "`921687251`, `bf26d9b3e`",
+    "expected": "Loading ghost/progress, cooperative large-project open, tab-choice cancellation/join, active-project-only restoration, crash recovery; font-registry invalidation, idle 3D gizmo/status polling, video posters without seeking viewer, animated multiline text geometry. Most baseline source remains unchanged; later shell presentation/performance differences survive.",
+    "coverage_before_reference_change": "Partial \u2014 K/S lifecycle, E text/font/media/cache and B publication models; first-open/restore/crash, real fonts and full content/presentation acceptance remain. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "U16",
+    "priority": " U16",
+    "commits": "`a69ff8fe7`, `bf26d9b3e`",
+    "expected": "Orange playhead brand/icon assets, font assets, renderer/cloud/website identity. Main range includes recovered assets already in tag plus surviving website/app presentation changes. `assets/brand`, desktop icons/CSS, `apps/www`, `apps/cloud/src/page.ts`.",
+    "coverage_before_reference_change": "Disposition \u2014 D owns native identity/icons/type; W/cloud owners own other products. No new assets or visual choices in this audit. ",
+    "owner": "later UI lane",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
+  },
+  {
+    "id": "A01",
+    "priority": " A01",
+    "commits": "`25d92afc5`",
+    "expected": "Provider presets grouped local/API; model discovery before connect filters non-tool models, discovers local servers; saves keys per address; actionable errors and Ollama low-context warning. Onboarding/connection gates and select optgroups updated. `main/compatible-provider.ts`, `shared/compatible-provider.ts`, `legacy/ui/compatible-settings.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 A provider process/state and P Keychain primitives exist. These preset/discovery/address-secret/error/context behaviors and live provider/UI conformance remain gaps. Preserve saved aliases/keys. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:provider-presets-model-discovery",
+    "source_hashes": {
+      "apps/desktop/src/main/compatible-provider.ts": "db1ea62d737d14bb7270df02e17661fcff20578aa9dcdd85b34475847c15a759",
+      "apps/desktop/src/shared/compatible-provider.ts": "aa718450dfc13c9828b5578805beace6a77eaf3c42dfb77a33f4622a0b3f57ba"
+    }
+  },
+  {
+    "id": "A02",
+    "priority": " A02 HIGH",
+    "commits": "`25d92afc5`",
+    "expected": "Settings Accounts installs/removes MCP entry for Claude Code, Codex, Claude, Gemini CLI, Cursor, VS Code, Windsurf, LM Studio and OpenCode; generic Copy setup; preserve hand-written/commented config and intentional removal. `main/agent-clients.ts`, `settings/AgentClientsSettings.svelte`.",
+    "coverage_before_reference_change": "Partial \u2014 M native transport/descriptor and P external config preservation exist. Exact per-client ownership/receipts/config round-trip and installed signed executable need Mac proof. No Node launcher in app (N8). ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:agent-client-config-registration",
+    "source_hashes": {
+      "apps/desktop/src/main/agent-clients.ts": "ff694d33ce3be4e4aef44e37a9840556c0c5d9e3064b90677bc49cea61ce604f"
+    }
+  },
+  {
+    "id": "A03",
+    "priority": " A03",
+    "commits": "`4f5cf623d`",
+    "expected": "Claude Project Auto now uses Claude Code auto permission classifier. `main/claude/{adapter,runner}.ts`.",
+    "coverage_before_reference_change": "Gap \u2014 A documentation still says Claude Project asks under both modes. Must reconcile provider authority and pinned runtime support before advertising Auto. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:claude-auto-permission-classifier",
+    "source_hashes": {
+      "apps/desktop/src/main/claude/adapter.ts": "94936dbfe6790fd48d7d25cd5edffaadb1da267c12a1b3bec5fccbb35df375b3",
+      "apps/desktop/src/main/claude/runner.ts": "fe5325a3eb52627cfa3f4670edfa526bfce1e9e37097777add82efc22e7518db"
+    }
+  },
+  {
+    "id": "A04",
+    "priority": " A04",
+    "commits": "`7cb061739`",
+    "expected": "Richer streaming markdown: nested/task/ordered lists, quotes/headings/fences/links and inert unsafe HTML/URLs; local image/video/audio attachments under prose with byte-range playback and safe file grants, remote images opt-in; finished work folds separately from reply, duration timer survives steering. `panels/agent/{markdown,work-groups}.ts`, `main/agent-media.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 A conversation/events/persistence and B agent panel spec exist. New parser/local-media grants/grouping/timer semantics are not established by frozen replay; S/B/A presentation and safe playback integration remain. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:markdown-local-media-grants",
+    "source_hashes": {
+      "apps/desktop/src/renderer/src/panels/agent/markdown.ts": "2d4adf66ca163f690413dfa35788843c296d7997b0bebc13ca1956c1d83d0097",
+      "apps/desktop/src/renderer/src/panels/agent/work-groups.ts": "556c470bca61164e861266da4f0992565814a670cdcdb5d589195fe5cf77d4fd",
+      "apps/desktop/src/main/agent-media.ts": "27aaa69b569c0c51fd11cf2eba05849a78916e1f2bece8854aa37b4a5f7b2bd5"
+    }
+  },
+  {
+    "id": "A05",
+    "priority": " A05 (carry + UI)",
+    "commits": "`dc2ff22fc`, `aff932bc2`, `bf26d9b3e`",
+    "expected": "Conversation visibility/drag/pin/resize, streaming recovery and Codex connection state; visual HTML replies publish/resize/expand/replay in durable threads with inert origin/CSP and no privileged bridge. Earlier core already ships at tag; later layouts/attachments vary. `panels/agent/`, `main/codex/`, `shared/visual-reply.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 A persistence/protocols and B views; M `publish_visual_reply` is still pending. Stored HTML and artifacts must survive even before a native safe viewer exists. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:visual-reply-thread-persistence",
+    "source_hashes": {
+      "apps/desktop/src/shared/visual-reply.ts": "7b0b4588ee04e162bfc532f78ed4a5c11ab02a7745a764f73d816093db827496"
+    }
+  },
+  {
+    "id": "A06",
+    "priority": " A06 HIGH (carry)",
+    "commits": "`ff5181601`, `aff932bc2`, `2c64c9e0b`",
+    "expected": "External stdio MCP/headless sessions, desktop registration; project/library lifecycle, timeline strip gestures, direct media list/import/replace/manage, inspection/sample/contact-sheet/waveform/transcribe/check/caption tools; saves and exports without chooser. These tool names/basics already exist at tag. New descriptions/result/lifecycle behavior still needs auditing.",
+    "coverage_before_reference_change": "Partial \u2014 M has 67 frozen schemas and K bodies, E adapters; pending import/replace/activation/agent/transcription/panel bodies stay explicit errors. Native Rust headless replaces Chromium host (N7/N8), not its implementation quirks. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:main-mcp-host-integration",
+    "source_hashes": {
+      "apps/desktop/src/main/agent-tools/spec.ts": "ca5c1eb40fe451f2cfc6402eb75c7514b9963b5b26c267ae280014e432707e24",
+      "apps/desktop/src/main/agent-tools/external-spec.ts": "9f7c12dc3860ca6e4e24f92904b9a4e797cfca91b7332b93e48e1b1c79377cd8"
+    }
+  },
+  {
+    "id": "A07",
+    "priority": " A07 HIGH",
+    "commits": "`32ffd5432`",
+    "expected": "Adds MCP `project_memory` list/add/update/remove with kind/reason/resolution/limit and memory index in `get_project_state`; disabled memory hidden from agents but retained. `main/agent-tools/spec.ts`, `legacy/assistant/harness.ts`.",
+    "coverage_before_reference_change": "Gap \u2014 M catalog has no name/body, K only opaque retention; A must preserve non-Undo autosave semantics. This is the confirmed name delta; resolve W1 inventory disagreement before extending freeze. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:project-memory-index-and-tool",
+    "source_hashes": {
+      "apps/desktop/src/renderer/src/core/memory.ts": "f8af5ce132862fb2b7b25cee4f833a97c42626b2df62c0dad3290adfc69f894e",
+      "apps/desktop/src/renderer/src/legacy/assistant/harness.ts": "dcb14bcd009d1e2d452a294daceff2cfa4fbe497d35c19a84b118237a8a0e81a"
+    }
+  },
+  {
+    "id": "A08",
+    "priority": " A08 HIGH (carry)",
+    "commits": "`ff5181601`, `aff932bc2`",
+    "expected": "Themes own reversible appearance, overlapping unload order/restart/user edits; workspace mutations distinguish temporary appearance from saved panel membership. Fork rebase uses pristine base/current/upstream, compile/activate/Undo and agent conflict fallback. `kernel/{theme-state,workspace-appearance}.ts`, `main/extensions/{rebase,update-fork}.ts`. Baseline core already exists.",
+    "coverage_before_reference_change": "Partial \u2014 X frozen helpers/registry lifecycle, K state/external history, P archived installs exist. Complete rebase coordinator and real extension lifecycle/DOM comparisons remain. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:extension-rebase-appearance",
+    "source_hashes": {
+      "apps/desktop/src/renderer/src/kernel/theme-state.ts": "c11e92010c32c9da15d6050c8478885020aaecf8fe19503cf466118cc33a2270",
+      "apps/desktop/src/renderer/src/kernel/workspace-appearance.ts": "14ed286fdd3525e5dbfecdac908b7b685cc9ccb964576fdd6332451fdc8f2a75",
+      "apps/desktop/src/main/extensions/rebase.ts": "05f0bf407535780c317f4322179f3f2f8751d8250de4a9e8e4299f29f7846e71"
+    }
+  },
+  {
+    "id": "A09",
+    "priority": " A09 HIGH (carry + later fencing)",
+    "commits": "`670b563dd`, `a889a5e78`, `e5bbfb677`, `bbf2083b5`, `908c89091`, `bf26d9b3e`",
+    "expected": "Recover sockets/sessions after renderer loss; reject delayed authorization/publication after disconnect or document replacement; serialize publication/recovery; fence finishing sessions and panel generations between capture and input. Earlier fixes often match tag; panel generation/finishing changes survive. `main/agent-tools/`, `legacy/assistant/{harness,panel-tools}.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 M/K session document/revision guards and A cancellation exist. Complete application queue ordering, extension publication, late replies and panel input/capture remain open. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:publication-panel-generation-fences",
+    "source_hashes": {
+      "apps/desktop/src/renderer/src/legacy/assistant/panel-tools.ts": "58e8f70e7cfb6371449e872c00332b04a831e0da562bdfb62874a96caded80ba",
+      "apps/desktop/src/renderer/src/legacy/assistant/harness.ts": "dcb14bcd009d1e2d452a294daceff2cfa4fbe497d35c19a84b118237a8a0e81a"
+    }
+  },
+  {
+    "id": "A10",
+    "priority": " A10 HIGH (carry)",
+    "commits": "`aff932bc2`, `cf86afe39`, `864b9cc35`, `d9461e878`",
+    "expected": "Original provider/settings retained during frame review, capture failures preserve applied edits; bounded instructions, explicit group coordinates/composition-wide ordering; supervised outside-sandbox command uses person's approval; teardown keeps original error. `main/{codex,agent-tools}`, `legacy/assistant/harness.ts`.",
+    "coverage_before_reference_change": "Partial \u2014 A protocol/workspace/authority and M/K guards exist. Live provider review, user consent and strict error/event identity are unverified. ",
+    "owner": "acceptance/agent-MCP integration",
+    "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+    "blocked_by": "main:provider-review-consent-error-identity",
+    "source_hashes": {
+      "apps/desktop/src/renderer/src/legacy/assistant/harness.ts": "dcb14bcd009d1e2d452a294daceff2cfa4fbe497d35c19a84b118237a8a0e81a"
+    }
+  }
+]

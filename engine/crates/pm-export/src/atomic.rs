@@ -203,10 +203,16 @@ impl AtomicOutput {
             set_mode(&self.temp, mode)?;
         }
         match self.overwrite {
-            Overwrite::Replace | Overwrite::InPlace => fs::rename(&self.temp, &self.destination)
-                .map_err(|e| {
+            Overwrite::Replace | Overwrite::InPlace => {
+                // InPlace replaces a host-owned scratch file. User outputs must
+                // survive Replace, including outputs from earlier versions (N4).
+                if self.overwrite == Overwrite::Replace {
+                    archive_existing(&self.destination)?;
+                }
+                fs::rename(&self.temp, &self.destination).map_err(|e| {
                     Error::Io(format!("moving into {}: {e}", self.destination.display()))
-                })?,
+                })?;
+            }
             Overwrite::Fail => {
                 match fs::hard_link(&self.temp, &self.destination) {
                     Ok(()) => {
@@ -215,16 +221,9 @@ impl AtomicOutput {
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                         return Err(Error::Exists(self.destination.clone()));
                     }
-                    // Volumes without hard links (exFAT, FAT, some network shares): check,
-                    // then rename. Only a file created in between can be replaced.
-                    Err(_) => {
-                        if fs::symlink_metadata(&self.destination).is_ok() {
-                            return Err(Error::Exists(self.destination.clone()));
-                        }
-                        fs::rename(&self.temp, &self.destination).map_err(|e| {
-                            Error::Io(format!("moving into {}: {e}", self.destination.display()))
-                        })?;
-                    }
+                    // A check followed by rename could overwrite a raced user
+                    // file. Use the platform's atomic no-replace operation (N4).
+                    Err(_) => rename_no_replace(&self.temp, &self.destination)?,
                 }
             }
         }
@@ -262,6 +261,7 @@ impl AtomicOutput {
                     .collect();
                 for f in &files {
                     let to = self.destination.join(f.file_name().expect("a file"));
+                    archive_existing(&to)?;
                     fs::rename(f, &to).map_err(|e| io(e, &to))?;
                 }
                 let _ = fs::remove_dir(&self.temp);
@@ -322,10 +322,89 @@ fn remove_stale_frames(folder: &Path, written: &[String]) -> Result<(), Error> {
             && entry.file_type().is_ok_and(|t| t.is_file());
         if stale {
             let path = entry.path();
+            archive_existing(&path)?;
             fs::remove_file(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
         }
     }
     Ok(())
+}
+
+/// Retain replaced and stale user outputs. Scratch cleanup never calls this.
+fn archive_existing(path: &Path) -> Result<(), Error> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::Io(e.to_string())),
+        Ok(meta) if meta.is_dir() => return Err(Error::Exists(path.to_path_buf())),
+        Ok(_) => {}
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let archive = parent.join(".powermove-export-archive");
+    match create_private_dir(&archive) {
+        Ok(()) => {}
+        Err(_)
+            if fs::symlink_metadata(&archive)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) => {}
+        Err(e) => return Err(e),
+    }
+    let mut name = std::ffi::OsString::from(format!("{}-", unique_suffix()));
+    name.push(
+        path.file_name()
+            .ok_or_else(|| Error::InvalidSpec("archive source has no name".into()))?,
+    );
+    let to = archive.join(name);
+    let mut source = fs::File::open(path).map_err(|e| Error::Io(e.to_string()))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target = options.open(to).map_err(|e| Error::Io(e.to_string()))?;
+    io::copy(&mut source, &mut target).map_err(|e| Error::Io(e.to_string()))?;
+    target.sync_all().map_err(|e| Error::Io(e.to_string()))
+}
+
+fn rename_no_replace(from: &Path, to: &Path) -> Result<(), Error> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(from.as_os_str().as_bytes())
+            .map_err(|e| Error::Io(e.to_string()))?;
+        let target = std::ffi::CString::new(to.as_os_str().as_bytes())
+            .map_err(|e| Error::Io(e.to_string()))?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Err(Error::Exists(to.to_path_buf()));
+        }
+        Err(Error::Io(format!("atomic no-replace move: {error}")))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = from;
+        Err(Error::Io(format!(
+            "atomic no-replace move unavailable for {}",
+            to.display()
+        )))
+    }
 }
 
 fn create_private_dir(path: &Path) -> Result<(), Error> {
@@ -500,6 +579,48 @@ mod tests {
     }
 
     #[test]
+    fn replace_archives_user_bytes_and_archive_failure_keeps_destination() {
+        let dir = scratch("archive");
+        let dest = dir.join("old.mp4");
+        fs::write(&dest, b"authored original").unwrap();
+        let out = AtomicOutput::new(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path(), b"new export").unwrap();
+        out.commit().unwrap();
+        let archive = dir.join(".powermove-export-archive");
+        let entries: Vec<_> = fs::read_dir(&archive).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            fs::read(entries[0].as_ref().unwrap().path()).unwrap(),
+            b"authored original"
+        );
+        fs::remove_dir_all(&archive).unwrap();
+        fs::write(&archive, b"not a directory").unwrap();
+        let out = AtomicOutput::new(&dest, Overwrite::Replace, None).unwrap();
+        fs::write(out.temp_path(), b"would replace").unwrap();
+        assert!(out.commit().is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"new export");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_replace_rename_keeps_a_raced_destination() {
+        let dir = scratch("rename-race");
+        let from = dir.join("temp");
+        let to = dir.join("destination");
+        fs::write(&from, b"new").unwrap();
+        fs::write(&to, b"raced user file").unwrap();
+        assert!(matches!(
+            rename_no_replace(&from, &to),
+            Err(Error::Exists(_))
+        ));
+        assert_eq!(fs::read(&to).unwrap(), b"raced user file");
+        fs::remove_file(&to).unwrap();
+        rename_no_replace(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn empty_output_and_missing_folders_fail() {
         let dir = scratch("empty");
         let out = AtomicOutput::new(&dir.join("E.mov"), Overwrite::Fail, None).unwrap();
@@ -545,6 +666,15 @@ mod tests {
         assert_eq!(fs::read(dest.join("Frames_00000.png")).unwrap(), b"new");
         assert!(!dest.join("Frames_00001.png").exists());
         assert!(!dest.join("Frames_00002.png").exists());
+        let mut archived: Vec<_> = fs::read_dir(dest.join(".powermove-export-archive"))
+            .unwrap()
+            .map(|entry| fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        archived.sort();
+        assert_eq!(
+            archived,
+            vec![b"old".to_vec(), b"png".to_vec(), b"png".to_vec()]
+        );
         assert_eq!(fs::read(dest.join("notes.txt")).unwrap(), b"mine");
         assert_eq!(fs::read(dest.join("Other_00001.png")).unwrap(), b"other");
         assert!(dest.join("Frames_001.png").exists() && dest.join("Frames_00001.tif").exists());

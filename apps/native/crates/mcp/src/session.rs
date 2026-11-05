@@ -72,11 +72,12 @@ impl McpSession {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
-        catalog::validate(name, args)?;
+        self.retire_replaced_document()?;
         if name == "start_session" {
             return self.start(args);
         }
         if name == "finish_session" {
+            crate::validation::session(name, args)?;
             if self.active.is_none() {
                 return Err(Error::invalid("No MCP session is active."));
             }
@@ -92,6 +93,7 @@ impl McpSession {
                     "Finish the current session before changing projects.",
                 ));
             }
+            catalog::validate(name, args)?;
             return match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
@@ -102,19 +104,46 @@ impl McpSession {
             .active
             .as_mut()
             .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
-        if session.access == "editor" && !catalog::permits("inspection", name) {
-            return Err(Error::invalid("This tool requires project access."));
+        // External-session gates run before the bridge and body parsers in the tag.
+        if name == "publish_extensions" && session.access == "editor" {
+            return Err(Error::invalid("Planning access cannot publish extensions."));
         }
-        if session.context == "app" && !catalog::permits("app", name) {
+        if name == "publish_extensions" {
+            crate::validation::extensions(args)?;
+            return Err(Error::unavailable(catalog::backing(name)));
+        }
+        if name == "import_media_to_timeline"
+            && (session.access == "editor" || session.context == "app")
+        {
             return Err(Error::invalid(
                 "This tool requires project access and an attached project.",
             ));
         }
+        if catalog::spec(name).is_none() {
+            return Err(Error::invalid(format!("Unknown Powermove tool: {name}")));
+        }
+        if session.access == "editor" && !catalog::permits("inspection", name) {
+            return Err(Error::invalid(
+                "This planning run can only inspect the project.",
+            ));
+        }
+        if session.context == "app" && !catalog::permits("app", name) {
+            return Err(Error::invalid(
+                "This agent has no project attached. Open a project to use composition tools.",
+            ));
+        }
         if name == "manage_project" {
+            catalog::validate(name, args)?;
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
             return self.manage(&mut host, args);
+        }
+        if name == "inspect_creative_workspace" {
+            return host.creative.workspace(args);
+        }
+        if name == "inspect_creative_extension" {
+            return host.creative.extension(args);
         }
         if name == "get_panel_layout" {
             if let Some(id) = &session.project {
@@ -129,6 +158,7 @@ impl McpSession {
             return crate::effect::validate(&args["definition"]);
         }
         if name == "fork_builtin_extension" {
+            catalog::validate(name, args)?;
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
             }
@@ -155,15 +185,113 @@ impl McpSession {
             let store = host.store_reads.as_deref().ok_or_else(|| Error::unavailable(
                 "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
             ))?;
+            catalog::validate(name, args)?;
             return match name {
                 "store_search" => crate::store::search(store, args),
                 "store_extension" => crate::store::detail(store, args),
                 _ => crate::store::source(store, args),
             };
         }
+        if name == "project_memory" {
+            let id = session
+                .project
+                .as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let project = host.read_document(id)?;
+            if !crate::memory::enabled(&project) {
+                return Err(Error::invalid(crate::memory::DISABLED));
+            }
+            if args["operation"] == "list" {
+                return crate::memory::list(&project, args);
+            }
+            if !["add", "update", "remove"]
+                .iter()
+                .any(|op| args["operation"] == *op)
+            {
+                return Err(Error::invalid(
+                    "operation must be list, add, update or remove.",
+                ));
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(Error::kernel)?
+                .as_millis() as f64;
+            crate::memory::apply(
+                project["memory"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                args,
+                now,
+                &pm_kernel::new_id("mem"),
+                "agent",
+            )?;
+            return Err(Error::unavailable(
+                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback",
+            ));
+        }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }
+        if name == "export_video" {
+            let id = session
+                .project
+                .as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let jobs = host.export_jobs.clone();
+            let pending = jobs.prepare(
+                host.freeze(id)?,
+                args,
+                host.export_child.clone(),
+                host.exports.clone(),
+            )?;
+            drop(host);
+            let outcome = pending.wait();
+            let finished = !matches!(&outcome, Ok((_, false)));
+            if finished && !jobs.consume(&pending.id)? {
+                return Err(Error::invalid(
+                    "Unknown export job. A finished job is reported once; check the export folder.",
+                ));
+            }
+            let observed = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("headless host stopped"))?;
+            assert_project(session, &observed, id)?;
+            return outcome.map(|(value, _)| value);
+        }
+        let prepared_selection = if name == "select_layers" {
+            let project = host
+                .active
+                .as_deref()
+                .map(|id| host.read_document(id))
+                .transpose()?;
+            let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
+                id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
+            })).ok_or_else(|| Error::invalid("Select existing layer IDs from get_project_state. No selection was changed."))?;
+            Some(
+                ids.iter()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let cleaned_commands = if name == "apply_commands" {
+            Some(commands::clean_commands(
+                args["commands"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )?)
+        } else {
+            if name != "select_layers" {
+                catalog::validate(name, args)?;
+            }
+            None
+        };
         let session = self.active.as_mut().unwrap();
         let id = session
             .project
@@ -204,7 +332,7 @@ impl McpSession {
                 };
                 host.media_tool(&id, operation, args)?.content()
             }
-            "export_video" => host.export_video(&id, args),
+
             "export_captions" => host.export_captions(&id, args),
             "manage_media" => {
                 let expected = session
@@ -244,18 +372,13 @@ impl McpSession {
                 Ok(result)
             }
             "select_layers" => {
-                let ids = args["layerIds"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>();
+                let ids = prepared_selection.unwrap();
                 Ok(
                     json!({"selection":host.select_layers(&id,&ids,args["add"]==true, self.writer)?}),
                 )
             }
             "save_project" => host.save_project(&id),
-            "apply_commands" | "edit_layer_strips" | "edit_video" => {
+            "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
                 let expected = session
                     .transaction
                     .as_ref()
@@ -266,10 +389,15 @@ impl McpSession {
                         "The project changed during the agent run (expected revision {expected}, found {revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry."
                     )));
                 }
+                let default_label = if name == "edit_3d" {
+                    "Edit 3D Layers"
+                } else {
+                    "Agent composition edit"
+                };
                 let label = args["label"]
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("Agent composition edit")
+                    .unwrap_or(default_label)
                     .trim()
                     .chars()
                     .take(80)
@@ -295,11 +423,21 @@ impl McpSession {
                 } else {
                     None
                 };
-                let batch = if strips.is_none() && video.is_none() {
-                    Some(commands::plan_with_definitions(
+                let batch = if name == "edit_3d" {
+                    Some(crate::scene3d::batch(
+                        &host.store(&id)?.snapshot(),
+                        args,
+                        &selection,
+                        host.playhead(&id),
+                        host.scene3d_assets
+                            .as_deref()
+                            .unwrap_or(&pm_scene3d::geometry::NoAssets),
+                    )?)
+                } else if strips.is_none() && video.is_none() {
+                    Some(commands::plan_cleaned_with_definitions(
                         &p,
                         &selection,
-                        args["commands"].as_array().unwrap(),
+                        cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
                         Some(host.kernel().state()),
                     )?)
@@ -308,7 +446,7 @@ impl McpSession {
                 };
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
-                        snapshot: p,
+                        snapshot: p.clone(),
                         mark: host.history_mark(&id, self.writer)?,
                         revision,
                         changed: false,
@@ -357,6 +495,14 @@ impl McpSession {
                 if let Some(notice) = ack.notice {
                     result["notice"] = json!(format!("{notice:?}"));
                 }
+                if name == "edit_3d" {
+                    let after = host.read_document(&id)?;
+                    let target = crate::scene3d::result_id(&p, &after, args, &selection);
+                    if let Some(ref target) = target {
+                        host.select_layers(&id, std::slice::from_ref(target), false, self.writer)?;
+                    }
+                    result["result"] = json!({"id":target,"layerId":target});
+                }
                 if let Some(strips) = strips_result {
                     result["strips"] = strips;
                 }
@@ -369,10 +515,41 @@ impl McpSession {
             _ => Err(Error::unavailable(catalog::backing(name))),
         }
     }
+    /// Renderer/document replacement ends the run, not the external connection.
+    /// Never restore an old snapshot into a replacement document. Preserve staged
+    /// files even when archival fails; cleanup cannot replace the primary loss.
+    fn retire_replaced_document(&mut self) -> Result<()> {
+        let replaced = if let Some(session) = self.active.as_ref() {
+            if let Some(id) = session.project.as_deref() {
+                let host = self
+                    .host
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                host.active.as_deref() != Some(id)
+                    || host.store(id).ok().map(|s| s.doc_id()) != session.document
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if replaced {
+            let session = self.active.take().expect("live replaced session");
+            if let Some(root) = session.workspace
+                && let Err(error) = archive_workspace(&root, false)
+            {
+                eprintln!(
+                    "MCP replaced-document workspace retained after archive failure: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
     fn start(&mut self, args: &Value) -> Result<Value> {
         if self.active.is_some() {
             return Err(Error::invalid("Finish the current MCP session first."));
         }
+        crate::validation::session("start_session", args)?;
         let access = args["access"].as_str().unwrap_or("project");
         let context = args["context"].as_str().unwrap_or("project");
         if context == "app" && access == "editor" {
@@ -410,7 +587,7 @@ impl McpSession {
                 std::fs::create_dir_all(root.join(name))?;
             }
             let input = if let Some(ref id) = project {
-                host.read_document(id)?
+                crate::memory::agent_snapshot(&host.read_document(id)?)
             } else {
                 json!({})
             };

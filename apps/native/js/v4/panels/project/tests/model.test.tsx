@@ -67,7 +67,7 @@ test("shift selection, wrap, Return and Space are model inputs, never local edit
     await m.service.input(down("d", { ...none, shift: true }));
     expect(m.service.view!.selected_count).toBe(3);
     let r = await m.service.input(key("Right", "d"));
-    expect(r!.view.focused).toEqual({ Asset: "a" });
+    expect(r!.view.focused).toEqual({ Folder: "f" });
     r = await m.service.input(key("Enter", "a"));
     expect((r!.outcome as any).effects).toContainEqual({ AddAsset: "a" });
     r = await m.service.input(key("Space", "a"));

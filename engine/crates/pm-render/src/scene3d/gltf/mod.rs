@@ -422,13 +422,10 @@ pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
 
 /// How an object's meshes take materials (`sync`).
 pub enum Override<'a> {
-    /// `useSourceMaterials` without slots: the file's materials.
+    /// `useSourceMaterials`: the file's materials.
     Source,
     /// The object's material (built as `sync` builds it).
     Single(&'a Material3d),
-    /// Slots: an array of materials (a glTF mesh has no groups, so it draws
-    /// nothing).
-    Slots(&'a [Material3d]),
 }
 
 /// The file's maps of a material that loaded, by uniform name.
@@ -667,32 +664,13 @@ pub fn instantiate(
                 let loaded = source_material(asset, &model.materials[d.material], order);
                 let is_mesh = gm.mode == Mode::Triangles;
                 let materials = if !is_mesh {
-                    Materials::Single(Box::new(loaded))
+                    Materials(Box::new(loaded))
                 } else {
                     match materials {
-                        Override::Source => Materials::Single(Box::new(loaded)),
+                        Override::Source => Materials(Box::new(loaded)),
                         Override::Single(def) => {
-                            Materials::Single(Box::new(synced(&loaded, def, order | 1 << 31)))
+                            Materials(Box::new(synced(&loaded, def, order | 1 << 31)))
                         }
-                        Override::Slots(defs) => Materials::Slots(
-                            defs.iter()
-                                .enumerate()
-                                .map(|(k, def)| {
-                                    if k == 0 {
-                                        synced(&loaded, def, order | 1 << 31)
-                                    } else {
-                                        synced(
-                                            &Material3d {
-                                                kind: MaterialKind::Basic,
-                                                ..loaded.clone()
-                                            },
-                                            def,
-                                            order | 1 << 31 | (k as u64) << 20,
-                                        )
-                                    }
-                                })
-                                .collect(),
-                        ),
                     }
                 };
                 let skinning = d.skin.map(|s| {

@@ -198,3 +198,134 @@ history; mutation/rollback/export/media/extension tool bodies; full extension
 activation and tool availability. The existing MCP inventory has only 13 of
 67 implemented standalone bodies (54 pending); catalog identity does not close
 that gap. These limitations prevent declaring all of Gate P4 complete.
+
+## 2026-11-04 — cloud agents3 cancellation boundary
+
+The cancellation timing discrepancy is fixed in production `codex::Client`.
+`turn/interrupt` is now a run-owned pending RPC; completion follows its success,
+rejection or 30-second timeout. The frozen runner explicitly awaits that RPC
+(`app-server-runner.ts:432–446`), so this is authored interruption sequencing,
+not a reproduced Chromium microtask quirk (N3, N1). Queued steering is discarded
+at cancellation, held questions are settled, and late work cannot publish success.
+A cancellation before `turn/start` returns still reports once and retains a
+cleanup tombstone to interrupt the late turn identity. Stop/restart and repeated
+cancel/timeout paths produce one terminal event (N1/N3, quirk policy).
+
+The difference ledger removes only the now-resolved cancellation causal shift.
+Native lifecycle additions and MCP error discrepancies remain recorded; the
+original full-observation strict gate is still open. No reference transcript was
+replaced. The shared workspace lock already contains `pm-agents` on the lane's
+base; `scripts/check.sh` now uses it directly with `--locked`. Its former
+alternate lockfile is retained as historical input, with no active script consumer.
+
+## 2026-11-04 — strict callback replay and new synthetic flow evidence
+
+All **21 provider callback cases now match exactly**, including cancellation's
+causal stimulus boundary. `provider_callback_boundary_is_strictly_identical_without_losing_inspection`
+uses the production typed delivery adapter. It also reconstructs every original
+native lifecycle observation from the disjoint callback/inspection streams,
+asserting that all **28** native inspection additions remain. This is a separate
+named check; the original full-observation strict gate is unchanged.
+
+The original 23-case report now has **23/23 public-event matches**, **22/23 wire
+matches**, and **6/23 full-observation matches**. Its remaining **32 exact leaf
+differences** are 28 native lifecycle additions and four MCP tool-error strings.
+The difference ledger still checks every one. `PM_REPLAY_REQUIRE_IDENTICAL=1`
+continues to fail visibly. The richer service interface is not falsely described
+as identical to the frozen callback interface, and the MCP failures are not
+normalized or waived.
+
+Three additional, independent frozen-source recorders add evidence without
+changing any of the original reference bytes:
+
+- `scripts/capture-concurrent.cjs` executes the tagged App Server runner with
+  two runs admitted before initialization completes. It records exact wire and
+  callback values, run IDs and causal positions for non-lexical admission,
+  broadcast reconnect, colliding question item IDs, an answer scoped to one run,
+  cancellation with a held question, interrupt acknowledgement and the other
+  run's successful answer. Native inspection is asserted separately, unchanged.
+- `scripts/capture-monitor.cjs` executes the tagged `AgentThreadMonitor` with an
+  injected clock: **28 operations**, covering queued/running/waiting/terminal
+  states, older-run selection, scope errors, duplicate watch leases, cycle
+  rejection/release, timeout and shutdown. Rust compares every result/error.
+- `scripts/capture-tasks.cjs` executes the tagged orchestrator with synthetic
+  provider discovery and a held execution host. Rust compares the queued task,
+  complete inherited child request, durable reservation archive, exact path and
+  idempotency fingerprint. This is a reservation/start-boundary probe, not a
+  full live orchestrator or MCP-tool-body certification.
+
+Each new fixture pins the frozen source hashes and its recorder hash. The task
+recorder supplies deterministic UUIDs and a clock; the monitor supplies a clock;
+the concurrent peer uses explicit response/terminal barriers. Expectations are
+obtained only from tagged TypeScript execution. Node/TypeScript/Zod remain
+oracle-only dependencies. Regenerate/check with:
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+npm install --prefix work/oracle typescript@5.9.3 zod@4.6.5
+node apps/native/crates/agents/tests/replay/capture.cjs --check
+node apps/native/crates/agents/scripts/capture-concurrent.cjs --check
+node apps/native/crates/agents/scripts/capture-monitor.cjs --check
+node apps/native/crates/agents/scripts/capture-tasks.cjs --check
+```
+
+The concurrent fixture waits for the cancelled runner's terminal callback before
+supplying later frames. An unfenced source probe observed the tagged callback
+later than the native state-machine callback while tagged temporary-directory
+cleanup awaited disk (stimulus 15 versus 13). That application cleanup/dispatch
+fence remains **unqualified**, not an accepted timing tolerance or a reproduced
+Electron scheduling quirk. The fixture does not certify arbitrary provider/IO
+schedules or final shell queue ordering. The FIFO and durable receipt primitives
+provide explicit boundaries for that application integration.
+
+The new portable tests also cover durable publication failures/retries, exact
+compaction/question history through reopen and archival, receipt conflicts,
+capacity admission and native inspection retention. These are native correctness
+checks, distinguished from frozen-source conformance probes.
+
+## 2026-11-04 — lane completion boundary
+
+The portable callback, FIFO, history, monitor and task-scope work is implemented
+and tested. The original whole-observation strict assertion is intentionally
+still failing on the explicit lifecycle additions and the four unchanged MCP
+errors. Full P4 completion is blocked on the application/MCP paths this lane is
+not permitted to edit, as well as real-provider credentials and macOS execution.
+The newer primitives do not turn missing tool adapters or unexecuted schedules
+into passes. See the dated integration list in `agents.md` for remaining bodies,
+including task updates, ordinary-thread controls and final queue/cleanup fencing.
+
+## 2026-11-04 — post-merge verification and updated reference audit
+
+Merged integration base `711f44ba0667f81ce8388c4ec57565d1d0378630`
+without conflicts. The post-merge portable suite passes **126 tests / 0 failures /
+0 ignored**: concurrent 1, conformance 11, conversation 4, delivery 3, history 4,
+monitor 5, orchestration 13, persistence 10, protocol 36, replay 9, runtime 12,
+transport 6 and workspace 12. Strict Clippy and package formatting pass.
+
+Exact native checks, after the standard activation and `cd apps/native`:
+
+```sh
+cargo test --locked -p pm-agents
+cargo clippy --locked -p pm-agents --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-agents --check
+PM_REPLAY_REQUIRE_IDENTICAL=1 cargo test --locked -p pm-agents --test replay replay_all_surfaces_and_check_every_difference
+```
+
+The first three commands pass. The final command is a separately reported
+**1 failed strict assertion / 8 filtered tests** on the unchanged full-observation
+contract, with the 32 exact remaining differences described above. This is not
+included in the 126 passing tests. All four `capture*.cjs --check` commands listed
+in the preceding section reproduce identical reference evidence. No live
+provider, signed app or macOS behavior was exercised.
+
+The merged P0 owner decision also moves overall parity to main commit
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. The retained v1.2.0 fixtures
+remain mandatory legacy evidence, not proof of that newer target. The A01–A10
+agent delta in `main-delta.md` stays open here. In particular, A03's newer Claude
+Project Auto classifier is **not established** by the legacy approval state
+machine/fixtures. Provider discovery/client registration, safe visual replies,
+project memory, updated session/publication fences and main's provider approval
+semantics need their own current-source replay and real host support. No
+optimistic Auto/provider capability is added by this lane. The scope of the
+portable services and the integration blockers remain explicit in `agents.md`.

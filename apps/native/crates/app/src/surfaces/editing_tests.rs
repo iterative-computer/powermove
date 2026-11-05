@@ -909,3 +909,19 @@ fn every_request_is_native_and_revision_guarded() {
     };
     assert_eq!(expected_revision, Some(t.revision));
 }
+
+#[test]
+fn review_path_handles_follow_gizmo_tokens_instead_of_keyframe_arithmetic() {
+    let mut t = tokens();
+    t.metrics.gizmo_handle = 13.;
+    t.metrics.tangent_end = 11.;
+    t.metrics.gizmo_keyline = 3.;
+    let mut s = path_state();
+    s.hovered = Some("v0".into());
+    let p = s.plan(&t);
+    assert_eq!(p.vertices[0].side, 15.);
+    assert_eq!(p.vertices[1].side, 13.);
+    assert_eq!(p.tangent_diameter, 11.);
+    assert_eq!(p.tangent_width, 3.);
+    assert_eq!(p.vertices[0].stroke_width, 3.);
+}

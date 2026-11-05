@@ -1,7 +1,7 @@
 //! AppKit sheets are asynchronous. No modal run loop or UI-thread file IO.
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
 use objc2_app_kit::*;
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::NSString;
 use std::path::PathBuf;
 
 pub fn paths(window: &NSWindow, save: bool) -> async_channel::Receiver<Option<PathBuf>> {
@@ -93,34 +93,6 @@ mod tests {
     }
 }
 
-pub fn field(
-    window: &NSWindow,
-    title: &str,
-    value: &str,
-) -> async_channel::Receiver<Option<String>> {
-    let mtm = MainThreadMarker::new().unwrap();
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.addButtonWithTitle(&NSString::from_str("Apply"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-    let field = NSTextField::initWithFrame(
-        NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::ZERO, NSSize::new(260., 28.)),
-    );
-    field.setStringValue(&NSString::from_str(value));
-    alert.setAccessoryView(Some(&field));
-    let (tx, rx) = async_channel::bounded(1);
-    let f: Retained<NSTextField> = field.clone();
-    let done = block2::RcBlock::new(move |r: NSModalResponse| {
-        let _ = tx.try_send((r == NSAlertFirstButtonReturn).then(|| f.stringValue().to_string()));
-    });
-    alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
-    unsafe {
-        field.selectText(None);
-    }
-    rx
-}
-
 pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
     let Some(root) = app.mainMenu() else { return };
@@ -200,58 +172,37 @@ impl QuitDelegate {
     }
 }
 
-pub struct MenuChoice {
-    sender: async_channel::Sender<isize>,
-}
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "PMNativeMenuTarget"]
-    #[ivars = MenuChoice]
-    pub struct MenuTarget;
-    unsafe impl NSObjectProtocol for MenuTarget {}
-    impl MenuTarget {
-        #[unsafe(method(choose:))]
-        fn choose(&self, item: &NSMenuItem) {
-            let _ = self.ivars().sender.try_send(item.tag());
-        }
+/// PNG sequences choose a parent directory; publication owns a fresh child
+/// folder, so existing frames are never overwritten.
+pub fn export_destination(
+    window: &NSWindow,
+    folder: bool,
+    name: &str,
+) -> async_channel::Receiver<Option<PathBuf>> {
+    if !folder {
+        return paths_named(window, true, name);
     }
-);
-
-/// A native pop-up menu at a point in window content coordinates (top-left
-/// origin, as GPUI reports them). Items are `(title, checked)`. Returns the
-/// chosen index. Call outside GPUI event dispatch: the menu tracks modally.
-pub fn pop_up_menu(window: &NSWindow, items: &[(String, bool)], x: f64, y: f64) -> Option<usize> {
-    let mtm = MainThreadMarker::new()?;
-    let view = window.contentView()?;
-    let (sender, rx) = async_channel::bounded(1);
-    let target = MenuTarget::alloc(mtm).set_ivars(MenuChoice { sender });
-    let target: Retained<MenuTarget> = unsafe { msg_send![super(target), init] };
-    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(""));
-    menu.setAutoenablesItems(false);
-    for (index, (title, checked)) in items.iter().enumerate() {
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                Some(objc2::sel!(choose:)),
-                &NSString::from_str(""),
-            )
-        };
-        unsafe { item.setTarget(Some(&target)) };
-        item.setTag(index as isize);
-        item.setState(if *checked {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
-        menu.addItem(&item);
-    }
-    let height = view.bounds().size.height;
-    let point = NSPoint::new(x, if view.isFlipped() { y } else { height - y });
-    menu.popUpMenuPositioningItem_atLocation_inView(None, point, Some(&view));
-    rx.try_recv()
-        .ok()
-        .and_then(|tag| usize::try_from(tag).ok())
-        .filter(|&i| i < items.len())
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(true);
+    let retained = panel.clone();
+    // The suggestion is authored by the Export model, never a pathname.
+    let name = PathBuf::from(name).file_name().map(|s| s.to_owned());
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let path = path
+            .zip(name.clone())
+            .map(|(parent, name)| parent.join(name));
+        let _ = tx.try_send(path);
+    });
+    panel.beginSheetModalForWindow_completionHandler(window, &done);
+    rx
 }

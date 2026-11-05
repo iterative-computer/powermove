@@ -30,8 +30,10 @@ fn main() {
                 })).collect::<Vec<_>>();
                 println!(
                     "{}",
-                    json!({"accepted":true,"wireDiagnostics":wire_diagnostics,"diagnostics":panel.diagnostics,
+                    pm_surface::inspection_json(
+                        json!({"accepted":true,"wireDiagnostics":wire_diagnostics,"diagnostics":panel.diagnostics,
                     "nodes":surface.nodes(),"focusOrder":pm_surface::kit::focus_order(&surface),"accessibilityNodes":ax.len(),"accessibility":ax})
+                    )
                 );
             }
             Err(error) => println!("{}", json!({"accepted":false,"error":error})),

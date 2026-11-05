@@ -1,5 +1,6 @@
 [package]
 name = "pm-studio"
+links = "pm_studio"
 description = "Studio: the product-shot renderer (docs/3d-studio-redesign.md). Phase 0: Live and Refine on one GPU path tracer"
 version.workspace = true
 edition.workspace = true
@@ -14,6 +15,9 @@ bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "wgsl"] }
 
 [features]
 # Final-frame denoising with Intel Open Image Denoise (Apache-2.0), linked

@@ -438,6 +438,8 @@ fn reconcile_object_nodes(old: &mut ObjectMap<Node>, new: ObjectMap<Node>, rev: 
 }
 
 fn reconcile_array_nodes(old: &mut Vec<Node>, new: Vec<Node>, rev: u64) -> bool {
+    let new_ids: std::collections::BTreeSet<_> =
+        new.iter().filter_map(Node::record_id).cloned().collect();
     let mut changed = old.len() != new.len();
     let mut pool: Vec<Option<Node>> = std::mem::take(old).into_iter().map(Some).collect();
     let mut by_id: BTreeMap<JsString, VecDeque<usize>> = BTreeMap::new();
@@ -449,11 +451,16 @@ fn reconcile_array_nodes(old: &mut Vec<Node>, new: Vec<Node>, rev: u64) -> bool 
     let mut out = Vec::with_capacity(new.len());
     for (position, value) in new.into_iter().enumerate() {
         let source = match value.record_id() {
-            Some(id) => by_id.get_mut(id).and_then(VecDeque::pop_front),
+            Some(id) => by_id.get_mut(id).and_then(VecDeque::pop_front).or_else(|| {
+                pool.get(position)
+                    .and_then(Option::as_ref)
+                    .filter(|node| node.record_id().is_none())
+                    .map(|_| position)
+            }),
             None => pool
                 .get(position)
                 .and_then(Option::as_ref)
-                .filter(|node| node.record_id().is_none())
+                .filter(|node| node.record_id().is_none_or(|id| !new_ids.contains(id)))
                 .map(|_| position),
         };
         match source.and_then(|index| pool[index].take().map(|node| (index, node))) {
@@ -497,6 +504,11 @@ fn value_record_id(value: &Value) -> Option<&JsString> {
 }
 
 fn reconcile_array(old: &mut Vec<Node>, new: Vec<Value>, rev: u64) -> bool {
+    // Adding/removing an id on an otherwise retained positional record must
+    // match leaf patches. Do not steal an old identified record whose id is
+    // still present elsewhere in the new array.
+    let new_ids: std::collections::BTreeSet<_> =
+        new.iter().filter_map(value_record_id).cloned().collect();
     let mut changed = old.len() != new.len();
     let mut pool: Vec<Option<Node>> = std::mem::take(old).into_iter().map(Some).collect();
     // Old element indices by id, in document order (duplicates queue up).
@@ -509,11 +521,16 @@ fn reconcile_array(old: &mut Vec<Node>, new: Vec<Value>, rev: u64) -> bool {
     let mut out = Vec::with_capacity(new.len());
     for (position, value) in new.into_iter().enumerate() {
         let source = match value_record_id(&value) {
-            Some(id) => by_id.get_mut(id).and_then(VecDeque::pop_front),
+            Some(id) => by_id.get_mut(id).and_then(VecDeque::pop_front).or_else(|| {
+                pool.get(position)
+                    .and_then(Option::as_ref)
+                    .filter(|node| node.record_id().is_none())
+                    .map(|_| position)
+            }),
             None => pool
                 .get(position)
                 .and_then(Option::as_ref)
-                .filter(|node| node.record_id().is_none())
+                .filter(|node| node.record_id().is_none_or(|id| !new_ids.contains(id)))
                 .map(|_| position),
         };
         match source.and_then(|index| pool[index].take().map(|node| (index, node))) {

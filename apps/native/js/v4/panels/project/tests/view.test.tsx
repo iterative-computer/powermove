@@ -64,6 +64,20 @@ const cases: [string, Projection | null, Partial<ProjectViewProps>?][] = [
   ],
   ["unknown-original", projection([asset("a", "Unknown")])],
   [
+    "unknown-after-delay",
+    projection([asset("a", "Unknown")]),
+    { unknownLoading: new Set(["a"]) },
+  ],
+  [
+    "transport-error",
+    projection([{ ...asset(), focused: true }]),
+    { transportFailed: true, errorSequence: 1 },
+  ],
+  [
+    "changed-source",
+    projection([asset("a", { Changed: { source: "/synthetic/changed.mov" } })]),
+  ],
+  [
     "cloud-stored",
     projection([
       asset("a", { Cloud: { provider: "Fixture", download: "Stored" } }),
@@ -120,6 +134,7 @@ for (const [state, view, extra] of cases)
     const report = reports.at(-1)!;
     expect({
       tree: treeSnapshot(report.nodes),
+      cards: report.cards,
       ax: report.accessibility,
       focusOrder: report.focusOrder,
     }).toMatchSnapshot();
@@ -134,6 +149,20 @@ for (const [state, view, extra] of cases)
       expect(grid.rowCount).toBe(view.page.total);
       expect(grid.multiselectable).toBe(true);
     }
+    if (state === "transport-error") {
+      expect(report.cards.every((card: any) => card.actions_disabled)).toBe(
+        true,
+      );
+      expect(
+        report.accessibility
+          .filter((n: any) => n.role === "Cell")
+          .every((n: any) => n.disabled && n.actions.length === 0),
+      ).toBe(true);
+      expect(find(root, "Add").props.disabled).toBe(true);
+    }
+    if (state === "unknown-after-delay")
+      expect(report.cards[0].status).toBe("Loading…");
+    if (state === "unknown-original") expect(report.cards[0].status).toBeNull();
     if (state === "60000-items") {
       expect(Object.keys(report.nodes).length).toBeLessThan(200);
       expect(find(root, "Project media").props.attr).toEqual({

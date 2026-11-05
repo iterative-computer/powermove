@@ -528,11 +528,26 @@ fn nothing_appears_at_the_destination_unless_the_export_completes() {
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
+    let mut left = left;
+    left.sort();
     assert_eq!(
         left,
-        vec![std::ffi::OsString::from("Cancelled.mp4")],
-        "only the delivered file remains"
+        vec![
+            std::ffi::OsString::from(".powermove-export-archive"),
+            std::ffi::OsString::from("Cancelled.mp4"),
+        ],
+        "only the delivered file and retained previous output remain"
     );
+    let archived: Vec<_> = std::fs::read_dir(dir.join(".powermove-export-archive"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        archived.len(),
+        1,
+        "Replace retains exactly the previous output"
+    );
+    assert_eq!(std::fs::read(&archived[0]).unwrap(), b"keep");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -156,10 +156,10 @@ fn main() {
         })();
         println!(
             "{}",
-            match result {
+            pm_surface::inspection_json(match result {
                 Ok(value) => value,
                 Err(error) => json!({"accepted":false,"error":error}),
-            }
+            })
         );
     }
 }

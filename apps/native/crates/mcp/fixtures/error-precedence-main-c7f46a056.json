@@ -1,0 +1,1326 @@
+{
+  "tag": "main",
+  "commit": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "zod": "4.6.5",
+  "cases": [
+    {
+      "state": "closed",
+      "tool": "list_projects",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "closed",
+      "tool": "create_project",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "closed",
+      "tool": "open_project",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "closed",
+      "tool": "start_session",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "closed",
+      "tool": "publish_extensions",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "publish_extensions",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "publish_extensions",
+      "args": {},
+      "error": "Planning access cannot publish extensions."
+    },
+    {
+      "state": "app",
+      "tool": "publish_extensions",
+      "args": {},
+      "error": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"extensions\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  }\n]"
+    },
+    {
+      "state": "closed",
+      "tool": "import_media_to_timeline",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "import_media_to_timeline",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "import_media_to_timeline",
+      "args": {},
+      "error": "This tool requires project access and an attached project."
+    },
+    {
+      "state": "app",
+      "tool": "import_media_to_timeline",
+      "args": {},
+      "error": "This tool requires project access and an attached project."
+    },
+    {
+      "state": "closed",
+      "tool": "finish_session",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "closed",
+      "tool": "orchestrator_capabilities",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "orchestrator_capabilities",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "delegate_task",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "delegate_task",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "task_status",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "task_status",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "task_cancel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "task_cancel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "task_send",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "task_send",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_launch",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_launch",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_list",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_list",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_read",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_read",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_send",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_send",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_watch",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_watch",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_unwatch",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_unwatch",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "thread_cancel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "thread_cancel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "publish_visual_reply",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "publish_visual_reply",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "get_timeline",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_timeline",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "get_timeline",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "edit_layer_strips",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "edit_layer_strips",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "edit_layer_strips",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "edit_layer_strips",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "manage_project",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "manage_project",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "manage_project",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "save_project",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "save_project",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "save_project",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "save_project",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "export_video",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "export_video",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "export_video",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "export_video",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "get_3d_scene",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_3d_scene",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "get_3d_scene",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "edit_3d",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "edit_3d",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "edit_3d",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "edit_3d",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "fork_builtin_extension",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "fork_builtin_extension",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "fork_builtin_extension",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "get_project_state",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_project_state",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "get_project_state",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "project_memory",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "project_memory",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "project_memory",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "project_memory",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "list_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "list_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "list_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "replace_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "replace_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "replace_media",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "replace_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "import_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "import_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "import_media",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "import_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "manage_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "manage_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "manage_media",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "manage_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "select_layers",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "select_layers",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "select_layers",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "select_layers",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "inspect_creative_workspace",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "inspect_creative_workspace",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "inspect_creative_workspace",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "set_panel_layout",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "set_panel_layout",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "set_panel_layout",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "get_panel_layout",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_panel_layout",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "inspect_creative_extension",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "inspect_creative_extension",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "inspect_creative_extension",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "open_panel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "open_panel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "open_panel",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "get_panel_state",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_panel_state",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "get_panel_state",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "interact_panel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "interact_panel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "interact_panel",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "interact_panel",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "capture_panel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "capture_panel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "capture_panel",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "computer_use_panel",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "computer_use_panel",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "computer_use_panel",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "computer_use_panel",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "get_workspace_state",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "get_workspace_state",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "get_workspace_state",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "render_frames",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "render_frames",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "render_frames",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "apply_commands",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "apply_commands",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "apply_commands",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "apply_commands",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "edit_video",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "edit_video",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "edit_video",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "edit_video",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "rollback_changes",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "rollback_changes",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "rollback_changes",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "rollback_changes",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "validate_effect",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "validate_effect",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "stage_fork_rebase",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "stage_fork_rebase",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "stage_fork_rebase",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "probe_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "probe_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "probe_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "sample_media_frames",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "sample_media_frames",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "sample_media_frames",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "media_contact_sheet",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "media_contact_sheet",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "media_contact_sheet",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "media_waveform",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "media_waveform",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "media_waveform",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "transcribe_media",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "transcribe_media",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "transcribe_media",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "check_project",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "check_project",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "check_project",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "store_search",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_search",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "store_extension",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_extension",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "store_source",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_source",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "store_library",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_library",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "closed",
+      "tool": "store_install",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_install",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "store_install",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "store_update",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_update",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "store_update",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "store_uninstall",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_uninstall",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "store_uninstall",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "store_publish_prepare",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_publish_prepare",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "store_publish_prepare",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "store_publish",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "store_publish",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "store_publish",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "closed",
+      "tool": "generate_captions",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "generate_captions",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "editor",
+      "tool": "generate_captions",
+      "args": {},
+      "error": "This planning run can only inspect the project."
+    },
+    {
+      "state": "app",
+      "tool": "generate_captions",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "closed",
+      "tool": "export_captions",
+      "args": {},
+      "error": "This MCP connection is closed."
+    },
+    {
+      "state": "none",
+      "tool": "export_captions",
+      "args": {},
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "app",
+      "tool": "export_captions",
+      "args": {},
+      "error": "This agent has no project attached. Open a project to use composition tools."
+    },
+    {
+      "state": "none",
+      "tool": "invented_tool",
+      "args": {
+        "operation": "read"
+      },
+      "error": "Call start_session before using Powermove tools."
+    },
+    {
+      "state": "project",
+      "tool": "invented_tool",
+      "args": {
+        "operation": "read"
+      },
+      "error": "Unknown Powermove tool: invented_tool"
+    },
+    {
+      "state": "editor",
+      "tool": "invented_tool",
+      "args": {
+        "operation": "read"
+      },
+      "error": "Unknown Powermove tool: invented_tool"
+    },
+    {
+      "state": "app",
+      "tool": "invented_tool",
+      "args": {
+        "operation": "read"
+      },
+      "error": "Unknown Powermove tool: invented_tool"
+    },
+    {
+      "state": "project",
+      "tool": "start_session",
+      "args": {},
+      "error": "Finish the current MCP session first."
+    },
+    {
+      "state": "project",
+      "tool": "create_project",
+      "args": {},
+      "error": "Finish the current session before changing projects."
+    },
+    {
+      "state": "project",
+      "tool": "open_project",
+      "args": {},
+      "error": "Finish the current session before changing projects."
+    },
+    {
+      "state": "none",
+      "tool": "finish_session",
+      "args": {},
+      "error": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "finish_session",
+      "args": {
+        "commit": 1
+      },
+      "error": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "finish_session",
+      "args": {
+        "commit": true,
+        "extra": 1,
+        "another": 2
+      },
+      "error": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\",\n      \"another\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"extra\\\", \\\"another\\\"\"\n  }\n]"
+    },
+    {
+      "state": "project",
+      "tool": "finish_session",
+      "args": {},
+      "error": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  }\n]"
+    },
+    {
+      "state": "project",
+      "tool": "finish_session",
+      "args": {
+        "commit": 1
+      },
+      "error": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commit\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]"
+    },
+    {
+      "state": "project",
+      "tool": "finish_session",
+      "args": {
+        "commit": true,
+        "extra": 1,
+        "another": 2
+      },
+      "error": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\",\n      \"another\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"extra\\\", \\\"another\\\"\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "finish_session",
+      "args": {
+        "commit": true
+      },
+      "error": "No MCP session is active."
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {},
+      "error": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {
+        "prompt": 1,
+        "access": "x",
+        "context": null,
+        "x": 1
+      },
+      "error": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"project\",\n      \"editor\"\n    ],\n    \"path\": [\n      \"access\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"project\\\"|\\\"editor\\\"\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"project\",\n      \"app\"\n    ],\n    \"path\": [\n      \"context\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"project\\\"|\\\"app\\\"\"\n  },\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"x\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"x\\\"\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {
+        "prompt": "",
+        "access": 1
+      },
+      "error": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_small\",\n    \"minimum\": 1,\n    \"inclusive\": true,\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Too small: expected string to have >=1 characters\"\n  },\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"project\",\n      \"editor\"\n    ],\n    \"path\": [\n      \"access\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"project\\\"|\\\"editor\\\"\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {
+        "prompt": "x",
+        "extra": 1
+      },
+      "error": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"extra\\\"\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {
+        "prompt": "x",
+        "access": null
+      },
+      "error": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"project\",\n      \"editor\"\n    ],\n    \"path\": [\n      \"access\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"project\\\"|\\\"editor\\\"\"\n  }\n]"
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {
+        "prompt": "x",
+        "access": "editor",
+        "context": "app"
+      },
+      "error": "App sessions require project access."
+    },
+    {
+      "state": "none",
+      "tool": "start_session",
+      "args": {},
+      "recipe": "oversized-prompt",
+      "error": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_big\",\n    \"maximum\": 200000,\n    \"inclusive\": true,\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Too big: expected string to have <=200000 characters\"\n  }\n]"
+    }
+  ]
+}

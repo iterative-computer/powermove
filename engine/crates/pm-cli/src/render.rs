@@ -530,7 +530,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
     let precision = pm_render::composite::project_color(
         doc.root().ok_or_else(|| usage("the project is empty"))?,
     )
-    .map_err(usage)?
+    .map_err(|reason| Failure::Unsupported(vec![reason]))?
     .precision;
     Ok(ExportSettings {
         format,
@@ -864,7 +864,6 @@ fn absolute(p: &Path) -> Result<PathBuf, Failure> {
 mod depth_tests {
     use super::*;
     use pm_protocol::color::Precision;
-
     #[test]
     fn precision_flag_changes_only_the_render_copy() {
         let original =

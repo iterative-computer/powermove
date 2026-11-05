@@ -1,0 +1,417 @@
+{
+  "W001": {
+    "id": "native-launch-open-routing",
+    "needs_macos": true,
+    "missing": "Native startup/Open event queue, last-focused-window restoration and hidden launch driver; assert exact restored project IDs and retained Recents."
+  },
+  "W002": {
+    "id": "native-window-tab-routing",
+    "needs_macos": true,
+    "missing": "Native tab/window focus, drag reorder/detach/attach and in-memory document activation driver; kernel library operations do not exercise window routing."
+  },
+  "W003": {
+    "id": "native-close-quit-coordinator",
+    "needs_macos": true,
+    "missing": "Native document/window/Quit close coordinator with Cancel, Save chooser cancellation, final recovery flush and archive-preserving DiscardClose integration."
+  },
+  "W004": {
+    "id": "native-crash-recovery-coordinator",
+    "needs_macos": true,
+    "missing": "Native runtime-crash injection and reload/close coordinator with journal recovery and surviving MCP connections; headless journal reads alone do not prove this."
+  },
+  "W005": {
+    "id": "native-signed-updater",
+    "needs_macos": true,
+    "missing": "Signed Sparkle/updater driver, staged installation and retained recovery on cancel/failure; portable version models do not execute an update."
+  },
+  "W006": {
+    "id": "native-project-library-controls",
+    "needs_macos": true,
+    "missing": "Native Projects/tab/context-menu controls for create/open/rename/duplicate/trash and picker cancellation; headless library IDs are independently testable."
+  },
+  "W007": {
+    "id": "native-portable-document-flow",
+    "needs_macos": true,
+    "missing": "Native Open/Save/Save As chooser and file-association/recovery coordination with portable media closure, cancelled/failed writes and external-change detection."
+  },
+  "W008": {
+    "id": "native-async-project-open",
+    "needs_macos": true,
+    "missing": "Native asynchronous load coordinator with cancellable tab intents, joined opens, paint/input progress and bounded document ownership; a synchronous open is not this gate."
+  },
+  "W009": {
+    "id": "native-composition-settings-controls",
+    "needs_macos": true,
+    "missing": "Native New/Project Settings and delivery-default controls bound to exact kernel composition fields; retain fractional authored rates."
+  },
+  "W010": {
+    "id": "native-key-command-dispatch",
+    "needs_macos": true,
+    "missing": "Native key dispatch connected to focused GPUI and remote-DOM surfaces, text ownership, repeat and decline; isolated resolver probes do not deliver physical input."
+  },
+  "W011": {
+    "id": "native-menu-command-dispatch",
+    "needs_macos": true,
+    "missing": "AppKit/context-menu routing to native command IDs with correct pointer location, focus and edit/Undo state."
+  },
+  "W012": {
+    "id": "native-settings-service-bindings",
+    "needs_macos": true,
+    "missing": "Native Settings sections/search, live extension details, preference controls and persistence across a real host relaunch."
+  },
+  "W013": {
+    "id": "native-first-run-about",
+    "needs_macos": true,
+    "missing": "Native onboarding/About coordinator, setup handoffs and reduced-motion/input interruption; no replacement copy or layout may be invented."
+  },
+  "W014": {
+    "id": "native-workspace-layout-controller",
+    "needs_macos": true,
+    "missing": "Native workspace/panel arrange/resize/hide/collapse controller with stable hosts and project-specific saved geometry across relaunch."
+  },
+  "W015": {
+    "id": "native-panel-popout-lifecycle",
+    "needs_macos": true,
+    "missing": "AppKit panel-popout lifecycle, allowed window names, retained panel state and return-to-dock integration."
+  },
+  "W016": {
+    "id": "native-library-live-previews",
+    "needs_macos": true,
+    "missing": "Native Library panel-preview host with bounded queues, fit, cancellation and retained live editor identity through transitions."
+  },
+  "W017": {
+    "id": "native-palette-dialog-notices",
+    "needs_macos": true,
+    "missing": "Native command palette/modal/menu/toast semantic driver, focus restoration, asynchronous failure/retry and dismissal."
+  },
+  "W018": {
+    "id": "native-media-browser-controller",
+    "needs_macos": true,
+    "missing": "Native media list selection/marquee/folder/drop/confirmation controller bound to project identity; metadata edits alone do not exercise stale dialogs or pointer selection."
+  },
+  "W019": {
+    "id": "durable-media-import-coordinator",
+    "needs_macos": true,
+    "missing": "Durable native import coordinator and MCP import_media/import_media_to_timeline, decoder/conversion worker, progress/cancel and project/revision fencing."
+  },
+  "W020": {
+    "id": "image-sequence-import-coordinator",
+    "needs_macos": true,
+    "missing": "Native image-sequence discovery/gap/replacement flow with exact source fps, durable frame bytes, decoder and portable-save closure."
+  },
+  "W021": {
+    "id": "native-source-preview-controller",
+    "needs_macos": true,
+    "missing": "Native source-preview surface and independent decoder/transport instance, open/double-click routing and source-only scrubbing without timeline mutation."
+  },
+  "W022": {
+    "id": "durable-media-relink-replacement",
+    "needs_macos": true,
+    "missing": "Native relink/replace_media coordinator with sampled source fingerprint checks, original/proxy provenance, durable version publication and runtime error recovery."
+  },
+  "W023": {
+    "id": "cloud-media-download-coordinator",
+    "needs_macos": true,
+    "missing": "Native deferred cloud-media download coordinator, fresh-byte storage, cancellation/failure cleanup and automatic recovery; no remote service is simulated as a real download."
+  },
+  "W024": {
+    "id": "agent-provider-auth-stream-host",
+    "needs_macos": false,
+    "missing": "Native subscription/API/local-provider connection and request/stream adapter, account persistence and broken-stream recovery under the real host boundary."
+  },
+  "W025": {
+    "id": "native-agent-conversation-surface",
+    "needs_macos": true,
+    "missing": "Native agent conversation surface and dock/popover/float/pin/resize controller with one retained conversation and saved window placement."
+  },
+  "W026": {
+    "id": "native-agent-composer-attachments",
+    "needs_macos": true,
+    "missing": "Native agent composer editing, caret/selection/newlines/slash tokens, attachment bytes and submit/focus ownership in each declared surface variant."
+  },
+  "W027": {
+    "id": "agent-run-thread-coordinator",
+    "needs_macos": false,
+    "missing": "Native agent run/thread persistence and orchestration lifecycle, launch deduplication, steering, stop and project/thread isolation across host relaunch."
+  },
+  "W028": {
+    "id": "agent-approval-question-stream-host",
+    "needs_macos": true,
+    "missing": "Native streaming reply/reasoning/result renderer and durable archive with full text, stable nodes, late fragments, failures, narrow layouts and follow-ups."
+  },
+  "W029": {
+    "id": "agent-visual-reply-publication",
+    "needs_macos": false,
+    "missing": "Native publish_visual_reply backing, durable thread attachments and WebKit interaction/replay host with CSP/navigation/privilege confinement."
+  },
+  "W030": {
+    "id": "agent-project-tool-integration",
+    "needs_macos": false,
+    "missing": "Native agent-run coordinator around MCP inspection/edit/review/finish, exact baseline refresh, interleaved Undo and final-frame verification; kernel/MCP checks cover only the explicitly linked assertions."
+  },
+  "W031": {
+    "id": "engine-media-registry-integration",
+    "needs_macos": true,
+    "missing": "Native media registry/original resolver plus probe/sample/contact-sheet/waveform/transcription workers and media import/replacement run coordination; metadata is not decoded media."
+  },
+  "W032": {
+    "id": "native-panel-semantic-surface-host",
+    "needs_macos": true,
+    "missing": "Real SurfaceHook panel tree/controls/capture and workspace-transfer host, stable element IDs, input delivery and retry; a recording trait double is not a rendered panel."
+  },
+  "W033": {
+    "id": "external-mcp-application-integration",
+    "needs_macos": false,
+    "missing": "Native packaged MCP entrypoint/session reconnection and real host tool adapters across reload/crash; in-process MCP contract tests do not certify installed-app transport."
+  },
+  "W034": {
+    "id": "owner-browser-host-scope",
+    "needs_macos": false,
+    "missing": "Recorded native scope boundary for browser-host/serve workflows; retain original obligations without success-shaped substitutes."
+  },
+  "W035": {
+    "id": "store-account-library-service",
+    "needs_macos": false,
+    "missing": "Remote Store account/library authentication, remembered installs and native credential consent/denial connected to Store host and kernel state."
+  },
+  "W036": {
+    "id": "store-remote-install-publish-service",
+    "needs_macos": false,
+    "missing": "Remote Store catalog/release network transport and install/update/uninstall/publish coordinator with verified bytes, admission and app/kernel/runtime wiring."
+  },
+  "W037": {
+    "id": "extension-source-promotion-activation",
+    "needs_macos": true,
+    "missing": "Atomic source promotion/reload and app install/disable/fork/rebase flows with unchanged extension activation. File-only MCP fork and definition validation now execute; compile/publication and native surfaces remain open."
+  },
+  "W038": {
+    "id": "signed-store-helper-admission",
+    "needs_macos": true,
+    "missing": "Per-Store-extension V8 process and WebKit view integration with permissions, network/clipboard/navigation boundaries, watchdog kill and independent surviving extensions."
+  },
+  "W039": {
+    "id": "extension-settings-storage-host",
+    "needs_macos": true,
+    "missing": "Real extension variable/settings/storage host connected to kernel state, activation and reload; pure registries do not establish durable host preferences."
+  },
+  "W040": {
+    "id": "compat-live-kernel-render-page-binding",
+    "needs_macos": true,
+    "missing": "Merged native V8/kernel history and typed edits plus recorder CPU readback execute in acceptance. Complete history.selection and structural-mutation leases, animation/model/space3d query backends, engine resources and WebKit page transport with unchanged v1\u20133 scenarios remain open. StorageAPI scope/reload executes; profile/disk lifecycle still needs host integration."
+  },
+  "W041": {
+    "id": "transcription-model-inference-service",
+    "needs_macos": false,
+    "missing": "Native speech-model download and word-timed inference service plus caption mutation adapter. Existing caption text export does not create/transcribe cues."
+  },
+  "W042": {
+    "id": "native-theme-host-bindings",
+    "needs_macos": true,
+    "missing": "Native theme ownership/unapply/reload/system-appearance integration across all declared workspaces and host restarts; existing Opus tokens/specs remain authoritative."
+  },
+  "W043": {
+    "id": "native-input-ime-accessibility",
+    "needs_macos": true,
+    "missing": "AppKit text services, clipboard and native selection/editing menus plus remote-DOM/GPUI focus, IME, accessibility and reduced-motion integration."
+  },
+  "W044": {
+    "id": "native-notification-haptic-adapters",
+    "needs_macos": true,
+    "missing": "Native notification/warning/haptic delivery and lifecycle with real foreground/background cadence and dismissal."
+  },
+  "W045": {
+    "id": "native-viewer-navigation",
+    "needs_macos": true,
+    "missing": "Native viewer/timeline wheel/trackpad/pinch/pan/fit controller, cursor-anchor math and retained picture placement verified against real presentation."
+  },
+  "W046": {
+    "id": "native-viewer-selection-movement",
+    "needs_macos": true,
+    "missing": "Native viewer hit-test/hover/group/multi-selection/lock controller and pointer/key gestures with exact selection, transform and Undo publication."
+  },
+  "W047": {
+    "id": "native-viewer-transform-gestures",
+    "needs_macos": true,
+    "missing": "Native viewer transform/resize/rotate/anchor/alignment gizmo controller, local/common pivot semantics, cursor and fixed-screen-size indicators with pixel verification."
+  },
+  "W048": {
+    "id": "native-path-mask-editor",
+    "needs_macos": true,
+    "missing": "Native Pen/vector/mask tool and pointer editing controller with lock protection, geometry/Undo and actual raster/matte pixels."
+  },
+  "W049": {
+    "id": "native-text-editor-layout",
+    "needs_macos": true,
+    "missing": "Native canvas point/paragraph text editing controller, caret/word selection/clipboard/focus and live glyph layout/raster under parent transforms."
+  },
+  "W050": {
+    "id": "native-scene3d-editor",
+    "needs_macos": true,
+    "missing": "Native 2.5D/3D scene import/gizmo/orbit controller and model/material/texture/lighting render backing; portable asset closure and exact camera/Undo must be verified."
+  },
+  "W051": {
+    "id": "native-playback-engine-transport",
+    "needs_macos": true,
+    "missing": "Native engine transport/decoder scheduler connected to host time/quality/play controls and independent clip instances; decoded cuts/playback/audio and display samples are required."
+  },
+  "W052": {
+    "id": "native-work-area-controls",
+    "needs_macos": true,
+    "missing": "Native work/source-range controls and key routing bound to preview/export ranges; kernel fields alone do not drive the host."
+  },
+  "W053": {
+    "id": "native-marker-controls",
+    "needs_macos": true,
+    "missing": "Native timeline ruler marker menus/pins and keyboard Undo/Redo in layers/tracks modes, stable marker IDs and saved-host reopen."
+  },
+  "W054": {
+    "id": "native-timeline-snapping",
+    "needs_macos": true,
+    "missing": "Native directional snap/guide controller for playhead, clip edges and keys with crossing/latch/release and modifier bypass input."
+  },
+  "W055": {
+    "id": "native-timeline-layer-controls",
+    "needs_macos": true,
+    "missing": "Native timeline layers/tracks rows, disclosure, track assignment/reorder and viewport controller with stable hosts and live property readouts."
+  },
+  "W056": {
+    "id": "native-clip-trim-split-controls",
+    "needs_macos": true,
+    "missing": "Native clip pointer/keyboard move/split/trim controller with live preview, stack order, source-time decoder publication, cancellation and one-step Undo."
+  },
+  "W057": {
+    "id": "decoded-source-slip-integration",
+    "needs_macos": true,
+    "missing": "Native source-slip command integration plus decoded source-in/out frame oracle; typed timing alone does not verify decoded continuity."
+  },
+  "W058": {
+    "id": "decoded-source-retiming-integration",
+    "needs_macos": true,
+    "missing": "Native Speed property control/drag/cancel bound to source-span-preserving retime, timeline strip geometry and Undo/Redo; MCP retiming is only linked supporting evidence."
+  },
+  "W059": {
+    "id": "native-embedded-audio-routing",
+    "needs_macos": true,
+    "missing": "Native embedded audio playback/separation/mute controller and real device output with source-rate mapping; kernel audio metadata is insufficient."
+  },
+  "W060": {
+    "id": "native-keyframe-editor",
+    "needs_macos": true,
+    "missing": "Native timeline/inspector stopwatch/diamond/property-row/keyframe pointer controller and selected-key navigation with exact key IDs, values, times and Undo."
+  },
+  "W061": {
+    "id": "native-graph-editor-and-curve-oracle",
+    "needs_macos": true,
+    "missing": "Native Graph Editor picking/marquee/value-speed/Bezier-handle controller with independent selected curves, cancellation and pixel/readout verification."
+  },
+  "W062": {
+    "id": "native-group-parent-precompose-pixels",
+    "needs_macos": true,
+    "missing": "Native group/parent/precompose/ungroup commands and pointer/menu integration checked by rendered pixels at all declared times, including animated boundaries and saved media."
+  },
+  "W063": {
+    "id": "native-inspector-property-bindings",
+    "needs_macos": true,
+    "missing": "Native Properties/multi-edit/composition control bindings with type-specific fields, exact authored values, lock guards and one-step Undo."
+  },
+  "W064": {
+    "id": "native-effects-matte-controls",
+    "needs_macos": true,
+    "missing": "Native effect/matte browser/registration/reorder/copy-paste control integration and real shader/raster outputs through masks, blend, alpha and timing."
+  },
+  "W065": {
+    "id": "native-easing-preset-library",
+    "needs_macos": true,
+    "missing": "Native easing/vector preset library panel, extended-preset import and graph editing integration with durable user preset data."
+  },
+  "W066": {
+    "id": "native-font-text-animation-controls",
+    "needs_macos": true,
+    "missing": "Native typography/variable-axis/text-animator controls plus actual installed-font registration/cache and glyph raster; font swaps and memory must be measured."
+  },
+  "W067": {
+    "id": "native-caption-editor-and-inference",
+    "needs_macos": true,
+    "missing": "Native caption import/cue editing/style/preset/Generate Captions host and timed-model service with burn-in/export pixels; linked pure SRT/VTT exports do not prove the entire workflow."
+  },
+  "W068": {
+    "id": "native-audio-mixer-device-meters",
+    "needs_macos": true,
+    "missing": "Native Mixer panel/fader/mute/solo/routing plus real nested audio output and moving measured meters; no simulated level is an audible pass."
+  },
+  "W069": {
+    "id": "native-export-child-codec-integration",
+    "needs_macos": true,
+    "missing": "Native export destination/progress/cancel controller and originals-only engine ExportChild with real codec/file verification, backpressure, failures and resource drain."
+  },
+  "W070": {
+    "id": "native-export-queue-snapshots",
+    "needs_macos": true,
+    "missing": "Native durable render-queue job/preset/snapshot/retry controller and real export child; preserve fractional rate/alpha and active document."
+  },
+  "W071": {
+    "id": "encoded-fractional-rate-oracle",
+    "needs_macos": true,
+    "missing": "Native source-time decoder, output-rate encoder and timecode/cadence verification at authored fractional rates; exact kernel fps persistence is supporting evidence only."
+  },
+  "W072": {
+    "id": "owner-web-animation-export-scope",
+    "needs_macos": false,
+    "missing": "Owner removed standalone web-animation export from cutover (2026-10-29); preserve shipped source evidence and do not report a pass."
+  },
+  "W073": {
+    "id": "native-control-input-bindings",
+    "needs_macos": true,
+    "missing": "Native numeric/choice/toggle/point control semantics for typing, pointer scrub, field key ownership, cancellation and one-step Undo."
+  },
+  "W074": {
+    "id": "native-colour-control-sampler",
+    "needs_macos": true,
+    "missing": "Native solid/gradient color picker/eyedropper control and overlay/focus/alpha binding with actual color/raster verification."
+  },
+  "W075": {
+    "id": "native-cross-surface-history-clipboard",
+    "needs_macos": true,
+    "missing": "Native cross-surface history/clipboard/live-edit routing with text-versus-layer ownership, pending redo and persisted history; linked actor/MCP checks do not deliver host events."
+  },
+  "W076": {
+    "id": "metal-authored-frame-oracles",
+    "needs_macos": true,
+    "missing": "Real pm-engine-service/Metal render/readback backing and independent decoded pixel/geometry/color oracle, GPU loss/recovery and cache generation/resource assertions; EngineHook doubles provide no pixels."
+  },
+  "W077": {
+    "id": "physical-paired-performance-oracles",
+    "needs_macos": true,
+    "missing": "Paired native/Electron performance runs on the same supported Mac with real input/presentation, decoder/GPU/resource counters and the declared project; Linux wall clocks cannot certify this budget."
+  },
+  "W078": {
+    "id": "native-shader-compiler-editor",
+    "needs_macos": true,
+    "missing": "Native shader authoring/compiler/registration/uniform controller and Metal/approved fallback output, errors and reload lifecycle."
+  },
+  "W079": {
+    "id": "native-shuttle-command-engine-routing",
+    "needs_macos": true,
+    "missing": "Real J/K/L command fallthrough and engine transport with reverse source decoding and physical audio; actor shuttle facts alone do not establish it."
+  },
+  "W080": {
+    "id": "native-ripple-gesture-integration",
+    "needs_macos": true,
+    "missing": "Real timeline ripple delete/trim gestures and target tracks connected to actor operations, decoded source/A/V checks and persisted history."
+  },
+  "W081": {
+    "id": "native-roll-slide-gesture-integration",
+    "needs_macos": true,
+    "missing": "Real timeline roll/slide gestures connected to actor operations, handle refusals and decoded boundary frames/audio."
+  },
+  "W082": {
+    "id": "native-source-monitor-three-point",
+    "needs_macos": true,
+    "missing": "Real source monitor In/Out/targets and video/audio/both insert/overwrite actions connected to actor operations and decoded A/V."
+  },
+  "W083": {
+    "id": "native-linked-av-editor-integration",
+    "needs_macos": true,
+    "missing": "Real linked-A/V selection, bypass gestures, lock feedback and source edits connected to actor link operations and decoded A/V."
+  }
+}

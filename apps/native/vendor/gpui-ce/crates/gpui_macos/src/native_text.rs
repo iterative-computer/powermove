@@ -331,7 +331,12 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     let mut moved = false;
     let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
-        let Some((bounds, clip)) = state.geometry.get() else {
+        let Some((bounds, clip)) = state.geometry.take() else {
+            if !state.wrapper.isHidden() {
+                state.wrapper.setHidden(true);
+                moved = true;
+                crate::composition_accessibility::changed(key);
+            }
             continue;
         };
         let h = state

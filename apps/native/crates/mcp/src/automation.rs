@@ -99,8 +99,12 @@ pub struct Automation {
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub export_jobs: Arc<crate::export_jobs::ExportJobs>,
+    /// Loaded 3D geometry from the native import/engine worker, for snapshot-bound placement and exploded views.
+    pub scene3d_assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
     pub export_child: Arc<dyn crate::services::ExportChild>,
     pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
+    pub creative: Arc<dyn crate::creative::CreativeInspection>,
     pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
 }
 impl Automation {
@@ -138,9 +142,12 @@ impl Automation {
             engine: None,
             surfaces: None,
             media_registry: None,
+            export_jobs: Arc::new(crate::export_jobs::ExportJobs::default()),
+            scene3d_assets: None,
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
             extension_sources: None,
+            creative: Arc::new(crate::creative::CreativeReader::default()),
         })
     }
     pub fn kernel(&self) -> &Kernel {
@@ -321,7 +328,25 @@ impl Automation {
             other => Err(Error::kernel(other)),
         }
     }
-    pub fn restore(&mut self, id: &str, value: Value, expected: u64, writer: u32) -> Result<u64> {
+    pub fn restore(
+        &mut self,
+        id: &str,
+        mut value: Value,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        // Main treats notes and their agent-access setting as durable metadata,
+        // not video content. Composition rollback must preserve current notes.
+        let current = self.read_document(id)?;
+        if let Some(target) = value.as_object_mut() {
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(current) = current.get(key) {
+                    target.insert(key.into(), current.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+        }
         let document = self.store(id)?.doc_id();
         let ack = self
             .call(
@@ -528,6 +553,26 @@ impl Automation {
         self.active = Some(id.into());
         let value = self.read_document(id)?;
         Ok(json!({"projectId":id,"name":value["name"]}))
+    }
+    /// Explicit host ingress for a caller-selected working file. This uses the
+    /// same kernel session/locks, recovery decisions and resident media table
+    /// as the app; it does not import metadata in place of original bytes.
+    /// The frozen open_project MCP schema remains a library-ID operation.
+    pub fn open_file(&mut self, id: &str, path: PathBuf) -> Result<Value> {
+        if !path.is_absolute() {
+            return Err(Error::invalid("Use an absolute project working-file path"));
+        }
+        let reply = self
+            .kernel
+            .shell(ShellCall::PrepareOpen {
+                id: id.into(),
+                source: SessionSource::File(path),
+                electron_profile: None,
+            })
+            .map_err(Error::kernel)?;
+        let project = self.adopt(reply)?;
+        let value = self.read_document(&project)?;
+        Ok(json!({"projectId":project,"name":value["name"]}))
     }
     pub fn save_library(&mut self, id: &str) -> Result<()> {
         let handle = self

@@ -7,9 +7,8 @@
 //! first; the store is then exact. Hardware-blended draws still round their
 //! blend result in hardware.
 //!
-//! This is the one copy of the conversion in the vector, path-mask, SVG
-//! and text shaders. It is the same WGSL as lane L4's `scene3d::NEAREST_HALF_WGSL`
-//! (same function names), so it is swapped for that one when it lands.
+//! This is the one copy of the conversion: the composite, sampling, 3D,
+//! effect, vector, path-mask, SVG and text shaders all include it.
 
 pub(crate) const NEAREST_HALF_WGSL: &str = r#"
 fn pm_scene_nearest_half(value: f32) -> f32 {

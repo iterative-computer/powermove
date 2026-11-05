@@ -220,6 +220,9 @@ impl<Q: KernelQueue> HostRouter<Q> {
     }
 }
 impl<K: crate::host_data::KernelData> HostRouter<crate::host_data::HostDataService<K>> {
+    pub fn subscription_count(&self) -> usize {
+        self.queue.subscription_count()
+    }
     pub fn publications(&mut self) -> Result<Vec<HostPublication>, String> {
         if self.retired || self.fenced {
             return Err("host generation retired/fenced".into());

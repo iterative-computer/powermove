@@ -60,6 +60,11 @@ pub fn validate() -> Result<(), String> {
     let catalog = pm_acceptance::catalog::Catalog::embedded()?;
     let backings = backings();
     let bindings = bindings();
+    let declaration_rows =
+        pm_acceptance::catalog::csv_rows(include_str!("../../data/e2e-declarations.csv"))?;
+    if declaration_rows.len() != frozen.cases.len() + 1 {
+        return Err("frozen declaration map cardinality drift".into());
+    }
     if frozen.revision != REFERENCE {
         return Err("unexpected frozen revision".into());
     }
@@ -88,8 +93,29 @@ pub fn validate() -> Result<(), String> {
                 return Err(format!("empty backing {workflow}"));
             }
         }
-        if !spec.coverage_limit.contains(&format!("L{}=", case.line)) {
-            return Err(format!("missing CSV declaration {}", case.id));
+        let rows = declaration_rows
+            .iter()
+            .skip(1)
+            .filter(|row| row.first() == Some(&case.id))
+            .collect::<Vec<_>>();
+        let expected_checks = bindings
+            .iter()
+            .filter(|b| b.sources.contains(&case.id))
+            .map(|b| b.check.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(";");
+        if rows.len() != 1
+            || rows[0].len() != 7
+            || rows[0][1] != case.file
+            || rows[0][2] != case.line.to_string()
+            || rows[0][3] != case.sha256
+            || rows[0][4] != expected_checks
+            || rows[0][5] != spec.workflows.join(";")
+            || rows[0][6] != case.title
+        {
+            return Err(format!("frozen declaration map drift {}", case.id));
         }
     }
     let mut files = BTreeSet::new();
@@ -371,13 +397,17 @@ mod tests {
         assert_eq!(report.exit_code(), 2);
     }
     #[test]
-    fn measured_easing_failure_is_reported_as_failure() {
+    fn repaired_easing_probe_does_not_certify_the_complete_declaration() {
         let report = run(Some("easing_set_batch")).unwrap();
         assert_eq!(report.checks.len(), 1);
         assert_eq!(report.cases.len(), 1);
-        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Fail);
-        assert_eq!(report.cases[0].status, pm_acceptance::runner::Status::Fail);
-        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Pass);
+        assert_eq!(
+            report.cases[0].status,
+            pm_acceptance::runner::Status::BlockedBy
+        );
+        assert!(!report.cases[0].missing.is_empty());
+        assert_eq!(report.exit_code(), 2);
     }
     #[test]
     fn one_passing_parameter_variant_does_not_certify_the_declaration() {

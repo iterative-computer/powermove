@@ -3,7 +3,7 @@
  * No browser APIs, timers, file IO, or document mutations in these views.
  */
 import type { ComponentChildren } from "preact";
-import { ProgressRow, ToolbarItem, token } from "../../src/components";
+import { Banner, ProgressRow, ToolbarItem, token } from "../../src/components";
 export type DocumentTarget = Readonly<{
   window: number;
   project: string;
@@ -12,17 +12,13 @@ export type DocumentTarget = Readonly<{
 export type NoticeAction = "showInFinder" | "saveAs" | "saveAgain";
 export type NoticeState = Readonly<{
   text: string;
-  level: "info" | "warning";
+  level: "info" | "warning" | "error";
   action?: Readonly<{ id: NoticeAction; label: string }>;
 }>;
 type ActionHandler = (
   target: DocumentTarget,
   action: NoticeAction | "dismiss",
 ) => void;
-const body = {
-  color: token("colors.text"),
-  fontSize: token("typography.body"),
-};
 const button = {
   color: token("colors.accent_text"),
   fontSize: token("typography.body"),
@@ -40,58 +36,33 @@ export function DocumentNotice(props: {
   const { notice, location } = props;
   const target = { ...props.target };
   return (
-    <div
-      role="group"
+    <Banner
       label={notice.text}
-      metadata={{
-        documentSurface: "notice",
-        location,
-        level: notice.level,
-        material: location === "viewer" ? "ViewerOverlay" : "Solid",
-        placement: location === "viewer" ? "bottom-centre" : "content-top",
-        shape: location === "viewer" ? "capsule" : "row",
-        scheme: location === "viewer" ? "dark" : "window",
-        // DESIGN-TODO(opus): notice symbol is unspecified in documents.md,
-        // surfaces/README and viewer-chrome; leave the symbol slot empty.
-        designTodo: "DESIGN-TODO(opus): notice symbol",
-      }}
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        ...(location === "library"
-          ? {
-              background: token("colors.panel_secondary"),
-              borderRadius: token("metrics.control_radius"),
-            }
-          : {}),
-      }}
-    >
-      <text style={body}>{notice.text}</text>
-      {notice.action && (
-        <button
-          label={notice.action.label}
-          style={button}
-          onClick={() => props.onAction(target, notice.action!.id)}
-        >
-          {notice.action.label}
-        </button>
-      )}
-      {notice.action && location === "viewer" && (
-        <button
-          label="Dismiss"
-          title="Dismiss"
-          metadata={{ symbol: "xmark", borderless: true }}
-          style={{
-            color: token("colors.secondary"),
-            symbolSize: token("metrics.symbol_inline"),
-            minWidth: token("metrics.hit"),
-            minHeight: token("metrics.hit"),
-          }}
-          onClick={() => props.onAction(target, "dismiss")}
-        />
-      )}
-    </div>
+      severity={notice.level}
+      placement={location === "viewer" ? "viewer" : "inline"}
+      symbol={
+        {
+          info: "info.circle",
+          warning: "exclamationmark.triangle.fill",
+          error: "xmark.octagon.fill",
+        }[notice.level]
+      }
+      metadata={{ documentSurface: "notice", location }}
+      action={
+        notice.action && (
+          <button
+            label={notice.action.label}
+            style={button}
+            onClick={() => props.onAction(target, notice.action!.id)}
+          >
+            {notice.action.label}
+          </button>
+        )
+      }
+      onDismiss={
+        notice.action ? () => props.onAction(target, "dismiss") : undefined
+      }
+    />
   );
 }
 export function DocumentLoading(props: { name: string; visible: boolean }) {

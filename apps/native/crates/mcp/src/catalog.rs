@@ -1,4 +1,5 @@
-//! Public names, descriptions and schemas are generated from v1.2.0, unchanged.
+//! Owner-pinned main catalog with the two owner-selected Studio 3D contracts.
+//! Tagged data stays available as compatibility evidence.
 use crate::{Error, Result};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -6,8 +7,29 @@ use std::sync::OnceLock;
 pub fn catalog() -> &'static Value {
     static VALUE: OnceLock<Value> = OnceLock::new();
     VALUE.get_or_init(|| {
+        let mut value: Value =
+            serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
+                .expect("frozen catalog");
+        let studio: Value =
+            serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                .expect("3D source catalog");
+        for replacement in studio["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing 3D tool");
+            *tool = replacement.clone();
+        }
+        value
+    })
+}
+pub fn legacy_catalog() -> &'static Value {
+    static LEGACY: OnceLock<Value> = OnceLock::new();
+    LEGACY.get_or_init(|| {
         serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
-            .expect("frozen catalog")
+            .expect("legacy catalog")
     })
 }
 pub fn tools() -> &'static Vec<Value> {
@@ -137,7 +159,10 @@ pub const IMPLEMENTED: &[&str] = &[
     "edit_layer_strips",
     "rollback_changes",
     "get_panel_layout",
+    "inspect_creative_workspace",
+    "inspect_creative_extension",
     "get_3d_scene",
+    "edit_3d",
     "check_project",
     "list_media",
     "manage_media",
@@ -188,6 +213,9 @@ pub fn backing(name: &str) -> &'static str {
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
         "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
+        "project_memory" => {
+            "kernel non-revision durable memory metadata admission and application actor binding"
+        }
         "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
         "set_panel_layout" => {
             "workspace editing state and external workspace Undo/Redo continuation host"
@@ -215,7 +243,8 @@ pub fn backing(name: &str) -> &'static str {
         }
         "edit_video" => "pm-kernel guarded id-keyed layer edits and source-aware timing adapter",
         "export_captions" => "native caption text exporter",
-        "edit_3d" | "generate_captions" => "kernel 3D/caption commands and transcription runtime",
+        "edit_3d" => "pm-scene3d and guarded kernel Studio document commands",
+        "generate_captions" => "kernel caption commands and transcription runtime",
         "list_media" => {
             "pm-kernel asset/folder/reference snapshot and optional live media registry"
         }

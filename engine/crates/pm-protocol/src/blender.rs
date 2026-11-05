@@ -213,9 +213,11 @@ impl Validate for BlenderJobRequest {
         use limits::*;
         const C: ContractId = ContractId::Blender;
         ensure(self.job.is_valid(), C, || "invalid job id".into())?;
-        ensure(!self.foreground_capture || self.priority == PriorityClass::Interactive, C, || {
-            "foreground capture requires interactive priority".into()
-        })?;
+        ensure(
+            !self.foreground_capture || self.priority == PriorityClass::Interactive,
+            C,
+            || "foreground capture requires interactive priority".into(),
+        )?;
         ensure(
             !self.surfaces.is_empty() && self.surfaces.len() <= MAX_NESTED_FRAMES,
             C,
@@ -509,10 +511,15 @@ pub(crate) mod tests {
         foreground.priority = PriorityClass::Interactive;
         assert!(foreground.validate().is_ok());
         let mut old_wire = serde_json::to_value(job()).unwrap();
-        old_wire.as_object_mut().unwrap().remove("foregroundCapture");
-        assert!(!serde_json::from_value::<BlenderJobRequest>(old_wire)
+        old_wire
+            .as_object_mut()
             .unwrap()
-            .foreground_capture);
+            .remove("foregroundCapture");
+        assert!(
+            !serde_json::from_value::<BlenderJobRequest>(old_wire)
+                .unwrap()
+                .foreground_capture
+        );
         let mut big = job();
         big.surfaces[0].size = Size::new(8193, 10);
         assert!(big.validate().is_err());

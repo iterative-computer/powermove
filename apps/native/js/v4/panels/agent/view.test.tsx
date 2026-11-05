@@ -170,7 +170,7 @@ test("60k logical rows mount only the supplied window and preserve logical count
   assertWire(commits);
   root.dispose();
 });
-test("empty Send and stopped Stop cannot dispatch; missing push buttons are not toolbar substitutes", async () => {
+test("empty Send and unavailable native actions cannot dispatch through system push buttons", async () => {
   const { root, commits } = mount();
   const actions: Action[] = [];
   await root.render(
@@ -186,8 +186,15 @@ test("empty Send and stopped Stop cannot dispatch; missing push buttons are not 
     root
       .inspect()
       .nodes.filter((n) => n.type === "button")
-      .some((n) => ["Answer", "Skip", "Allow"].includes(String(n.props.label))),
-  ).toBe(false);
+      .filter((n) =>
+        ["Answer", "Skip", "Allow"].includes(String(n.props.label)),
+      )
+      .every(
+        (n) =>
+          n.props["data-pm-component"] === "push-button" &&
+          n.props.disabled === true,
+      ),
+  ).toBe(true);
   assertWire(commits);
   root.dispose();
 });
