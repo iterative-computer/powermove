@@ -13,6 +13,7 @@ are those of panels/README §1.
 |---|---|---|
 | [agent-auth.md](agent-auth.md) | Agent surfaces, providers, runtime, sign-in, account | S057 S059 S060 S062–S066 S070–S072 S083–S086 |
 | [store.md](store.md) | Store window, Library, extension management, updates, publishing, sandbox check | S073 S075–S082 |
+| [captions.md](captions.md) | Captions panel, inspector, timeline, generation, speech models, import/export | S087–S093 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec

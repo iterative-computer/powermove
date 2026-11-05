@@ -141,7 +141,6 @@ Sections in order; a section with no items is omitted unless stated.
 | `Needs Attention` + count | anything `needsAttention` | omitted |
 | `Installed` + trailing `Check for Updates` | Store items | `EmptyState` `Nothing Installed Yet`, `Extensions you install from the Store live here, and update when their makers publish.`, button `Discover Extensions` |
 | `Made by You` + count | local items | `EmptyState` `Nothing Made Yet`, `Ask your agent for an effect, a panel or a theme. What it makes shows up here, ready to publish.` |
-| `Remembered` + count (signed in) | account installs not on this Mac | row action `Install`. Omitted when `Remember Installs on This Account` is off |
 
 Row = `ListingRow` with: lineage `forked from {handle}/{slug}` in the second
 line; third line status `t.minimum`, `c.warning` with `exclamationmark.triangle.fill`
@@ -159,8 +158,10 @@ Trust` · `Sandbox Compatibility Check…` (local) · `Show in Finder` · separa
 `Uninstall…`.
 
 Check result, inline notice: `Everything is up to date.`, `One update is
-available.`, `{n} updates are available.` Signed out: `Remembered` is absent and a
-one-line link `Sign in to keep your installs across Macs.` follows `Installed`.
+available.`, `{n} updates are available.`
+
+v1.2.0 records installs on the account when `Remember Installs on This Account` is
+on, but shows no list of them; that stays a Settings switch and no section is added.
 
 ## S073 Extensions in Settings
 
@@ -182,8 +183,8 @@ collapse with a disclosure; row detail line shows `Needs attention` state in
 | Switch failed | Error line on the row `Couldn’t update this extension.`; switch reverts |
 
 **Detail pane** additions, top to bottom: state line (`Needs attention` etc.);
-`Replacement` line when Powermove now includes it, tone `c.secondary`:
-`Powermove now includes this.`; `Effect Categories`, `Panel Categories`,
+quiet state `Replaced` with detail `Replaced by {name}`; `Replaces` (or `When Active,
+Replaces` while off) listing what it takes over, in `c.secondary`; `Effect Categories`, `Panel Categories`,
 `Appearance`, then one row each for `Panels`, `Commands`, `Shortcuts`, `Effects`,
 `Transitions`, `Layers`, `Themes`; `Values` (`Set Up…` default when waiting, else
 `Variables…`); `Extension Files` (`Show in Finder`, path `t.minimum` `c.muted`);
