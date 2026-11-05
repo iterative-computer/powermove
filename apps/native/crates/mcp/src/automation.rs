@@ -641,25 +641,17 @@ impl Automation {
         let path = self
             .exports
             .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
-        let project = self
+        let session = self
+            .sessions
+            .get(id)
+            .ok_or_else(|| Error::invalid("No shell session"))?
+            .clone();
+        let document = self.store(id)?.doc_id();
+        let receipt = self
             .kernel
-            .project_mut(id)
-            .ok_or_else(|| Error::invalid("Project is not open"))?;
-        let workspace = project.workspace().clone();
-        project.store_mut().set_workspace(Some(workspace));
-        let receipt = project
-            .store_mut()
-            .prepare_save(
-                pm_kernel::project_io::SaveTarget::SaveAs {
-                    path: path.clone(),
-                    replace: false,
-                },
-                pm_kernel::project_io::SaveOptions {
-                    portable: true,
-                    ..Default::default()
-                },
-            )
-            .and_then(|plan| plan.run())
+            .prepare_session_export(session, document, path.clone())
+            .map_err(Error::kernel)?
+            .run()
             .map_err(Error::kernel)?;
         if !receipt.unavailable_links.is_empty() {
             return Err(Error::unavailable(

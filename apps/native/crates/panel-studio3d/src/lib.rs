@@ -166,9 +166,18 @@ impl Session {
         Ok(value)
     }
     async fn call(&self, call: impl Into<Call>) -> Result<Ack> {
+        let document = self
+            .gesture_scope
+            .as_ref()
+            .map(|scope| scope.0)
+            .or_else(|| self.published.as_ref().map(|p| p.snapshot.doc_id))
+            .ok_or_else(|| invalid("Missing Studio document identity"))?;
         let ack = self
             .kernel
-            .call(&self.project, Request::new(self.caller, call))
+            .call(
+                &self.project,
+                Request::new(self.caller, call).with_document(document),
+            )
             .await
             .ok_or_else(|| invalid("Kernel stopped"))?
             .map_err(|e| invalid(format!("{e:?}")))?;
@@ -194,7 +203,8 @@ impl Session {
         self.kernel
             .state_transaction(pm_kernel::state::StateTransaction {
                 expected_revision: Some(state.revision),
-                ops: vec![pm_kernel::state::StateOp::Ui {
+                ops: vec![pm_kernel::state::StateOp::UiDocument {
+                    document: p.snapshot.doc_id,
                     project: self.project.clone(),
                     next: ui,
                 }],
@@ -432,6 +442,19 @@ impl Session {
     }
     pub async fn end(&mut self, cancel: bool) -> Result<()> {
         let gesture = self.gesture.ok_or_else(|| invalid("No Studio gesture"))?;
+        let document = self.gesture_scope.as_ref().map(|scope| scope.0);
+        if !self
+            .kernel
+            .published(&self.project)
+            .is_some_and(|p| Some(p.snapshot.doc_id) == document)
+        {
+            // Closing/reopening already retires the old actor lease. Its local
+            // owner must never cancel an edit in a replacement document.
+            self.gesture = None;
+            self.gesture_scope = None;
+            self.published = None;
+            return Ok(());
+        }
         self.call(if cancel {
             GestureCall::Cancel { gesture }
         } else {

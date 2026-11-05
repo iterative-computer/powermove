@@ -126,14 +126,15 @@ fn set_content(
             if super::scene3d::is_known_layer(&layer) {
                 return super::scene3d::set_known_content(cx, layer_id, &patch);
             }
-            return Err(CommandError::NotImplemented(
-                "set_content (extension layers)",
-            ));
+            let definition = layer
+                .get("d")
+                .and_then(|d| values::text(d, "definition"))
+                .and_then(|id| cx.state.and_then(|state| state.provider("layerTypes", id)))
+                .map(|registration| &registration.definition);
+            extension_content(&mut layer, &patch, definition)?;
         }
         "captions" => {
-            return Err(CommandError::NotImplemented(
-                "set_content (captions: use edit_captions)",
-            ));
+            super::captions::set_content(&mut layer, &patch)?;
         }
         _ => {
             let m = values::obj(&mut layer);
@@ -209,5 +210,142 @@ fn audio_content(layer: &mut Value, patch: &Map) -> Result<(), CommandError> {
     m.insert("parent", Value::Null);
     m.insert("blend", values::s("normal"));
     m.insert("mblur", Value::Bool(false));
+    Ok(())
+}
+
+/// Main's extension content contract uses the winning registered definition,
+/// while an unavailable definition leaves existing opaque parameters editable.
+fn extension_content(
+    layer: &mut Value,
+    patch: &Map,
+    definition: Option<&Value>,
+) -> Result<(), CommandError> {
+    const ALLOWED: &[&str] = &["definition", "version", "w", "h", "data", "parameters"];
+    for key in patch.keys() {
+        if !ALLOWED.contains(&key.to_string_lossy().as_str()) {
+            return Err(CommandError::Invalid(format!(
+                "Extension layer content field “{}” is not editable",
+                key.to_string_lossy()
+            )));
+        }
+    }
+    let mut d = layer
+        .get("d")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(id) = patch
+        .get("definition")
+        .filter(|v| !matches!(v, Value::Null))
+    {
+        if d.get("definition") != Some(id) {
+            return Err(CommandError::Invalid(
+                "An extension layer definition cannot be changed in place".into(),
+            ));
+        }
+    }
+    if let Some(version) = patch.get("version").filter(|v| !matches!(v, Value::Null)) {
+        if definition.and_then(|v| v.get("version")) != Some(version) {
+            return Err(CommandError::Invalid(
+                "Extension layer version is owned by its definition".into(),
+            ));
+        }
+    }
+    for (key, label) in [("w", "width"), ("h", "height")] {
+        if let Some(value) = patch.get(key).filter(|v| !matches!(v, Value::Null)) {
+            d.insert(
+                key,
+                Value::Number(values::finite(track::js_number(value), label)?.clamp(1., 16384.)),
+            );
+        }
+    }
+    if let Some(data) = patch.get("data").filter(|v| !matches!(v, Value::Null)) {
+        let data = data
+            .as_object()
+            .ok_or_else(|| CommandError::Invalid("extension data must be an object".into()))?;
+        layers::safe_patch(data, "extension data")?;
+        let mut current = d
+            .get("data")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (key, value) in data.iter() {
+            current.insert(key.clone(), value.clone());
+        }
+        d.insert("data", Value::Object(current));
+    }
+    if let Some(parameters) = patch
+        .get("parameters")
+        .filter(|v| !matches!(v, Value::Null))
+    {
+        let parameters = parameters.as_object().ok_or_else(|| {
+            CommandError::Invalid("extension parameters must be an object".into())
+        })?;
+        layers::safe_patch(parameters, "extension parameters")?;
+        let mut channels = d
+            .get("params")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (key, value) in parameters.iter() {
+            let channel = channels
+                .get_key_mut(key)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    CommandError::Invalid(format!(
+                        "Unknown extension parameter: {}",
+                        key.to_string_lossy()
+                    ))
+                })?;
+            let parameter = definition
+                .and_then(|v| v.get("params"))
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|v| v.get("k").and_then(Value::as_js_string) == Some(key))
+                });
+            let value = match parameter {
+                None => value.clone(),
+                Some(parameter) => {
+                    let label = values::text(parameter, "label")
+                        .unwrap_or_else(|| key.as_str().unwrap_or("Parameter"));
+                    match values::text(parameter, "type") {
+                        Some("color") => {
+                            let text = value
+                                .as_str()
+                                .filter(|s| {
+                                    (s.len() == 7 || s.len() == 9)
+                                        && s.starts_with('#')
+                                        && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+                                })
+                                .ok_or_else(|| {
+                                    CommandError::Invalid(format!("{label} must be a hex color"))
+                                })?;
+                            Value::from(text.to_ascii_uppercase())
+                        }
+                        Some("toggle") => Value::Bool(value.as_bool().ok_or_else(|| {
+                            CommandError::Invalid(format!("{label} must be on or off"))
+                        })?),
+                        _ => {
+                            let n = values::finite(track::js_number(value), label)?;
+                            let min = parameter
+                                .get("min")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(f64::NEG_INFINITY);
+                            let max = parameter
+                                .get("max")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(f64::INFINITY);
+                            Value::Number(n.max(min).min(max))
+                        }
+                    }
+                }
+            };
+            channel.insert("v", value);
+        }
+        d.insert("params", Value::Object(channels));
+    }
+    values::obj(layer).insert("d", Value::Object(d));
     Ok(())
 }

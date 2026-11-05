@@ -213,14 +213,15 @@ fn reopened_identity_and_editor_permissions_are_fenced() {
     );
 }
 #[test]
-fn closing_gate_refuses_new_calls_and_save_uses_app_destination() {
+fn closing_gate_refuses_new_calls_and_export_preserves_the_live_document() {
     let f = Fixture::new();
     let mut c = f.connection();
     start(&mut c);
     add(&mut c, "saved");
     let save = c.dispatch("save_project", &json!({})).unwrap();
     assert!(std::path::Path::new(save["path"].as_str().unwrap()).exists());
-    assert!(!f.host.kernel.published("test").unwrap().dirty);
+    assert!(f.host.kernel.published("test").unwrap().dirty);
+    assert!(f.host.kernel.published("test").unwrap().path.is_none());
     let operation = f.host.try_operation().unwrap();
     assert_eq!(
         c.dispatch("get_project_state", &json!({"indexOnly":true}))
@@ -349,5 +350,103 @@ fn implemented_edits_keep_mcp_origin_in_durable_history() {
     assert_eq!(
         recovered.history.records().last().unwrap().origin,
         Origin::Mcp
+    );
+}
+
+#[test]
+fn live_app_mcp_exports_unique_packed_files_without_adopting_or_overwriting_source() {
+    let f = Fixture::new();
+    let source = f._root.path().join("working.pmv");
+    f.host
+        .save(f.host.current().unwrap(), Some(source.clone()))
+        .unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let mut connection = f.connection();
+    start(&mut connection);
+    add(&mut connection, "changed");
+    let before = f.host.kernel.published("test").unwrap();
+    let mut paths = Vec::new();
+    for _ in 0..2 {
+        let response = connection.dispatch("save_project", &json!({})).unwrap();
+        let path = PathBuf::from(response["path"].as_str().unwrap());
+        assert_eq!(
+            path.parent(),
+            Some(f.host.profile.join("exports").as_path())
+        );
+        let opened = pm_kernel::open_project(&path, Default::default()).unwrap();
+        assert_eq!(
+            opened.document.to_value(),
+            before.snapshot.document.to_value()
+        );
+        paths.push(path);
+        let after = f.host.kernel.published("test").unwrap();
+        assert_eq!(after.path, before.path);
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.dirty, before.dirty);
+        assert_eq!(after.history.entries, before.history.entries);
+        assert_eq!(after.saving, before.saving);
+    }
+    assert_ne!(paths[0], paths[1]);
+    assert_eq!(std::fs::read(source).unwrap(), original);
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+}
+
+#[test]
+fn live_app_ingress_and_actor_export_keep_authored_utf16_and_source_bytes() {
+    let f = Fixture::new();
+    let source = f._root.path().join("utf16.pmv");
+    let bytes =
+        include_bytes!("../../../../../engine/crates/pm-model/tests/fixtures/containers/pmv4.pmv");
+    std::fs::write(&source, bytes).unwrap();
+    let opened = f
+        .host
+        .open("utf16".into(), SessionSource::File(source.clone()))
+        .unwrap();
+    assert_eq!(opened["projectId"], "utf16");
+    let current = f.host.current().unwrap();
+    let before = f.host.kernel.published(&current.project).unwrap();
+    let saved = f.host.export(current, before.snapshot.doc_id).unwrap();
+    let opened = pm_kernel::open_project(
+        std::path::Path::new(saved["path"].as_str().unwrap()),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        opened.document.to_value(),
+        before.snapshot.document.to_value()
+    );
+    assert!(
+        pm_model::json::to_canonical_string(&opened.document.to_value().unwrap())
+            .contains("\\ud800")
+    );
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
+}
+
+#[test]
+fn queued_app_mcp_call_cannot_edit_a_reopened_document_with_the_same_project_id() {
+    let f = Fixture::new();
+    let mut connection = f.connection();
+    start(&mut connection);
+    assert!(f.host.kernel.close("test").wait().unwrap());
+    f.host.kernel.open("test",OpenSource::Untitled(model(&json!({"id":"test","name":"Replacement","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})))).wait().unwrap().unwrap();
+    let before = f.host.kernel.published("test").unwrap();
+    assert!(
+        connection
+            .call(
+                "test",
+                HistoryCall::Begin {
+                    label: "Retired request".into()
+                }
+            )
+            .is_err()
+    );
+    let after = f.host.kernel.published("test").unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert!(after.entry.is_none());
+    assert_eq!(
+        after.snapshot.document.to_value(),
+        before.snapshot.document.to_value()
     );
 }

@@ -569,3 +569,30 @@ fn disclosures_persist_in_kernel_ui_without_touching_project_or_unknown_fields()
     assert_eq!(root(&a), before);
     assert_eq!(a.handle().published("p").unwrap().history.entries, 0);
 }
+
+#[test]
+fn disposed_gesture_from_a_reopened_document_preserves_the_new_lease() {
+    let (actor, mut session) = fixture();
+    drive(&mut session, "add", json!("box"));
+    let state = publish(&mut session);
+    run(session.begin(state["ticket"].as_str().unwrap(), "Change Roughness")).unwrap();
+    actor.handle().close("p").wait().unwrap();
+    actor.handle().open("p",OpenSource::Untitled(to_model(&json!({"id":"p","compId":"c","w":640,"h":360,"fps":30,"dur":10,"layers":[],"assets":{},"comps":{}})))).wait().unwrap().unwrap();
+    call(
+        &actor,
+        pm_kernel::GestureCall::Begin {
+            label: "Replacement edit".into(),
+        },
+    );
+    let before = actor.handle().published("p").unwrap();
+    assert!(run(session.step("field.m.roughness", json!(0.8))).is_err());
+    run(session.dispose()).unwrap();
+    let after = actor.handle().published("p").unwrap();
+    assert_eq!(after.snapshot.doc_id, before.snapshot.doc_id);
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(
+        after.entry.as_ref().map(|e| e.id),
+        before.entry.as_ref().map(|e| e.id)
+    );
+    assert!(after.entry.is_some());
+}

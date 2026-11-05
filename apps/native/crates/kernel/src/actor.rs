@@ -280,6 +280,12 @@ enum Msg {
         call: crate::profile::ProfileCall,
         reply: Reply<Result<crate::profile::ProfileReply, KernelFailure>>,
     },
+    PrepareExport {
+        session: crate::session::SessionHandle,
+        document: u64,
+        path: std::path::PathBuf,
+        reply: Reply<Result<crate::SavePlan, KernelFailure>>,
+    },
     PrepareSave {
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
@@ -444,6 +450,21 @@ impl KernelHandle {
             reply: Box::new(move |v| r.resolve(v)),
         });
         p
+    }
+    pub fn prepare_export(
+        &self,
+        session: crate::session::SessionHandle,
+        document: u64,
+        path: std::path::PathBuf,
+    ) -> Pending<Result<crate::SavePlan, KernelFailure>> {
+        let (reply, pending) = oneshot();
+        self.send(Msg::PrepareExport {
+            session,
+            document,
+            path,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
     }
     pub fn prepare_save(
         &self,
@@ -780,6 +801,14 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
         match msg {
             Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
             Msg::Profile { call, reply } => reply(kernel.profile(call)),
+            Msg::PrepareExport {
+                session,
+                document,
+                path,
+                reply,
+            } => {
+                reply(kernel.prepare_session_export(session, document, path));
+            }
             Msg::PrepareSave {
                 session,
                 path,

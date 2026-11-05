@@ -1287,3 +1287,80 @@ fn changed_unkeyed_array_still_commits_with_notice() {
         parse(r#"[{"name":"foreign"},{"name":"owner"},{"name":"b"}]"#).unwrap()
     );
 }
+
+#[test]
+fn document_guard_fences_selection_and_every_gesture_lifecycle_call() {
+    let old_document = project().store().doc_id();
+    let mut replacement = project(); // same project/layer IDs, another lifetime
+    let document = replacement.store().doc_id();
+    let original = replacement.store().snapshot().document.to_value();
+    for call in [
+        Call::Selection(pm_kernel::SelectionCall::Layers {
+            ids: vec!["layer0".into()],
+            add: false,
+        }),
+        Call::Gesture(GestureCall::Begin {
+            label: "Stale".into(),
+        }),
+    ] {
+        let ack = replacement
+            .handle(Request::new(native(), call).with_document(old_document))
+            .reply
+            .unwrap();
+        assert!(matches!(ack.reply, Reply::Throw(KernelError::Guard(_))));
+        assert_eq!(replacement.store().snapshot().document.to_value(), original);
+        assert!(replacement.store().selection().layers().is_empty());
+    }
+    let ack = replacement
+        .handle(
+            Request::new(
+                native(),
+                GestureCall::Begin {
+                    label: "Current".into(),
+                },
+            )
+            .with_document(document),
+        )
+        .reply
+        .unwrap();
+    let Reply::Gesture(gesture) = ack.reply else {
+        panic!("gesture must open")
+    };
+    for call in [
+        GestureCall::Step {
+            gesture,
+            body: opacity("layer0", 25.),
+            replace: true,
+        },
+        GestureCall::Commit { gesture },
+        GestureCall::Cancel { gesture },
+    ] {
+        let ack = replacement
+            .handle(Request::new(native(), call).with_document(old_document))
+            .reply
+            .unwrap();
+        assert!(matches!(ack.reply, Reply::Throw(KernelError::Guard(_))));
+        assert_eq!(replacement.store().snapshot().document.to_value(), original);
+    }
+    let ack = replacement
+        .handle(
+            Request::new(
+                native(),
+                GestureCall::Step {
+                    gesture,
+                    body: opacity("layer0", 25.),
+                    replace: true,
+                },
+            )
+            .with_document(document),
+        )
+        .reply
+        .unwrap();
+    assert!(!matches!(ack.reply, Reply::Throw(_)));
+    let ack = replacement
+        .handle(Request::new(native(), GestureCall::Cancel { gesture }).with_document(document))
+        .reply
+        .unwrap();
+    assert!(!matches!(ack.reply, Reply::Throw(_)));
+    assert_eq!(replacement.store().snapshot().document.to_value(), original);
+}
