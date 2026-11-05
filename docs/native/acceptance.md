@@ -626,6 +626,7 @@ apps/native/crates/acceptance/scripts/verify.sh --strict
 python3 apps/native/crates/acceptance/scripts/refresh-main-reports.py work/native-acceptance/report.json
 # Read-only oracle checks, with TypeScript 5.9.3 available through NODE_PATH:
 bun apps/native/crates/acceptance/scripts/main-catalog.cjs
+python3 apps/native/crates/acceptance/scripts/main-deltas.py
 bun apps/native/crates/acceptance/src/e2e/extract.cjs
 bun apps/native/crates/acceptance/src/e2e/extract.cjs --reference=v1.2.0
 ```
@@ -648,7 +649,7 @@ Bun/remote-DOM build prerequisites and the matching S1 artifact on macOS.
 | Separate schema/routing/supporting evidence, complete bodies/workflows and legacy results | N3: no old or partial pass certifies current main behavior |
 | Route data/effect/UI production work to its owners and make no visual/UX changes | Ownership and Opus design rule; no new DESIGN-TODO(opus) |
 
-Linux verification: **84 acceptance + 17 optional-worker + 37 retained-e2e Rust
+Linux verification: **85 acceptance + 17 optional-worker + 37 retained-e2e Rust
 tests and 8 Python report tests pass**, with no ignored tests. Formatting and
 crate-local Clippy `-D warnings` pass across the three manifests. Main and legacy
 oracle regeneration checks match their pinned sources. No native workspace or
@@ -658,3 +659,11 @@ AppKit/IME/AX/WebKit panels, complete current extension scenarios, new 3D/effect
 pixels, media/export/audio, client setup consent, signed boundaries and physical
 performance. Linux proves none of those. The previously recorded unusable Linux
 Playwright CLI still prevents an Electron ledger execution; no GUI pass is claimed.
+
+
+Current main reports name the mandatory old-file/extension checks in
+`compatibility_required_ids`. Those checks affect strict/failure exits alongside
+current main. Retained old window/layout/visual gates remain historical evidence;
+they do not reinstate v1.2.0 as the UI target. All old IDs, cases and provenance
+remain inspectable. This distinction follows the owner's explicit current-main
+reference plus the required old-project/extension compatibility boundary.

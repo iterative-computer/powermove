@@ -44,6 +44,16 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
     let r =
         main_reference::run(&Catalog::embedded().unwrap(), &Filter::default(), &[], None).unwrap();
     assert_eq!(r.exit_code(true), 1);
+    let retired = r
+        .cases
+        .iter()
+        .find(|c| c.id == "MAIN.W072.contract")
+        .unwrap();
+    assert!(retired.reason.contains("removed action stays absent"));
+    assert_eq!(
+        retired.blocked_by.as_deref(),
+        Some("delta-data:archived-web-export-preferences")
+    );
     assert_eq!(r.counts(), (1651, 32, 2661));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
@@ -171,4 +181,48 @@ fn preexisting_id_consumers_still_run_with_explicit_compatibility_metadata() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["reference"], main_reference::LEGACY_REFERENCE);
     assert_eq!(value["purpose"], "legacy-compatibility");
+}
+
+#[test]
+fn old_ui_gates_stay_historical_while_required_legacy_inputs_gate_strict_mode() {
+    let catalog = Catalog::embedded().unwrap();
+    let mut main = main_reference::run(
+        &catalog,
+        &Filter {
+            workflow: None,
+            case: Some("MAIN.MCP.list_projects.catalog".into()),
+        },
+        &[],
+        None,
+    )
+    .unwrap();
+    let legacy = pm_acceptance::runner::run(
+        &catalog,
+        &Filter {
+            workflow: None,
+            case: Some("K001.normal".into()),
+        },
+        &[],
+    )
+    .unwrap();
+    main.compatibility = Some(legacy);
+    assert_eq!(
+        main.exit_code(true),
+        0,
+        "superseded UI gate must not restore the tag parity target"
+    );
+    let legacy = pm_acceptance::runner::run(
+        &catalog,
+        &Filter {
+            workflow: None,
+            case: Some("W037.v8-reload".into()),
+        },
+        &[],
+    )
+    .unwrap();
+    main.compatibility = Some(legacy);
+    main.compatibility_required_ids = vec!["W037.v8-reload".into()];
+    assert_eq!(main.exit_code(true), 2);
+    main.compatibility.as_mut().unwrap().cases[0].status = Status::Fail;
+    assert_eq!(main.exit_code(false), 1);
 }

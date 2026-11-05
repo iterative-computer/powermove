@@ -50,6 +50,9 @@ pub struct MainReport {
     pub delta_routing: &'static Vec<Value>,
     /// Actual tagged requirements, never counted as current main parity passes.
     pub compatibility: Option<Report>,
+    /// Required old file/extension checks; old shell/visual workflow gates are
+    /// historical evidence and do not reinstate a superseded UI reference.
+    pub compatibility_required_ids: Vec<String>,
 }
 fn blocked(
     id: String,
@@ -176,7 +179,23 @@ pub fn run(
         } else {
             (
                 format!("main:mcp:{name}"),
-                pm_mcp::catalog::HOST_BACKED.contains(&name),
+                matches!(
+                    name,
+                    "render_frames"
+                        | "probe_media"
+                        | "sample_media_frames"
+                        | "media_contact_sheet"
+                        | "media_waveform"
+                        | "export_video"
+                        | "get_workspace_state"
+                        | "open_panel"
+                        | "get_panel_state"
+                        | "interact_panel"
+                        | "capture_panel"
+                        | "computer_use_panel"
+                        | "inspect_creative_workspace"
+                        | "inspect_creative_extension"
+                ),
             )
         };
         cases.push(blocked(format!("MAIN.MCP.{name}.behavior"),"W033","main-tool-behavior",&backing,format!("Execute the complete pinned main tool body, including lifecycle/results/error precedence: {}. {}",tool["description"].as_str().unwrap(),pm_mcp::catalog::backing(name)),mac));
@@ -351,6 +370,10 @@ pub fn run(
     }
     let backings: Value = serde_json::from_str(include_str!("../data/backings.json")).unwrap();
     for w in &catalog.workflows {
+        if w.id == "W050" {
+            cases.push(blocked("MAIN.W050.contract".into(),"W050","main-workflow-contract","main:native-scene3d-editor","Owner requires the new Rust 3D system from feat/na-3d-source, automatic old-project upgrade, no Blender/compatibility mode, and actual native editor/render/resource verification. Old get_3d_scene fixtures do not certify this gate.".into(),true));
+            continue;
+        }
         if w.id == "W072" {
             cases.push(blocked("MAIN.W072.contract".into(),"W072","main-workflow-contract","delta-data:archived-web-export-preferences","Main removed standalone web-animation delivery. Preserve old project preferences/archives; verify the removed action stays absent. This gate does not request reinstating web export.".into(),true));
             continue;
@@ -488,12 +511,28 @@ pub fn run(
     } else {
         None
     };
+    let compatibility_required_ids = compatibility
+        .as_ref()
+        .map(|report| {
+            report
+                .cases
+                .iter()
+                .filter(|case| {
+                    case.kind == "corpus-copy"
+                        || case.id == "W007.portable"
+                        || (matches!(case.workflow.as_str(), "W037" | "W038" | "W040")
+                            && crate::runtime::CASES.iter().any(|entry| entry.0 == case.id))
+                })
+                .map(|case| case.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let workflows=catalog.workflows.iter().map(|w| {
         let rows=cases.iter().filter(|c|c.workflow==w.id).collect::<Vec<_>>();
         let passed=rows.iter().filter(|c|c.status==Status::Pass).count();
         let failed=rows.iter().filter(|c|c.status==Status::Fail).count();
         let blocked=rows.len()-passed-failed;
-        crate::runner::WorkflowResult {id:w.id.clone(),title:w.title.clone(),status:if failed>0{Status::Fail}else{Status::BlockedBy},reason:"Pinned main full workflow remains blocked; narrower assertions retain their own verdicts".into(),passed,failed,blocked}
+        crate::runner::WorkflowResult {id:w.id.clone(),title:if w.id=="W072" {"Retain archived web-export preferences with the retired action absent".into()} else {w.title.clone()},status:if failed>0{Status::Fail}else{Status::BlockedBy},reason:"Pinned main full workflow remains blocked; narrower assertions retain their own verdicts".into(),passed,failed,blocked}
     }).collect();
     Ok(MainReport {
         format: "powermove.acceptance.main",
@@ -508,6 +547,7 @@ pub fn run(
         specs: specs.into_values().collect(),
         delta_routing: deltas(),
         compatibility,
+        compatibility_required_ids,
     })
 }
 impl MainReport {
@@ -526,19 +566,15 @@ impl MainReport {
     }
     pub fn exit_code(&self, strict: bool) -> u8 {
         let (_, fail, blocked) = self.counts();
-        if fail > 0
-            || self
-                .compatibility
-                .as_ref()
-                .is_some_and(|r| r.counts().1 > 0)
-        {
+        let required = self
+            .compatibility
+            .iter()
+            .flat_map(|report| &report.cases)
+            .filter(|case| self.compatibility_required_ids.contains(&case.id))
+            .collect::<Vec<_>>();
+        if fail > 0 || required.iter().any(|c| c.status == Status::Fail) {
             1
-        } else if strict
-            && (blocked > 0
-                || self
-                    .compatibility
-                    .as_ref()
-                    .is_some_and(|r| r.counts().2 > 0))
+        } else if strict && (blocked > 0 || required.iter().any(|c| c.status == Status::BlockedBy))
         {
             2
         } else {
