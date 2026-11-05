@@ -1,3 +1,1 @@
 case_id,workflow,kind,needs_macos,blocked_by,reason
-MAIN.MCP.save_project.behavior,W033,main-tool-behavior,false,,"Production MCP/kernel body, exact catalog, lifecycle/error precedence and persisted authored-state assertions: save_project must export a separate packed project; the opened working file was saved in place"
-MAIN.file.utf16-ingress,W007,main-file-compatibility,false,,Production MCP ingress preserves kernel-valid authored UTF-16: MCP ingress rejects kernel-valid authored lone UTF-16; serde_json conversion panics
