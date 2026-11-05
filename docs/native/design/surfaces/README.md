@@ -17,6 +17,8 @@ are those of panels/README §1.
 | [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
 | [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
 | [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; shipped 3D layers, inspector and viewer controls | S097 S098 |
+| [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
+| [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
