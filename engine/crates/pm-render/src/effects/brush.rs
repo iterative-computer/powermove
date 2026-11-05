@@ -56,9 +56,11 @@ fn apply(m: [f64; 6], p: Point) -> Point {
         m[1] * p[0] + m[3] * p[1] + m[5],
     ]
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn raster<'d>(
     scope: &mut Scope<'_, 'd>,
     provider: &'d Node,
+    owner: &'d Node,
     path_id: &str,
     time: f64,
     step: &EffectStep,
@@ -228,7 +230,9 @@ pub(crate) fn raster<'d>(
             }
         }
     }
-    let world = scope.world_matrix(provider, time)?;
+    // Geometry channels belong to the provider, but main rasterizes those
+    // local curves through the consuming owner's transform.
+    let world = scope.world_matrix(owner, time)?;
     let matrix = [
         world[0] * scale.0,
         world[1] * scale.1,
