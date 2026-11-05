@@ -161,7 +161,7 @@ name as title, button trailing.
 
 The card appears only when the result is ready **and** the panel still exists,
 as v1.2.0 does: an errored or removed result shows no card, and the agent's own
-text reports it. `Open` reveals the panel in Library ▸ Panels (S101). AX for
+text reports it. `Open` reveals the panel in the Panel Library (S101). AX for
 `Open`: `Open {name}`.
 
 **Run results** — completes agent-panel *Result card*.
