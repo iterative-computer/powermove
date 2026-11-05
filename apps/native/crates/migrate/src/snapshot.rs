@@ -501,40 +501,6 @@ fn check_capacity_above(free: u64, floor: u64, needed: u64) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod capacity_tests {
-    use super::*;
-
-    #[test]
-    fn reserve_and_payload_capacity_fail_with_explicit_enospc() {
-        for (available, needed) in [(MIN_FREE - 1, 0), (MIN_FREE + 7, 8)] {
-            let error = check_capacity(available, needed).unwrap_err();
-            assert_eq!(
-                error
-                    .downcast_ref::<std::io::Error>()
-                    .unwrap()
-                    .raw_os_error(),
-                Some(libc::ENOSPC)
-            );
-            let message = format!("{error:#}");
-            assert!(message.contains("ENOSPC"), "{message}");
-            assert!(
-                message.contains(&format!("{available} bytes available")),
-                "{message}"
-            );
-        }
-        check_capacity(MIN_FREE, 0).unwrap();
-        check_capacity(MIN_FREE + 8, 8).unwrap();
-        let error = check_capacity_above(MIN_FREE, MIN_FREE + 1, 0).unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .unwrap()
-                .raw_os_error(),
-            Some(libc::ENOSPC)
-        );
-    }
-}
 pub(crate) fn open_regular(path: &Path) -> Result<File> {
     let f = OpenOptions::new()
         .read(true)
@@ -650,4 +616,39 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     fs::rename(&tmp, path)?;
     File::open(path.parent().unwrap())?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_and_payload_capacity_fail_with_explicit_enospc() {
+        for (available, needed) in [(MIN_FREE - 1, 0), (MIN_FREE + 7, 8)] {
+            let error = check_capacity(available, needed).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(libc::ENOSPC)
+            );
+            let message = format!("{error:#}");
+            assert!(message.contains("ENOSPC"), "{message}");
+            assert!(
+                message.contains(&format!("{available} bytes available")),
+                "{message}"
+            );
+        }
+        check_capacity(MIN_FREE, 0).unwrap();
+        check_capacity(MIN_FREE + 8, 8).unwrap();
+        let error = check_capacity_above(MIN_FREE, MIN_FREE + 1, 0).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ENOSPC)
+        );
+    }
 }

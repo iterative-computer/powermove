@@ -117,10 +117,10 @@ fn discover_paths(v: &Value, out: &mut BTreeSet<String>) {
     match v {
         Value::Object(m) => {
             for k in ["sourcePath", "path"] {
-                if let Some(s) = m.get(k).and_then(Value::as_str) {
-                    if Path::new(s).is_absolute() {
-                        out.insert(s.into());
-                    }
+                if let Some(s) = m.get(k).and_then(Value::as_str)
+                    && Path::new(s).is_absolute()
+                {
+                    out.insert(s.into());
                 }
             }
             for x in m.values() {
@@ -148,15 +148,14 @@ fn inventory(root: &Path) -> Result<()> {
     for row in store.projects()?.into_iter().chain(store.trash()?) {
         ids.insert(row.id);
     }
-    if let Some(v) = store.read("autosave")? {
-        if let Some(id) = v
+    if let Some(v) = store.read("autosave")?
+        && let Some(id) = v
             .get("proj")
             .unwrap_or(&v)
             .get("id")
             .and_then(pm_model::Value::as_str)
-        {
-            ids.insert(id.into());
-        }
+    {
+        ids.insert(id.into());
     }
     let mut rows = Vec::new();
     let mut paths = BTreeSet::new();
