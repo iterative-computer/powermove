@@ -154,7 +154,7 @@ preview and decoded MP4/ProRes pixel changes against an effect-free baseline;
 it is **not executed or compiled here**, because the native worker requires Apple
 frameworks. A Linux example check explicitly fails at `objc2` platform admission.
 
-Linux checks: **108 passed, 0 failed, 1 existing manual private-store test ignored**
+Linux checks: **112 passed, 0 failed, 1 existing manual private-store test ignored**
 across Python driver/frozen-tool tests, Rust corpus reductions, pm-glsl and targeted
 kernel library compatibility tests. Portable corpus clippy (`-D warnings`) and
 format checks pass. These are synthetic/component results, not additional corpus

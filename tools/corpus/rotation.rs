@@ -23,49 +23,32 @@ fn document(path: &str, w: u32, h: u32) -> (pm_model::Document, MapResolver) {
     )
 }
 
+struct NativePixels(Renderer);
+impl crate::rotation_pixels::PixelRenderer for NativePixels {
+    fn frame(&mut self, path: &str, (w, h): (u32, u32), export: bool) -> Result<Vec<f32>, String> {
+        let (doc, res) = document(path, w, h);
+        let mut request = RenderRequest::at_scale(Size::new(w, h), 1., Precision::Float32);
+        request.export = export;
+        let frame = self
+            .0
+            .render(&doc, "C1", Ticks::ZERO, &request, &res)
+            .map_err(|e| format!("{e:?}"))?;
+        if !frame.failures.is_empty() {
+            return Err(format!("pixel failures: {:?}", frame.failures));
+        }
+        self.0.read_rgba(&frame).map_err(|e| format!("{e:?}"))
+    }
+}
 pub fn proof(spec: &Path) -> Result<()> {
     let spec: Value = serde_json::from_slice(&std::fs::read(spec)?)?;
     let turns = spec["turns"].as_u64().unwrap() as u32;
     ensure!((1..=3).contains(&turns), "invalid synthetic rotation");
-    let (w, h) = (64, 48);
-    let (ow, oh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
-    let mut renderer = Renderer::headless()?;
-    let (base, base_res) = document(spec["plain"].as_str().unwrap(), w, h);
-    let (rotated, rotated_res) = document(spec["rotated"].as_str().unwrap(), ow, oh);
-    for export in [false, true] {
-        let mut render = |doc, res: &MapResolver, width, height| -> Result<Vec<f32>> {
-            let mut request =
-                RenderRequest::at_scale(Size::new(width, height), 1., Precision::Float32);
-            request.export = export;
-            let frame = renderer.render(doc, "C1", Ticks::ZERO, &request, res)?;
-            ensure!(
-                frame.failures.is_empty(),
-                "pixel failures: {:?}",
-                frame.failures
-            );
-            Ok(renderer.read_rgba(&frame)?)
-        };
-        let plain = render(&base, &base_res, w, h)?;
-        ensure!(
-            plain.chunks_exact(4).any(|p| p[0] != p[1]),
-            "blank rotation witness"
-        );
-        let ours = render(&rotated, &rotated_res, ow, oh)?;
-        for y in 0..oh {
-            for x in 0..ow {
-                let (u, v) = match turns {
-                    1 => (w - 1 - y, x),
-                    2 => (w - 1 - x, h - 1 - y),
-                    _ => (y, h - 1 - x),
-                };
-                let a = ((y * ow + x) * 4) as usize;
-                let b = ((v * w + u) * 4) as usize;
-                ensure!(
-                    ours[a..a + 4] == plain[b..b + 4],
-                    "rotation pixel mismatch ({x},{y}), export={export}"
-                );
-            }
-        }
-    }
-    Ok(())
+    crate::rotation_pixels::qualify(
+        &mut NativePixels(Renderer::headless()?),
+        spec["plain"].as_str().unwrap(),
+        spec["rotated"].as_str().unwrap(),
+        (64, 48),
+        turns,
+    )
+    .map_err(anyhow::Error::msg)
 }

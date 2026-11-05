@@ -198,6 +198,10 @@ Implemented on `feat/na-cloud-corpus2`, starting from corpus
   permutation. It detects the supported display-matrix syntax. A build unable
   to generate/probe that fixture reports a clear skip in the Python test and a
   blocker in the synthetic command. All three angles ran here without skips.
+- A platform-neutral `PixelRenderer` trait separates the Mac pixel adapter from
+  a Linux test double. Four checker tests require exact direction/count/finite
+  values in both preview and final mode and propagate the actual guard failure.
+  These validate the checker, not native rotation.
 - `rotation-proof` adds exact native default-path preview/final pixel comparison
   against the unrotated frame's permutation, with no interpretation override.
   **The production rotation guard was not lifted.** The qualification command
@@ -264,10 +268,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/corpus -p test_r
 (cd apps/native && cargo test --locked -p pm-kernel --test library --test library_roundtrip)
 cargo clippy --locked --manifest-path tools/corpus/checks/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path tools/corpus/checks/Cargo.toml -- --check
-rustfmt --edition 2024 --check tools/corpus/main.rs tools/corpus/media.rs tools/corpus/rotation.rs
+rustfmt --edition 2024 --check tools/corpus/main.rs tools/corpus/media.rs tools/corpus/rotation.rs tools/corpus/rotation_pixels.rs
 ```
 
-Results: corpus Rust **10 passed** (8 media + 2 compiler tests, including seven
+Results: corpus Rust **14 passed** (8 media + 2 compiler + 4 rotation-checker tests, including seven
 shader families); Python driver **22 passed**; real frozen tools **1 passed**
 (20 definitions); pm-glsl **65 passed**; kernel library/roundtrip **10 passed,
 1 existing private-store manual test ignored**. The initial tagged-reader run

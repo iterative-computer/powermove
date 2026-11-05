@@ -191,3 +191,6 @@ mod tests {
     }
 }
 pub mod shaders;
+
+#[path = "../../rotation_pixels.rs"]
+pub mod rotation_pixels;
