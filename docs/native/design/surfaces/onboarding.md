@@ -14,15 +14,17 @@ No new tokens.
 ## S107 First run and Welcome window
 
 v1.2.0 plays a full-screen overlay animation of about 9.8 s, then opens a 900 × 640
-welcome window. Native keeps the moment but not the takeover: the animation plays
-**inside** the Welcome window, which needs no transparent screen-sized overlay, and
-it can't hide other apps.
+welcome window. Native keeps the moment but not the takeover (owner decision,
+2026-11-04): the animation plays **inside** the Welcome window, which needs no
+transparent screen-sized overlay, and it can't hide other apps. The overlay isn't
+ported: no borderless window, no screen-sized surface, and the Welcome window is on
+screen from the first frame.
 
 | Part | Spec |
 |---|---|
 | Window | standard titled window, full-size content, title hidden, close button only, centred on the active display. Size `m.welcome_width` × `m.welcome_height` (below), matching v1.2.0's 900 × 640 |
 | Ground | solid `c.window`, no card; content centred, max width `m.sheet_width_wide` |
-| Mark | Powermove mark; the v1.2.0 animation plays once, 9.8 s, on `c.window` |
+| Mark | Powermove mark; the v1.2.0 animation plays once, 9.8 s, on `c.window`, clipped to the window's content area and scaled to fit it. Title and button sit above the animation and are visible throughout |
 | Title | `t.display`, `Welcome to Powermove.` on two lines as v1.2.0 |
 | Button | default accent `Begin`, enabled from the first frame. Return or a click skips the animation |
 | Reduce Motion | no animation; the final frame shows at once with `mo.reduced` cross-fade |
