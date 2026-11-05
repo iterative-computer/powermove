@@ -620,6 +620,14 @@ impl Automation {
         }
     }
     pub fn save_project(&mut self, id: &str) -> Result<Value> {
+        // Pinned main c7f46a056 mcp-project-tools.ts checks filePath before
+        // exporting: an associated working file saves like Cmd-S, retaining
+        // external links even when their originals are currently offline.
+        if let Some(path) = self.store(id)?.path().map(std::path::Path::to_path_buf) {
+            self.save_library(id)?;
+            self.emit(id, "saved");
+            return Ok(json!({"path":path,"projectId":id}));
+        }
         std::fs::create_dir_all(&self.exports)?;
         let identity = self.project_identity(id)?;
         let name = identity["name"]
@@ -635,9 +643,8 @@ impl Automation {
             })
             .take(100)
             .collect::<String>();
-        // MCP Save is an export, not the editor's Save/Save As command. Freeze
-        // the current document, history and resident originals without adopting
-        // the export as the live session's destination or marking edits clean.
+        // A library project exports without adopting the new file as the live
+        // session's destination or marking edits clean.
         let path = self
             .exports
             .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));

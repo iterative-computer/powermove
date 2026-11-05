@@ -562,9 +562,9 @@ pub(crate) fn publish(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupPolicy {
     pub directory: PathBuf,
-    /// Most versions kept (12 in the old app).
+    /// Most active versions (12 in the old app); older versions are archived.
     pub max_versions: usize,
-    /// Byte budget across versions (1 GiB in the old app).
+    /// Byte budget across active versions (1 GiB in the old app).
     pub max_bytes: u64,
     /// Versions always kept even over budget (2 in the old app).
     pub min_versions: usize,
@@ -679,17 +679,51 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
     }
 }
 
-/// `retain`: keeps at most `max_versions` and `max_bytes`, but never fewer
-/// than `min_versions`, newest first.
+/// Keep the newest active versions within the budgets (at least
+/// `min_versions`). Archive every older generation; retention never deletes
+/// authored bytes. Archiving does not promise reclaimed disk space.
 pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
     let mut bytes = 0u64;
     for (index, file) in list_backups(policy)?.into_iter().enumerate() {
         let size = fs::symlink_metadata(&file).map(|m| m.len()).unwrap_or(0);
-        bytes += size;
+        bytes = bytes.saturating_add(size);
         if index >= policy.min_versions
             && (index >= policy.max_versions || bytes > policy.max_bytes)
         {
+            let archive = policy.directory.join("archived");
+            match fs::create_dir(&archive) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(io_err(&archive, e)),
+            }
+            if !fs::symlink_metadata(&archive)
+                .map_err(|e| io_err(&archive, e))?
+                .is_dir()
+            {
+                return Err(ProjectIoError::Invalid(
+                    "Unsafe backup archive directory".into(),
+                ));
+            }
+            let name = file.file_name().expect("listed backup has a name");
+            let mut target = archive.join(name);
+            loop {
+                // Exclusive link, then sync BEFORE retiring the active name.
+                // An interruption leaves at least one durable copy; collisions
+                // preserve both generations, even after an interrupted retry.
+                match fs::hard_link(&file, &target) {
+                    Ok(()) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let mut unique = name.to_os_string();
+                        unique.push(format!(".{}", random_uuid()));
+                        target = archive.join(unique);
+                    }
+                    Err(e) => return Err(io_err(&target, e)),
+                }
+            }
+            sync_directory(&archive)?;
+            sync_directory(&policy.directory)?;
             fs::remove_file(&file).map_err(|e| io_err(&file, e))?;
+            sync_directory(&policy.directory)?;
         }
     }
     Ok(())

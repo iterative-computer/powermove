@@ -9,7 +9,7 @@ finish_session, rollback_changes, get_timeline, select_layers, apply_commands,
 edit_layer_strips, edit_video, export_captions, manage_media,
 get_panel_layout, get_3d_scene, validate_effect }
 #[test]
-fn packed_save_preserves_bytes_history_source_and_unique_export_contract() {
+fn packed_save_preserves_named_files_and_independent_library_exports() {
     headless::packed_save().unwrap();
 }
 
