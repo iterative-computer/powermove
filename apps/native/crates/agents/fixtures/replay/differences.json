@@ -84,18 +84,9 @@
     ]
   },
   "codex-cancel": {
-    "rule": "N1/N3/N7 — observable cancellation scheduling difference; P4 remains open",
-    "reason": "Native completion is emitted with cancel at stimulus 5; the frozen runner resolves after the interrupt acknowledgement at stimulus 6. Result and interrupt values match. Native also publishes Ready and Session inspection events. No production behavior is changed by the replay lane; application integration must resolve/verify timing.",
+    "rule": "N3 — interrupt acknowledgement is the cancellation completion boundary; N7 — retain native inspection",
+    "reason": "Cancellation now completes after interrupt settlement, matching the frozen runner. Native Ready/Session inspection events remain explicit pending compatibility/application boundary integration.",
     "differences": [
-      {
-        "path": "/events/0/after",
-        "expected": {
-          "Present": 6
-        },
-        "actual": {
-          "Present": 5
-        }
-      },
       {
         "path": "/lifecycle/0",
         "expected": "Missing",

@@ -1,0 +1,486 @@
+{
+  "baseline": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "sources": [
+    {
+      "file": "apps/desktop/src/main/codex/app-server-runner.ts",
+      "sha256": "71817b0a42c739dbac08d7c43355dd877161317bf280efa4a02a206e6db24940"
+    },
+    {
+      "file": "apps/desktop/src/main/codex/connection-status.ts",
+      "sha256": "d1e99bed3a3c1124e1872188de4cacf6169d87c5ca66110dfb2e3f0d6fde576e"
+    }
+  ],
+  "captureSha256": "b945c65723e12d9b04672bf2e647602da8590e966ba1d6c3ad31d2a4d456deb7",
+  "frames": [
+    {
+      "kind": "run",
+      "value": {
+        "id": "z-first",
+        "cwd": "/workspace/agent",
+        "prompt": "Synthetic z-first",
+        "schema": {
+          "type": "object"
+        },
+        "model": null,
+        "reasoningEffort": null,
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      },
+      "after": 1
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialize",
+        "id": 1,
+        "params": {
+          "clientInfo": {
+            "name": "powermove_agent",
+            "title": "Powermove Agent",
+            "version": "1.0.0"
+          },
+          "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
+          }
+        }
+      },
+      "after": 1
+    },
+    {
+      "kind": "run",
+      "value": {
+        "id": "a-second",
+        "cwd": "/workspace/agent",
+        "prompt": "Synthetic a-second",
+        "schema": {
+          "type": "object"
+        },
+        "model": null,
+        "reasoningEffort": null,
+        "imagePaths": [],
+        "config": {
+          "mcp_servers": {}
+        },
+        "resumeThread": null
+      },
+      "after": 2
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 1,
+        "result": {}
+      },
+      "after": 3
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "initialized",
+        "params": {}
+      },
+      "after": 3
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 2,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "serviceName": "powermove"
+        }
+      },
+      "after": 3
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "thread/start",
+        "id": 3,
+        "params": {
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
+          "ephemeral": true,
+          "config": {
+            "mcp_servers": {}
+          },
+          "serviceName": "powermove"
+        }
+      },
+      "after": 3
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thread-z"
+          }
+        }
+      },
+      "after": 4
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 4,
+        "params": {
+          "threadId": "thread-z",
+          "input": [
+            {
+              "type": "text",
+              "text": "Synthetic z-first"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      },
+      "after": 4
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 3,
+        "result": {
+          "thread": {
+            "id": "thread-a"
+          }
+        }
+      },
+      "after": 5
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/start",
+        "id": 5,
+        "params": {
+          "threadId": "thread-a",
+          "input": [
+            {
+              "type": "text",
+              "text": "Synthetic a-second"
+            }
+          ],
+          "cwd": "/workspace/agent",
+          "approvalPolicy": "never",
+          "sandboxPolicy": {
+            "type": "readOnly"
+          },
+          "outputSchema": {
+            "type": "object"
+          }
+        }
+      },
+      "after": 5
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 4,
+        "result": {
+          "turn": {
+            "id": "turn-z"
+          }
+        }
+      },
+      "after": 6
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 5,
+        "result": {
+          "turn": {
+            "id": "turn-a"
+          }
+        }
+      },
+      "after": 7
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "warning",
+        "params": {
+          "message": "Reconnecting... 1/5"
+        }
+      },
+      "after": 8
+    },
+    {
+      "kind": "progress",
+      "value": {
+        "run": "z-first",
+        "value": "Connection interrupted. Reconnecting…"
+      },
+      "after": 8
+    },
+    {
+      "kind": "progress",
+      "value": {
+        "run": "a-second",
+        "value": "Connection interrupted. Reconnecting…"
+      },
+      "after": 8
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/tool/requestUserInput",
+        "id": "question-z",
+        "params": {
+          "threadId": "thread-z",
+          "turnId": "turn-z",
+          "itemId": "same-item",
+          "questions": [
+            {
+              "id": "choice",
+              "question": "Which choice?",
+              "options": []
+            }
+          ]
+        }
+      },
+      "after": 9
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "run": "z-first",
+        "value": {
+          "kind": "question",
+          "itemId": "same-item",
+          "questions": [
+            {
+              "id": "choice",
+              "header": "",
+              "question": "Which choice?",
+              "options": [],
+              "allowOther": true,
+              "secret": false
+            }
+          ],
+          "transport": "reply",
+          "blocking": true
+        }
+      },
+      "after": 9
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/tool/requestUserInput",
+        "id": "question-a",
+        "params": {
+          "threadId": "thread-a",
+          "turnId": "turn-a",
+          "itemId": "same-item",
+          "questions": [
+            {
+              "id": "choice",
+              "question": "Which choice?",
+              "options": []
+            }
+          ]
+        }
+      },
+      "after": 10
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "run": "a-second",
+        "value": {
+          "kind": "question",
+          "itemId": "same-item",
+          "questions": [
+            {
+              "id": "choice",
+              "header": "",
+              "question": "Which choice?",
+              "options": [],
+              "allowOther": true,
+              "secret": false
+            }
+          ],
+          "transport": "reply",
+          "blocking": true
+        }
+      },
+      "after": 10
+    },
+    {
+      "kind": "answer",
+      "value": {
+        "id": "a-second",
+        "itemId": "same-item",
+        "answers": {
+          "choice": [
+            "Second"
+          ]
+        }
+      },
+      "after": 11
+    },
+    {
+      "kind": "out",
+      "value": {
+        "id": "question-a",
+        "result": {
+          "answers": {
+            "choice": {
+              "answers": [
+                "Second"
+              ]
+            }
+          }
+        }
+      },
+      "after": 11
+    },
+    {
+      "kind": "cancel",
+      "value": "z-first",
+      "after": 12
+    },
+    {
+      "kind": "out",
+      "value": {
+        "method": "turn/interrupt",
+        "id": 6,
+        "params": {
+          "threadId": "thread-z",
+          "turnId": "turn-z"
+        }
+      },
+      "after": 12
+    },
+    {
+      "kind": "in",
+      "value": {
+        "id": 6,
+        "result": {}
+      },
+      "after": 13
+    },
+    {
+      "kind": "out",
+      "value": {
+        "id": "question-z",
+        "result": {
+          "answers": {}
+        }
+      },
+      "after": 13
+    },
+    {
+      "kind": "result",
+      "value": {
+        "run": "z-first",
+        "value": {
+          "ok": false,
+          "error": "The Codex run was cancelled.",
+          "cancelled": true
+        }
+      },
+      "after": 13
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thread-a",
+          "turnId": "turn-a",
+          "itemId": "answer",
+          "delta": "Authored second result"
+        }
+      },
+      "after": 14
+    },
+    {
+      "kind": "progress",
+      "value": {
+        "run": "a-second",
+        "value": "Connected. Continuing…"
+      },
+      "after": 14
+    },
+    {
+      "kind": "trace",
+      "value": {
+        "run": "a-second",
+        "value": {
+          "kind": "answer",
+          "text": "Authored second result"
+        }
+      },
+      "after": 14
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "item/completed",
+        "params": {
+          "threadId": "thread-a",
+          "turnId": "turn-a",
+          "item": {
+            "id": "answer",
+            "type": "agentMessage",
+            "text": "Authored second result"
+          }
+        }
+      },
+      "after": 15
+    },
+    {
+      "kind": "in",
+      "value": {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread-a",
+          "turn": {
+            "id": "turn-a",
+            "status": "completed",
+            "error": null
+          }
+        }
+      },
+      "after": 16
+    },
+    {
+      "kind": "result",
+      "value": {
+        "run": "a-second",
+        "value": {
+          "ok": true,
+          "text": "Authored second result",
+          "access": "editor"
+        }
+      },
+      "after": 16
+    }
+  ]
+}
