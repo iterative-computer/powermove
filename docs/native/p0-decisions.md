@@ -71,3 +71,13 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - This Mac runs P0 except S1. The app grows from `feat/na-foundation` (`apps/native`).
 - Web-animation export is removed (2026-10-29), not a cutover requirement.
 - Verified lanes are pushed as `feat/na-*` and merged `--no-ff` into `feat/native-engine` as they finish.
+
+## Owner decisions (Chike, 2026-11-04)
+
+- **Behaviour reference moves to latest `main`.** The 1:1 parity target is `origin/main` at `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, replacing `v1.2.0`. [main-delta.md](main-delta.md) is the work list. If `main` moves, re-run that audit from the new tip. v1.2.0 stays a required input: every project and extension from it must still work.
+- **The new 3D system ships with the rewrite.** Port it to Rust from `feat/na-3d-source` (Electron `core/scene3d` and `core/studio`, plus `engine/crates/pm-studio`). Old 3D projects upgrade automatically, with no compatibility mode and no Blender.
+- **No restore UI** for archived threads, takes and presets. Archives are kept.
+- **Ask first** before adding Powermove to the Claude desktop app's settings. No silent registration.
+- **First-run animation** plays inside the Welcome window.
+- **Going back:** there is no reverse migration. The old app must refuse a native file it can't read, safely and clearly, instead of opening it wrongly.
+
