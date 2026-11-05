@@ -12,7 +12,16 @@ pub fn for_session(
 ) -> Result<MediaCatalog> {
     fs::create_dir_all(cache)?;
     let mut catalog = MediaCatalog::default();
+    let root = snapshot.root();
     for (index, item) in media.iter().enumerate() {
+        // Immutable versions remain in PMV/history, but are not renderer asset
+        // aliases. A corrupt retired version must not prevent another selected
+        // original from being displayed.
+        if let Some(id) = item.id.as_str()
+            && root.and_then(|r| r.get("nativeMediaVersions"))
+                .and_then(|m| m.get("originals")).and_then(|m| m.get(id)).is_some()
+            && root.and_then(|r| r.get("assets")).and_then(|a| a.get(id)).is_none()
+        { continue; }
         let extension = match item.media_type.to_string().as_str() {
             "video/mp4" => "mp4",
             "video/quicktime" => "mov",
@@ -37,6 +46,14 @@ pub fn for_session(
         && let Some(assets) = root.get("assets").and_then(|v| v.as_object())
     {
         for (id, value) in assets {
+            if value.get("originalVersion").is_some()
+                || snapshot.root().and_then(|r| r.get("nativeMediaVersions"))
+                    .and_then(|m| m.get("owners")).and_then(|m| m.get(id.as_str().unwrap_or(""))).is_some()
+            {
+                // Ownership selects verified bytes; old path metadata is not
+                // authority to substitute a different original on failure.
+                continue;
+            }
             if let Some(p) = value
                 .get("sourcePath")
                 .or_else(|| value.get("path"))

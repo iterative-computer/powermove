@@ -13,6 +13,7 @@ pub mod library_surface;
 mod lifecycle;
 mod mcp;
 mod media;
+mod media_refresh;
 mod panels;
 mod perf_gate;
 mod platform;

@@ -1321,3 +1321,36 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     assert!(panels.take_errors().is_empty());
     actor.shutdown();
 }
+#[test]
+fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_layer_ids() {
+    let actor = actor();
+    let handle = actor.handle();
+    let mut old = Builtins::new(handle.clone(), "synthetic", || {}).unwrap();
+    finish(old.mount("timeline").unwrap());
+    let before = handle.published("synthetic").unwrap();
+    let source = before.snapshot.document.to_value().unwrap();
+    assert!(handle.close("synthetic").wait().unwrap());
+    handle.open("synthetic", OpenSource::Untitled(source)).wait().unwrap().unwrap();
+    let reopened = handle.published("synthetic").unwrap();
+    assert_ne!(before.snapshot.doc_id, reopened.snapshot.doc_id);
+    let intent = serde_json::json!({"type":"switch", "id":pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer("a".into())), "name":"visibility"});
+    let ticket = old.timeline_action(intent.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let rejected = loop {
+        if let Some(result) = ticket.try_take() { break result; }
+        assert!(Instant::now() < deadline, "retired native worker must finish");
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert!(rejected.is_err(), "Old rendered actions must not be rebound: {rejected:?}");
+    let after = handle.published("synthetic").unwrap();
+    assert_eq!(after.snapshot.document.to_value(), reopened.snapshot.document.to_value());
+    assert_eq!(after.history.entries, reopened.history.entries);
+    assert_eq!(after.dirty, reopened.dirty);
+    let mut current = Builtins::new(handle.clone(), "synthetic", || {}).unwrap();
+    finish(current.mount("timeline").unwrap());
+    finish(current.timeline_action(intent).unwrap());
+    let changed = handle.published("synthetic").unwrap();
+    assert_eq!(changed.snapshot.root().unwrap().get("layers").unwrap().at(0).unwrap().get("on").map(pm_model::Node::to_value), Some(pm_model::Value::Bool(false)));
+    assert_eq!(changed.history.entries, reopened.history.entries + 1);
+    old.close(); current.close(); actor.shutdown();
+}

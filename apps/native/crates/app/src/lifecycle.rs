@@ -300,6 +300,8 @@ impl Controller {
                     }
                     v.session = None;
                     v.published = None;
+                    v.media_refresh.reset();
+                    v.media = Default::default();
                     v.mirror = None;
                     v.rows.clear();
                     v.saving_note = false;

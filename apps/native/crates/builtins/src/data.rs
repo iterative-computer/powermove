@@ -60,6 +60,7 @@ impl Backend {
         identity: Identity,
         panel: &str,
         application: bool,
+    document: Option<u64>,
     ) -> Result<Self, String> {
         let published = if application {
             None
@@ -95,10 +96,12 @@ impl Backend {
             Caller::realm(realm, 1, Origin::Interface),
             application,
         )?;
+        let document = published.as_ref().map(|p| p.snapshot.doc_id);
         Ok(Self {
             kernel,
             identity,
             application,
+            document,
             caller: Caller::realm(realm, 1, Origin::Interface),
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
             panel: EffectsPanel::new(presentation, 0..96),
@@ -120,6 +123,7 @@ impl Backend {
             None
         } else {
             self.kernel.published(&self.identity.project)
+                .filter(|p| Some(p.snapshot.doc_id) == self.document)
         }
     }
     pub(crate) fn sync(&mut self) -> Result<(), String> {
