@@ -1462,3 +1462,49 @@ owner-decision changes enter only through merge commits. No new workspace crate,
 engine lockfile change or external fixture is introduced. App/Keychain/HTTP,
 client-file/CLI/consent-store, kernel/engine/panel and provider-worker integration
 listed above remain actual host work; pure models do not pass those gates.
+
+### Part A MERGE-READY validation — 2026-11-04
+
+Merged base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`.
+Final required `git fetch origin feat/native-engine`, explicit tracking-ref fetch,
+and `git merge origin/feat/native-engine` reconciliation reported already up to
+date after the conflict-free spec merge. All commands below passed again after
+that reconciliation, on Rust 1.96.1. Tests do not read user data or require Node,
+a display, a native app, ffmpeg, private sources, spikes or platform frameworks.
+
+From `/workspace/powermove` (activate every shell first):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-services --quiet
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
+cargo +1.96.1 test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --quiet
+cargo +1.96.1 clippy --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml --all-targets -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/crates/services/isolated/Cargo.toml --check
+cargo +1.96.1 test --locked --manifest-path engine/Cargo.toml -p pm-captions --quiet
+cargo +1.96.1 check --locked --manifest-path apps/native/Cargo.toml -p pm-services --target aarch64-apple-darwin
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+Results: **195 service tests passed** (120 new surface tests + 75 existing),
+**195 passed in the isolated replay** of the same source (not additional distinct
+tests), and **42 caption-engine tests passed** (11 reference + 31 edge cases).
+Zero failures or ignored tests. All listed Clippy/fmt/check commands passed;
+`git diff --check` and the 19-path ownership check passed. Staged scans in both
+required gitleaks modes precede every commit. Both needed lockfiles are committed;
+engine/Cargo.lock is unchanged. No dependency was bulk-upgraded.
+
+The Apple-target checks only type-check Rust and tests: **no macOS runtime, UI,
+visual or P1–P5 acceptance is claimed**. Mac/application verification remains:
+real kernel session/gesture/applied-ack dispatch; speech download/decode and model
+removal; source-time mapping/generation; GLSL cache invalidation and last-good
+program rendering; secure per-address Keychain migration/save; native-profile
+consent durability; real client discovery/config/CLI/MCP startup and CAS/archival
+under permissions, symlinks and running-client races; actual AppKit sheet/focus/
+IME/AX behavior and light/dark/accessibility output for Opus review. A03's provider
+argument integration and A04's complete Markdown/media/panel attachment remain
+with their owning worker/panel integration, as stated above. Those capabilities
+are not marked successful by these models. No design placeholder remains in the
+owned source; the actual views still await their owning application integration.
