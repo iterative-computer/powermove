@@ -33,13 +33,13 @@ tabular `c.secondary`, `◀◀ 2×`, `◀ 1×`, `▶▶ 2×`, shown only when th
 fixed slot so the header doesn't shift. AX `Playing in reverse at 2 times speed`, posted
 `.medium` on change. Under Focus or full screen the indicator joins the overlay capsule.
 
-Menu: `Playback ▸ Reverse`, `Playback ▸ Play Around Current Frame`. Play Around's
+Menu: `Timeline ▸ Reverse`, `Timeline ▸ Play Around Current Frame`. Play Around's
 range shows as a `c.accent_wash` band in the ruler while it plays, and clears on return.
 
 ## Timeline edit tools
 
 Edit Tool pop-up in the timeline header, Tracks mode only, before Snap; `t.minimum`, fixed
-width, tooltip `Edit Tool`, AX `Edit tool, {name}`. Also `Clip ▸ Edit Tool`.
+width, tooltip `Edit Tool`, AX `Edit tool, {name}`. Also `Timeline ▸ Edit Tool`.
 
 | Tool | Key | Cursor | Dragging an edge or clip |
 |---|---|---|---|
@@ -81,7 +81,7 @@ are never quietly clamped.
 |---|---|
 | Linked Selection | header toggle next to Snap, `link` glyph, on `c.accent` (active-state rule), tooltip `Linked Selection`. On by default |
 | Bypass | hold `⌥` while clicking or dragging: acts on one half only |
-| Commands | `Clip ▸ Link Audio and Video` (one video, one audio selected), `Clip ▸ Unlink Audio and Video` |
+| Commands | `Timeline ▸ Link Audio and Video` (one video, one audio selected), `Timeline ▸ Unlink Audio and Video` |
 | Linked clip | small `link` glyph after the name at `m.symbol_inline`, `c.secondary` |
 | Out of sync | capsule at the clip's leading end, `m.sync_badge` tall, `c.media_badge` fill, `t.minimum` tabular dark-scheme `c.warning` text with the signed offset at composition rate `+00:00:00:04`. Both halves show it, with opposite signs |
 | Sync badge menu | `Move into Sync`, `Slip into Sync` |
@@ -101,7 +101,7 @@ Extends viewer-chrome's Source mode. Applies to video and audio sources.
 | Insert | `⌥,` | ripples targeted tracks |
 | Overwrite | `⌥.` | replaces, no ripple |
 
-Menu: `Clip ▸ Mark In`, and so on. Keys are free chords, and work with the viewer or timeline
+Menu: `Timeline ▸ Mark In`, and so on. Keys are free chords, and work with the viewer or timeline
 focused.
 
 **Marks on the source transport**: `m.mark_bracket` brackets on the scrubber in dark-scheme
