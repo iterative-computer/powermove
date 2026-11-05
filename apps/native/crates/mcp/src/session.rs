@@ -198,38 +198,7 @@ impl McpSession {
                 .as_deref()
                 .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
             assert_project(session, &host, id)?;
-            let project = host.read_document(id)?;
-            if !crate::memory::enabled(&project) {
-                return Err(Error::invalid(crate::memory::DISABLED));
-            }
-            if args["operation"] == "list" {
-                return crate::memory::list(&project, args);
-            }
-            if !["add", "update", "remove"]
-                .iter()
-                .any(|op| args["operation"] == *op)
-            {
-                return Err(Error::invalid(
-                    "operation must be list, add, update or remove.",
-                ));
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(Error::kernel)?
-                .as_millis() as f64;
-            crate::memory::apply(
-                project["memory"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                args,
-                now,
-                &pm_kernel::new_id("mem"),
-                "agent",
-            )?;
-            return Err(Error::unavailable(
-                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback",
-            ));
+            return host.project_memory(id, args, self.writer);
         }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));

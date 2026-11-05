@@ -644,7 +644,7 @@ impl Controller {
                     let runtime = runtime.clone();
                     crate::v4_native::menu(window, &options, cx, move |index, _| {
                         let value = index
-                            .and_then(|index| selected.get(index))
+                            .and_then(|index| crate::v4_native::menu_item(&selected, index))
                             .and_then(|item| item.get("id"))
                             .cloned()
                             .unwrap_or(Value::Null);
@@ -654,20 +654,14 @@ impl Controller {
                 }
                 "effectMenu" => {
                     let state = self.kernel.state();
-                    let options = state
-                        .registries
-                        .get("effects")
-                        .into_iter()
-                        .flatten()
-                        .map(|entry| json!({"id":entry.id,"label":entry.id}))
-                        .collect::<Vec<_>>();
+                    let options = crate::v4_native::effect_options(&state);
                     let selected = options.clone();
                     let runtime = runtime.clone();
                     crate::v4_native::menu(window, &options, cx, move |index, _| {
                         runtime.platform_reply(
                             request.id,
                             Ok(index
-                                .and_then(|index| selected.get(index))
+                                .and_then(|index| crate::v4_native::menu_item(&selected, index))
                                 .and_then(|item| item.get("id"))
                                 .cloned()
                                 .unwrap_or(Value::Null)),

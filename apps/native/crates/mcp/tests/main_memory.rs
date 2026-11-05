@@ -219,3 +219,102 @@ fn disabled_note_redaction_is_recursive_preserves_other_fields_and_never_mutates
     assert_eq!(generated["comps"]["child"]["other"], 7);
     assert_eq!(project, original);
 }
+
+#[test]
+fn actual_session_memory_crud_survives_composition_rollback_and_profile_reopen() {
+    let root = std::env::temp_dir().join(pm_kernel::new_id("memory-durable-session"));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let profile = root.join("profile");
+    let exports = root.join("exports");
+    let id;
+    let expected;
+    {
+        let mut host = Automation::new(profile.clone(), exports.clone()).unwrap();
+        id = host
+            .create_project(
+                &json!({"name":"Synthetic notes","width":320,"height":180,"duration":2,"fps":30}),
+            )
+            .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let shared = Arc::new(Mutex::new(host));
+        let mut session = McpSession::new(shared.clone());
+        session
+            .dispatch(
+                "start_session",
+                &json!({"prompt":"Synthetic memory retention"}),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "apply_commands",
+                &json!({"commands":[{"type":"add_layer","id":"temporary","layerType":"shape"}]}),
+            )
+            .unwrap();
+        let revision = shared.lock().unwrap().revision(&id).unwrap();
+        let before_history = shared
+            .lock()
+            .unwrap()
+            .store(&id)
+            .unwrap()
+            .history()
+            .snapshot()
+            .to_saved();
+        let first=session.dispatch("project_memory",&json!({"operation":"add","kind":"decision","text":"Keep the authored intent","why":"Synthetic reason"})).unwrap();
+        let note = first["entry"]["id"].clone();
+        assert_eq!(shared.lock().unwrap().revision(&id).unwrap(), revision);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .store(&id)
+                .unwrap()
+                .history()
+                .snapshot()
+                .to_saved(),
+            before_history
+        );
+        let edited = session
+            .dispatch(
+                "project_memory",
+                &json!({"operation":"update","id":note,"text":"Revised intent","resolved":true}),
+            )
+            .unwrap();
+        assert_eq!(edited["entry"]["text"], "Revised intent");
+        assert_eq!(edited["entry"]["resolved"], true);
+        let goal = session
+            .dispatch(
+                "project_memory",
+                &json!({"operation":"add","kind":"goal","text":"Synthetic goal"}),
+            )
+            .unwrap();
+        session
+            .dispatch("project_memory", &json!({"operation":"remove","id":note}))
+            .unwrap();
+        let listed = session
+            .dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["memory"][0]["id"], goal["entry"]["id"]);
+        session.dispatch("rollback_changes", &json!({})).unwrap();
+        let value = shared.lock().unwrap().read_document(&id).unwrap();
+        assert!(value["layers"].as_array().unwrap().is_empty());
+        assert_eq!(value["memory"], listed["memory"]);
+        assert_eq!(value["nativeMemoryArchive"][0]["text"], "Revised intent");
+        expected = value["memory"].clone();
+        session
+            .dispatch("finish_session", &json!({"commit":true}))
+            .unwrap();
+        shared.lock().unwrap().save_library(&id).unwrap();
+    }
+    {
+        let mut reopened = Automation::new(profile, exports).unwrap();
+        reopened.open_project(&id).unwrap();
+        let value = reopened.read_document(&id).unwrap();
+        assert_eq!(value["memory"], expected);
+        assert_eq!(value["nativeMemoryArchive"][0]["text"], "Revised intent");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

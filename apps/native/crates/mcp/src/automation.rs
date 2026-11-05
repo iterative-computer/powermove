@@ -180,6 +180,135 @@ impl Automation {
             .map(|p| p.store())
             .ok_or_else(|| Error::invalid("Project is not open"))
     }
+    /// The authored model stays in JavaScript's UTF-16 domain. File ingress,
+    /// portable export and snapshots must not round-trip it through serde JSON.
+    pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
+        let store = self.store(id)?;
+        let mut project = pm_model::canonical::realize_project(
+            store
+                .snapshot()
+                .document
+                .to_value()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+        );
+        if let Some(object) = project.as_object_mut() {
+            object.insert("revision", pm_model::Value::Number(store.revision() as f64));
+        }
+        Ok(project)
+    }
+    fn project_identity(&self, id: &str) -> Result<Value> {
+        // Only the response metadata needs a Unicode projection. An unrelated
+        // opaque authored field may contain any JavaScript UTF-16 code units.
+        let name = self
+            .store(id)?
+            .root()
+            .and_then(|root| root.get("name"))
+            .and_then(|node| match node.kind() {
+                pm_model::NodeKind::String(text) => text.as_str(),
+                _ => None,
+            });
+        Ok(json!({"projectId": id, "name": name}))
+    }
+    pub fn project_memory(&mut self, id: &str, args: &Value, writer: u32) -> Result<Value> {
+        let store = self.store(id)?;
+        let root = store
+            .root()
+            .ok_or_else(|| Error::invalid("Missing document"))?;
+        let mut known = pm_model::Map::new();
+        for key in ["memory", "memoryEnabled"] {
+            if let Some(value) = root.get(key) {
+                known.insert(key, value.to_value());
+            }
+        }
+        let project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+            &pm_model::Value::Object(known),
+        ))
+        .map_err(|_| Error::unavailable("MCP Unicode projection of stored project notes"))?;
+        if !crate::memory::enabled(&project) {
+            return Err(Error::invalid(crate::memory::DISABLED));
+        }
+        if args["operation"] == "list" {
+            return crate::memory::list(&project, args);
+        }
+        let text = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .map(pm_model::JsString::from)
+        };
+        let operation = match args["operation"].as_str() {
+            Some("add") => pm_model::memory::Operation::Add {
+                kind: args["kind"].as_str().unwrap_or("").into(),
+                text: text("text").unwrap_or_default(),
+                why: text("why"),
+                resolved: args["resolved"] == true,
+            },
+            Some("update") => pm_model::memory::Operation::Update {
+                id: text("id").unwrap_or_default(),
+                kind: args.get("kind").and_then(Value::as_str).map(str::to_owned),
+                text: text("text"),
+                why: text("why"),
+                resolved: args.get("resolved").and_then(Value::as_bool),
+            },
+            Some("remove") => pm_model::memory::Operation::Remove {
+                id: text("id").unwrap_or_default(),
+            },
+            _ => {
+                return Err(Error::invalid(
+                    "operation must be list, add, update or remove.",
+                ));
+            }
+        };
+        // Preserve main's validation/error order. The actor repeats model
+        // validation and compares the exact observed notes at admission.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(Error::kernel)?
+            .as_millis() as f64;
+        crate::memory::apply(
+            project["memory"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            args,
+            now,
+            "validation",
+            "agent",
+        )?;
+        let document = store.doc_id();
+        let expected = root.get("memory").map(pm_model::Node::to_value);
+        let ack = self.call(
+            id,
+            Request::new(
+                Caller::realm(writer, 1, Origin::Mcp),
+                pm_kernel::MemoryCall::Mutate {
+                    expected,
+                    operation,
+                    now,
+                    id: pm_kernel::new_id("mem").as_str().into(),
+                },
+            )
+            .with_document(document),
+        )?;
+        if let Some(pm_kernel::Notice::NotDurable { message }) = ack.notice {
+            return Err(Error::unavailable(format!(
+                "Project notes remain applied but durability failed: {message}. Read the notes before retrying."
+            )));
+        }
+        match ack.reply {
+            Reply::Memory { entry, total, .. } => {
+                let entry = entry
+                    .map(|entry| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(&entry))
+                    })
+                    .transpose()
+                    .map_err(|_| Error::unavailable("MCP Unicode projection of the retained note"))?
+                    .unwrap_or(Value::Null);
+                Ok(json!({"ok":true,"entry":entry,"total":total}))
+            }
+            other => Err(Error::kernel(other)),
+        }
+    }
+
     pub fn read_document(&self, id: &str) -> Result<Value> {
         let store = self.store(id)?;
         let mut project = json_value(&pm_model::canonical::realize_project(
@@ -551,8 +680,7 @@ impl Automation {
             self.adopt(reply)?;
         }
         self.active = Some(id.into());
-        let value = self.read_document(id)?;
-        Ok(json!({"projectId":id,"name":value["name"]}))
+        self.project_identity(id)
     }
     /// Explicit host ingress for a caller-selected working file. This uses the
     /// same kernel session/locks, recovery decisions and resident media table
@@ -571,8 +699,7 @@ impl Automation {
             })
             .map_err(Error::kernel)?;
         let project = self.adopt(reply)?;
-        let value = self.read_document(&project)?;
-        Ok(json!({"projectId":project,"name":value["name"]}))
+        self.project_identity(&project)
     }
     pub fn save_library(&mut self, id: &str) -> Result<()> {
         let handle = self
@@ -594,7 +721,8 @@ impl Automation {
     }
     pub fn save_project(&mut self, id: &str) -> Result<Value> {
         std::fs::create_dir_all(&self.exports)?;
-        let name = self.read_document(id)?["name"]
+        let identity = self.project_identity(id)?;
+        let name = identity["name"]
             .as_str()
             .unwrap_or("Project")
             .chars()
@@ -607,37 +735,37 @@ impl Automation {
             })
             .take(100)
             .collect::<String>();
-        let session = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::invalid("No shell session"))?
-            .clone();
-        let call = if self.store(id)?.path().is_some() {
-            ShellCall::Save(session)
-        } else {
-            ShellCall::SaveAs {
-                session,
-                path: self
-                    .exports
-                    .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export"))),
-            }
-        };
-        // Session SaveAs owns the file lock, destination, metadata and journal
-        // rebase. Writing the DocumentStore alone leaves these out of sync.
-        let reply = self.kernel.shell(call).map_err(Error::kernel)?;
-        if !matches!(
-            reply,
-            ShellReply::Saved {
-                recovery_copy: None,
-                ..
-            }
-        ) {
-            return Err(Error::kernel(reply));
-        }
+        // MCP Save is an export, not the editor's Save/Save As command. Freeze
+        // the current document, history and resident originals without adopting
+        // the export as the live session's destination or marking edits clean.
         let path = self
-            .store(id)?
-            .path()
-            .ok_or_else(|| Error::kernel("Missing saved path"))?;
+            .exports
+            .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
+        let project = self
+            .kernel
+            .project_mut(id)
+            .ok_or_else(|| Error::invalid("Project is not open"))?;
+        let workspace = project.workspace().clone();
+        project.store_mut().set_workspace(Some(workspace));
+        let receipt = project
+            .store_mut()
+            .prepare_save(
+                pm_kernel::project_io::SaveTarget::SaveAs {
+                    path: path.clone(),
+                    replace: false,
+                },
+                pm_kernel::project_io::SaveOptions {
+                    portable: true,
+                    ..Default::default()
+                },
+            )
+            .and_then(|plan| plan.run())
+            .map_err(Error::kernel)?;
+        if !receipt.unavailable_links.is_empty() {
+            return Err(Error::unavailable(
+                "original media unavailable for complete portable project export",
+            ));
+        }
         let result = json!({"path":path,"projectId":id});
         self.emit(id, "saved");
         Ok(result)

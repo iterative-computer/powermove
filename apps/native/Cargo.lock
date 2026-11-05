@@ -4999,6 +4999,7 @@ dependencies = [
 name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
+ "pm-captions",
  "flate2",
  "libc",
  "pm-edit",

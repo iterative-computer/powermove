@@ -61,9 +61,15 @@ impl TimelineClient {
         Ok(())
     }
     pub async fn call(&mut self, call: Call) -> Result<Ack, ClientError> {
+        self.call_document(call, self.model.index.doc_id).await
+    }
+    async fn call_document(&mut self, call: Call, document: u64) -> Result<Ack, ClientError> {
         let ack = self
             .kernel
-            .call(&self.project, Request::new(self.caller, call))
+            .call(
+                &self.project,
+                Request::new(self.caller, call).with_document(document),
+            )
             .await
             .ok_or(ClientError::Closed)?
             .map_err(|e| ClientError::Kernel(format!("{e:?}")))?;
@@ -96,8 +102,9 @@ impl TimelineClient {
         {
             return Err(ClientError::OriginMismatch);
         }
+        let document = plan.expected_document.unwrap_or(self.model.index.doc_id);
         for call in plan.calls {
-            self.call(call).await?;
+            self.call_document(call, document).await?;
         }
         Ok(plan.effects)
     }

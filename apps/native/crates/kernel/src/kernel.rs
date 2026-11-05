@@ -397,6 +397,15 @@ impl Kernel {
             .slots
             .get_mut(id)
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
+        slot.project
+            .store_mut()
+            .set_runtime_state(self.state.clone());
+        let memory_write = matches!(&request.call, Call::Memory(_));
+        if memory_write && (slot.journal.is_none() || self.durability.is_none()) {
+            return Err(KernelFailure::Storage(
+                "Project memory requires durable journal admission".into(),
+            ));
+        }
         let workspace_write = matches!(request.call, Call::Workspace(WorkspaceCall::Mutate { .. }));
         let mut handled = slot.project.handle(request);
         if let (Some(journal), Some(durability)) = (&mut slot.journal, &self.durability) {
@@ -410,6 +419,13 @@ impl Kernel {
                     document: store.current().clone(),
                     history: store.history().snapshot(),
                     workspace: project.workspace().clone(),
+                }
+            });
+            let result = result.and_then(|()| {
+                if memory_write {
+                    journal.sync_now().and_then(|()| durability.barrier())
+                } else {
+                    Ok(())
                 }
             });
             if let Err(e) = result {

@@ -43,7 +43,7 @@ fn source_snapshots_pin_main_without_discarding_legacy_rosters() {
 fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separate() {
     let r =
         main_reference::run(&Catalog::embedded().unwrap(), &Filter::default(), &[], None).unwrap();
-    assert_eq!(r.exit_code(true), 1);
+    assert_eq!(r.exit_code(true), 2);
     let retired = r
         .cases
         .iter()
@@ -54,7 +54,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         retired.blocked_by.as_deref(),
         Some("delta-data:archived-web-export-preferences")
     );
-    assert_eq!(r.counts(), (1699, 2, 2644));
+    assert_eq!(r.counts(), (1701, 0, 2644));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
     assert_eq!(r.specs.iter().filter(|s| s.in_370_roster).count(), 370);
@@ -104,7 +104,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
             "{id}"
         );
     }
-    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1424, 2, 3178));
+    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1426, 0, 3178));
     for id in ["A506", "W007.mcp-utf16-ingress"] {
         assert!(
             r.compatibility_required_ids

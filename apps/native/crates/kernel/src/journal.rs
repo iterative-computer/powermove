@@ -652,6 +652,10 @@ fn encode_tap(tap: &Tap) -> Value {
             m.insert("n", Value::Number(*count as f64));
             encode_record(&mut m, record);
         }
+        Tap::Metadata { ops } => {
+            m.insert("t", Value::from("metadata"));
+            m.insert("ops", ops_to_value(ops));
+        }
         Tap::Clear => {
             m.insert("t", Value::from("clear"));
         }
@@ -1014,6 +1018,11 @@ impl Replay {
                     .apply_ops_at(&ops, revision)
                     .map_err(|e| e.to_string())?;
                 self.revision = revision;
+            }
+            Some("metadata") => {
+                let ops = decode_ops(m.get("ops"))?;
+                if ops.iter().any(|op| op.path().len()!=1 || !matches!(op.path().first(),Some(pm_model::patch::PathPart::Key(key)) if key.as_str().is_some_and(|key|crate::memory_metadata::FIELDS.contains(&key)))) {return Err("Invalid metadata journal path".into());}
+                self.document = crate::memory_metadata::apply(&self.document, &ops)?;
             }
             Some("push") => self.push(m)?,
             // Closure entries die with their realm (not persisted, as before).

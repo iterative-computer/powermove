@@ -131,3 +131,6 @@ pub mod session;
 pub mod state;
 
 pub mod profile;
+
+pub mod memory_metadata;
+pub use memory_metadata::MemoryCall;

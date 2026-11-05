@@ -115,6 +115,9 @@ pub struct Request {
     pub caller: Caller,
     /// Optional transaction id for retry dedupe and lost-ack recovery.
     pub txid: Option<u64>,
+    /// Pins all call kinds, including selection and gesture lifecycle, to one
+    /// document lifetime. A reused project/layer ID grants no authority.
+    pub expected_document: Option<u64>,
     pub call: Call,
 }
 
@@ -123,8 +126,14 @@ impl Request {
         Request {
             caller,
             txid: None,
+            expected_document: None,
             call: call.into(),
         }
+    }
+
+    pub fn with_document(mut self, document: u64) -> Request {
+        self.expected_document = Some(document);
+        self
     }
 
     pub fn with_txid(mut self, txid: u64) -> Request {
@@ -140,6 +149,7 @@ pub enum Call {
     Edit(EditCall),
     Gesture(GestureCall),
     Workspace(WorkspaceCall),
+    Memory(crate::MemoryCall),
     Selection(SelectionCall),
     /// Validated whole-document restore; never folds across an open entry.
     Restore {
@@ -371,6 +381,11 @@ pub enum Reply {
     /// The caller's realm runs the closure inline, then reports.
     Continuation(Continuation),
     Workspace(Value),
+    Memory {
+        entry: Option<Value>,
+        total: usize,
+        sequence: u64,
+    },
     /// A gesture opened.
     Gesture(u64),
     /// `QueryTx`.
@@ -694,7 +709,22 @@ impl Project {
 
     /// Runs one call. The single entry point of the transaction layer.
     pub fn handle(&mut self, request: Request) -> Handled {
-        let Request { caller, txid, call } = request;
+        let Request {
+            caller,
+            txid,
+            expected_document,
+            call,
+        } = request;
+        if expected_document.is_some_and(|document| document != self.store.doc_id()) {
+            return Handled::reply(self.ack(
+                None,
+                None,
+                None,
+                Reply::Throw(KernelError::Guard(
+                    "The document was closed or replaced; the request was not applied".into(),
+                )),
+            ));
+        }
         let txid = txid.map(|txid| TxId {
             realm: caller.writer.realm,
             generation: caller.writer.generation,
@@ -719,7 +749,10 @@ impl Project {
         }
         let tracks_mutation = !matches!(
             &call,
-            Call::Selection(_) | Call::Workspace(_) | Call::History(HistoryCall::Mark)
+            Call::Selection(_)
+                | Call::Workspace(_)
+                | Call::Memory(_)
+                | Call::History(HistoryCall::Mark)
         );
         let before_revision = self.revision();
         let before_mark = self.store.history_mark();
@@ -761,6 +794,16 @@ impl Project {
             Call::Edit(e) => Handled::reply(self.edit(caller, txid, e)),
             Call::Gesture(g) => Handled::reply(self.gesture(caller, txid, g)),
             Call::Workspace(w) => Handled::reply(self.workspace_call(txid, w)),
+            Call::Memory(call) => {
+                let reply = if expected_document.is_none() {
+                    Reply::Throw(KernelError::Guard(
+                        "Memory metadata requires its document identity".into(),
+                    ))
+                } else {
+                    self.memory(caller, call)
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::Transact {
                 label,
                 body,
@@ -804,6 +847,67 @@ impl Project {
             self.notices.push(notice);
         }
         handled
+    }
+
+    fn memory(&mut self, caller: Caller, call: crate::MemoryCall) -> Reply {
+        use crate::MemoryCall;
+        let Some(root) = self.store.root() else {
+            return Reply::Throw(TransactionError::NoDocument.into());
+        };
+        let fields = crate::memory_metadata::fields(root);
+        let planned: Result<(Value, Option<Value>), String> = (|| match call {
+            MemoryCall::Mutate {
+                expected,
+                operation,
+                now,
+                id,
+            } => {
+                if root.get("memory").map(Node::to_value) != expected {
+                    return Err("Project notes changed; read them again before editing".into());
+                }
+                let author = if caller.origin == Origin::Interface {
+                    "user"
+                } else {
+                    "agent"
+                };
+                pm_model::memory::apply(
+                    &fields,
+                    &operation,
+                    &pm_model::memory::Context { now, id, author },
+                )
+                .map_err(str::to_owned)
+            }
+            MemoryCall::SetEnabled { expected, enabled } => {
+                if caller.origin != Origin::Interface {
+                    return Err("Only the user can change project memory access".into());
+                }
+                if root.get("memoryEnabled").map(Node::to_value) != expected {
+                    return Err("Project memory access changed; read it again".into());
+                }
+                let mut next = fields;
+                next.as_object_mut()
+                    .unwrap()
+                    .insert("memoryEnabled", Value::Bool(enabled));
+                Ok((next, None))
+            }
+        })();
+        match planned {
+            Err(message) => Reply::Throw(KernelError::Guard(message)),
+            Ok((next, entry)) => {
+                let total = next
+                    .get("memory")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                match self.store.publish_memory(next) {
+                    Ok(()) => Reply::Memory {
+                        entry,
+                        total,
+                        sequence: self.store.metadata_revision(),
+                    },
+                    Err(error) => Reply::Throw(error.into()),
+                }
+            }
+        }
     }
 
     fn select(&mut self, call: SelectionCall) -> Reply {
@@ -2281,6 +2385,20 @@ fn probes(root: Option<&Node>, forward: &[Op], scopes: &[Vec<PathPart>]) -> Vec<
 
 fn probe_holds(root: Option<&Node>, probe: &Probe) -> bool {
     match probe {
+        Probe::Path { path, node } if path.is_empty() => {
+            crate::memory_metadata::same_composition(root, node.as_ref(), same_node)
+        }
+        Probe::Path { path, .. }
+            if path
+                .first()
+                .and_then(|p| match p {
+                    PathPart::Key(k) => k.as_str(),
+                    _ => None,
+                })
+                .is_some_and(|key| crate::memory_metadata::FIELDS.contains(&key)) =>
+        {
+            true
+        }
         Probe::Path { path, node } => same(root.and_then(|r| r.lookup(path)), node.as_ref()),
         Probe::Element { array, id, node } => same(element(root, array, id), node.as_ref()),
         Probe::Order { array, ids } => &array_ids(root, array) == ids,

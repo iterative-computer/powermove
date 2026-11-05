@@ -3,6 +3,7 @@
 //! The real kernel receives the complete batch once, with a revision guard.
 use crate::{Error, Result, json_value, model};
 use pm_kernel::commands::{
+    captions::{AddCaptions, CaptionCommand, CaptionEdit, CaptionFormat, CueSource},
     comps::CompPatch,
     effects::EffectPatch,
     keyframes::{EaseSpec, KeyframeSpec, ReplaceKeyframes, SimplifyScope},
@@ -349,6 +350,9 @@ pub(crate) fn plan_cleaned_with_definitions(
     state: Option<&pm_kernel::state::StateSnapshot>,
 ) -> Result<Batch> {
     let mut scratch = DocumentStore::new_untitled(model(project));
+    if let Some(state) = state {
+        scratch.set_runtime_state(state.clone());
+    }
     let mut batch = Batch {
         commands: vec![],
         results: vec![],
@@ -357,7 +361,7 @@ pub(crate) fn plan_cleaned_with_definitions(
     };
     for mut c in cleaned.iter().cloned() {
         let kind = c["type"].as_str().unwrap().to_owned();
-        if ["transform_layers", "add_captions", "edit_captions"].contains(&kind.as_str()) {
+        if kind == "transform_layers" {
             return Err(Error::unavailable(format!(
                 "kernel command/runtime definition: {kind}"
             )));
@@ -494,6 +498,97 @@ pub(crate) fn plan_cleaned_with_definitions(
                     patch,
                 }
                 .into()
+            }
+            "add_captions" => {
+                let id = text(&c, "id").unwrap_or_else(|| pm_kernel::new_id("L"));
+                c["id"] = json!(id);
+                let source = caption_source(&mut c, true)?;
+                data = json!({"id":id});
+                CaptionCommand::Add(Box::new(AddCaptions {
+                    id,
+                    name: text(&c, "name"),
+                    source,
+                    style: c.get("style").filter(|v| !v.is_null()).map(model),
+                    language: text(&c, "language"),
+                    from: c
+                        .get("from")
+                        .filter(|v| !v.is_null())
+                        .map(|_| number(&c, "from", 0.))
+                        .transpose()?,
+                    duration: c
+                        .get("duration")
+                        .filter(|v| !v.is_null())
+                        .map(|_| number(&c, "duration", 0.))
+                        .transpose()?,
+                    index: c
+                        .get("index")
+                        .filter(|v| !v.is_null())
+                        .map(|_| index(&c, "index"))
+                        .transpose()?,
+                    comp: None,
+                }))
+                .into()
+            }
+            "edit_captions" => {
+                let id = target()?;
+                let edit = match c["op"].as_str() {
+                    Some("replace") => CaptionEdit::Replace(caption_source(&mut c, false)?),
+                    Some("insert") => {
+                        reserve_insert_ids(&mut c, &p, &id);
+                        caption_ids(&mut c);
+                        CaptionEdit::Insert(model(&c["cues"]))
+                    }
+                    Some("update") => CaptionEdit::Update(model(&c["cues"])),
+                    Some("delete") => CaptionEdit::Delete(caption_target_ids(&c)?),
+                    Some("split") => {
+                        let tail_id = pm_kernel::new_id("cue");
+                        data = json!({"id":id,"tailId":tail_id});
+                        CaptionEdit::SplitWithId {
+                            id: required(&c, "id")?,
+                            at: number(&c, "at", 0.)?,
+                            tail_id,
+                        }
+                    }
+                    Some("merge") => CaptionEdit::Merge(caption_target_ids(&c)?),
+                    Some("move") => {
+                        let by = number(&c, "by", 0.)?;
+                        if c.get("ids").is_none_or(Value::is_null) {
+                            CaptionEdit::MoveAll { by }
+                        } else {
+                            CaptionEdit::Move {
+                                ids: caption_target_ids(&c)?,
+                                by,
+                            }
+                        }
+                    }
+                    Some("import") => CaptionEdit::Import {
+                        source: caption_source(&mut c, false)?,
+                        replace: c["replace"] != false,
+                    },
+                    Some("style") => CaptionEdit::Style {
+                        style: model(&c["style"]),
+                        language: text(&c, "language"),
+                    },
+                    _ => {
+                        return Err(Error::invalid(format!(
+                            "Unknown captions operation: {}",
+                            c["op"]
+                        )));
+                    }
+                };
+                if data.is_null() {
+                    data = json!({"id":id});
+                }
+                if let Some(language) = c.get("language") {
+                    CaptionCommand::EditWithLanguage {
+                        layer_id: id,
+                        edit,
+                        language: (!language.is_null()).then(|| caption_text(language)),
+                    }
+                    .into()
+                } else {
+                    CaptionCommand::Edit { layer_id: id, edit }.into()
+                }
             }
             "set_content" => {
                 let id = target()?;
@@ -857,11 +952,33 @@ pub(crate) fn plan_cleaned_with_definitions(
         let layer = after["layers"]
             .as_array()
             .and_then(|a| a.iter().find(|l| l["id"] == id));
-        if kind == "add_layer" {
+        if kind == "add_layer" || kind == "add_captions" {
             let l = layer.unwrap();
-            data = json!({"id":l["id"],"name":l["name"],"layer":l});
+            data = if kind == "add_captions" {
+                json!({"id":l["id"],"name":l["name"],"cues":l["d"]["cues"].as_array().map_or(0,Vec::len)})
+            } else {
+                json!({"id":l["id"],"name":l["name"],"layer":l})
+            };
             if c["select"] != false {
                 batch.selection = vec![id.clone()];
+            }
+        }
+        if kind == "edit_captions" {
+            let cues = layer
+                .and_then(|l| l["d"]["cues"].as_array())
+                .ok_or_else(|| Error::kernel("Caption edit did not publish its cue list"))?;
+            data["cues"] = json!(cues.len());
+            if c["op"] == "merge" {
+                let ids = caption_target_ids(&c)?;
+                data["cue"] = cues
+                    .iter()
+                    .find(|cue| {
+                        cue["id"]
+                            .as_str()
+                            .is_some_and(|id| ids.iter().any(|wanted| wanted == id))
+                    })
+                    .map(|cue| cue["id"].clone())
+                    .unwrap_or(Value::Null);
             }
         }
         if kind == "add_marker" {
@@ -911,6 +1028,8 @@ pub fn describe(c: &Value) -> String {
         "set_easing" => "Set easing",
         "set_expression" => "Set expression",
         "set_content" => "Edit content",
+        "add_captions" => "Add Captions",
+        "edit_captions" => "Edit Captions",
         "set_layer" => "Edit layer",
         "set_composition" => "Edit composition",
         "add_layer" => "Add layer",
@@ -957,6 +1076,145 @@ pub fn describe(c: &Value) -> String {
         .chars()
         .take(150)
         .collect()
+}
+
+fn caption_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => pm_model::json::number_to_js_string(n.as_f64().unwrap_or(f64::NAN)),
+        Value::Object(_) => "[object Object]".into(),
+        Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                if v.is_null() {
+                    String::new()
+                } else {
+                    caption_text(v)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    }
+}
+fn reserve_insert_ids(command: &mut Value, project: &Value, layer: &str) {
+    let existing = project["layers"]
+        .as_array()
+        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
+        .and_then(|l| l["d"]["cues"].as_array())
+        .map(|c| {
+            c.iter()
+                .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    for cue in command
+        .get_mut("cues")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if cue["id"].as_str().is_some_and(|id| existing.contains(id)) {
+            cue["id"] = json!(pm_kernel::new_id("cue"));
+        }
+    }
+}
+fn caption_ids(command: &mut Value) {
+    let mut seen = std::collections::HashSet::new();
+    for cue in command
+        .get_mut("cues")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if !cue.is_object() {
+            continue;
+        }
+        let id = cue["id"].as_str().unwrap_or("");
+        if id.is_empty() || !seen.insert(id.to_owned()) {
+            let id = pm_kernel::new_id("cue");
+            seen.insert(id.clone());
+            cue["id"] = json!(id);
+        }
+    }
+}
+fn caption_target_ids(command: &Value) -> Result<Vec<String>> {
+    command
+        .get("ids")
+        .filter(|v| !v.is_null())
+        .map(|v| {
+            v.as_array()
+                .ok_or_else(|| Error::invalid("Caption ids must be an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| Error::invalid("Caption ids must be strings"))
+                })
+                .collect()
+        })
+        .unwrap_or(Ok(vec![]))
+}
+fn caption_source(command: &mut Value, offset_cues: bool) -> Result<CueSource> {
+    if let Some(text) = command.get("text").filter(|v| !v.is_null()) {
+        let text = text
+            .as_str()
+            .ok_or_else(|| Error::invalid("Caption text must be a string"))?
+            .to_owned();
+        let format = match command["format"].as_str() {
+            Some("srt") => CaptionFormat::Srt,
+            Some("vtt") => CaptionFormat::Vtt,
+            None | Some("auto") | Some("text") => CaptionFormat::Text,
+            _ => return Err(Error::invalid("Unknown caption format")),
+        };
+        let input = CueSource::Text {
+            text,
+            format,
+            offset: number(command, "offset", 0.)?,
+        };
+        let mut cues = json_value(
+            &pm_kernel::commands::captions::materialize_source(&input).map_err(Error::kernel)?,
+        );
+        for cue in cues.as_array_mut().into_iter().flatten() {
+            cue["id"] = json!(pm_kernel::new_id("cue"));
+        }
+        command["cues"] = cues.clone();
+        return Ok(CueSource::Cues(model(&cues)));
+    }
+    caption_ids(command);
+    let mut cues = command["cues"].clone();
+    if offset_cues {
+        let offset = number(command, "offset", 0.)?;
+        for cue in cues.as_array_mut().into_iter().flatten() {
+            for key in ["start", "end"] {
+                if let Some(value) = cue.get_mut(key) {
+                    *value = json!(
+                        value.as_f64().ok_or_else(|| Error::invalid(
+                            "Caption times must be finite numbers"
+                        ))? + offset
+                    );
+                }
+            }
+            for word in cue
+                .get_mut("words")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                for key in ["start", "end"] {
+                    if let Some(value) = word.get_mut(key) {
+                        *value = json!(
+                            value.as_f64().ok_or_else(|| Error::invalid(
+                                "Caption word times must be finite numbers"
+                            ))? + offset
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(CueSource::Cues(model(&cues)))
 }
 
 fn definition(

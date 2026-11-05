@@ -50,6 +50,40 @@ pub enum OpenDecision {
     AsCopy(CopyReason),
 }
 
+/// Owns the advisory lock independently of descriptor lifetime. A fork can
+/// retain a copy of the same open-file description after our descriptor closes.
+struct LockedFile {
+    file: File,
+    owns_record: bool,
+}
+impl std::ops::Deref for LockedFile {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+impl std::ops::DerefMut for LockedFile {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        if self.owns_record {
+            let _ = write_record(&mut self.file, 0);
+        }
+        // Release only after the last heartbeat/record write, including failed
+        // initialization and failed thread spawn. Never unlink the stable inode.
+        loop {
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } == 0
+                || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+            {
+                break;
+            }
+        }
+    }
+}
+
 pub struct FileLock {
     path: PathBuf,
     stop: mpsc::Sender<()>,
@@ -57,7 +91,7 @@ pub struct FileLock {
 }
 impl FileLock {
     pub fn acquire(path: &Path) -> io::Result<Self> {
-        let (mut file, created) = match OpenOptions::new()
+        let (file, created) = match OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
@@ -79,6 +113,10 @@ impl FileLock {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        let mut file = LockedFile {
+            file,
+            owns_record: false,
+        };
         let mut text = String::new();
         file.read_to_string(&mut text)?;
         if !created && text.is_empty() {
@@ -104,6 +142,7 @@ impl FileLock {
                 ));
             }
         }
+        file.owns_record = true;
         write_record(&mut file, std::process::id())?;
         let (stop, rx) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -115,12 +154,11 @@ impl FileLock {
                             let _ = write_record(&mut file, std::process::id());
                         }
                         _ => {
-                            let _ = write_record(&mut file, 0);
                             break;
                         }
                     }
                 }
-                // The descriptor's close releases flock. File is intentionally kept.
+                // LockedFile writes PID 0 and explicitly unlocks before close.
             })?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -263,5 +301,58 @@ pub fn open_decision(path: &Path, electron_profile: Option<&Path>) -> OpenDecisi
         OpenDecision::AsCopy(CopyReason::OlderElectron)
     } else {
         OpenDecision::Writable
+    }
+}
+
+#[cfg(test)]
+mod inheritance_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn final_drop_unlocks_the_stable_inode_despite_a_forked_descriptor() {
+        let root = std::env::temp_dir().join(crate::new_id("lock-inheritance"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("synthetic.lock");
+        let lock = FileLock::acquire(&path).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let mut pipe = [-1; 2];
+        // Only async-signal-safe libc calls execute in the child. In particular,
+        // the inherited Rust allocator, heartbeat and mutexes are never entered.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                libc::close(pipe[1]);
+                let mut byte = 0u8;
+                libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(pipe[0]);
+        }
+        if child < 0 {
+            unsafe {
+                libc::close(pipe[1]);
+            }
+            panic!("fork: {}", io::Error::last_os_error());
+        }
+        drop(lock);
+        let reopened = FileLock::acquire(&path);
+        let stable_inode = std::fs::metadata(&path).unwrap().ino();
+        // Reap before checking the result, including the historical failure.
+        unsafe {
+            let byte = 1u8;
+            libc::write(pipe[1], (&byte as *const u8).cast(), 1);
+            libc::close(pipe[1]);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        let reopened = reopened.unwrap_or_else(|error| {
+            panic!("clean reopen must not retain the fork's advisory lock: {error}")
+        });
+        assert_eq!(inode, stable_inode, "the lock file must never be unlinked");
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

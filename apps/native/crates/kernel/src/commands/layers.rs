@@ -500,6 +500,19 @@ pub(crate) fn make_layer(
     Ok(Value::Object(l))
 }
 
+pub(crate) fn make_caption_layer(
+    id: &str,
+    name: Option<&str>,
+    comp: (f64, f64, f64),
+) -> Result<Value, CommandError> {
+    let mut layer = make_layer("null", id, name, comp, &Map::new(), &Map::new())?;
+    let fields = values::obj(&mut layer);
+    fields.insert("type", Value::from("captions"));
+    fields.insert("name", Value::from(name.unwrap_or(type_label("captions"))));
+    fields.insert("color", Value::from(type_color("captions")));
+    Ok(layer)
+}
+
 const FORBIDDEN_KEYS: [&str; 3] = ["__proto__", "prototype", "constructor"];
 
 /// `safePatch(value, label)`.

@@ -126,6 +126,10 @@ pub enum StoreEvent {
     /// A new revision is published (the query mirror already follows it).
     Changed(Arc<Change>),
     SelectionChanged,
+    /// Same composition revision, a new immutable notes publication.
+    MetadataChanged {
+        sequence: u64,
+    },
     /// The undo stack changed (labels, can-undo, can-redo).
     HistoryChanged,
     /// The unsaved-changes state flipped.
@@ -210,6 +214,9 @@ pub(crate) enum Tap {
         record: crate::history::HistoryRecord,
     },
     Clear,
+    Metadata {
+        ops: Arc<[Op]>,
+    },
 }
 
 /// Most changes kept for [`DocumentStore::changes_since`].
@@ -220,6 +227,7 @@ type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 /// The single document authority. See the crate documentation for the
 /// threading model.
 pub struct DocumentStore {
+    runtime_state: Option<crate::state::StateSnapshot>,
     doc_id: u64,
     current: Arc<Document>,
     file: ProjectFile,
@@ -231,6 +239,9 @@ pub struct DocumentStore {
     gesture: Option<Gesture>,
     state_token: u64,
     saved_token: u64,
+    metadata_token: u64,
+    saved_metadata_token: u64,
+    save_metadata_token: u64,
     log: VecDeque<Arc<Change>>,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
@@ -300,6 +311,7 @@ impl DocumentStore {
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
+            runtime_state: None,
             doc_id: new_doc_id(),
             current: Arc::new(document),
             file,
@@ -310,6 +322,9 @@ impl DocumentStore {
             gesture: None,
             state_token: token,
             saved_token: token,
+            metadata_token: 0,
+            saved_metadata_token: 0,
+            save_metadata_token: 0,
             log: VecDeque::new(),
             listeners: Vec::new(),
             next_listener: 1,
@@ -319,6 +334,11 @@ impl DocumentStore {
     }
 
     // ── reading ────────────────────────────────────────────────────────────
+
+    /// Contribution facts for worker-side planning. Never authored or persisted.
+    pub fn set_runtime_state(&mut self, state: crate::state::StateSnapshot) {
+        self.runtime_state = Some(state);
+    }
 
     pub fn doc_id(&self) -> u64 {
         self.doc_id
@@ -421,7 +441,7 @@ impl DocumentStore {
     /// value back by hand also became clean; here only reaching the same
     /// history state does (see `docs/gpui/core-api.md`).
     pub fn is_dirty(&self) -> bool {
-        self.state_token != self.saved_token
+        self.state_token != self.saved_token || self.metadata_token != self.saved_metadata_token
     }
 
     /// Whether a save of this document is running.
@@ -616,7 +636,10 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        let canonical = model::to_canonical(project);
+        let mut canonical = model::to_canonical(project);
+        if let Some(current) = self.root() {
+            crate::memory_metadata::preserve_value(&mut canonical, current);
+        }
         project_io::validate_stored_project(&pm_model::canonical::realize_project(
             canonical.clone(),
         ))
@@ -999,7 +1022,7 @@ impl DocumentStore {
                 (_, Some(c)) => {
                     crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
                 }
-                (Some(c), None) => c.plan(tree, origin)?,
+                (Some(c), None) => c.plan_with_state(tree, origin, self.runtime_state.as_ref())?,
                 (None, None) => Vec::new(),
             };
             for op in ops {
@@ -1089,7 +1112,24 @@ impl DocumentStore {
         })
     }
 
-    fn publish(&mut self, mut document: Document, ops: Arc<[Op]>, cause: ChangeCause) {
+    fn publish(&mut self, mut document: Document, mut ops: Arc<[Op]>, cause: ChangeCause) {
+        if matches!(
+            cause,
+            ChangeCause::Undo { .. }
+                | ChangeCause::Redo { .. }
+                | ChangeCause::Revert { .. }
+                | ChangeCause::GestureCancel { .. }
+                | ChangeCause::GestureStep { .. }
+        ) {
+            if let Some(current) = self.root() {
+                if let Some(preserved) = crate::memory_metadata::preserve(&document, current)
+                    .expect("valid metadata patches")
+                {
+                    document = preserved;
+                    ops = diff_node_ops(self.root(), document.root()).into();
+                }
+            }
+        }
         let base_revision = self.revision();
         document.set_saving_app_version(self.current.saving_app_version().map(str::to_owned));
         let document = Arc::new(document);
@@ -1243,6 +1283,7 @@ impl DocumentStore {
         }
         let ticket = Arc::new(());
         self.save_ticket = Arc::downgrade(&ticket);
+        self.save_metadata_token = self.metadata_token;
         Ok(SavePlan {
             container_index: self.file.envelope.container_index.clone(),
             revision: self.revision(),
@@ -1293,6 +1334,7 @@ impl DocumentStore {
         }
         let was = self.is_dirty();
         self.saved_token = receipt.state_token;
+        self.saved_metadata_token = self.save_metadata_token;
         let revision = receipt.revision;
         drop(receipt);
         self.emit(StoreEvent::Saved { revision });
@@ -1409,6 +1451,34 @@ impl From<Vec<Command>> for WriteBody {
 /// stand-alone [`DocumentStore::execute`]/gesture API above stays for
 /// single-owner callers and tests.
 impl DocumentStore {
+    pub fn metadata_revision(&self) -> u64 {
+        self.metadata_token
+    }
+
+    pub(crate) fn publish_memory(&mut self, next: Value) -> Result<(), TransactionError> {
+        let root = self.root().ok_or(TransactionError::NoDocument)?;
+        let ops = crate::memory_metadata::patches(root, &next);
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let document = crate::memory_metadata::apply(&self.current, &ops)
+            .map_err(TransactionError::Invalid)?;
+        let was = self.is_dirty();
+        self.current = Arc::new(document);
+        self.queries = QueryContext::new(&self.current);
+        self.metadata_token = next_token();
+        if let Some(tap) = &mut self.tap {
+            tap.push(Tap::Metadata { ops: ops.into() });
+        }
+        self.emit(StoreEvent::MetadataChanged {
+            sequence: self.metadata_token,
+        });
+        if was != self.is_dirty() {
+            self.emit(StoreEvent::DirtyChanged(self.is_dirty()));
+        }
+        Ok(())
+    }
+
     /// Starts recording durable changes for the journal.
     pub(crate) fn enable_tap(&mut self) {
         self.tap.get_or_insert_with(Vec::new);
@@ -1510,7 +1580,7 @@ impl DocumentStore {
         for op in prev_inverse {
             root = apply_one(root, op, revision)?.0;
         }
-        let staged = match body {
+        let mut staged = match body {
             WriteBody::Commands(commands) => {
                 self.stage_commands_on(root.as_ref(), commands, origin)?
             }
@@ -1518,6 +1588,14 @@ impl DocumentStore {
         };
         let mut ops = prev_inverse.to_vec();
         ops.extend(staged.forward.iter().cloned());
+        if let Some(current) = self.root() {
+            if let Some(preserved) = crate::memory_metadata::preserve(&staged.document, current)
+                .map_err(TransactionError::Invalid)?
+            {
+                staged.document = preserved;
+                ops = diff_node_ops(self.root(), staged.document.root());
+            }
+        }
         validate(&staged.document, &ops)?;
         if ops.is_empty() {
             return Ok(None);
@@ -1713,6 +1791,7 @@ impl DocumentStore {
     }
     pub(crate) fn mark_library_saved(&mut self) {
         self.saved_token = self.state_token;
+        self.saved_metadata_token = self.metadata_token;
         self.emit(StoreEvent::Saved {
             revision: self.revision(),
         });
