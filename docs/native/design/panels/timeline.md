@@ -28,6 +28,7 @@ Behaviour source (wins on behaviour and keys):
 | `markers` | `{id, frame, name}` | |
 | `render_bar` | segments of `BarState` `Missing` · `Rendering` · `Rendered` · `Kept` · `Stale` | see promedia review |
 | `viewport` | `scroll_time`, `pps` (points per second, clamp 4…4000), `scroll_y`, `layer_column_width` | persisted per project |
+| `columns` | `show_layer_numbers`, `show_switches` (workspace `chrome.timeline`, as main) | Columns menu |
 | `gesture` | `None` · `Scrub` · `MoveClips` · `Trim{edge}` · `MoveKeys` · `Marquee` · `Stagger` · `PickWhip` · `WorkArea{handle}` · `Pan` | drives cursor + live preview |
 
 ## 2. Anatomy
@@ -74,9 +75,22 @@ panel width; double-click the edge resets to `m.layer_column`. Width persists
 per project. Keyboard: the edge is a focusable splitter (`←`/`→` by
 `m.keyboard_step`, `Return` resets).
 
-The top `m.ruler` of the layer column (the **ruler gutter**) is empty
+The top `m.ruler` of the layer column (the **ruler gutter**) is
 `c.panel_secondary` (v1.2.0 placed transport here; native moved it to the
 header). Dragging in the gutter does nothing; it is not a scrub area.
+
+**Column headings** sit in the gutter in Layers mode, so main's heading strip adds no
+height. In Tracks mode the gutter stays empty.
+
+| Heading | Spec |
+|---|---|
+| `Layer` | `t.minimum` `t.medium_weight` `c.muted`, at the Name column's x |
+| Visibility | `eye` at `m.symbol_inline` `c.muted`, centred over the Visibility slot |
+| `Parent` | Same text style, at the Parent column's x, only while that column shows |
+
+Right-click the gutter for the **Columns** `NSMenu`: `Layer Name` ✓ (disabled), `Layer Numbers`
+✓, `Switches` ✓, `Parent` ✓ (disabled), separator, `Show All Columns`. Hiding `Switches` hides
+every switch in Layers mode except a set one.
 
 **Layer row** (`m.track_row`):
 
@@ -90,15 +104,17 @@ header). Dragging in the gutter does nothing; it is not a scrub area.
 | Kind badge | `m.kind_badge` square, `m.inner_radius`, fill = the layer's label colour `c.labels.*`, glyph at `m.symbol_inline` in `c.text`: text `textformat`, shape `square.on.circle`, video `film`, image `photo`, audio `waveform`, adjustment `slider.horizontal.3`, null `circle.dashed`, camera `camera`, group `square.stack`, precomp `rectangle.stack`, captions `captions.bubble`, solid `square.fill`, shader/extension `wand.and.rays`. |
 | Gap | `m.gap` |
 | Name | `t.body`, `c.text`, truncating tail with `…` and a tooltip of the full name. |
-| Trailing switches | right-aligned at `m.inset` from the column edge, each in an `m.hit` square, glyph `m.symbol_inline`: **Parent** (`link`, transformable layers only), **Solo** (`s.circle`), **Lock** (`lock` / `lock.open`), **Visibility** (`eye` / `eye.slash`). Order trailing→leading: Visibility, Lock, Solo, Parent. A switch is drawn when its state is non-default (hidden → `eye.slash`, locked → `lock`, soloed → `s.circle.fill`, parented → `link`) or when the row is hovered/focused (default-state glyphs then appear in `c.muted`). Set states draw in `c.secondary`; solo set draws `c.accent` (it is an active state that changes what plays). |
+| Trailing switches | right-aligned at `m.inset` from the column edge, each in an `m.hit` square, glyph `m.symbol_inline`, in fixed slots. Order trailing→leading: **Visibility** (`eye` / `eye.slash`), **Lock** (`lock` / `lock.open`), **Solo** (`s.circle`), **Parent** (`link`, transformable layers only), **Audio** (`speaker.wave.2` / `speaker.slash`, only a video with sound or a precomp that carries sound), **3D** (`cube` / `cube.fill`; not audio, adjustment or always-3D layers), **Raster** (`sun.max` / `sun.max.fill`, precomps only, `Continuously Rasterize`). A switch is drawn when its state is non-default or when the row is hovered/focused (default-state glyphs then appear in `c.muted`). Set states draw in `c.secondary`; solo set draws `c.accent` (it is an active state that changes what plays). Audio, 3D and Raster show their default state on hover only when the column is at least `m.layer_column + 3 × m.hit`; below that they appear only when set, and stay reachable from the layer menu and Properties. Empty slots give their width to the name. |
+| Parent column | From `m.layer_column + m.value_column` wide, the Parent slot becomes a column of width `m.value_column`: `link` glyph (pick whip) then the parent's name or `None`, `t.minimum` `c.secondary`, truncating. It sits in the same place in the slot order. |
 
 **Property row** (`m.property_row`):
 
 | Column | Spec |
 |---|---|
-| Previous keyframe | `chevron.left` at `m.symbol_inline`, `m.hit` square starting at `m.inset`. `c.secondary`; `c.muted` + disabled when no earlier key. Hidden (space kept) when the property has no keyframes. Tooltip `Previous Keyframe (⇧J)`. |
+| Previous keyframe | `chevron.left` at `m.symbol_inline`, `m.hit` square starting at `m.inset`. `c.secondary`; `c.muted` + disabled when no earlier key. Shown only on row hover or focus, as main; space kept. Hidden when the property has no keyframes. Tooltip `Previous Keyframe (⇧J)`. |
 | Keyframe toggle | custom `diamond` at `m.keyframe`, next `m.hit` square. Outline `c.muted` = not animated; filled `c.accent` = key at playhead; half-filled `c.accent` = animated, no key at playhead (same semantics as Properties). Tooltip `Add Keyframe` / `Remove Keyframe`. |
 | Next keyframe | `chevron.right`, next `m.hit` square, rules as previous. Tooltip `Next Keyframe (⇧K)`. |
+| Section heading row | `m.property_row`, as main's `property-sections.ts`: `Content`, `Transform`, each effect's name, the mask's name, `Layer`. `t.body` `t.medium_weight` `c.secondary` at the label's x. No diamond, no value, not a focus stop. |
 | Gap | `m.gap` |
 | Label | starts at `m.inset + 3 × m.hit + m.gap` (plus `depth × m.tree_indent`); `t.body`, `c.secondary`, truncating, tooltip = full property path (`Transform ▸ Scale`). |
 | Value readout | trailing, right edge at `m.inset` from the column edge (Scale: link glyph occupies the last `m.hit`, readout before it). One `m.field`-high well, `c.field`, `m.control_radius`, padding `m.inset − m.gap` (6) each side, `t.body` tabular `c.text`, unit `c.muted` after a space. Axes join with `, ` (`960, 540 px`, `100, 100 %`). Width fits content, min `m.value_column ÷ 2`, max `m.value_column`. **Shown only when the label keeps ≥ `m.value_column ÷ 2 − m.inset` points** (≈ 52); otherwise hidden — the value stays editable in Properties — and shown again when the column widens. |
@@ -147,7 +163,7 @@ No index, no badge (language §15: track names stay).
 | Clip beyond composition end / out of work area | unchanged; the region outside the work area gets a 30 % `c.panel_secondary` veil over the track area. |
 | Offline media clip | fill `c.labels.gray`, name `c.danger` with `exclamationmark.triangle.fill` before it. |
 | Locked layer clip | unchanged fill; a `lock` glyph `m.symbol_inline` `c.muted` after the name; pointer gestures on it show the "not allowed" cursor. |
-| Collapsed key summary | on the layer row, at each key time of any property: diamond `m.keyframe − 2`, `c.text` at 90 %, 1 pt `c.panel` keyline, vertically at the clip's bottom edge. Selected keys: `c.accent`. |
+| Collapsed key summary | on the layer row, at each key time of any property: diamond `m.keyframe − 2`, `c.text` at 90 %, 1 pt `c.panel` keyline, vertically at the clip's bottom edge. Selected keys: `c.accent`. A group's row shows its descendants' keys the same way. |
 | Keyframe (property row) | `m.keyframe` diamond centred in the row. Unselected `c.text` at 90 %; selected `c.accent` + 1 pt `c.panel` keyline (shape change by keyline, not colour only). Interpolation shape: linear = diamond, ease/bezier = circle, hold = square-ish hourglass (custom `keyframe.hold`), as v1.2.0. |
 | Playhead line | `m.playhead` width `c.accent`, from the ruler head through all rows. Over a selected clip it stays `c.accent`. |
 | Snap guide | while snapping, a 1 pt `c.accent` vertical line through ruler and tracks at the latched time; disappears on release. |
@@ -218,7 +234,9 @@ No index, no badge (language §15: track names stay).
 | Drag work-area handle / bed | resize / move work area (≥ 1 frame) | handles |
 | Right-click ruler | menu: `Add Marker Here` (disabled if one exists at that frame), separator, `Set Work Area Start`, `Set Work Area End`, `Reset Work Area`, separator, `Switch to Track Timeline` / `Switch to Layer Timeline` | NSMenu |
 | Right-click marker | menu: `Remove Marker` | |
-| Right-click property row | `Add Keyframe Here`, `Paste Keyframes Here`, `Clear All Keyframes` (disabled without keys) | |
+| Right-click property row | `Add Keyframe Here`, `Paste Keyframes Here`, `Clear All Keyframes` (disabled without keys); on Position, separator, `Separate Dimensions` ✓ | |
+| Right-click ruler gutter | Columns menu | |
+| Click 3D, Raster or Audio switch | toggle; undo `3D Layer`, `Continuously Rasterize`, `Toggle Audio` | glyph state |
 | Right-click selected keys | `Edit Value…`, `Keyframe Velocity…`, `Scale Keyframes…`, separator, `Easy Ease` (F9), `Easy Ease In` (⇧F9), `Easy Ease Out` (⌘⇧F9) | |
 | Right-click layer | the shared layer context menu (owned by the layer-commands lane; same items as the Layer main menu) | |
 | Drop files | import at drop time/index (Option = as folder) | drop treatment |
@@ -302,7 +320,7 @@ Tooltips and menu items are listed in §2/§4. Additional:
 
 | Where | String |
 |---|---|
-| Undo names | `Move Layers`, `Trim Layer`, `Split Layer`, `Move Keyframes`, `Add Keyframe`, `Clear Keyframes`, `Rename Layer`, `Toggle Visibility`, `Toggle Lock`, `Toggle Solo`, `Set Parent`, `Add Marker`, `Remove Marker`, `Set Work Area`, `Reset Work Area`, `Stagger Layers`, `Link Scale Axes` |
+| Undo names | `Move Layers`, `Trim Layer`, `Split Layer`, `Move Keyframes`, `Add Keyframe`, `Clear Keyframes`, `Rename Layer`, `Toggle Visibility`, `Toggle Lock`, `Toggle Solo`, `3D Layer`, `Continuously Rasterize`, `Toggle Audio`, `Separate Dimensions`, `Join Dimensions`, `Set Parent`, `Add Marker`, `Remove Marker`, `Set Work Area`, `Reset Work Area`, `Stagger Layers`, `Link Scale Axes` |
 | Empty composition | `Drag media here or import from your computer.` · button `Import…` |
 | Graph empty | `Select an animated property to see its curve.` |
 | Tab close tooltip | `Close {composition} (⌘W)` |
@@ -319,6 +337,7 @@ Tooltips and menu items are listed in §2/§4. Additional:
   the header.
 - Don't show Scale as two readouts in the timeline; it is one readout with
   axis-specific scrubbing.
-- Don't introduce a 3D switch column (3D is not shipped).
+- Don't add a heading strip under the ruler; headings live in the gutter.
+- Don't label parenting `Link Layers`; it's `Parent`.
 - Don't use letters (`V`, `A`, `T`) as layer badges; track names `V1`/`A1`
   stay only in Tracks mode headers.

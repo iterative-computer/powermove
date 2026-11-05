@@ -86,6 +86,10 @@ Description: `Settings for “{project name}”.`
 | | `Color Depth` | pop-up `8-bit`, `16-bit`, `32-bit float` | `Precision per color channel. Applies to every composition in this project.` | project |
 | Export defaults | `Format`, `Resolution`, `Frame Rate`, `Range`, `Quality`, `Motion Blur`, `Include Audio`, `Transparent Background` | same controls, options and detail lines as the Export sheet ([export-sheet.md](export-sheet.md)) | — | project |
 
+### Memory (only with a project open)
+
+Group `Project Memory` and the note sections: [main-delta-ui.md §9](../surfaces/main-delta-ui.md#9-settings--memory-p02-a07).
+
 ### General
 
 Description: `How Powermove looks and works on this Mac.`
@@ -110,12 +114,14 @@ Description: `Your Powermove account, and the models your agent works with.`
 | | `Remember Installs on This Account` | switch | — |
 | | `Delete Account` | button `Delete Account…` (`c.danger` text; NSAlert confirm, destructive default Cancel) | `Your published extensions stay on the Store under your handle.` |
 | Subscriptions | `ChatGPT`, `Claude` (one row each) | status text (`Connected` `c.success` + `checkmark.circle.fill`, `Checking…`, `Waiting…`, `Restart needed` `c.warning`) + button `Connect` / `Disconnect` / `Retry` | `Finish signing in in your browser.` while waiting |
-| API or Local Model | `Connection Type` | pop-up `OpenAI API`, `Ollama`, `LM Studio`, `Other compatible provider` | — |
+| API or Local Model | `Connection Type` | grouped pop-up, [S071](../surfaces/agent-auth.md#s071-api-or-local-model) | — |
 | | `API Base URL` | text field | `Base URL of the API, ending in /v1.` |
 | | `API Key` | secure field | `Key saved securely. Leave blank to keep it.` / `Optional for local models.` / `Required by this provider.` |
-| | `Model Name` | text field | `The exact model name your provider expects.` |
+| | `Model Name` | combo box once models are discovered, else text field | `The exact model name your provider expects.` |
 | | `This Model Supports Images` | switch | `The model can read pictures you attach to a message.` |
 | | `Status` | status text + button `Test and Connect` (`Testing…` while running) | errors: `Couldn’t connect. Check the address and model.` / `Not connected. Start your local server, or enter your provider’s details.` / `Restart Powermove to enable API and local connections.` |
+
+After API or Local Model comes the group `Other Agent Apps`: [S070](../surfaces/agent-auth.md#other-agent-apps).
 
 ### Transcription
 
@@ -137,6 +143,15 @@ slides out; back button `chevron.left` + `Extensions`): `About`, `Includes`,
 `Delete…` (`c.danger`, NSAlert). Esc in a detail returns to the list
 (A257 extension settings route). Store publishing row: `Publish and manage
 your extensions on the Store.` with `Open Store`.
+
+### Storage
+
+[tasks-storage.md](../surfaces/tasks-storage.md#settings--storage), after Extensions.
+
+### Sidebar groups
+
+Source-list section headers, as main: `Project` (`Project`, `Memory`), `App` (`General`, `Accounts`,
+`Transcription`, `Extensions`, `Storage`). With no project open, the `Project` group is absent.
 
 ## 5. States
 
