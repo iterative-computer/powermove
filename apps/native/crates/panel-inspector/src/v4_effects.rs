@@ -51,6 +51,14 @@ pub struct Plan {
     layer: String,
     document: u64,
 }
+impl Plan {
+    fn pin_document(mut self) -> Self {
+        if let Some(request) = &mut self.request {
+            request.expected_document = Some(self.document);
+        }
+        self
+    }
+}
 impl EffectsPanel {
     pub fn new(presentation: Presentation, range: Range<usize>) -> Self {
         Self {
@@ -435,11 +443,11 @@ impl EffectsPanel {
                 return Err(InspectorError::InvalidInput);
             }
             self.range = start..end;
-            return Ok(plan);
+            return Ok(plan.pin_document());
         }
         if action == "clear" {
             model.effects.clear();
-            return Ok(plan);
+            return Ok(plan.pin_document());
         }
         if !model.editable(&layer)
             || ["audio", "camera"].contains(&text(&model.layer(&layer)?, "type"))
@@ -468,7 +476,7 @@ impl EffectsPanel {
                         ..Default::default()
                     },
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "navigate" => {
                 let focused = model
@@ -484,7 +492,7 @@ impl EffectsPanel {
                     direction()?,
                     intent.get("shift").and_then(Value::as_bool) == Some(true),
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "disclose" => {
                 model.set_effect_disclosure(
@@ -495,11 +503,11 @@ impl EffectsPanel {
                         .and_then(Value::as_bool)
                         .ok_or(InspectorError::InvalidInput)?,
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "copy" => {
                 model.copy_effects(&layer, id)?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "toggle" => {
                 let effect = model.effect(&layer, id)?;
@@ -673,7 +681,7 @@ impl EffectsPanel {
                         .binding_state(&Binding::Property(property.clone()), time)?
                         .animated
                 {
-                    return Ok(plan);
+                    return Ok(plan.pin_document());
                 }
                 let action = match text(intent, "action") {
                     "diamond" => PropertyAction::Diamond,
@@ -684,7 +692,7 @@ impl EffectsPanel {
                 // Keep the kernel's exact action-specific undo name for diamond
                 // add/remove, rather than labelling a removal as an addition.
                 if text(intent, "action") == "diamond" {
-                    return Ok(plan);
+                    return Ok(plan.pin_document());
                 }
                 label = "Remove Animation".into();
             }
@@ -701,7 +709,7 @@ impl EffectsPanel {
         {
             *request_label = Some(label);
         }
-        Ok(plan)
+        Ok(plan.pin_document())
     }
     pub fn acknowledge(
         &mut self,
