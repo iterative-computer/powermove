@@ -25,7 +25,7 @@ fn rect_of(l: &Layout, id: &str) -> Rect {
 }
 
 #[test]
-fn drop_targets_cover_header_tab_split_halves_and_edges() {
+fn drop_targets_cover_header_group_viewer_splits_and_edges() {
     let l = Layout::preset("design");
     let g = geometry(&l);
     let t = tokens();
@@ -48,11 +48,12 @@ fn drop_targets_cover_header_tab_split_halves_and_edges() {
             index: 1
         }
     );
-    // Only the header strip lights up (shell 3).
+    // The group body lights up, per main-delta-ui §2.
     assert_eq!(
         p.rect,
         Rect {
-            h: t.metrics.header,
+            y: inspector.y + t.metrics.header,
+            h: inspector.h - t.metrics.header,
             ..inspector
         }
     );

@@ -12,6 +12,7 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Dura
 #[derive(Clone)]
 struct PanelDrag {
     id: String,
+    stack: bool,
     start: Point<Pixels>,
     original: Layout,
     at: Point<Pixels>,
@@ -311,6 +312,17 @@ impl Editor {
                     self.layout.show_panel(rest)
                 }
             }
+            ("panel", "activate") => {
+                // Switching a tab preserves the maximized stack.
+                let result = self.layout.show_panel(rest);
+                if let Err(error) = result {
+                    self.status = error.to_string();
+                } else {
+                    self.save();
+                }
+                cx.notify();
+                return true;
+            }
             ("panel", "show") => self.layout.show_panel(rest),
             ("panel", "close") => self.layout.close_panel(rest),
             ("panel", "dock") => {
@@ -321,6 +333,17 @@ impl Editor {
                     _ => Edge::Bottom,
                 };
                 self.layout.move_panel_to(id, DropTarget::Edge(edge))
+            }
+            ("panel", "group" | "above" | "below") => {
+                let (id, target) = rest.split_once(':').unwrap_or((rest, ""));
+                self.layout.place_relative(id, target, verb)
+            }
+            ("panel", "maximize") => {
+                if self.layout.open_panels().contains(&rest) {
+                    self.maximized_panel = Some(rest.into());
+                    cx.notify();
+                }
+                return true;
             }
             // panel:addto:<dock>:<group>:<id> — the header's + menu.
             ("panel", "addto") => {
@@ -375,7 +398,10 @@ impl Editor {
             _ => return false,
         };
         match result {
-            Ok(()) => self.save(),
+            Ok(()) => {
+                self.maximized_panel = None;
+                self.save();
+            }
             Err(e) => self.status = e.to_string(),
         }
         cx.notify();
@@ -522,11 +548,25 @@ impl Editor {
                             self.layout.docks[p.dock].groups[p.group]
                                 .active()
                                 .to_owned()
+                        })
+                        .or_else(|| {
+                            self.panel_order
+                                .iter()
+                                .find(|id| {
+                                    self.panel_focus
+                                        .get(*id)
+                                        .is_some_and(|f| f.is_focused(window))
+                                })
+                                .cloned()
                         });
                     handled = self.maximized_panel.is_some();
                 }
             }
+            "restorePanel" => {
+                self.maximized_panel = None;
+            }
             "toggleSidebar" | "toggleInspector" => {
+                self.maximized_panel = None;
                 let id = if cmd.name == "toggleSidebar" {
                     "left"
                 } else {
@@ -566,6 +606,7 @@ impl Editor {
                 }
             }
             name if name.starts_with("workspace:") => {
+                self.maximized_panel = None;
                 self.save();
                 self.layout = self.store.get(&self.project, &name[10..]);
                 self.save();
@@ -593,11 +634,17 @@ impl Editor {
             Some(Gesture::Panel(d)) => d.original,
             _ => self.layout.clone(),
         };
-        let preview = self
-            .layout
-            .drop_target(&self.geometry, self.dock_bounds, x, y, &self.tokens);
+        let preview = self.layout.drop_target_for(
+            &self.geometry,
+            self.dock_bounds,
+            (x, y),
+            &self.tokens,
+            id,
+            false,
+        );
         self.gesture = Some(Gesture::Panel(PanelDrag {
             id: id.into(),
+            stack: false,
             start: at,
             original,
             at,
@@ -612,13 +659,20 @@ impl Editor {
             return None;
         };
         let target = drag.preview?.target;
-        self.layout.move_panel_to(&drag.id, target).ok()?;
+        if drag.stack {
+            self.layout.move_stack_to(&drag.id, target)
+        } else {
+            self.layout.move_panel_to(&drag.id, target)
+        }
+        .ok()?;
         self.save();
         Some(target)
     }
-    fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>) {
+    fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>, stack: bool) {
+        self.maximized_panel = None;
         self.gesture = Some(Gesture::Panel(PanelDrag {
             id: id.into(),
+            stack,
             start: at,
             original: self.layout.clone(),
             at,
@@ -697,6 +751,31 @@ impl Editor {
                     .checked(current == Some(edge)),
             );
         }
+        for (label, verb) in [
+            ("Group With", "group"),
+            ("Dock Above", "above"),
+            ("Dock Below", "below"),
+        ] {
+            let children = self
+                .layout
+                .open_panels()
+                .into_iter()
+                .filter(|target| {
+                    *target != id && (verb != "group" || (id != "viewer" && *target != "viewer"))
+                })
+                .map(|target| {
+                    MenuEntry::item(
+                        layout::panel_title(target),
+                        format!("panel:{verb}:{id}:{target}"),
+                    )
+                })
+                .collect();
+            items.push(MenuEntry::submenu(label, children));
+        }
+        items.push(MenuEntry::item(
+            "Maximize Panel",
+            format!("panel:maximize:{id}"),
+        ));
         items.push(MenuEntry::separator());
         items.push(MenuEntry::item("Save Workspace…", "layout:save"));
         items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
@@ -762,8 +841,6 @@ fn positioned(r: Rect) -> Div {
         .w(px(r.w))
         .h(px(r.h))
 }
-/// Drop-zone outline width (language: 2 pt `accent`).
-const DROP_OUTLINE: f32 = 2.;
 /// Centred empty state (language §9/§14): `heading` + one `reading` line.
 /// Callers may append one action.
 pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
@@ -996,12 +1073,13 @@ impl Render for Editor {
                             drag.preview = drag
                                 .moved
                                 .then(|| {
-                                    this.layout.drop_target(
+                                    this.layout.drop_target_for(
                                         &this.geometry,
                                         this.dock_bounds,
-                                        f32::from(e.position.x),
-                                        f32::from(e.position.y),
+                                        (f32::from(e.position.x), f32::from(e.position.y)),
                                         &this.tokens,
+                                        &drag.id,
+                                        drag.stack,
                                     )
                                 })
                                 .flatten();
@@ -1022,7 +1100,11 @@ impl Render for Editor {
                         if let Gesture::Panel(drag) = g
                             && drag.moved
                             && let Some(p) = drag.preview
-                            && let Err(err) = this.layout.move_panel_to(&drag.id, p.target)
+                            && let Err(err) = if drag.stack {
+                                this.layout.move_stack_to(&drag.id, p.target)
+                            } else {
+                                this.layout.move_panel_to(&drag.id, p.target)
+                            }
                         {
                             this.status = err.to_string();
                         }
@@ -1086,6 +1168,7 @@ impl Render for Editor {
             let is_viewer = id == "viewer";
             let tabs = group.tabs.clone();
             let active = group.active;
+            let tab_track = group.tab_track(p.rect.w - 2. * m.inset - m.hit, &t);
             let header_bg = if is_viewer { c.viewer } else { c.panel };
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
@@ -1124,11 +1207,11 @@ impl Render for Editor {
                 .h(px(m.header))
                 .px(px(m.inset))
                 .bg(rgb(header_bg))
-                // The header's empty area drags the active panel and opens its menu.
+                // The header's empty area moves the whole stack; a tab moves one panel.
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        this.begin_panel_drag(&header_id, e.position);
+                        this.begin_panel_drag(&header_id, e.position, true);
                         window.focus(&this.focus, cx);
                         cx.notify();
                     }),
@@ -1152,6 +1235,9 @@ impl Render for Editor {
                         .p(px(2.))
                 });
                 for (ti, tab) in tabs.iter().enumerate() {
+                    if !tab_track.visible.contains(&ti) {
+                        continue;
+                    }
                     let tabid = tab.clone();
                     let menu_id = tab.clone();
                     let selected = ti == active;
@@ -1187,7 +1273,10 @@ impl Render for Editor {
                         .when(!multi, |s| s.font_weight(FontWeight::SEMIBOLD))
                         .when(multi, |s| s.font_weight(FontWeight::MEDIUM))
                         .cursor_pointer()
-                        .child(title.clone());
+                        .when(multi, |s| {
+                            s.w(px(tab_track.width)).min_w(px(0.)).overflow_hidden()
+                        })
+                        .child(div().min_w(px(0.)).truncate().child(title.clone()));
                     if closable {
                         // Mac tabs: the close button sits at the leading edge, on hover.
                         cell = cell.child(
@@ -1234,7 +1323,7 @@ impl Render for Editor {
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
-                                this.begin_panel_drag(&tabid, e.position);
+                                this.begin_panel_drag(&tabid, e.position, false);
                                 window.focus(&this.focus, cx);
                                 cx.notify();
                             }),
@@ -1248,7 +1337,66 @@ impl Render for Editor {
                         ),
                     );
                 }
+                if !tab_track.overflow.is_empty() {
+                    let entries: Vec<_> = tab_track
+                        .overflow
+                        .iter()
+                        .map(|&i| {
+                            MenuEntry::item(
+                                layout::panel_title(&tabs[i]),
+                                format!("panel:activate:{}", tabs[i]),
+                            )
+                            .checked(i == active)
+                        })
+                        .collect();
+                    strip = strip.child(
+                        div()
+                            .id(format!("more-panels-{}-{}", p.dock, p.group))
+                            .role(Role::Button)
+                            .aria_label("More Panels")
+                            .tab_index(0)
+                            .w(px(m.hit))
+                            .cursor_pointer()
+                            .child(crate::symbol::symbol(
+                                "chevron.down",
+                                m.symbol_inline,
+                                crate::symbol::Weight::Medium,
+                                c.secondary,
+                                w,
+                            ))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, _| {
+                                if let Some(host) = &this.host {
+                                    let at = e.position();
+                                    host.borrow()
+                                        .context_menu(&entries, at.x.into(), at.y.into());
+                                }
+                            })),
+                    );
+                }
                 header = header.child(strip);
+            }
+            if self.maximized_panel.is_some() {
+                header = header.child(
+                    div()
+                        .id("restore-panel")
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .aria_label("Restore Panel")
+                        .cursor_pointer()
+                        .child(crate::symbol::symbol(
+                            "arrow.down.right.and.arrow.up.left",
+                            m.symbol_inline,
+                            crate::symbol::Weight::Medium,
+                            c.secondary,
+                            w,
+                        ))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.maximized_panel = None;
+                            cx.notify();
+                        })),
+                );
             }
             if let Some(custom) = custom {
                 header = header.child(div().flex_1().min_w(px(0.)).h_full().child(custom));
@@ -1409,8 +1557,8 @@ impl Render for Editor {
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
-                        .rounded(px(m.control_radius))
-                        .border(px(DROP_OUTLINE))
+                        .rounded(px(m.panel_radius))
+                        .border(px(m.drop_stroke))
                         .border_color(rgb(c.accent))
                         .bg(rgb(c.accent_wash)),
                 );
