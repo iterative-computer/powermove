@@ -123,6 +123,87 @@ impl Library {
     pub fn source(&self) -> &Value {
         &self.raw
     }
+    pub fn add_group(&self, id: &str, name: &str) -> Result<Change, Problem> {
+        let mut raw = self.raw.clone();
+        raw["groups"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":id,"name":name,"presets":[]}));
+        raw["active"] = json!(id);
+        self.change(raw)
+    }
+    pub fn save_preset(
+        &self,
+        group_id: &str,
+        id: &str,
+        name: &str,
+        curve: Value,
+    ) -> Result<Change, Problem> {
+        validate_curve(&curve)?;
+        let mut raw = self.raw.clone();
+        let group = raw["groups"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|g| g["id"] == group_id)
+            .ok_or(Problem::MissingTarget)?;
+        group["presets"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":id,"name":name,"color":"","curve":curve}));
+        self.change(raw)
+    }
+    /// Caller supplies the already specified/entered duplicate name; this model
+    /// does not invent a suffix or other visible copy.
+    pub fn duplicate_preset(&self, id: &str, new_id: &str, name: &str) -> Result<Change, Problem> {
+        let mut raw = self.raw.clone();
+        let group = raw["groups"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|g| {
+                g["presets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["id"] == id)
+            })
+            .ok_or(Problem::MissingTarget)?;
+        let mut preset = group["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .unwrap()
+            .clone();
+        preset["id"] = json!(new_id);
+        preset["name"] = json!(name);
+        group["presets"].as_array_mut().unwrap().push(preset);
+        self.change(raw)
+    }
+    pub fn set_color(&self, id: &str, color: &str) -> Result<Change, Problem> {
+        if !(color.is_empty()
+            || color.len() == 7
+                && color.starts_with('#')
+                && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(Problem::Preset);
+        }
+        let mut raw = self.raw.clone();
+        let mut found = false;
+        for group in raw["groups"].as_array_mut().unwrap() {
+            for preset in group["presets"].as_array_mut().unwrap() {
+                if preset["id"] == id {
+                    preset["color"] = json!(color);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return Err(Problem::MissingTarget);
+        }
+        self.change(raw)
+    }
     pub fn active(&self) -> &str {
         let groups = self.raw["groups"].as_array().unwrap();
         groups
@@ -215,27 +296,48 @@ impl Library {
         }
         self.change(raw)
     }
-    /// One caller-supplied fresh ID per incoming group/preset, in traversal order.
+    /// S095: retain non-conflicting IDs, use one supplied fresh ID per conflict.
     pub fn merge(&self, incoming: &Library, ids: &[String]) -> Result<Change, Problem> {
-        let count = incoming.raw["groups"]
+        let mut used: BTreeSet<String> = self.raw["groups"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|g| 1 + g["presets"].as_array().unwrap().len())
-            .sum::<usize>();
-        if count != ids.len() {
-            return Err(Problem::IdCollision);
-        }
+            .flat_map(|g| {
+                std::iter::once(g["id"].as_str().unwrap().to_owned()).chain(
+                    g["presets"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p["id"].as_str().unwrap().to_owned()),
+                )
+            })
+            .collect();
         let mut ids = ids.iter();
         let mut raw = self.raw.clone();
+        let mut assign = |value: &mut Value| -> Result<(), Problem> {
+            let old = value.as_str().unwrap();
+            if used.contains(old) {
+                let id = ids.next().ok_or(Problem::IdCollision)?;
+                if !used.insert(id.clone()) {
+                    return Err(Problem::IdCollision);
+                }
+                *value = json!(id);
+            } else {
+                used.insert(old.into());
+            }
+            Ok(())
+        };
         for group in incoming.raw["groups"].as_array().unwrap() {
             let mut group = group.clone();
-            group["id"] = json!(ids.next().unwrap());
+            assign(&mut group["id"])?;
             for preset in group["presets"].as_array_mut().unwrap() {
-                preset["id"] = json!(ids.next().unwrap());
+                assign(&mut preset["id"])?;
             }
             raw["active"] = group["id"].clone();
             raw["groups"].as_array_mut().unwrap().push(group);
+        }
+        if ids.next().is_some() {
+            return Err(Problem::IdCollision);
         }
         self.change(raw)
     }
@@ -260,7 +362,12 @@ impl Change {
     /// including unknown fields. Host must commit with a CAS and durable archive
     /// in one transaction; failed archival never publishes the edited library.
     pub fn commit(self, store: &mut impl LibraryArchive) -> crate::Result<Library> {
-        store.archive_and_publish(STORAGE_KEY, &self.before, &self.after)?;
+        store.archive_and_publish(
+            STORAGE_KEY,
+            &self.before,
+            &self.after,
+            std::slice::from_ref(&self.before),
+        )?;
         Ok(Library { raw: self.after })
     }
 }
@@ -270,7 +377,87 @@ pub trait LibraryArchive {
         key: &str,
         expected: &Value,
         next: &Value,
+        archives: &[Value],
     ) -> crate::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveColor {
+    Accent,
+    Mono,
+}
+pub fn curve_color(library: &Library) -> CurveColor {
+    if library.source()["preferences"]["palette"] == "mono" {
+        CurveColor::Mono
+    } else {
+        CurveColor::Accent
+    }
+}
+/// S094/S095: edits and immediate Undo keep working in memory on IO failure.
+/// All intermediate before-images remain queued for durable archival on Retry.
+pub struct LibrarySession {
+    pub current: Library,
+    durable: Value,
+    pending_archives: Vec<Value>,
+    undo: Vec<Value>,
+    pub error: Option<crate::ServiceErrorCode>,
+}
+impl LibrarySession {
+    pub fn new(library: Library) -> Self {
+        Self {
+            durable: library.raw.clone(),
+            current: library,
+            pending_archives: vec![],
+            undo: vec![],
+            error: None,
+        }
+    }
+    pub fn edit(&mut self, change: Change, store: &mut impl LibraryArchive) -> crate::Result<()> {
+        if change.before != self.current.raw {
+            return Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::InvalidInput,
+                "stale easing library edit",
+            ));
+        }
+        self.undo.push(change.before.clone());
+        self.pending_archives.push(change.before);
+        self.current.raw = change.after;
+        self.retry(store)
+    }
+    pub fn undo(&mut self, store: &mut impl LibraryArchive) -> crate::Result<bool> {
+        let Some(before) = self.undo.pop() else {
+            return Ok(false);
+        };
+        self.pending_archives.push(self.current.raw.clone());
+        self.current.raw = before;
+        self.retry(store)?;
+        Ok(true)
+    }
+    pub fn retry(&mut self, store: &mut impl LibraryArchive) -> crate::Result<()> {
+        if self.pending_archives.is_empty() {
+            return Ok(());
+        }
+        match store.archive_and_publish(
+            STORAGE_KEY,
+            &self.durable,
+            &self.current.raw,
+            &self.pending_archives,
+        ) {
+            Ok(()) => {
+                self.durable = self.current.raw.clone();
+                self.pending_archives.clear();
+                self.error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.error = Some(error.code);
+                Err(error)
+            }
+        }
+    }
+    pub fn has_unpersisted_work(&self) -> bool {
+        !self.pending_archives.is_empty()
+    }
 }
 
 pub fn mirror(curve: &Value) -> Result<Value, Problem> {
@@ -289,6 +476,61 @@ pub fn mirror(curve: &Value) -> Result<Value, Problem> {
     }
     validate_curve(&next)?;
     Ok(next)
+}
+
+/// Tagged loadCurve/normalize: one selected key includes its next neighbour,
+/// or previous at the end. Disjoint selections never become an invented span.
+/// Exact normalized speeds use dt/dv; arbitrary key/handle metadata survives.
+pub fn load_curve(keys: &[Value], selected: &[String]) -> Result<Value, Problem> {
+    let mut indices: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| {
+            key["i"]
+                .as_str()
+                .is_some_and(|id| selected.iter().any(|s| s == id))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if indices.len() == 1 {
+        let i = indices[0];
+        indices = if i + 1 < keys.len() {
+            vec![i, i + 1]
+        } else if i > 0 {
+            vec![i - 1, i]
+        } else {
+            vec![]
+        };
+    }
+    if indices.len() < 2 || indices.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Err(Problem::NonConsecutive);
+    }
+    let first = &keys[indices[0]];
+    let last = &keys[*indices.last().unwrap()];
+    let from = number(&first["t"]).ok_or(Problem::Coordinates)?;
+    let value = number(&first["v"]).ok_or(Problem::Coordinates)?;
+    let dt = number(&last["t"]).ok_or(Problem::Coordinates)? - from;
+    let dv = number(&last["v"]).ok_or(Problem::Coordinates)? - value;
+    if dt <= 0. || !dt.is_finite() || !dv.is_finite() || dv.abs() < 1e-9 {
+        return Err(Problem::FlatSpan);
+    }
+    let mut points = Vec::new();
+    for index in indices {
+        let mut point = keys[index].clone();
+        let t = number(&point["t"]).ok_or(Problem::Coordinates)?;
+        let v = number(&point["v"]).ok_or(Problem::Coordinates)?;
+        point["t"] = json!((t - from) / dt);
+        point["v"] = json!((v - value) / dv);
+        for side in ["inEase", "outEase"] {
+            let speed = number(&point[side]["speed"]).ok_or(Problem::Handles)? * dt / dv;
+            if !speed.is_finite() {
+                return Err(Problem::Handles);
+            }
+            point[side]["speed"] = json!(speed);
+        }
+        points.push(point);
+    }
+    Ok(json!({"points":points}))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,6 +687,7 @@ mod tests {
                 key: &str,
                 expected: &Value,
                 next: &Value,
+                archives: &[Value],
             ) -> crate::Result<()> {
                 assert_eq!(key, STORAGE_KEY);
                 if self.fail || &self.value != expected {
@@ -453,7 +696,7 @@ mod tests {
                         "fixture archive failure",
                     ));
                 }
-                self.archive.push(expected.clone());
+                self.archive.extend_from_slice(archives);
                 self.value = next.clone();
                 Ok(())
             }
@@ -511,5 +754,138 @@ mod tests {
                 outgoing: false
             }
         );
+    }
+    #[test]
+    fn save_duplicate_and_colour_preserve_curve_and_all_future_payloads() {
+        let library = Library::read(raw()).unwrap();
+        let change = library
+            .duplicate_preset("p", "copy", "Entered name")
+            .unwrap();
+        let copy = &change.preview()["groups"][0]["presets"][1];
+        assert_eq!(copy["curve"], curve());
+        assert_eq!(copy["futurePreset"], 1);
+        assert_eq!(copy["name"], "Entered name");
+        let change = library
+            .save_preset("other", "saved", "Custom", curve())
+            .unwrap();
+        assert_eq!(
+            change.preview()["groups"][1]["presets"][0]["curve"],
+            curve()
+        );
+        let change = library.set_color("p", "#AbC123").unwrap();
+        assert_eq!(
+            change.preview()["groups"][0]["presets"][0]["color"],
+            "#AbC123"
+        );
+        assert!(library.set_color("p", "red").is_err());
+        let change = library.add_group("new", "Entered group").unwrap();
+        assert_eq!(change.preview()["active"], "new");
+        assert!(library.add_group("g", "collision").is_err());
+    }
+    #[test]
+    fn load_curve_uses_single_key_neighbour_and_scales_signed_speed_exactly() {
+        let mut a = point(4., 20.);
+        a["i"] = json!("a");
+        let mut b = point(6., 10.);
+        b["i"] = json!("b");
+        let curve = load_curve(&[a.clone(), b.clone()], &["b".into()]).unwrap();
+        assert_eq!(curve["points"][0]["t"], 0.);
+        assert_eq!(curve["points"][1]["v"], 1.);
+        assert_eq!(curve["points"][0]["inEase"]["speed"], -0.4);
+        assert_eq!(curve["points"][0]["futurePoint"], 1);
+        let mut c = point(7., 10.);
+        c["i"] = json!("c");
+        assert_eq!(
+            load_curve(&[a, b.clone(), c.clone()], &["a".into(), "c".into()]),
+            Err(Problem::NonConsecutive)
+        );
+        assert_eq!(
+            load_curve(&[b, c], &["b".into(), "c".into()]),
+            Err(Problem::FlatSpan)
+        );
+    }
+    #[test]
+    fn stored_graph_hues_project_to_accent_without_rewriting_preferences() {
+        for palette in ["blue", "green", "violet", "native", "mono"] {
+            let mut value = raw();
+            value["preferences"]["palette"] = json!(palette);
+            let library = Library::read(value.clone()).unwrap();
+            assert_eq!(
+                curve_color(&library),
+                if palette == "mono" {
+                    CurveColor::Mono
+                } else {
+                    CurveColor::Accent
+                }
+            );
+            assert_eq!(library.source(), &value);
+        }
+    }
+    #[test]
+    fn import_keeps_nonconflicting_ids() {
+        let library = Library::read(raw()).unwrap();
+        let mut incoming = raw();
+        incoming["groups"][0]["id"] = json!("unique");
+        incoming["groups"][0]["presets"][0]["id"] = json!("unique-preset");
+        incoming["groups"].as_array_mut().unwrap().pop();
+        let change = library
+            .merge(&Library::read(incoming).unwrap(), &[])
+            .unwrap();
+        assert_eq!(change.preview()["groups"][2]["id"], "unique");
+        assert_eq!(
+            change.preview()["groups"][2]["presets"][0]["id"],
+            "unique-preset"
+        );
+    }
+    #[test]
+    fn memory_edits_and_undo_survive_disk_failure_and_retry_archives_every_step() {
+        struct Store {
+            value: Value,
+            archives: Vec<Value>,
+            fail: bool,
+        }
+        impl LibraryArchive for Store {
+            fn archive_and_publish(
+                &mut self,
+                _: &str,
+                expected: &Value,
+                next: &Value,
+                archives: &[Value],
+            ) -> crate::Result<()> {
+                if self.fail {
+                    return Err(crate::ServiceError::message(
+                        crate::ServiceErrorCode::DiskFull,
+                        "fixture disk full",
+                    ));
+                }
+                assert_eq!(&self.value, expected);
+                self.archives.extend_from_slice(archives);
+                self.value = next.clone();
+                Ok(())
+            }
+        }
+        let mut session = LibrarySession::new(Library::read(raw()).unwrap());
+        let mut store = Store {
+            value: raw(),
+            archives: vec![],
+            fail: true,
+        };
+        let change = session.current.remove("p").unwrap();
+        assert!(session.edit(change, &mut store).is_err());
+        assert!(
+            session.current.source()["groups"][0]["presets"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(session.has_unpersisted_work());
+        assert_eq!(store.value, raw());
+        assert!(session.undo(&mut store).is_err());
+        assert_eq!(session.current.source(), &raw());
+        store.fail = false;
+        session.retry(&mut store).unwrap();
+        assert!(!session.has_unpersisted_work());
+        assert_eq!(store.archives.len(), 2);
+        assert_eq!(store.value, raw());
     }
 }

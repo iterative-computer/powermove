@@ -149,6 +149,7 @@ impl Status {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub path: PathBuf,
     pub start: Option<f64>,
@@ -166,12 +167,37 @@ impl Request {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transcript {
     pub model_id: String,
     pub language: Option<String>,
     pub duration: f64,
     pub timing: Option<String>,
     pub segments: Vec<Value>,
+}
+impl Transcript {
+    pub fn valid(&self) -> bool {
+        fn span(value: &Value) -> bool {
+            match (value["start"].as_f64(), value["end"].as_f64()) {
+                (Some(start), Some(end)) => {
+                    start.is_finite()
+                        && end.is_finite()
+                        && start >= 0.
+                        && end >= start
+                        && value["text"].is_string()
+                }
+                _ => false,
+            }
+        }
+        !self.model_id.is_empty()
+            && self.duration.is_finite()
+            && self.duration >= 0.
+            && self.segments.iter().all(|s| {
+                span(s)
+                    && s.get("words")
+                        .is_none_or(|w| w.as_array().is_some_and(|words| words.iter().all(span)))
+            })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JobState {
@@ -250,9 +276,14 @@ impl Job {
             return true;
         }
         match result {
-            Ok(transcript) => {
+            Ok(transcript) if transcript.valid() => {
                 self.transcript = Some(transcript);
                 self.state = JobState::Complete;
+            }
+            Ok(_) => {
+                self.state = JobState::Failed {
+                    code: "invalid-transcript".into(),
+                }
             }
             Err(code) => self.state = JobState::Failed { code },
         }
@@ -267,8 +298,169 @@ pub trait TranscriptionHost: Send + 'static {
     fn transcribe(&mut self, ticket: Ticket, request: Request) -> crate::Result<Transcript>;
     /// Must use a separate control path from a blocked decoder worker.
     fn cancel(&self, ticket: Ticket) -> crate::Result<()>;
-    /// Archive original and partial model bytes before removing the active entry.
-    fn archive_model(&mut self, id: &str) -> crate::Result<()>;
+    /// S092 exception: remove re-downloadable model/partial bytes after native confirmation.
+    /// This capability must never remove transcripts, preferences or authored work.
+    fn remove_model(&mut self, id: &str) -> crate::Result<Status>;
+    /// Starts background work and returns its observed state promptly, as in tag.
+    fn download(&mut self, id: &str) -> crate::Result<Status>;
+    fn cancel_download(&mut self, id: &str) -> crate::Result<Status>;
+    fn set_active(&mut self, id: &str) -> crate::Result<Status>;
+    fn set_language(&mut self, language: &str) -> crate::Result<Status>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelCommand {
+    Download(String),
+    CancelDownload(String),
+    Delete(String),
+    SetActive(String),
+    SetLanguage(String),
+}
+impl ModelCommand {
+    pub fn run(self, host: &mut impl TranscriptionHost) -> crate::Result<Status> {
+        match self {
+            Self::Download(id) => host.download(&id),
+            Self::CancelDownload(id) => host.cancel_download(&id),
+            Self::Delete(id) => host.remove_model(&id),
+            Self::SetActive(id) => host.set_active(&id),
+            Self::SetLanguage(language) => host.set_language(&language),
+        }
+    }
+}
+#[derive(Debug, Default)]
+pub struct ModelManager {
+    pub status: Status,
+    pub error: Option<crate::ServiceErrorCode>,
+    flight: Flight,
+}
+#[derive(Debug)]
+pub struct RemovalPrompt {
+    model: Model,
+}
+impl RemovalPrompt {
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+}
+impl ModelManager {
+    /// A request never marks bytes installed/removed before the host confirms it.
+    pub fn request(&mut self, command: ModelCommand) -> Option<(Ticket, ModelCommand)> {
+        if matches!(command, ModelCommand::Delete(_)) {
+            return None;
+        }
+        self.admit(command)
+    }
+    pub fn removal_prompt(&self, id: &str) -> Option<RemovalPrompt> {
+        let model = self
+            .status
+            .models
+            .iter()
+            .find(|m| m.id == id && matches!(m.state, ModelState::Ready | ModelState::Error))?;
+        Some(RemovalPrompt {
+            model: model.clone(),
+        })
+    }
+    pub fn confirm_removal(
+        &mut self,
+        prompt: RemovalPrompt,
+        accepted: bool,
+    ) -> Option<(Ticket, ModelCommand)> {
+        if !accepted {
+            return None;
+        }
+        let current = self
+            .status
+            .models
+            .iter()
+            .find(|m| m.id == prompt.model.id)?;
+        if serde_json::to_value(current).ok() != serde_json::to_value(&prompt.model).ok() {
+            return None;
+        }
+        self.admit(ModelCommand::Delete(prompt.model.id))
+    }
+    fn admit(&mut self, command: ModelCommand) -> Option<(Ticket, ModelCommand)> {
+        if self.status.available == Some(false) || self.flight.current().is_some() {
+            return None;
+        }
+        let valid = match &command {
+            ModelCommand::Download(id) => {
+                self.status.models.iter().any(|m| {
+                    &m.id == id && matches!(m.state, ModelState::Absent | ModelState::Error)
+                })
+            }
+            ModelCommand::CancelDownload(id) => self
+                .status
+                .models
+                .iter()
+                .any(|m| &m.id == id && m.state == ModelState::Downloading),
+            ModelCommand::Delete(id) => self.status.models.iter().any(|m| {
+                &m.id == id && m.state != ModelState::Downloading && m.state != ModelState::Absent
+            }),
+            ModelCommand::SetActive(id) => self
+                .status
+                .models
+                .iter()
+                .any(|m| &m.id == id && m.state == ModelState::Ready),
+            ModelCommand::SetLanguage(language) => {
+                language == "auto"
+                    || self
+                        .status
+                        .models
+                        .iter()
+                        .find(|m| Some(&m.id) == self.status.active_model_id.as_ref())
+                        .is_some_and(|m| {
+                            m.language_codes
+                                .as_ref()
+                                .map_or(m.languages == "en" && language == "en", |codes| {
+                                    codes.contains(language)
+                                })
+                        })
+            }
+        };
+        if !valid {
+            return None;
+        }
+        self.error = None;
+        Some((self.flight.start(), command))
+    }
+    pub fn receive(&mut self, ticket: Ticket, result: crate::Result<Status>) -> bool {
+        if !self.flight.finish(ticket) {
+            return false;
+        }
+        match result {
+            Ok(status) => self.status = status,
+            Err(error) => self.error = Some(error.code),
+        }
+        true
+    }
+    pub fn close(&mut self) {
+        self.flight.cancel();
+    }
+}
+
+pub struct TranscribeWork {
+    pub ticket: Ticket,
+    pub request: Request,
+}
+pub struct TranscribeReply {
+    pub ticket: Ticket,
+    pub result: crate::Result<Transcript>,
+}
+impl TranscribeWork {
+    pub fn run(self, host: &mut impl TranscriptionHost) -> TranscribeReply {
+        let result = if self.request.valid() {
+            host.transcribe(self.ticket, self.request)
+        } else {
+            Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::InvalidInput,
+                "invalid transcription source span",
+            ))
+        };
+        TranscribeReply {
+            ticket: self.ticket,
+            result,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -436,5 +628,108 @@ mod tests {
         r.end = Some(1.);
         r.start = Some(-1.);
         assert!(!r.valid());
+    }
+    #[test]
+    fn invalid_transcript_cannot_become_a_completed_result() {
+        let mut j = Job::default();
+        let t = j.start(&request(), stamp()).unwrap();
+        let mut bad = transcript();
+        bad.segments = vec![json!({"text":"bad","start":2.,"end":1.,"words":[]})];
+        assert!(j.finish(t, &stamp(), Ok(bad)));
+        assert_eq!(
+            j.state,
+            JobState::Failed {
+                code: "invalid-transcript".into()
+            }
+        );
+        assert!(j.transcript.is_none());
+    }
+    #[test]
+    fn model_deletion_waits_for_host_and_keeps_ready_state_on_failure() {
+        let mut manager = ModelManager {
+            status: status(),
+            ..ModelManager::default()
+        };
+        let prompt = manager.removal_prompt("english").unwrap();
+        let (t, command) = manager.confirm_removal(prompt, true).unwrap();
+        assert_eq!(command, ModelCommand::Delete("english".into()));
+        assert_eq!(manager.status.models[1].state, ModelState::Ready);
+        assert!(
+            manager
+                .request(ModelCommand::SetActive("english".into()))
+                .is_none()
+        );
+        assert!(manager.receive(
+            t,
+            Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::DiskFull,
+                "model removal failed"
+            ))
+        ));
+        assert_eq!(manager.status.models[1].state, ModelState::Ready);
+        assert_eq!(manager.error, Some(crate::ServiceErrorCode::DiskFull));
+        let (t, _) = manager
+            .request(ModelCommand::SetActive("english".into()))
+            .unwrap();
+        manager.close();
+        assert!(!manager.receive(t, Ok(Status::default())));
+    }
+    #[test]
+    fn model_selection_and_download_actions_require_real_model_state() {
+        let mut manager = ModelManager {
+            status: status(),
+            ..ModelManager::default()
+        };
+        assert!(
+            manager
+                .request(ModelCommand::Download("english".into()))
+                .is_none()
+        );
+        manager.status.models[1].state = ModelState::Absent;
+        assert!(
+            manager
+                .request(ModelCommand::SetActive("english".into()))
+                .is_none()
+        );
+        let (t, _) = manager
+            .request(ModelCommand::Download("english".into()))
+            .unwrap();
+        let mut observed = manager.status.clone();
+        observed.models[1].state = ModelState::Downloading;
+        manager.receive(t, Ok(observed));
+        let (t, _) = manager
+            .request(ModelCommand::CancelDownload("english".into()))
+            .unwrap();
+        manager.receive(t, Ok(status()));
+        assert!(
+            manager
+                .request(ModelCommand::SetLanguage("ja".into()))
+                .is_none()
+        );
+    }
+    #[test]
+    fn transcription_wire_keeps_frozen_camel_case_fields() {
+        let value = serde_json::to_value(request()).unwrap();
+        assert_eq!(value["wordTimestamps"], true);
+        let value = serde_json::to_value(transcript()).unwrap();
+        assert_eq!(value["modelId"], "m");
+    }
+    #[test]
+    fn removal_needs_fresh_confirmation_and_cancel_keeps_model() {
+        let mut manager = ModelManager {
+            status: status(),
+            ..ModelManager::default()
+        };
+        assert!(
+            manager
+                .request(ModelCommand::Delete("english".into()))
+                .is_none()
+        );
+        let prompt = manager.removal_prompt("english").unwrap();
+        assert!(manager.confirm_removal(prompt, false).is_none());
+        assert_eq!(manager.status.models[1].state, ModelState::Ready);
+        let prompt = manager.removal_prompt("english").unwrap();
+        manager.status.models[1].state = ModelState::Downloading;
+        assert!(manager.confirm_removal(prompt, true).is_none());
     }
 }

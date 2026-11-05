@@ -1317,3 +1317,80 @@ One production dependency is added: existing pure-Rust `pm-captions` by path.
 `cargo update -p pm-services` updates only its new dependency closure in
 `apps/native/Cargo.lock` and the already-existing services isolated lockfile;
 no workspace crate or engine lockfile change is needed.
+
+### Part A reconciliation with Opus specs — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`ce36cb6fc` (full merged hash recorded in the final validation addendum below),
+including `design/surfaces/{agent-auth,store,captions,easing,shader-lab}.md` and
+README §§6–7. This section supersedes the part A notes above wherever the newer
+spec changes the tag's behavior or closes a design question. No visual output is
+produced, and no token values are substituted. These families request no new
+tokens. The nine requested tokens remain with their owning design lane.
+
+- **S070–S072, S083–S086:** added registry-bound account worker tasks with
+  exchange/verify → secure session save → account refresh ordering. Failed
+  saves return their real error and never publish an account. Secret/session
+  payloads are excluded from serialization and redacted in Debug. The existing
+  `entrypoints::AuthLink` parser handles native admission; ambiguous callback
+  targets/duplicate fields are refused. S083's sheet-open gate prevents an
+  off-screen return link from exchanging credentials. Compatible connections
+  retain the active configuration until a test succeeds; explicit key clearing
+  differs from an untouched Saved placeholder. Disconnect retains entered fields.
+- **S075–S080/S082:** the public catalog query has no sort option. Search has the
+  specified 120 UTF-16-unit limit and retains visible rows until replaced.
+  Detail actions follow the spec's trust/setup/fork/update/publish precedence
+  and exact labels. There is no remembered-install list (the existing preference
+  switch remains), so the earlier reference to a remote remember-list host is
+  **not remaining work**. A sandbox result must be Passed or explicit Full
+  Access before the publish form can be submitted. Upload adapters accept
+  immutable bytes and recheck the confirmed snapshot/account/origin. Cancel
+  disables at Publishing; an earlier cancellation race retains an actual server
+  receipt rather than reporting a false cancellation. A mismatched receipt is
+  retained for reconciliation and produces an explicit failure.
+- **S087–S093:** Shift extends selection and Command toggles it. Follow stops
+  during search, list keyboard focus and row editing, as Opus specifies. Generation
+  remains an action on the selection; no source/language form was added. Language
+  and per-cue text controls were not added to the Captions Inspector. The model
+  manager requires a fresh native-delete confirmation and an observed host result.
+  **S092's explicit exception** applies only to re-downloadable speech model and
+  partial-download bytes: the worker seam is `remove_model`, not archival claiming
+  to free space. Transcripts, caption edits and preferences are never removed by
+  that capability. Invalid transcripts cannot become successful generation results.
+- **S094/S095:** save/group/duplicate/colour operations preserve all authored
+  fields. Non-conflicting imported IDs remain unchanged; only conflicts consume
+  supplied fresh IDs. Stored blue/green/violet graph preferences project as Accent
+  while their stored values and user preset colours remain intact. Library edits
+  and panel-lifetime Undo continue in memory after a write failure; every pending
+  before-image is retained and archived atomically with the next successful CAS.
+  The original single-change API also refuses publication on archive failure.
+- **S096:** 420 ms source flushes share **one focus gesture**, committed only on
+  blur/unmount after acknowledged work; the earlier per-burst undo note is
+  superseded. A commit-only work item closes an already flushed gesture. Locked
+  layers refuse source input. Escape exit is disarmed by every other key.
+  Compilation holds its previous status and adds the spinner only at 500 ms.
+  Full diagnostics/uniform metadata remain available; native column truncation
+  belongs to the renderer. The renderer's last good program must remain visible.
+- `surfaces::copy` projects supplied state/error/outcome/confirmation strings from
+  the new specs. It adds no rendering or metrics. Destructive confirmation defaults
+  and the safe return-to-default-registry default are tested. There are no new
+  part A `DESIGN-TODO(opus)` placeholders after reconciliation.
+
+Decisions: **N3** selects Opus's explicit behavior over the tag for caption follow,
+selection, shader gesture grouping and graph hue presentation. **N4** preserves
+exact libraries, rejected inputs, drafts, all interim before-images and real upload
+receipts; the S092 exception is limited to reproducible model binaries. **N7/N8**
+select ticket/stamp-driven worker protocols and real applied acknowledgments.
+**N4/N6/prune** retain every existing consumer and extension contract. Per the
+orchestrator's explicit restriction and README §6, **S066 is not built**. No thread
+rename, Mixer pan, Store sort control or remembered-installs list is added.
+
+All 88 new surface tests are inline synthetic Rust fixtures. Production account
+HTTP/Keychain/provider/runtime/external-client registration, full Store browse/
+detail/installed-state dispatch, immutable scanner/compiler/sandbox/upload and
+provenance services, actual speech download/decode/source-time mapping and cue
+segmentation, Easing keyframe tool dispatch/import pickers, and kernel/engine
+shader/caption host wiring remain integration work. The traits and plans expose
+these requirements; they do not claim working production services. Existing
+agent panels/runtime/store-host/engine consumers continue to own their behavior.
+No macOS UI or phase gate is accepted by this backing-only change.

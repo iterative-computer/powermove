@@ -99,6 +99,20 @@ pub struct Exchange {
     pub verifier: Secret,
 }
 impl BrowserAuth {
+    /// S083: no sheet means the return link is only an Error Log fact. Callers
+    /// must also cancel the pending browser flow when the sheet closes.
+    pub fn receive_for_sheet(
+        &mut self,
+        raw: &str,
+        origin: &str,
+        now: u64,
+        sheet_open: bool,
+    ) -> Option<Exchange> {
+        if !sheet_open {
+            return None;
+        }
+        self.receive(raw, origin, now)
+    }
     /// Host must provide fresh CSPRNG output, never a timestamp/UUID/JS random.
     /// The verifier challenge hashes the raw random bytes, as the tagged server
     /// does, rather than hashing their base64 spelling (N3 protocol intent).
@@ -136,17 +150,11 @@ impl BrowserAuth {
     /// Wrong/malformed links leave a real sign-in pending. A matching link is
     /// consumed before exchange, including failure or registry change.
     pub fn receive(&mut self, raw: &str, current_origin: &str, now: u64) -> Option<Exchange> {
-        let url = Url::parse(raw).ok()?;
-        if url.scheme() != "powermove" || url.host_str() != Some("auth") {
-            return None;
-        }
-        let first = |key| {
-            url.query_pairs()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.into_owned())
-        };
-        let state = first("state")?;
-        let token = first("token")?;
+        // Reuse the native LaunchServices admission boundary (no confused
+        // authority, duplicate callback fields or control characters).
+        let link = crate::entrypoints::AuthLink::parse(raw).ok()?;
+        let state = link.state().to_owned();
+        let token = link.token().to_owned();
         if state.is_empty()
             || token.is_empty()
             || state.encode_utf16().count() > 128
@@ -307,7 +315,28 @@ pub struct ProviderInput {
     pub vision: bool,
     pub key: Option<Secret>,
 }
+#[derive(Debug)]
+pub enum KeyEdit {
+    KeepSaved,
+    Replace(Secret),
+    Remove,
+}
 impl ProviderInput {
+    /// S071 distinguishes an untouched Saved placeholder from explicitly
+    /// clearing the field. Endpoint changes cannot reuse another endpoint's key.
+    pub fn with_key_edit(
+        base_url: &str,
+        model: &str,
+        vision: bool,
+        edit: KeyEdit,
+        saved: Option<(&str, &str)>,
+    ) -> Option<Self> {
+        match edit {
+            KeyEdit::KeepSaved => Self::prepare(base_url, model, vision, "", saved),
+            KeyEdit::Replace(key) => Self::prepare(base_url, model, vision, key.expose(), None),
+            KeyEdit::Remove => Self::prepare(base_url, model, vision, "", None),
+        }
+    }
     pub fn prepare(
         base_url: &str,
         model: &str,
@@ -339,6 +368,60 @@ impl ProviderInput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibleConfig {
+    pub base_url: String,
+    pub model: String,
+    pub vision: bool,
+    pub has_key: bool,
+}
+#[derive(Debug, Default)]
+pub struct CompatibleConnection {
+    pub active: Option<CompatibleConfig>,
+    pub fields: Option<CompatibleConfig>,
+    pub error: Option<crate::ServiceErrorCode>,
+    pub edited: bool,
+    flight: Flight,
+}
+impl CompatibleConnection {
+    pub fn edit(&mut self, fields: CompatibleConfig) -> bool {
+        if self.flight.current().is_some() {
+            return false;
+        }
+        self.fields = Some(fields);
+        self.edited = true;
+        true
+    }
+    pub fn test(&mut self) -> Option<Ticket> {
+        if self.flight.current().is_some() {
+            return None;
+        }
+        self.error = None;
+        Some(self.flight.start())
+    }
+    /// A failed test retains the previous working connection and entered fields.
+    pub fn receive(&mut self, ticket: Ticket, result: crate::Result<CompatibleConfig>) -> bool {
+        if !self.flight.finish(ticket) {
+            return false;
+        }
+        match result {
+            Ok(config) => {
+                self.fields = Some(config.clone());
+                self.active = Some(config);
+                self.edited = false;
+            }
+            Err(error) => self.error = Some(error.code),
+        }
+        true
+    }
+    /// Disconnect is reconnectable: fields/key facts remain. Keychain removal
+    /// happens only through an explicit KeyEdit::Remove and successful test.
+    pub fn disconnected(&mut self) {
+        self.flight.cancel();
+        self.active = None;
+    }
+}
+
 pub fn allowed_codex_auth_url(raw: &str) -> bool {
     let Ok(url) = Url::parse(raw) else {
         return false;
@@ -350,6 +433,136 @@ pub fn allowed_codex_auth_url(raw: &str) -> bool {
         && ["chatgpt.com", "openai.com"]
             .iter()
             .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
+/// A runtime session payload, accessible only to the worker credential adapter.
+/// It cannot be serialized into a surface inspection or printed in diagnostics.
+pub struct SessionPayload(serde_json::Value);
+impl SessionPayload {
+    pub fn new(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
+impl std::fmt::Debug for SessionPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted session]")
+    }
+}
+
+/// Concrete HTTP and Keychain implementations belong to the application host.
+/// Every method runs on ServiceWorker. Registry changes must use the same worker
+/// so exchange/save/refresh cannot interleave with a change of credential origin.
+pub trait CloudHost: Send + 'static {
+    fn origin(&self) -> &str;
+    fn exchange(&mut self, exchange: Exchange) -> crate::Result<SessionPayload>;
+    fn verify_email(&mut self, email: &str, code: &Secret) -> crate::Result<SessionPayload>;
+    fn send_email(&mut self, email: &str) -> crate::Result<()>;
+    fn save_session(&mut self, session: SessionPayload, provider: &str) -> crate::Result<()>;
+    fn refresh_account(&mut self) -> crate::Result<Option<Account>>;
+    fn claim_handle(&mut self, handle: &str) -> crate::Result<()>;
+    fn remember_installs(&mut self, remember: bool) -> crate::Result<()>;
+    fn sign_out(&mut self) -> crate::Result<()>;
+}
+pub enum CloudWork {
+    Exchange(Exchange),
+    SendEmail { email: String },
+    VerifyEmail { email: String, code: Secret },
+    ClaimHandle { handle: String },
+    RememberInstalls(bool),
+    SignOut,
+}
+#[derive(Debug)]
+pub enum CloudReply {
+    Sent,
+    Account(Option<Account>),
+    SignedOut,
+}
+pub struct CloudTask {
+    pub ticket: Ticket,
+    origin: String,
+    work: CloudWork,
+}
+pub struct CloudCompletion {
+    pub ticket: Ticket,
+    pub result: crate::Result<CloudReply>,
+}
+impl CloudTask {
+    pub fn new(ticket: Ticket, origin: &str, work: CloudWork) -> Option<Self> {
+        Some(Self {
+            ticket,
+            origin: registry_origin(origin)?,
+            work,
+        })
+    }
+    pub fn run(self, host: &mut impl CloudHost) -> CloudCompletion {
+        let result = if registry_origin(host.origin()).as_ref() != Some(&self.origin) {
+            Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::PermissionDenied,
+                "registry changed before account action",
+            ))
+        } else {
+            self.work.run(host)
+        };
+        CloudCompletion {
+            ticket: self.ticket,
+            result,
+        }
+    }
+}
+impl CloudWork {
+    /// Submit via ServiceWorker; replies carry account facts, never credentials.
+    /// A failed save/refresh/claim/sign-out is returned unchanged as an error.
+    fn run(self, host: &mut impl CloudHost) -> crate::Result<CloudReply> {
+        match self {
+            Self::SendEmail { email } => {
+                host.send_email(&email)?;
+                Ok(CloudReply::Sent)
+            }
+            Self::Exchange(exchange) => {
+                if registry_origin(host.origin()).as_deref() != Some(&exchange.origin) {
+                    return Err(crate::ServiceError::message(
+                        crate::ServiceErrorCode::PermissionDenied,
+                        "registry changed before exchange",
+                    ));
+                }
+                let session = host.exchange(exchange)?;
+                host.save_session(session, "google")?;
+                Ok(CloudReply::Account(host.refresh_account()?))
+            }
+            Self::VerifyEmail { email, code } => {
+                if code.expose().len() != 6 || !code.expose().bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(crate::ServiceError::message(
+                        crate::ServiceErrorCode::InvalidInput,
+                        "invalid verification code",
+                    ));
+                }
+                let session = host.verify_email(&email, &code)?;
+                host.save_session(session, "email")?;
+                Ok(CloudReply::Account(host.refresh_account()?))
+            }
+            Self::ClaimHandle { handle } => {
+                if !valid_handle(&handle) {
+                    return Err(crate::ServiceError::message(
+                        crate::ServiceErrorCode::InvalidInput,
+                        "invalid publisher handle",
+                    ));
+                }
+                host.claim_handle(&handle)?;
+                Ok(CloudReply::Account(host.refresh_account()?))
+            }
+            Self::RememberInstalls(value) => {
+                host.remember_installs(value)?;
+                Ok(CloudReply::Account(host.refresh_account()?))
+            }
+            Self::SignOut => {
+                host.sign_out()?;
+                Ok(CloudReply::SignedOut)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +714,184 @@ mod tests {
         ] {
             assert!(!allowed_codex_auth_url(raw));
         }
+    }
+    #[derive(Default)]
+    struct Host {
+        calls: Vec<&'static str>,
+        fail_save: bool,
+    }
+    impl CloudHost for Host {
+        fn origin(&self) -> &str {
+            "https://example.com"
+        }
+        fn exchange(&mut self, _: Exchange) -> crate::Result<SessionPayload> {
+            self.calls.push("exchange");
+            Ok(SessionPayload::new(serde_json::json!({})))
+        }
+        fn verify_email(&mut self, _: &str, _: &Secret) -> crate::Result<SessionPayload> {
+            self.calls.push("verify");
+            Ok(SessionPayload::new(serde_json::json!({})))
+        }
+        fn send_email(&mut self, _: &str) -> crate::Result<()> {
+            self.calls.push("send");
+            Ok(())
+        }
+        fn save_session(&mut self, _: SessionPayload, _: &str) -> crate::Result<()> {
+            self.calls.push("save");
+            if self.fail_save {
+                Err(crate::ServiceError::message(
+                    crate::ServiceErrorCode::DiskFull,
+                    "credential save failed",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn refresh_account(&mut self) -> crate::Result<Option<Account>> {
+            self.calls.push("refresh");
+            Ok(None)
+        }
+        fn claim_handle(&mut self, _: &str) -> crate::Result<()> {
+            self.calls.push("claim");
+            Ok(())
+        }
+        fn remember_installs(&mut self, _: bool) -> crate::Result<()> {
+            self.calls.push("remember");
+            Ok(())
+        }
+        fn sign_out(&mut self) -> crate::Result<()> {
+            self.calls.push("sign_out");
+            Ok(())
+        }
+    }
+    fn task(work: CloudWork) -> CloudTask {
+        CloudTask::new(Flight::default().start(), "https://example.com", work).unwrap()
+    }
+    #[test]
+    fn auth_worker_saves_before_refresh_and_stops_on_failed_save() {
+        let mut host = Host::default();
+        let reply = task(CloudWork::VerifyEmail {
+            email: "test@example.com".into(),
+            code: Secret::new("123456".into()),
+        })
+        .run(&mut host);
+        assert!(matches!(reply.result, Ok(CloudReply::Account(None))));
+        assert_eq!(host.calls, vec!["verify", "save", "refresh"]);
+        host.calls.clear();
+        host.fail_save = true;
+        let reply = task(CloudWork::VerifyEmail {
+            email: "test@example.com".into(),
+            code: Secret::new("123456".into()),
+        })
+        .run(&mut host);
+        assert_eq!(
+            reply.result.unwrap_err().code,
+            crate::ServiceErrorCode::DiskFull
+        );
+        assert_eq!(host.calls, vec!["verify", "save"]);
+    }
+    #[test]
+    fn account_worker_binds_all_actions_to_registry_and_validates_inputs() {
+        let mut host = Host::default();
+        let ticket = Flight::default().start();
+        let reply = CloudTask::new(
+            ticket,
+            "https://other.example",
+            CloudWork::SendEmail {
+                email: "test@example.com".into(),
+            },
+        )
+        .unwrap()
+        .run(&mut host);
+        assert_eq!(reply.ticket, ticket);
+        assert_eq!(
+            reply.result.unwrap_err().code,
+            crate::ServiceErrorCode::PermissionDenied
+        );
+        assert!(host.calls.is_empty());
+        assert!(
+            task(CloudWork::ClaimHandle { handle: "A".into() })
+                .run(&mut host)
+                .result
+                .is_err()
+        );
+        assert!(
+            task(CloudWork::VerifyEmail {
+                email: "test@example.com".into(),
+                code: Secret::new("invalid".into())
+            })
+            .run(&mut host)
+            .result
+            .is_err()
+        );
+        assert!(host.calls.is_empty());
+        assert!(
+            task(CloudWork::ClaimHandle {
+                handle: "valid".into()
+            })
+            .run(&mut host)
+            .result
+            .is_ok()
+        );
+        assert_eq!(host.calls, vec!["claim", "refresh"]);
+    }
+    #[test]
+    fn compatible_failed_test_keeps_previous_connection_and_explicit_clear_removes_key() {
+        let old = CompatibleConfig {
+            base_url: "https://example.com/v1".into(),
+            model: "old".into(),
+            vision: false,
+            has_key: true,
+        };
+        let mut c = CompatibleConnection {
+            active: Some(old.clone()),
+            fields: Some(old.clone()),
+            ..CompatibleConnection::default()
+        };
+        let mut fields = old.clone();
+        fields.model = "new".into();
+        assert!(c.edit(fields.clone()));
+        assert_eq!(c.active, Some(old.clone()));
+        let t = c.test().unwrap();
+        assert!(!c.edit(old.clone()));
+        c.receive(
+            t,
+            Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::Offline,
+                "fixture offline",
+            )),
+        );
+        assert_eq!(c.active, Some(old));
+        assert_eq!(c.fields, Some(fields.clone()));
+        let t = c.test().unwrap();
+        c.receive(t, Ok(fields.clone()));
+        assert_eq!(c.active, Some(fields.clone()));
+        c.disconnected();
+        assert!(c.active.is_none());
+        assert_eq!(c.fields, Some(fields));
+        assert!(
+            ProviderInput::with_key_edit(
+                "https://example.com",
+                "m",
+                false,
+                KeyEdit::Remove,
+                Some(("https://example.com", "saved"))
+            )
+            .unwrap()
+            .key
+            .is_none()
+        );
+    }
+    #[test]
+    fn closed_sheet_never_exchanges_browser_return() {
+        let (mut auth, url) = auth();
+        assert!(
+            auth.receive_for_sheet(&link(&url), "https://example.com", 1, false)
+                .is_none()
+        );
+        assert!(
+            auth.receive_for_sheet(&link(&url), "https://example.com", 2, true)
+                .is_some()
+        );
     }
 }

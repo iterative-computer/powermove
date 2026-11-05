@@ -1,10 +1,12 @@
 //! Non-visual secondary-surface backing. No IO is performed by reducers.
 //! Worker adapters use `ServiceWorker::submit`/`Pending::try_take`; the kernel
 //! remains the sole document/settings writer. No v1–3 consumer is replaced.
-//! DESIGN-TODO(opus): presentation, copy and interaction for uncovered states
-//! in S070–S096 remain neutral typed facts until the corresponding specs land.
+//! Presentation follows Opus's design/surfaces specs at ce36cb6fc; `copy` projects
+//! their supplied strings. No geometry, material, colour or new UX is defined.
+//! S066 is deliberately not built. Existing agent panels retain their consumers.
 pub mod agent_auth;
 pub mod captions;
+pub mod copy;
 pub mod easing;
 pub mod publishing;
 pub mod shader;

@@ -37,8 +37,14 @@ pub struct Selection {
     pub layer_id: Option<String>,
     pub cues: BTreeSet<String>,
 }
+#[derive(Debug, Clone, Copy)]
+pub enum SelectionMode {
+    Replace,
+    Extend,
+    Toggle,
+}
 impl Selection {
-    /// Cmd and Shift both toggle the cue, as shipped; no invented range policy.
+    /// Compatibility helper for command-click; native Shift uses Extend below.
     pub fn choose(&mut self, layer: &Layer, cue_id: &str, extend: bool) -> Option<f64> {
         let cue = layer.cues.iter().find(|c| c.id == cue_id)?;
         if !extend || self.layer_id.as_ref() != Some(&layer.id) {
@@ -46,6 +52,26 @@ impl Selection {
         }
         if !self.cues.remove(cue_id) {
             self.cues.insert(cue_id.into());
+        }
+        self.layer_id = Some(layer.id.clone());
+        Some(layer.from + cue.start)
+    }
+    /// S087: Shift extends without removing an already selected cue; Command
+    /// toggles. No unspecified range anchor/geometry is invented.
+    pub fn select(&mut self, layer: &Layer, id: &str, mode: SelectionMode) -> Option<f64> {
+        let cue = layer.cues.iter().find(|c| c.id == id)?;
+        if self.layer_id.as_ref() != Some(&layer.id) || matches!(mode, SelectionMode::Replace) {
+            self.cues.clear();
+        }
+        match mode {
+            SelectionMode::Toggle => {
+                if !self.cues.remove(id) {
+                    self.cues.insert(id.into());
+                }
+            }
+            _ => {
+                self.cues.insert(id.into());
+            }
         }
         self.layer_id = Some(layer.id.clone());
         Some(layer.from + cue.start)
@@ -69,8 +95,9 @@ pub fn follow(
     composition_time: f64,
     playing: bool,
     editing: bool,
+    list_focused: bool,
 ) -> Option<usize> {
-    if !playing || editing {
+    if !playing || editing || list_focused || !query.is_empty() {
         return None;
     }
     let index = pm_captions::cue_index_at(&layer.cues, composition_time - layer.from)?;
@@ -308,10 +335,10 @@ mod tests {
     fn search_keeps_source_indices_and_follow_suppresses_typing() {
         let l = layer();
         assert_eq!(shown(&l, " SECOND ")[0].0, 1);
-        assert_eq!(follow(&l, "second", 12., true, false), Some(0));
-        assert_eq!(follow(&l, "first", 12., true, false), None);
-        assert_eq!(follow(&l, "", 12., true, true), None);
-        assert_eq!(follow(&l, "", 11., true, false), None);
+        assert_eq!(follow(&l, "", 12., true, false, false), Some(1));
+        assert_eq!(follow(&l, "first", 12., true, false, false), None);
+        assert_eq!(follow(&l, "", 12., true, true, false), None);
+        assert_eq!(follow(&l, "", 11., true, false, false), None);
     }
     #[test]
     fn modified_selection_toggles_and_seeks_in_composition_time() {
@@ -394,5 +421,19 @@ mod tests {
             export(&l, CaptionFormat::Srt, Some([2., 1.])),
             Err(EditProblem::InvalidRange)
         );
+    }
+    #[test]
+    fn opus_shift_extends_and_focus_or_query_suppresses_playback_follow() {
+        let l = layer();
+        let mut s = Selection::default();
+        s.select(&l, "a", SelectionMode::Replace);
+        s.select(&l, "b", SelectionMode::Extend);
+        s.select(&l, "b", SelectionMode::Extend);
+        assert_eq!(s.cues.len(), 2);
+        s.select(&l, "b", SelectionMode::Toggle);
+        assert_eq!(s.cues.len(), 1);
+        assert_eq!(follow(&l, "", 12., true, false, false), Some(1));
+        assert_eq!(follow(&l, "", 12., true, false, true), None);
+        assert_eq!(follow(&l, "second", 12., true, false, false), None);
     }
 }

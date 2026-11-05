@@ -16,11 +16,18 @@ pub enum CatalogState {
     Ready,
     Failed(ServiceErrorCode),
 }
+/// S075 has no user sort control or remembered-install list. Low-level Store
+/// API sort remains in its existing client for other consumers.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogQuery {
+    pub text: Option<String>,
+    pub category: Option<String>,
+}
 
 #[derive(Debug)]
 pub struct SearchWork {
     pub ticket: Ticket,
-    pub search: Search,
+    search: Search,
     append: bool,
 }
 impl SearchWork {
@@ -62,18 +69,32 @@ impl Default for Catalog {
     }
 }
 impl Catalog {
-    pub fn search(&mut self, mut search: Search) -> SearchWork {
-        search.cursor = None;
+    pub fn search(&mut self, query: CatalogQuery) -> Result<SearchWork> {
+        if query
+            .text
+            .as_ref()
+            .is_some_and(|s| s.encode_utf16().count() > 120)
+        {
+            return Err(crate::ServiceError::message(
+                ServiceErrorCode::InvalidInput,
+                "Store search exceeds 120 characters",
+            ));
+        }
+        let search = Search {
+            query: query.text.map(|s| s.trim().into()),
+            category: query.category,
+            ..Search::default()
+        };
         self.search = search.clone();
-        self.items.clear();
+        // S075/README §4: retain results until replacement arrives.
         self.next_cursor = None;
         self.seen_cursors.clear();
         self.state = CatalogState::Loading;
-        SearchWork {
+        Ok(SearchWork {
             ticket: self.flight.start(),
             search,
             append: false,
-        }
+        })
     }
     pub fn more(&mut self) -> Option<SearchWork> {
         if self.flight.current().is_some() {
@@ -199,6 +220,144 @@ pub fn ordered_permissions(permissions: &[String]) -> Vec<&str> {
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemGroup {
+    Builtin,
+    Store,
+    Yours,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Ready,
+    NeedsTrust,
+    NeedsSetup,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishKind {
+    First,
+    Update,
+}
+#[derive(Debug)]
+pub struct ItemFacts {
+    pub group: ItemGroup,
+    pub health: Health,
+    pub enabled: bool,
+    pub fork: bool,
+    pub published_repo: Option<String>,
+    pub update: bool,
+    pub update_modified: bool,
+    pub removed: bool,
+    pub publish: Option<PublishKind>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailAction {
+    Install,
+    InstallAndSetUp,
+    Installing,
+    BuiltIn,
+    Trust,
+    SetUp,
+    Forked,
+    Update,
+    UpdateModified,
+    Publish,
+    PublishUpdate,
+    Installed,
+    TurnOn,
+    Open,
+    RequiresNewerHost,
+}
+impl DetailAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Install | Self::RequiresNewerHost => "Install",
+            Self::InstallAndSetUp => "Install and Set Up",
+            Self::Installing => "Installing…",
+            Self::BuiltIn => "Built In",
+            Self::Trust => "Trust…",
+            Self::SetUp => "Set Up…",
+            Self::Forked => "Forked",
+            Self::Update => "Update",
+            Self::UpdateModified => "Update…",
+            Self::Publish => "Publish…",
+            Self::PublishUpdate => "Publish Update…",
+            Self::Installed => "Installed",
+            Self::TurnOn => "Turn On",
+            Self::Open => "Open",
+        }
+    }
+    pub fn enabled(self) -> bool {
+        !matches!(
+            self,
+            Self::Installing
+                | Self::RequiresNewerHost
+                | Self::BuiltIn
+                | Self::Installed
+                | Self::Forked
+        )
+    }
+}
+/// S076's single action and exact precedence; authorship never grants trust.
+pub fn detail_action(
+    item: Option<&ItemFacts>,
+    repo_id: Option<&str>,
+    declares_values: bool,
+    installing: bool,
+    api: Option<u32>,
+) -> DetailAction {
+    if installing {
+        return DetailAction::Installing;
+    }
+    let Some(item) = item else {
+        if !matches!(
+            compatibility(api),
+            Compatibility::SupportedLegacy | Compatibility::NativeV4
+        ) {
+            return DetailAction::RequiresNewerHost;
+        }
+        return if declares_values {
+            DetailAction::InstallAndSetUp
+        } else {
+            DetailAction::Install
+        };
+    };
+    if item.group == ItemGroup::Builtin {
+        return DetailAction::BuiltIn;
+    }
+    if item.health == Health::NeedsTrust {
+        return DetailAction::Trust;
+    }
+    if item.health == Health::NeedsSetup {
+        return DetailAction::SetUp;
+    }
+    if item.fork && repo_id.is_some() && repo_id != item.published_repo.as_deref() {
+        return DetailAction::Forked;
+    }
+    if item.update && !item.removed {
+        return if item.update_modified {
+            DetailAction::UpdateModified
+        } else {
+            DetailAction::Update
+        };
+    }
+    if item.group == ItemGroup::Yours
+        && let Some(kind) = item.publish
+    {
+        return if kind == PublishKind::First {
+            DetailAction::Publish
+        } else {
+            DetailAction::PublishUpdate
+        };
+    }
+    if item.group == ItemGroup::Store {
+        return DetailAction::Installed;
+    }
+    if !item.enabled {
+        return DetailAction::TurnOn;
+    }
+    DetailAction::Open
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,22 +396,24 @@ mod tests {
     #[test]
     fn stale_search_and_close_cannot_publish() {
         let mut c = Catalog::default();
-        let old = c.search(Search::default());
-        let new = c.search(Search {
-            query: Some("new".into()),
-            ..Search::default()
-        });
+        let old = c.search(CatalogQuery::default()).unwrap();
+        let new = c
+            .search(CatalogQuery {
+                text: Some("new".into()),
+                ..CatalogQuery::default()
+            })
+            .unwrap();
         assert!(!c.receive(reply(old, json!([listing("old")]), None)));
         assert!(c.receive(reply(new, json!([listing("new")]), None)));
         assert_eq!(c.items, vec![listing("new")]);
-        let old = c.search(Search::default());
+        let old = c.search(CatalogQuery::default()).unwrap();
         c.close();
         assert!(!c.receive(reply(old, json!([listing("closed")]), None)));
     }
     #[test]
     fn pagination_failure_retains_items_and_allows_retry() {
         let mut c = Catalog::default();
-        let first = c.search(Search::default());
+        let first = c.search(CatalogQuery::default()).unwrap();
         c.receive(reply(first, json!([listing("one")]), Some("page2")));
         let next = c.more().unwrap();
         assert!(c.more().is_none());
@@ -271,7 +432,7 @@ mod tests {
     #[test]
     fn looping_cursor_is_an_explicit_error() {
         let mut c = Catalog::default();
-        let first = c.search(Search::default());
+        let first = c.search(CatalogQuery::default()).unwrap();
         c.receive(reply(first, json!([]), Some("same")));
         let next = c.more().unwrap();
         c.receive(reply(next, json!([]), Some("same")));
@@ -291,7 +452,7 @@ mod tests {
         })
         .unwrap();
         let mut c = Catalog::default();
-        let work = c.search(Search::default());
+        let work = c.search(CatalogQuery::default()).unwrap();
         let pending = worker.submit(move |client| Ok(work.run(client))).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -351,5 +512,75 @@ mod tests {
             ordered_permissions(&p),
             vec!["full-access", "network", "future"]
         );
+    }
+    #[test]
+    fn search_retains_results_until_replaced_and_limits_utf16_input() {
+        let mut c = Catalog::default();
+        let first = c.search(CatalogQuery::default()).unwrap();
+        c.receive(reply(first, json!([listing("previous")]), None));
+        let next = c
+            .search(CatalogQuery {
+                text: Some("new".into()),
+                ..CatalogQuery::default()
+            })
+            .unwrap();
+        assert_eq!(c.items, vec![listing("previous")]);
+        assert!(
+            c.search(CatalogQuery {
+                text: Some("😀".repeat(61)),
+                ..CatalogQuery::default()
+            })
+            .is_err()
+        );
+        c.receive(reply(next, json!([listing("replacement")]), None));
+        assert_eq!(c.items, vec![listing("replacement")]);
+    }
+    #[test]
+    fn detail_action_precedence_matches_spec_and_never_silently_trusts_a_fork() {
+        let mut item = ItemFacts {
+            group: ItemGroup::Yours,
+            health: Health::NeedsTrust,
+            enabled: false,
+            fork: true,
+            published_repo: Some("own".into()),
+            update: true,
+            update_modified: true,
+            removed: false,
+            publish: Some(PublishKind::First),
+        };
+        assert_eq!(
+            detail_action(Some(&item), Some("original"), false, false, Some(3)),
+            DetailAction::Trust
+        );
+        item.health = Health::NeedsSetup;
+        assert_eq!(
+            detail_action(Some(&item), Some("original"), false, false, Some(3)),
+            DetailAction::SetUp
+        );
+        item.health = Health::Ready;
+        assert_eq!(
+            detail_action(Some(&item), Some("original"), false, false, Some(3)),
+            DetailAction::Forked
+        );
+        item.fork = false;
+        assert_eq!(
+            detail_action(Some(&item), None, false, false, Some(3)),
+            DetailAction::UpdateModified
+        );
+        item.update = false;
+        assert_eq!(
+            detail_action(Some(&item), None, false, false, Some(3)),
+            DetailAction::Publish
+        );
+        item.publish = None;
+        assert_eq!(
+            detail_action(Some(&item), None, false, false, Some(3)),
+            DetailAction::TurnOn
+        );
+        assert_eq!(
+            detail_action(None, None, true, false, Some(3)).label(),
+            "Install and Set Up"
+        );
+        assert!(!detail_action(None, None, false, false, Some(5)).enabled());
     }
 }

@@ -10,6 +10,7 @@ pub struct Layer {
     pub id: String,
     pub kind: String,
     pub code: String,
+    pub locked: bool,
 }
 pub fn selected_shader<'a>(layers: &'a [Layer], selection: &[String]) -> Option<&'a Layer> {
     selection
@@ -25,6 +26,7 @@ pub enum Problem {
     Dirty,
     InvalidSelection,
     Rejected(String),
+    Locked,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Write {
@@ -32,7 +34,11 @@ pub struct Write {
     pub stamp: DocumentStamp,
     pub layer_id: String,
     pub code: String,
-    pub command: Value,
+    pub command: Option<Value>,
+    /// All writes in one focus gesture share this ID. Host maps it to one
+    /// kernel lease, begins once, steps on writes and commits only at finish.
+    pub gesture: Ticket,
+    pub finish_gesture: bool,
 }
 #[derive(Debug)]
 pub struct Editor {
@@ -40,32 +46,39 @@ pub struct Editor {
     pub stamp: DocumentStamp,
     pub draft: String,
     pub focused: bool,
+    pub locked: bool,
     pub problem: Option<Problem>,
     written: String,
     due: Option<u64>,
     tab_exit_armed: bool,
     flight: Flight,
     pending: Option<Write>,
+    gesture: Option<Ticket>,
 }
 impl Editor {
-    pub fn new(stamp: DocumentStamp, layer_id: String, code: String) -> Self {
+    pub fn new(stamp: DocumentStamp, layer_id: String, code: String, locked: bool) -> Self {
         Self {
             layer_id,
             stamp,
             draft: code.clone(),
             written: code,
             focused: false,
+            locked,
             problem: None,
             due: None,
             tab_exit_armed: false,
             flight: Flight::default(),
             pending: None,
+            gesture: None,
         }
     }
     pub fn focus(&mut self) {
         self.focused = true;
     }
     pub fn input(&mut self, code: String, now: u64) -> Result<(), Problem> {
+        if self.locked {
+            return Err(Problem::Locked);
+        }
         if !self.focused {
             return Err(Problem::NotFocused);
         }
@@ -85,6 +98,7 @@ impl Editor {
         {
             return Err(Problem::Stale);
         }
+        self.locked = layer.locked;
         if !self.focused && !self.dirty() && self.pending.is_none() {
             self.draft = layer.code.clone();
             self.written = layer.code.clone();
@@ -92,22 +106,33 @@ impl Editor {
         }
         Ok(())
     }
-    /// One command = one undo burst, no open lease held during an IO wait.
+    /// S096: one live gesture until blur, even across 420 ms source flushes.
     /// `force` is used for blur/unmount/compile; returned work still needs ACK.
     pub fn flush(&mut self, now: u64, force: bool) -> Option<Write> {
+        if self.locked && self.dirty() {
+            self.problem = Some(Problem::Locked);
+            return None;
+        }
         if self.flight.current().is_some()
-            || !self.dirty()
+            || (!self.dirty() && (self.focused || self.gesture.is_none()))
             || !force && self.due.is_none_or(|due| now < due)
         {
             return None;
         }
         self.due = None;
+        let gesture = *self
+            .gesture
+            .get_or_insert_with(|| Flight::default().start());
         let write = Write {
             ticket: self.flight.start(),
             stamp: self.stamp.clone(),
             layer_id: self.layer_id.clone(),
             code: self.draft.clone(),
-            command: json!({"type":"set_content","target":self.layer_id,"patch":{"code":self.draft}}),
+            command: self.dirty().then(
+                || json!({"type":"set_content","target":self.layer_id,"patch":{"code":self.draft}}),
+            ),
+            gesture,
+            finish_gesture: !self.focused,
         };
         self.pending = Some(write.clone());
         Some(write)
@@ -128,6 +153,9 @@ impl Editor {
                 self.written = write.code;
                 self.stamp = stamp;
                 self.problem = None;
+                if write.finish_gesture {
+                    self.gesture = None;
+                }
             }
             Ok(_) => self.problem = Some(Problem::Stale),
             Err(code) => self.problem = Some(Problem::Rejected(code)),
@@ -141,10 +169,15 @@ impl Editor {
         self.flush(now, true)
     }
     pub fn can_retire(&self) -> bool {
-        !self.dirty() && self.pending.is_none()
+        !self.dirty() && self.pending.is_none() && self.gesture.is_none()
     }
     pub fn escape(&mut self) {
         self.tab_exit_armed = true;
+    }
+    /// Every key except the Escape that arms exit and its following Tab must
+    /// disarm it, including arrows/modifiers/compile (not merely text input).
+    pub fn other_key(&mut self) {
+        self.tab_exit_armed = false;
     }
     /// UTF-16 offsets match NSTextView/legacy textarea, including astral text.
     /// Invalid/split-surrogate ranges are refused without changing authored text.
@@ -228,11 +261,15 @@ pub struct Compilation {
     expected: Option<CompileInput>,
     pub result: Option<Compiled>,
     pub error: Option<crate::ServiceErrorCode>,
+    started_at: u64,
 }
 impl Compilation {
     pub fn start(&mut self, input: CompileInput) -> CompileWork {
-        self.result = None;
-        self.error = None;
+        self.start_at(input, 0)
+    }
+    pub fn start_at(&mut self, input: CompileInput, now: u64) -> CompileWork {
+        // S096 holds previous status while compiling, including invalid source.
+        self.started_at = now;
         self.expected = Some(input.clone());
         CompileWork {
             ticket: self.flight.start(),
@@ -249,10 +286,16 @@ impl Compilation {
             return false;
         }
         match reply.result {
-            Ok(result) => self.result = Some(result),
+            Ok(result) => {
+                self.result = Some(result);
+                self.error = None;
+            }
             Err(error) => self.error = Some(error.code),
         }
         true
+    }
+    pub fn shows_compiling(&self, now: u64) -> bool {
+        self.flight.current().is_some() && now.saturating_sub(self.started_at) >= 500
     }
     pub fn cancel(&mut self) -> Option<Ticket> {
         self.expected = None;
@@ -271,7 +314,7 @@ mod tests {
         }
     }
     fn editor() -> Editor {
-        Editor::new(stamp(), "shader".into(), "ab".into())
+        Editor::new(stamp(), "shader".into(), "ab".into(), false)
     }
     #[test]
     fn fallback_uses_only_first_selected_then_first_shader() {
@@ -280,11 +323,13 @@ mod tests {
                 id: "a".into(),
                 kind: "shader".into(),
                 code: "a".into(),
+                locked: false,
             },
             Layer {
                 id: "b".into(),
                 kind: "shader".into(),
                 code: "b".into(),
+                locked: false,
             },
         ];
         assert_eq!(selected_shader(&layers, &["b".into()]).unwrap().id, "b");
@@ -306,7 +351,7 @@ mod tests {
         let work = e.flush(520, false).unwrap();
         assert_eq!(
             work.command,
-            json!({"type":"set_content","target":"shader","patch":{"code":"second"}})
+            Some(json!({"type":"set_content","target":"shader","patch":{"code":"second"}}))
         );
         assert!(e.flush(999, true).is_none());
     }
@@ -335,6 +380,7 @@ mod tests {
             id: "shader".into(),
             kind: "shader".into(),
             code: "foreign".into(),
+            locked: false,
         };
         let mut newer = stamp();
         newer.revision = 2;
@@ -426,5 +472,56 @@ mod tests {
         changed.stamp.session += 1;
         assert!(!c.receive(current.run(&mut TestCompiler), &changed));
         assert!(c.result.is_none());
+    }
+    #[test]
+    fn one_focus_keeps_one_gesture_across_debounce_flushes_until_blur() {
+        let mut e = editor();
+        e.focus();
+        e.input("one".into(), 0).unwrap();
+        let one = e.flush(420, false).unwrap();
+        assert!(!one.finish_gesture);
+        e.acknowledged(one.ticket, Ok(stamp()));
+        e.input("two".into(), 500).unwrap();
+        let two = e.flush(920, false).unwrap();
+        assert_eq!(two.gesture, one.gesture);
+        assert!(!two.finish_gesture);
+        e.acknowledged(two.ticket, Ok(stamp()));
+        let close = e.blur(921).unwrap();
+        assert!(close.command.is_none());
+        assert!(close.finish_gesture);
+        assert_eq!(close.gesture, one.gesture);
+        e.acknowledged(close.ticket, Ok(stamp()));
+        assert!(e.can_retire());
+    }
+    #[test]
+    fn locked_input_is_read_only_and_any_other_key_disarms_escape() {
+        let mut e = editor();
+        e.focus();
+        e.locked = true;
+        assert_eq!(e.input("lost".into(), 0), Err(Problem::Locked));
+        assert_eq!(e.draft, "ab");
+        e.locked = false;
+        e.escape();
+        e.other_key();
+        assert_eq!(e.tab(0, 0, 1), Ok(Some(2)));
+        assert_eq!(e.draft, "  ab");
+    }
+    #[test]
+    fn compile_holds_previous_status_and_delays_spinner_half_second() {
+        let mut c = Compilation {
+            result: Some(Compiled {
+                diagnostics: vec![],
+                uniform_definitions: json!([1, 2]),
+            }),
+            ..Compilation::default()
+        };
+        let input = editor().compile().unwrap();
+        c.start_at(input, 100);
+        assert!(c.result.is_some());
+        assert!(!c.shows_compiling(599));
+        assert!(c.shows_compiling(600));
+        c.cancel();
+        assert!(!c.shows_compiling(1000));
+        assert!(c.result.is_some());
     }
 }

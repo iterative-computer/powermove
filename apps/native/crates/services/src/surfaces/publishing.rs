@@ -28,6 +28,16 @@ pub struct Plan {
     pub blocked_findings: Vec<Value>,
     pub permission_findings: Vec<Value>,
     pub waivable_findings: Vec<Finding>,
+    pub sandbox: SandboxState,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SandboxState {
+    Running,
+    CouldNotRun,
+    FullAccess,
+    Passed,
+    Failed,
+    Cancelled,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Draft {
@@ -57,6 +67,7 @@ pub enum Problem {
     CategoryInvalid,
     LicenceInvalid,
     VisibilityInvalid,
+    SandboxNotPassed,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldProblem {
@@ -161,6 +172,12 @@ impl Draft {
         if !plan.permission_findings.is_empty() {
             add("permissions", Problem::PermissionFinding);
         }
+        if !matches!(
+            plan.sandbox,
+            SandboxState::Passed | SandboxState::FullAccess
+        ) {
+            add("sandbox", Problem::SandboxNotPassed);
+        }
         for finding in &plan.waivable_findings {
             let key = finding.key();
             let n = chars(self.reasons.get(&key).map(|s| s.trim()).unwrap_or(""));
@@ -245,6 +262,7 @@ pub enum Phase {
     Uploading { done: u32, total: u32 },
     Publishing,
     Published { release_id: String },
+    CancelRequested,
     Cancelled,
     Failed { code: String },
 }
@@ -354,12 +372,16 @@ impl Publish {
         returned: &Snapshot,
         release_id: String,
     ) -> bool {
-        if self.phase != Phase::Publishing
-            || !self.flight.accepts(authorization.ticket)
+        if !matches!(
+            self.phase,
+            Phase::Checking | Phase::Uploading { .. } | Phase::Publishing | Phase::CancelRequested
+        ) || !self.flight.accepts(authorization.ticket)
             || self.snapshot.as_ref() != Some(&authorization.snapshot)
-            || returned != &authorization.snapshot
-            || release_id.is_empty()
         {
+            return false;
+        }
+        if returned != &authorization.snapshot || release_id.is_empty() {
+            self.fail(authorization.ticket, "publication_identity_mismatch");
             return false;
         }
         self.flight.finish(authorization.ticket);
@@ -374,9 +396,111 @@ impl Publish {
         true
     }
     pub fn cancel(&mut self) -> Option<Ticket> {
-        let ticket = self.flight.cancel();
+        // S080: the cancel control disables once publishing starts.
+        if self.phase == Phase::Publishing {
+            return None;
+        }
+        let ticket = self.flight.current()?;
+        if matches!(
+            self.phase,
+            Phase::Checking | Phase::Uploading { .. } | Phase::Publishing | Phase::CancelRequested
+        ) {
+            // An uploaded/committed release cannot be un-published by dismissing
+            // its surface. Keep the ticket until the worker reports the outcome.
+            self.phase = Phase::CancelRequested;
+        } else {
+            self.flight.cancel();
+            self.phase = Phase::Cancelled;
+        }
+        Some(ticket)
+    }
+    /// Only a worker that proved there was no publication may acknowledge cancel.
+    pub fn cancelled(&mut self, ticket: Ticket) -> bool {
+        if self.phase != Phase::CancelRequested || !self.flight.finish(ticket) {
+            return false;
+        }
         self.phase = Phase::Cancelled;
-        ticket
+        true
+    }
+}
+
+/// Immutable upload capability stays on the worker. It is never an editable
+/// folder path that could be re-read after confirmation.
+pub struct PreparedUpload<F> {
+    snapshot: Snapshot,
+    frozen: F,
+}
+impl<F> PreparedUpload<F> {
+    pub fn new(snapshot: Snapshot, frozen: F) -> Self {
+        Self { snapshot, frozen }
+    }
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+    /// Performs no public mutation without the exact confirmed authorization.
+    /// The backend still performs signature/commit verification and preserves
+    /// every uploaded source/provenance record; this is not a signing authority.
+    pub fn run(
+        self,
+        authorization: Authorization,
+        host: &mut impl PublishHost<Frozen = F>,
+    ) -> UploadOutcome {
+        let identity = host.identity();
+        let result = if self.snapshot != authorization.snapshot
+            || identity
+                != (
+                    self.snapshot.account_id.clone(),
+                    self.snapshot.registry_origin.clone(),
+                ) {
+            Err(crate::ServiceError::message(
+                crate::ServiceErrorCode::PermissionDenied,
+                "publish authority or frozen snapshot changed",
+            ))
+        } else {
+            host.upload_frozen(self.frozen)
+        };
+        UploadOutcome {
+            authorization,
+            result,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipt {
+    pub coordinate: String,
+    pub version: String,
+    pub tree_sha: String,
+    pub release_id: String,
+}
+pub trait PublishHost {
+    type Frozen;
+    fn identity(&self) -> (String, String);
+    /// Upload exactly these immutable bytes. No source re-read is permitted.
+    fn upload_frozen(&mut self, frozen: Self::Frozen) -> crate::Result<Receipt>;
+}
+pub struct UploadOutcome {
+    authorization: Authorization,
+    pub result: crate::Result<Receipt>,
+}
+impl UploadOutcome {
+    /// Returns the real receipt for durable provenance/reconciliation even when
+    /// its originating surface has closed. Host must retain this evidence.
+    pub fn receive(self, model: &mut Publish) -> Option<Receipt> {
+        let ticket = self.authorization.ticket;
+        match self.result {
+            Ok(receipt) => {
+                let mut returned = self.authorization.snapshot.clone();
+                returned.coordinate = receipt.coordinate.clone();
+                returned.version = receipt.version.clone();
+                returned.tree_sha = receipt.tree_sha.clone();
+                model.published(self.authorization, &returned, receipt.release_id.clone());
+                Some(receipt)
+            }
+            Err(error) => {
+                model.fail(ticket, &format!("{:?}", error.code));
+                None
+            }
+        }
     }
 }
 
@@ -394,6 +518,7 @@ mod tests {
             blocked_findings: vec![],
             permission_findings: vec![],
             waivable_findings: vec![],
+            sandbox: SandboxState::Passed,
         }
     }
     fn snapshot() -> Snapshot {
@@ -537,5 +662,121 @@ mod tests {
         );
         assert_eq!(p.phase, Phase::Cancelled);
         assert!(!p.prepared(t, s));
+    }
+    #[test]
+    fn sandbox_must_pass_or_explicitly_require_full_access_before_publish() {
+        let mut p = plan();
+        let draft = Draft::for_plan(&p);
+        for state in [
+            SandboxState::Running,
+            SandboxState::CouldNotRun,
+            SandboxState::Failed,
+            SandboxState::Cancelled,
+        ] {
+            p.sandbox = state;
+            assert!(
+                draft
+                    .problems(&p)
+                    .iter()
+                    .any(|p| p.problem == Problem::SandboxNotPassed)
+            );
+        }
+        p.sandbox = SandboxState::FullAccess;
+        assert!(draft.form(&p).is_ok());
+    }
+    struct Host {
+        account: String,
+        uploaded: Vec<Vec<u8>>,
+    }
+    impl PublishHost for Host {
+        type Frozen = Vec<u8>;
+        fn identity(&self) -> (String, String) {
+            (self.account.clone(), "https://example.com".into())
+        }
+        fn upload_frozen(&mut self, frozen: Vec<u8>) -> crate::Result<Receipt> {
+            self.uploaded.push(frozen);
+            Ok(Receipt {
+                coordinate: "author/tool".into(),
+                version: "1.2.1".into(),
+                tree_sha: "synthetic-tree".into(),
+                release_id: "release".into(),
+            })
+        }
+    }
+    fn authorize(p: &mut Publish, s: &Snapshot) -> Authorization {
+        let t = p.prepare().unwrap();
+        p.prepared(t, s.clone());
+        p.confirm(t, s, "author", "https://example.com", true)
+            .unwrap()
+    }
+    #[test]
+    fn upload_adapter_uses_frozen_bytes_and_retains_real_publication_after_cancel_race() {
+        let mut p = Publish::default();
+        let s = snapshot();
+        let auth = authorize(&mut p, &s);
+        let prepared = PreparedUpload::new(s.clone(), vec![1, 2, 3]);
+        let t = auth.ticket();
+        assert_eq!(p.cancel(), Some(t));
+        assert_eq!(p.phase, Phase::CancelRequested);
+        let mut host = Host {
+            account: "author".into(),
+            uploaded: vec![],
+        };
+        let receipt = prepared.run(auth, &mut host).receive(&mut p).unwrap();
+        assert_eq!(host.uploaded, vec![vec![1, 2, 3]]);
+        assert_eq!(receipt.release_id, "release");
+        assert_eq!(
+            p.phase,
+            Phase::Published {
+                release_id: "release".into()
+            }
+        );
+        assert!(p.cancel().is_none());
+    }
+    #[test]
+    fn upload_adapter_rechecks_authority_and_publishing_disables_cancel() {
+        let mut p = Publish::default();
+        let s = snapshot();
+        let auth = authorize(&mut p, &s);
+        let t = auth.ticket();
+        assert!(p.progress(t, Phase::Publishing));
+        assert!(p.cancel().is_none());
+        let mut host = Host {
+            account: "other".into(),
+            uploaded: vec![],
+        };
+        assert!(
+            PreparedUpload::new(s, vec![1])
+                .run(auth, &mut host)
+                .receive(&mut p)
+                .is_none()
+        );
+        assert!(host.uploaded.is_empty());
+        assert!(matches!(p.phase, Phase::Failed { .. }));
+    }
+    #[test]
+    fn mismatched_receipt_is_visible_failure_and_is_retained_for_reconciliation() {
+        let mut p = Publish::default();
+        let s = snapshot();
+        let auth = authorize(&mut p, &s);
+        let outcome = UploadOutcome {
+            authorization: auth,
+            result: Ok(Receipt {
+                coordinate: "unexpected/tool".into(),
+                version: s.version,
+                tree_sha: s.tree_sha,
+                release_id: "release".into(),
+            }),
+        };
+        assert_eq!(
+            outcome.receive(&mut p).unwrap().coordinate,
+            "unexpected/tool"
+        );
+        assert_eq!(
+            p.phase,
+            Phase::Failed {
+                code: "publication_identity_mismatch".into()
+            }
+        );
     }
 }
