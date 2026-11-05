@@ -530,3 +530,12 @@ Reverification on macOS still needs the S1 archive plus matching bindings and
 `--features macos-sandbox`, actual GPUI/AppKit/IME/AX/WebKit execution, Metal
 frames, codecs/source identity, audio devices, signed confinement/migration and
 physical display/performance gates. Linux evidence certifies none of those.
+
+### Final integration replay — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`ce36cb6fcc26342cbc51ca577eb8cc1ad596de85` without conflicts. Its new Opus surface
+specifications do not add portable production backing. Replayed the locked
+verification on the merged branch: the same 79/17/36 Rust tests and four Python
+tests pass; formatting/strict Clippy pass; configured acceptance retains
+1,466 pass / 1 measured Glide failure / 3,136 blockers. No new macOS claim.
