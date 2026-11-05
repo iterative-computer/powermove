@@ -864,3 +864,49 @@ permissions; real profile/system-root links and default Adobe roots; signed
 bundle launch and all external clients (including CLI and declined/approved
 Claude consent); app actor binding, real export/video/progress/cancel/reap and
 provider/panel/extension flows. None was exercised in this Linux container.
+
+### Final merged Linux validation — 2026-11-05
+
+Integration base merged without conflicts:
+`d7a0b01d430d7ec9977f52d784f047c027801b14`. Both native lockfiles are committed;
+all final Cargo builds/tests use `--locked`. No Mac target was built or run.
+Commands below run from the repository root after sourcing the activation script.
+
+| Command | Final result |
+| --- | --- |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-mcp` | 126 passed, zero failed/ignored, normal parallel harness. |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-mcp -p pm-kernel -- --test-threads=1` | 399 passed (126 MCP + 273 kernel), zero failed, one pre-existing optional real-profile smoke test ignored. |
+| `cargo test --locked --manifest-path apps/native/crates/mcp/backends/Cargo.toml` | 10 passed, zero failed/ignored. |
+| `cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-mcp --all-targets -- -D warnings` | Clean. |
+| `cargo clippy --locked --manifest-path apps/native/crates/mcp/backends/Cargo.toml --all-targets -- -D warnings` | Clean. |
+| `cargo fmt --manifest-path apps/native/Cargo.toml -p pm-mcp -- --check` | Clean. |
+| `cargo fmt --manifest-path apps/native/crates/mcp/backends/Cargo.toml -- --check` | Clean. |
+| `node apps/native/crates/mcp/scripts/main-oracle.mjs` | 68 current tool names/descriptions/schemas identical. |
+| `node apps/native/crates/mcp/scripts/tag-oracle.mjs` | 67 historical tool names/descriptions/schemas identical. |
+| `PM_ORACLE_MODULE_ROOT=work/oracle node apps/native/crates/mcp/scripts/main-error-pairs.mjs` | 213 current source gate/parser refusals unchanged. |
+| `PM_ORACLE_MODULE_ROOT=work/oracle node apps/native/crates/mcp/scripts/error-pairs.mjs` | 209 historical source gate/parser refusals unchanged. |
+
+The last two optional fixture-regeneration checks require a disposable npm
+prefix with the source's Zod 4.6.5; committed fixtures suffice for normal Rust
+regressions. Node 24's TypeScript stripping runs source oracles in tests only.
+No test invokes a real external-client registration or live provider.
+
+Earlier validation exposed an untouched kernel event-order race in the default
+parallel combined run:
+`kernel/tests/slice2.rs::workspace_mutations_keep_partial_writes_without_document_undo_and_emit_events`
+received a non-`Published` event at its first-event assertion. Its exact retry
+passed; the final full combined run uses a serial test harness. The kernel test
+and its assertion were not changed, skipped or widened. This remains a kernel
+owner follow-up, not evidence that the race has been fixed. The sole existing
+ignored test is `smoke_real_store_copy_counts_only`, which needs an explicitly
+provided copy of a real profile; none was supplied. No new test was ignored.
+Registration's new late-publication race regression also initially exposed a
+misclassified project-revision error; it was fixed to `configuration_conflict`,
+with the byte-preservation assertion retained. Final export tests additionally
+prove worker completion/drain while a host progress callback is blocked.
+
+**Finish status: BLOCKED.** Passing tests cover the implemented behaviors and
+visible refusals, not the 34 missing tool bodies, memory publication, A01–A10
+application/provider dependencies, S070 answer persistence/presentation or Mac
+acceptance. The branch finish signal must therefore be `BLOCKED`, never a false
+`MERGE-READY` completion signal.
