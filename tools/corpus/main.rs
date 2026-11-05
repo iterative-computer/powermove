@@ -33,6 +33,10 @@ mod session {
         )
     }
 }
+mod media;
+mod rotation;
+use media::project_assets;
+
 const FLOOR: u64 = 6 * 1024 * 1024 * 1024;
 fn space(root: &Path) -> Result<()> {
     ensure!(fs2::available_space(root)? >= FLOOR, "disk_floor");
@@ -107,42 +111,6 @@ fn extensions(v: &Value) -> bool {
         Value::Array(a) => a.iter().any(extensions),
         _ => false,
     }
-}
-fn project_assets(v: &Value) -> Value {
-    fn scan(v: &Value, ids: &mut BTreeSet<String>) {
-        match v {
-            Value::Object(m) => {
-                for (k, x) in m {
-                    if k == "assets" {
-                        continue;
-                    }
-                    if matches!(k.as_str(), "asset" | "assetId") {
-                        if let Some(id) = x.as_str() {
-                            ids.insert(id.into());
-                        }
-                    }
-                    scan(x, ids);
-                }
-            }
-            Value::Array(a) => {
-                for x in a {
-                    scan(x, ids);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut ids = BTreeSet::new();
-    scan(v, &mut ids);
-    let mut assets = serde_json::Map::new();
-    if let Some(all) = v["assets"].as_object() {
-        for id in ids {
-            if let Some(a) = all.get(&id) {
-                assets.insert(id, a.clone());
-            }
-        }
-    }
-    Value::Object(assets)
 }
 fn discover_paths(v: &Value, out: &mut BTreeSet<String>) {
     match v {
@@ -301,6 +269,7 @@ fn scrub(
 }
 fn catalog(root: &Path, p: &pm_kernel::Published, work: &Path) -> Result<MediaCatalog> {
     let mut media = MediaCatalog::default();
+    let doc = value(&p.snapshot.document.to_value().unwrap());
     for (i, m) in p.media.iter().enumerate() {
         space(work)?;
         ensure!(
@@ -309,73 +278,25 @@ fn catalog(root: &Path, p: &pm_kernel::Published, work: &Path) -> Result<MediaCa
         );
         let dest = work.join(format!("embedded-{i}"));
         m.copy_to(&dest)?;
-        media.originals.insert(m.id.to_string(), dest);
+        let id = m.id.to_string();
+        if media::proxy(&doc["assets"][&id]) {
+            media.proxies.insert(id, dest);
+        } else {
+            media.originals.insert(id, dest);
+        }
     }
     let map = read(&root.join("media.json"))?;
-    let doc = value(&p.snapshot.document.to_value().unwrap());
     if let Some(assets) = doc["assets"].as_object() {
         for (id, a) in assets {
-            if media.originals.contains_key(id) {
+            if media.originals.contains_key(id) || media.proxies.contains_key(id) {
                 continue;
             }
-            let key = a["storageKey"]
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| a["fingerprint"].as_str().map(|s| format!("media:{s}")))
-                .unwrap_or(id.clone());
-            let mut candidates = Vec::new();
-            let mut identities = BTreeSet::new();
-            for r in map["records"].as_array().unwrap() {
-                if (r["key"] == key || r["key"] == *id)
-                    && a["revision"]
-                        .as_str()
-                        .is_none_or(|rev| r["revision"] == rev)
-                {
-                    if let Some(path) = r["path"].as_str() {
-                        candidates.push(PathBuf::from(path));
-                        if let Some(hash) = r["sha256"].as_str() {
-                            identities.insert(hash.to_owned());
-                        }
-                    }
-                }
-            }
-            if let Some(hash) = a["contentHash"].as_str() {
-                let path = root
-                    .join("profile/Media Store/objects")
-                    .join(&hash[..hash.len().min(2)])
-                    .join(hash);
-                if path.is_file() {
-                    candidates = vec![path];
-                }
-            }
-            for field in ["sourcePath", "path"] {
-                if let Some(src) = a[field].as_str()
-                    && let Some(path) = map["linked"][src].as_str()
-                {
-                    candidates = vec![PathBuf::from(path)];
-                }
-            }
-            if let Some(src) = a["link"]["path"].as_str()
-                && let Some(path) = map["linked"][src].as_str()
-            {
-                candidates = vec![PathBuf::from(path)];
-            }
-            candidates.sort();
-            candidates.dedup();
-            if candidates.len() > 1 && identities.len() == 1 {
-                candidates.truncate(1);
-            }
-            if candidates.len() == 1 {
-                let path = candidates.pop().unwrap();
-                ensure!(
-                    path.canonicalize()?.starts_with(root.canonicalize()?),
-                    "media escaped snapshot"
-                );
-                if a["playbackProxy"] == true || a["playbackProxyVersion"].as_u64().unwrap_or(0) > 0
-                {
-                    media.proxies.insert(id.clone(), path);
+            if let Some(binding) = media::binding(id, a, &map).map_err(anyhow::Error::msg)? {
+                binding.verify(root).map_err(anyhow::Error::from_boxed)?;
+                if binding.proxy {
+                    media.proxies.insert(id.clone(), binding.path);
                 } else {
-                    media.originals.insert(id.clone(), path);
+                    media.originals.insert(id.clone(), binding.path);
                 }
             }
         }
@@ -560,6 +481,15 @@ fn project(
         );
         for t in times {
             scrub(&viewer, ticks(t), frame_ticks)?;
+        }
+        if row["synthetic_pixel_proof"] == true {
+            let before = scrub(&viewer, Ticks::ZERO, frame_ticks)?;
+            viewer.capture_next()?;
+            let f = wait(&viewer, Some(Ticks::ZERO), before.completion_host_seconds)?;
+            let pixels = f
+                .pixels
+                .ok_or_else(|| anyhow::anyhow!("missing_synthetic_readback"))?;
+            write(&work.join("preview-pixels.json"), &json!(pixels))?;
         }
         Ok(())
     })?;
@@ -766,6 +696,19 @@ fn project(
                 .args(["-f", "null", "-"])
                 .output()?;
             ensure!(decoded.status.success(), "decode_failed");
+            if row["synthetic_pixel_proof"] == true {
+                let pixels = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&dest)
+                    .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                    .output()?;
+                ensure!(pixels.status.success(), "synthetic_pixel_decode_failed");
+                ensure!(
+                    pixels.stdout.len() == 320 * 180 * 3,
+                    "synthetic_pixel_count"
+                );
+                fs::write(work.join(format!("{stage}-pixels.rgb")), pixels.stdout)?;
+            }
             fs::remove_file(dest)?;
             Ok(())
         })?;
@@ -791,6 +734,17 @@ fn main() -> Result<()> {
         return pm_engine_service::jobs::run_child();
     }
     match args.get(1).map(String::as_str) {
+        Some("rotation-proof") => rotation::proof(Path::new(&args[2])),
+        Some("shader-info") => {
+            let mut effects = pm_render::effects::Effects::new("corpus-diagnostics");
+            let failures = effects.set_snapshot(&pm_render::all_builtin_definitions())?;
+            write(Path::new(&args[2]), &serde_json::to_value(&failures)?)?;
+            ensure!(
+                failures.is_empty(),
+                "shader_translation_failed; inspect private shader-info"
+            );
+            Ok(())
+        }
         Some("snapshot") => snapshot(
             Path::new(&args[2]),
             Path::new(&args[3]),

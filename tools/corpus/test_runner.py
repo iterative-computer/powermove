@@ -40,6 +40,94 @@ class CorpusSafety(unittest.TestCase):
             self.assertEqual(log.read_text().strip(),'synthetic compiler')
             self.assertEqual(corpus.digest(compiler),identities['compiler_sha256'])
 
+    def test_frozen_tools_refuse_modified_bytes_and_symlinks(self):
+        for symlink in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                worker, helper = base/'worker', base/'helper'
+                for p in (worker, helper):
+                    p.write_text('#!/bin/sh\nexit 0\n')
+                    p.chmod(0o700)
+                root = base/'frozen'
+                root.mkdir()
+                frozen, compiler, _ = corpus.freeze_tools(worker, helper, root)
+                compiler.unlink()
+                if symlink:
+                    compiler.symlink_to(helper)
+                else:
+                    compiler.write_bytes(b'changed')
+                    compiler.chmod(0o700)
+                with self.assertRaisesRegex(RuntimeError, 'frozen_tool_changed'):
+                    corpus.freeze_tools(worker, helper, root)
+
+    def test_selection_prefers_exact_content_key_then_bare_id(self):
+        records = [{'key':'clip','revision':'r2','source':'stale','snapshot':'db'},
+                   {'key':'media:current','revision':'r2','source':'current'}]
+        asset = {'fingerprint':'current','revision':'r2'}
+        self.assertEqual(corpus.select_records('clip', asset, records, Path('.')), [records[1]])
+        self.assertEqual(corpus.select_records('clip', asset, records[:1], Path('.')), records[:1])
+        asset['revision'] = 'new'
+        self.assertEqual(corpus.select_records('clip', asset, records, Path('.')), [])
+
+    def test_content_object_without_key_manifest_is_captured_for_verification(self):
+        h = 'a' * 64
+        selected = corpus.select_records('clip', {'contentHash':h}, [], Path('profile'))
+        self.assertEqual(selected[0]['source'], str(Path('profile/Media Store/objects/aa') / h))
+        self.assertEqual(selected[0]['blake3'], h)
+        for h in ('../../untrusted', 'a'*63, 'z'*64):
+            self.assertEqual(corpus.select_records('clip', {'contentHash':h}, [], Path('.')), [])
+
+    def test_snapshot_preference_stays_within_the_selected_key_family(self):
+        records = [{'key':'media:x','source':'host'}, {'key':'media:x','snapshot':'db'}, {'key':'clip','snapshot':'other'}]
+        self.assertEqual(corpus.select_records('clip', {'storageKey':'media:x'}, records, Path('.')), [records[1]])
+
+    def test_generated_rotations_match_ffmpeg_autorotate_exactly(self):
+        from rotation import generate, UnsupportedFFmpeg
+        with tempfile.TemporaryDirectory() as directory:
+            for turns in (1,2,3):
+                try:
+                    witness = generate(Path(directory), turns)
+                except UnsupportedFFmpeg as error:
+                    self.skipTest(str(error))
+                self.assertEqual(witness['turns'],turns)
+
+    def test_projects_only_never_reads_profile_stores(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            profile, target = base/'source', base/'snapshot'
+            profile.mkdir()
+            args = SimpleNamespace(profile=profile, projects_only=True, projects=[], extra_files=None,
+                resume_snapshot=False, resume_results=False, report=base/'report.json',
+                retain_for_debug=False, batch_gib=1.5, only_ids=None, binary=base/'worker', compiler=base/'helper', timeout=5)
+            def worker(binary, arguments, log, **kwargs):
+                self.assertEqual(arguments[0], 'inventory')
+                self.assertTrue((target/'profile/store').is_dir())
+                (target/'inventory.json').write_text(json.dumps({'projects':[], 'associated_files':[]}))
+                return 0
+            with patch.object(corpus,'ROOT',target), patch.object(corpus,'tree',side_effect=AssertionError('source profile read')), patch.object(corpus,'freeze_tools',return_value=(args.binary,args.compiler,{'worker_sha256':'w','compiler_sha256':'c'})), patch.object(corpus,'call',side_effect=worker):
+                corpus.run(args)
+            report = json.loads(args.report.read_text())
+            self.assertEqual(report['snapshot']['host_records'],0)
+            self.assertEqual(report['snapshot']['indexeddb_records'],0)
+            self.assertEqual(report['library_slots'],0)
+            self.assertFalse(report['gate_pass'])
+
+    def test_preflight_uses_frozen_pair_and_fails_before_source_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            profile = base/'source'
+            profile.mkdir()
+            args = SimpleNamespace(profile=profile, resume_snapshot=False,resume_results=False,
+                report=base/'report.json',retain_for_debug=False,batch_gib=1.5,binary=base/'original',compiler=base/'original-helper',
+                timeout=5, synthetic_preflight=True)
+            frozen, compiler = base/'frozen-worker',base/'frozen-helper'
+            with patch.object(corpus,'ROOT',base/'snapshot'), patch.object(corpus,'freeze_tools',return_value=(frozen,compiler,{})), patch.object(corpus,'call',return_value=1) as call, patch.object(corpus,'tree',side_effect=AssertionError('capture before preflight')):
+                with self.assertRaisesRegex(RuntimeError,'shader_preflight_failed'):
+                    corpus.run(args)
+            self.assertEqual(call.call_args.args[0],frozen)
+            self.assertEqual(call.call_args.kwargs['compiler'],compiler)
+
     def test_missing_compiler_is_a_setup_error_before_any_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory)

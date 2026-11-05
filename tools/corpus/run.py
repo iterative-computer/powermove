@@ -78,8 +78,10 @@ def clone(src, dst):
         raise DiskFloor('disk_floor_payload_reserve')
     dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.clonefile(os.fsencode(src), os.fsencode(dst), 1):
-        if ctypes.get_errno() not in (errno.EXDEV, errno.ENOTSUP, errno.EINVAL, errno.EPERM, errno.EACCES):
+    clonefile = getattr(libc, 'clonefile', None)
+    cloned = clonefile is not None and clonefile(os.fsencode(src), os.fsencode(dst), 1) == 0
+    if not cloned:
+        if clonefile is not None and ctypes.get_errno() not in (errno.EXDEV, errno.ENOTSUP, errno.EINVAL, errno.EPERM, errno.EACCES):
             raise OSError(ctypes.get_errno(), 'clone failed')
         # Cross-volume originals use a bounded stream, after reserving their
         # full size above the floor. Never stream a whole media library.
@@ -123,17 +125,47 @@ def freeze_tools(binary, compiler, root):
     compiler=Path(compiler).expanduser()
     if not compiler.is_file() or compiler.is_symlink() or not os.access(compiler,os.X_OK):
         raise ShaderCompilerUnavailable('shader_compiler_unavailable')
+    if not binary.is_file() or binary.is_symlink() or not os.access(binary,os.X_OK):
+        raise RuntimeError('worker_unavailable')
     identities={'worker_sha256':digest(binary),'compiler_sha256':digest(compiler)}
     outputs=[]
     for source,folder,key in [(binary,'workers','worker_sha256'),(compiler,'compilers','compiler_sha256')]:
         directory=root/folder
         directory.mkdir(exist_ok=True,mode=0o700)
         target=directory/identities[key]
+        if target.is_symlink():
+            raise RuntimeError('frozen_tool_changed')
         if not target.exists():
             clone(source,target)
             target.chmod(0o700)
+        if digest(target) != identities[key] or not os.access(target,os.X_OK):
+            raise RuntimeError('frozen_tool_changed')
         outputs.append(target)
     return *outputs,identities
+
+def select_records(asset_id, asset, records, profile):
+    """Exact revision, preferred content key, then the shipped bare-ID fallback.
+
+    Snapshot-origin preference applies within a key family, never ahead of it.
+    A content-addressed original can be present without a legacy key manifest.
+    The worker verifies its BLAKE3 before binding the captured bytes.
+    """
+    keys = [asset.get('storageKey'),
+            'media:' + asset['fingerprint'] if asset.get('fingerprint') else None,
+            asset_id]
+    revision = asset.get('revision')
+    for key in dict.fromkeys(k for k in keys if isinstance(k, str) and k):
+        matches = [r for r in records if r['key'] == key and
+                   (not isinstance(revision, str) or r.get('revision') == revision)]
+        if matches:
+            captured = [r for r in matches if 'snapshot' in r]
+            return captured or matches
+    content_hash = asset.get('contentHash')
+    if isinstance(content_hash, str) and len(content_hash) == 64 and all(c in '0123456789abcdef' for c in content_hash):
+        return [{'key': keys[0] or keys[1] or asset_id, 'revision': revision,
+                 'source': str(profile / 'Media Store/objects' / content_hash[:2] / content_hash),
+                 'blake3': content_hash}]
+    return []
 
 def call(binary, args, log, timeout=180, compiler=None):
     space()
@@ -162,6 +194,7 @@ def call(binary, args, log, timeout=180, compiler=None):
 def classify(text):
     # Never copy arbitrary error strings into the public report.
     for needle, code in (
+        ('ambiguous_media', 'ambiguous_media'), ('media_content_hash_mismatch', 'media_content_hash_mismatch'),
         ('AsCopy(ChangedOnDisk)', 'changed_file_association'), ('rotated video', 'rotated_video_capability'), ('no definition for effect', 'dynamic_effect_dependency'), ('no definition for transition', 'dynamic_transition_dependency'), ('roundtrip_mismatch', 'roundtrip_mismatch'), ('offline', 'offline_media'),
         ('GLSL fallback runner', 'glsl_fallback_capability'),
         ('history', 'history'), ('font', 'font'), ('shader', 'shader'),
@@ -227,16 +260,17 @@ class BatchLimit(RuntimeError):
 
 def run(args):
     profile = args.profile.expanduser().resolve()
+    projects_only = getattr(args, 'projects_only', False)
     target=ROOT.resolve()
     if target == profile or target.is_relative_to(profile) or profile.is_relative_to(target):
         raise RuntimeError('source_destination_overlap')
     if ROOT.exists():
         owner = json.loads((ROOT / '.owner.json').read_text())
-        if not args.resume_snapshot or ROOT.is_symlink() or owner['uid'] != os.getuid() or owner['profile'] != str(profile):
+        if not args.resume_snapshot or ROOT.is_symlink() or owner['uid'] != os.getuid() or owner['profile'] != str(profile) or owner.get('projects_only', False) != projects_only:
             raise RuntimeError('foreign_or_existing_snapshot')
     else:
         ROOT.mkdir(mode=0o700)
-        owner={'uid':os.getuid(),'profile':str(profile),'run_id':uuid4().hex}
+        owner={'uid':os.getuid(),'profile':str(profile),'run_id':uuid4().hex,'projects_only':projects_only}
         (ROOT / '.owner.json').write_text(json.dumps(owner))
     summary = {'version': 2, 'snapshot_mode': 'per-project batches; metadata snapshot with deferred IndexedDB payloads',
                'batch_limit_bytes': args.batch_gib * 1024**3, 'floor_gib': 6,
@@ -264,11 +298,23 @@ def run(args):
         # Keep this run independent of shared-target rebuilds or cache cleanup.
         args.binary,args.compiler,identities=freeze_tools(args.binary,getattr(args,'compiler',None),ROOT)
         summary.update(identities)
+        if getattr(args, 'synthetic_preflight', False):
+            if call(args.binary, ['shader-info', ROOT/'shaders.private.json'], ROOT/'shaders.private.log', timeout=args.timeout, compiler=args.compiler):
+                raise RuntimeError('shader_preflight_failed')
+            for effect in ('glow', 'shadow'):
+                if call(sys.executable, [Path(__file__).with_name('synthetic.py'), '--binary', args.binary,
+                        '--compiler', args.compiler, '--effect', effect], ROOT/(effect+'.private.log'),
+                        timeout=args.timeout, compiler=args.compiler):
+                    raise RuntimeError('synthetic_pixel_preflight_failed')
+
         summary['mixed_provenance']=bool(previous and (previous.get('runner_sha256') != summary['runner_sha256'] or previous.get('worker_sha256') != summary['worker_sha256'] or previous.get('compiler_sha256') != summary['compiler_sha256'] or previous.get('snapshot_run_id') != summary['snapshot_run_id'] or previous.get('mixed_provenance')))
         if not (ROOT / 'profile/store').exists():
-            tree(profile / 'store', ROOT / 'profile/store')
+            if projects_only:
+                (ROOT / 'profile/store').mkdir(parents=True, mode=0o700)
+            else:
+                tree(profile / 'store', ROOT / 'profile/store')
         records = []
-        for family in ('Index', 'keys'):
+        for family in (() if projects_only else ('Index', 'keys')):
             source = profile / 'Media Store' / family
             target = ROOT / 'profile/Media Store' / family
             if source.is_dir() and not target.exists():
@@ -279,9 +325,9 @@ def run(args):
                     records.append({'key': r['key'], 'revision': r.get('revision'), 'source': r['sourcePath'], 'size': r.get('size', 0), 'value': r})
                 elif len(r.get('hash', '')) == 64 and all(c in '0123456789abcdef' for c in r['hash']):
                     h = r['hash']
-                    records.append({'key': r['key'], 'revision': r.get('revision'), 'source': str(profile / 'Media Store/objects' / h[:2] / h), 'size': r.get('size', 0), 'value': r})
+                    records.append({'key': r['key'], 'revision': r.get('revision'), 'source': str(profile / 'Media Store/objects' / h[:2] / h), 'size': r.get('size', 0), 'value': r, 'blake3': h})
         host_count = len(records)
-        for i, db in enumerate(sorted((profile / 'IndexedDB').glob('*.indexeddb.leveldb'))):
+        for i, db in enumerate([] if projects_only else sorted((profile / 'IndexedDB').glob('*.indexeddb.leveldb'))):
             target = ROOT / f'indexeddb-{i}'
             blobs = db.with_name(db.name.removesuffix('.leveldb') + '.blob')
             if not target.exists():
@@ -390,9 +436,9 @@ def run(args):
                             raise LocalPause('local_pause')
                         raise BatchLimit('copy_failed')
                 else:
-                    code = call(args.binary, ['blob', record['snapshot'], record['database'], record['number'], dest], batch / 'blob.private.log', timeout=60,compiler=args.compiler)
+                    code = call(args.binary, ['blob', record['snapshot'], record['database'], record['number'], dest], batch / ('blob-' + hashlib.sha256(identity.encode()).hexdigest()[:16] + '.private.log'), timeout=60,compiler=args.compiler)
                     if code:
-                        text = (batch / 'blob.private.log').read_text(errors='replace')
+                        text = (batch / ('blob-' + hashlib.sha256(identity.encode()).hexdigest()[:16] + '.private.log')).read_text(errors='replace')
                         if 'disk_floor' in text:
                             space()
                             raise BatchLimit('batch_disk_capacity')
@@ -429,12 +475,7 @@ def run(args):
                 for asset_id, a in assets.items():
                     if asset_id in row.get('embedded', []):
                         continue
-                    key = a.get('storageKey') or ('media:' + a['fingerprint'] if a.get('fingerprint') else asset_id)
-                    matches = [r for r in records if r['key'] in (key, asset_id) and (not isinstance(a.get('revision'), str) or r.get('revision') == a['revision'])]
-                    # Exact shipped host revision is preferred; otherwise retain every
-                    # captured origin and disambiguate only by copied payload checksum.
-                    captured = [r for r in matches if 'snapshot' in r]
-                    matches = captured or matches
+                    matches = select_records(asset_id, a, records, profile)
                     selected_before = len(selected)
                     for r in matches:
                         try:
@@ -509,7 +550,7 @@ def run(args):
     except Exception as error:
         if isinstance(error,(LocalPause,DiskFloor)):
             args.retain_for_debug=True
-        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'shader_compiler_unavailable' if isinstance(error,ShaderCompilerUnavailable) else 'disk_floor' if isinstance(error,DiskFloor) or shutil.disk_usage('/tmp').free < FLOOR else 'runner_setup_failed'})
+        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'shader_compiler_unavailable' if isinstance(error,ShaderCompilerUnavailable) else 'disk_floor' if isinstance(error,DiskFloor) or shutil.disk_usage('/tmp').free < FLOOR else str(error) if str(error) in ('shader_preflight_failed','synthetic_pixel_preflight_failed','frozen_tool_changed','worker_unavailable') else 'runner_setup_failed'})
         report()
         raise
     finally:
@@ -526,8 +567,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--binary', type=Path, default=Path.home() / 'Developer/pm-target/debug/examples/pm-corpus')
     p.add_argument('--compiler',type=Path,help='GLSL compiler helper; defaults to pm-glsl-compiler next to the build output.')
+    p.add_argument('--synthetic-preflight', action='store_true', help='Prove real builtin shader translation and glow/shadow preview/export pixels with this frozen tool pair before capture (Mac).')
     p.add_argument('--profile', type=Path, default=Path.home() / 'Library/Application Support/Powermove')
     p.add_argument('--projects', type=Path, action='append')
+    p.add_argument('--projects-only', action='store_true', help='Use an empty library and no profile media stores; discover only the supplied project folders.')
     p.add_argument('--extra-files', type=Path, help='Private JSON list of additional PMV source paths, for indexed discovery or targeted rechecks.')
     p.add_argument('--report', type=Path, default=Path('/tmp/pm-corpus-summary.json'))
     p.add_argument('--timeout', type=int, default=120)
@@ -537,6 +580,8 @@ def main():
     p.add_argument('--resume-snapshot', action='store_true')
     p.add_argument('--retain-for-debug', action='store_true', help='Keep metadata and private diagnostic logs, never completed batch media; remove /tmp/pm-corpus when done.')
     args = p.parse_args()
+    if args.projects_only and not args.projects:
+        p.error('--projects-only requires at least one --projects folder')
     args.projects = args.projects or [Path.home() / d for d in ('Documents', 'Desktop', 'Downloads', 'Movies')]
     if not 0 < args.batch_gib <= 2:
         p.error('--batch-gib must be greater than zero and at most 2')
