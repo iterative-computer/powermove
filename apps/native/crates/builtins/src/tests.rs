@@ -487,3 +487,6 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     }
     assert!(backend.native.platform.is_empty());
 }
+
+#[path = "timeline_tests.rs"]
+mod timeline;

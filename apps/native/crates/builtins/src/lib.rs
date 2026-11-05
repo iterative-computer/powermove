@@ -6,6 +6,7 @@ pub mod delivery;
 mod models;
 mod properties;
 mod settings;
+mod timeline_easing;
 pub mod timeline_scene;
 pub mod virtualization;
 use data::Backend;
@@ -72,6 +73,7 @@ struct Broker {
     errors: Mutex<Vec<String>>,
     facts: Mutex<Value>,
     platform_replies: Mutex<BTreeMap<u64, Value>>,
+    timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -106,6 +108,7 @@ impl Builtins {
             errors: Default::default(),
             facts: Mutex::new(json!({})),
             platform_replies: Default::default(),
+            timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
             wake: Arc::new(wake),
         });
@@ -174,7 +177,7 @@ impl Builtins {
     pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {
         if id == 0 {
             return;
-        } // One-way native model effect, without a JS waiter.
+        }
         self.broker.platform_replies.lock().unwrap().insert(
             id,
             match result {
@@ -220,7 +223,24 @@ impl Builtins {
         key: &str,
         additive: bool,
     ) -> Result<Ticket<Evaluation>> {
-        self.realms.get("timeline").ok_or(Error::Closed)?.eval(format!("__pmBuiltin.command('panel.timeline',{})",json!({"type":"native.select-key","layer":layer,"channel":channel,"key":key,"additive":additive})))
+        self.timeline_action(json!({"type":"selectKeys","layer":layer,"path":channel,"ids":[key],"additive":additive}))
+    }
+    /// Enqueue on the existing v4 worker. The ticket covers actor receipts and
+    /// platform acknowledgements; the main thread only polls it. Drivers can
+    /// include decimal document/revision stamps from the inspected frame.
+    pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
+        self.realms
+            .get("timeline")
+            .ok_or(Error::Closed)?
+            .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+    }
+
+    /// Inspect exact library source and CAS revision on the panel worker.
+    pub fn timeline_easing_library(&self) -> Result<Ticket<Evaluation>> {
+        self.realms
+            .get("timeline")
+            .ok_or(Error::Closed)?
+            .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
         self.realms.get(panel).ok_or(Error::Closed)?.eval(format!(
@@ -382,13 +402,50 @@ impl EngineProxy for Broker {
             "host.poll" => {
                 {
                     let mut backend = entry.backend.lock().unwrap();
+                    // Drain effect receipts on the panel worker. Main only
+                    // deposits replies; it never locks a worker-owned backend.
+                    {
+                        let mut pending = self.timeline_requests.lock().unwrap();
+                        let mut replies = self.platform_replies.lock().unwrap();
+                        let ids = pending
+                            .iter()
+                            .filter(|(_, owner)| owner.0 == panel && owner.1 == generation.number)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>();
+                        for id in ids {
+                            if let Some(reply) = replies.remove(&id) {
+                                pending.remove(&id);
+                                backend.native.timeline_effect_pending =
+                                    backend.native.timeline_effect_pending.saturating_sub(1);
+                                if reply["accepted"] != true {
+                                    backend.native.timeline_effect_result =
+                                        Some(Err(reply["error"]
+                                            .as_str()
+                                            .unwrap_or("Native timeline effect rejected")
+                                            .into()));
+                                }
+                            }
+                        }
+                    }
                     backend.tick().map_err(Error::Host)?;
                     let requests = std::mem::take(&mut backend.native.platform);
                     if !requests.is_empty() {
                         let mut queue = self.platform.lock().unwrap();
                         for (operation, input) in requests {
+                            let id = if operation == "timeline.effect" {
+                                let id = self
+                                    .platform_ids
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                self.timeline_requests
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id, (panel.into(), generation.number));
+                                id
+                            } else {
+                                0
+                            };
                             queue.push(PlatformRequest {
-                                id: 0,
+                                id,
                                 panel: panel.into(),
                                 generation: generation.number,
                                 operation,
@@ -463,6 +520,7 @@ impl EngineProxy for Broker {
                 .unwrap()
                 .inspector_snapshot()
                 .map_err(Error::Host),
+            "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
             "timeline.frame" => entry
                 .backend
                 .lock()

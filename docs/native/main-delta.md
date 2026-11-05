@@ -464,3 +464,20 @@ check("lane ownership", changed == [str(DOC)])
 print("9 checks passed; 138 commits; 57 expanded changes; 0 runtime claims")
 ```
 <!-- audit-python:end -->
+
+## 2026-11-05 — cloud Timeline integration, partial evidence
+
+`feat/na-cloud-timeline`: `5fbeeb5ff`, `dfb9ee065`, `21c7536a5` connect the existing
+v4 worker to kernel-backed gestures, scoped pro edits, parent/key/easing edits,
+joined Position and per-axis diamonds; retain negative/coincident key identities;
+and back the existing Easing library service with atomic archive-preserving
+extension storage. Post-merge Linux evidence: 193 Rust tests and 54 Timeline Bun
+tests / 18 snapshots passed; touched-crate Clippy, formatting and v4 typecheck
+passed. The read-only timeline-render input is already contained in the base.
+
+U04/U05/U06/U07/U12 and Timeline U13 remain **partial/blocked**, not closed:
+application hit-testing/control/menu/field/presentation bindings, full Easing and
+motion-path tools, caption command bodies, Mac physical checks and Opus review
+remain. No coverage-column completion or whole-app acceptance promotion is
+claimed. Exact ownership boundaries, commands and required Mac verification are
+in [cloud-timeline.md](cloud-timeline.md#2026-11-05--final-integration-evidence-and-blocked-handoff).
