@@ -294,3 +294,38 @@ not permitted to edit, as well as real-provider credentials and macOS execution.
 The newer primitives do not turn missing tool adapters or unexecuted schedules
 into passes. See the dated integration list in `agents.md` for remaining bodies,
 including task updates, ordinary-thread controls and final queue/cleanup fencing.
+
+## 2026-11-04 — post-merge verification and updated reference audit
+
+Merged integration base `711f44ba0667f81ce8388c4ec57565d1d0378630`
+without conflicts. The post-merge portable suite passes **126 tests / 0 failures /
+0 ignored**: concurrent 1, conformance 11, conversation 4, delivery 3, history 4,
+monitor 5, orchestration 13, persistence 10, protocol 36, replay 9, runtime 12,
+transport 6 and workspace 12. Strict Clippy and package formatting pass.
+
+Exact native checks, after the standard activation and `cd apps/native`:
+
+```sh
+cargo test --locked -p pm-agents
+cargo clippy --locked -p pm-agents --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-agents --check
+PM_REPLAY_REQUIRE_IDENTICAL=1 cargo test --locked -p pm-agents --test replay replay_all_surfaces_and_check_every_difference
+```
+
+The first three commands pass. The final command is a separately reported
+**1 failed strict assertion / 8 filtered tests** on the unchanged full-observation
+contract, with the 32 exact remaining differences described above. This is not
+included in the 126 passing tests. All four `capture*.cjs --check` commands listed
+in the preceding section reproduce identical reference evidence. No live
+provider, signed app or macOS behavior was exercised.
+
+The merged P0 owner decision also moves overall parity to main commit
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. The retained v1.2.0 fixtures
+remain mandatory legacy evidence, not proof of that newer target. The A01–A10
+agent delta in `main-delta.md` stays open here. In particular, A03's newer Claude
+Project Auto classifier is **not established** by the legacy approval state
+machine/fixtures. Provider discovery/client registration, safe visual replies,
+project memory, updated session/publication fences and main's provider approval
+semantics need their own current-source replay and real host support. No
+optimistic Auto/provider capability is added by this lane. The scope of the
+portable services and the integration blockers remain explicit in `agents.md`.
