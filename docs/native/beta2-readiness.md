@@ -358,3 +358,37 @@ only a typed request to the storage owner, never a deletion in this lane. Source
 or authored data always moves to archive, never deletion. Remaining two neutral
 Opus defaults (initial scope type and non-original cleanup selections) are
 unchanged. No literal token fallback is supplied.
+
+
+## Final aligned verification — 2026-11-04
+
+Integration base fetched/merged before the final locked replay:
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`. No conflicts. Behavior reference:
+main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; v1.2.0 fixtures remain compatibility
+inputs. **192 Rust tests passed / 0 failed / 0 ignored**: 57 first-launch (2 unit,
+14 handoff/merge/Sparkle-policy, 25 coordinator, 16 surface), 27 migration,
+33 distribution and 75 services. **15 Python bundle-audit tests passed**.
+The locked test/fmt/Clippy commands above were repeated after the final merge;
+Python 3.9 syntax, diff checks and staged gitleaks passed. Apple-target std metadata
+API probes type-checked for both architectures without linking or running Mac code.
+
+These are supporting tests, not a beta qualification pass. Main-file-media
+preservation/refusal tests pass by asserting a named unsupported-input result;
+they do **not** claim main media migrated. Pending work:
+
+1. Build the main-reference flat-file/source-link media adapter. The checkpoints
+   and unknown metadata are retained and original data is untouched; the current
+   gate refuses unsupported input before pretending import completed.
+2. Distribution/services: replace or bridge the synchronous external-archive
+   stage contract with supported asynchronous Sparkle behavior, and align the
+   obsolete readiness proof field with actual installer recovery. No production
+   Sparkle capability is linked.
+3. Application/kernel/storage owners: attach worker models and real evidence/
+   import leases, live media-delta scheduling, the main storageSettings registry,
+   profile services, required design tokens and native presentation. Fileguard owns
+   original-app refusal; this lane promises no reverse migration or assured return.
+4. Complete the signed Mac checklist above, resource closure/rpath relocation and
+   physical failure/interruption/permission/Keychain/JIT/AX/design validation.
+
+The signal is BLOCKED for these unresolved integrations. Nothing was signed,
+notarized, published, tagged or dispatched. No real profile/Keychain was used.
