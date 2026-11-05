@@ -16,3 +16,4 @@ existing Opus specifications remain authoritative.
 | --- | --- | --- | --- |
 | tokens6 | `e8a2f10f7282eb48208237f82d2789c9666cdc36` | None | `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-design`: 12 passed |
 | surfa | `4f0743569b3e5690def2321f050f0f84503db5a7` | None | `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-services`: 195 passed, 0 failed, 0 ignored |
+| surfb | `5576c1d9041da9fcdf6d316880725d48e6f7cf96` | Services exports/manifests and both locks: union dependencies; isolated lock updated only for pm-services. surfaces.md: retain complete dated A and B sections. | `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-services -p pm-first-launch -p pm-promedia`: 408 passed, 0 failed, 0 ignored |
