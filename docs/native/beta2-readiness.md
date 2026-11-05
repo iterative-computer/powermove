@@ -192,3 +192,10 @@ is available inside the owned paths, and complete current-state profile/media/
 secret Restore cannot be certified by the store-preparation tests. The signed Mac
 steps above remain open. The final branch signal must report BLOCKED, not convert
 these missing integrations into beta readiness.
+
+The retention review also removed cleanup/truncation of prior first-launch file
+copy/state temporaries and media importer payload/metadata temporaries. Retries
+archive the previous attempt before create-new publication. The empty-payload
+scratch input remains owned and retained even when import fails. Focused tests
+verify that interrupted state metadata, snapshot metadata, payload copies and an
+unexpected existing empty-payload input retain their exact prior bytes.

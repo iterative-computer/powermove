@@ -68,10 +68,12 @@ pub fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 pub fn bytes(path: &Path, value: &[u8]) -> Result<()> {
     let tmp = path.with_extension("first-launch-part");
+    if fs::symlink_metadata(&tmp).is_ok() {
+        archive(&tmp)?;
+    }
     let mut f = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
@@ -216,4 +218,23 @@ pub fn archive(path: &Path) -> Result<PathBuf> {
         return Ok(archived);
     }
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn interrupted_state_append_is_archived_before_atomic_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let state = root.join("migration.json");
+        let partial = state.with_extension("first-launch-part");
+        fs::write(&partial, b"synthetic interrupted state").unwrap();
+        atomic(&state, &serde_json::json!({"version":1})).unwrap();
+        assert_eq!(
+            fs::read(root.join("migration.first-launch-part.archive-0000000000000000")).unwrap(),
+            b"synthetic interrupted state"
+        );
+        assert_eq!(json::<serde_json::Value>(&state).unwrap()["version"], 1);
+    }
 }

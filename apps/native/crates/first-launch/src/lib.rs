@@ -535,7 +535,7 @@ fn bootstrap(
         if !target.exists() {
             let temp = target.with_extension("first-launch-copy");
             if temp.exists() {
-                fs::remove_file(&temp)?;
+                disk::archive(&temp)?;
             }
             let copied = disk::copy(&root.join("profile").join(relative), &temp)?;
             ensure!(copied.hash == entry.hash, "checkpoint copy differs");

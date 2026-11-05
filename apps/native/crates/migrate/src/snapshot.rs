@@ -414,10 +414,12 @@ fn try_clone(_: &Path, _: &Path) -> Result<bool> {
 
 pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let tmp = path.with_extension("json.part");
+    if fs::symlink_metadata(&tmp).is_ok() {
+        archive_attempt(&tmp)?;
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
@@ -428,4 +430,51 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     fs::rename(&tmp, path)?;
     File::open(path.parent().unwrap())?.sync_all()?;
     Ok(())
+}
+
+/// Caller owns the migration lease and a private destination. Retain interrupted
+/// payload/metadata attempts under distinct sibling names; never follow links.
+pub(crate) fn archive_attempt(path: &Path) -> Result<()> {
+    ensure!(
+        !fs::symlink_metadata(path)?.file_type().is_symlink(),
+        "linked migration attempt"
+    );
+    let parent = path.parent().context("attempt has no parent")?;
+    let name = path
+        .file_name()
+        .context("attempt has no name")?
+        .to_string_lossy();
+    for sequence in 0u64.. {
+        let target = parent.join(format!("{name}.archive-{sequence:016x}"));
+        if fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        fs::rename(path, target)?;
+        File::open(parent)?.sync_all()?;
+        return Ok(());
+    }
+    unreachable!()
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn atomic_snapshot_metadata_retains_torn_previous_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let state = root.join("snapshot.json");
+        fs::write(
+            state.with_extension("json.part"),
+            b"synthetic torn metadata",
+        )
+        .unwrap();
+        atomic_json(&state, &serde_json::json!({"complete":true})).unwrap();
+        assert_eq!(
+            fs::read(root.join("snapshot.json.part.archive-0000000000000000")).unwrap(),
+            b"synthetic torn metadata"
+        );
+        let value: serde_json::Value = serde_json::from_reader(File::open(state).unwrap()).unwrap();
+        assert_eq!(value["complete"], true);
+    }
 }
