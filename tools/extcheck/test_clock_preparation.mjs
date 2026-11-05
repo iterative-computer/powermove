@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import vm from "node:vm";
-import { clockHTML, clockHelper } from "./prepare-reference.mjs";
+import { clockHTML, clockHelper, CLOCK_ASSET } from "./prepare-reference.mjs";
 import { CLOCK_SOURCE, CLOCK_FIXTURE } from "./clock-source.mjs";
 
 test("shared prelude executes in a frozen-performance host before module evaluation", async () => {
@@ -27,15 +27,25 @@ test("HTML prepends exactly the shared fixture before application modules", () =
   const original =
     '<html><head></head><body><script type="module" src="./src/main.ts"></script></body></html>';
   const prepared = clockHTML(original);
-  assert(prepared.includes(CLOCK_SOURCE));
-  assert(prepared.indexOf(CLOCK_SOURCE) < prepared.indexOf('type="module"'));
+  assert(
+    prepared.indexOf('src="./host/extcheck-clock.js"') <
+      prepared.indexOf('type="module"'),
+  );
+  assert(!prepared.includes("<script>"));
+  assert(CLOCK_ASSET.includes(CLOCK_SOURCE));
   const context = vm.createContext({ performance: {}, crypto: {} });
-  vm.runInContext(prepared.match(/<script>([\s\S]*?)<\/script>/)[1], context);
+  vm.runInContext(CLOCK_ASSET, context);
   assert.equal(
     vm.runInContext("__extcheckClock.fixture.sha256", context),
     CLOCK_FIXTURE.sha256,
   );
-  assert(prepared.includes(JSON.stringify(CLOCK_FIXTURE)));
+  assert(CLOCK_ASSET.includes(JSON.stringify(CLOCK_FIXTURE)));
+  assert(
+    clockHTML(original, "../host/extcheck-clock.js").includes(
+      'src="../host/extcheck-clock.js"',
+    ),
+  );
+  assert.throws(() => clockHTML(original, "https://invalid.example/clock.js"));
   assert.equal(
     prepared.replace(
       /\n<!-- extcheck-clock:start -->\n[\s\S]*?\n<!-- extcheck-clock:end -->/,

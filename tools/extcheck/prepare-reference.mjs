@@ -5,14 +5,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLOCK_SOURCE, CLOCK_FIXTURE } from "./clock-source.mjs";
 
-export function clockHTML(original) {
+export const CLOCK_ASSET = `/* extcheck-clock: owned fixture */\n${CLOCK_SOURCE}\nglobalThis.__extcheckClock.fixture=${JSON.stringify(CLOCK_FIXTURE)};`;
+
+export function clockHTML(original, src = "./host/extcheck-clock.js") {
   const anchor = "<head>";
   if (original.split(anchor).length !== 2)
     throw Error("Unsupported reference HTML");
-  const source = `${CLOCK_SOURCE}\nglobalThis.__extcheckClock.fixture=${JSON.stringify(CLOCK_FIXTURE)};`;
+  if (!["./host/extcheck-clock.js", "../host/extcheck-clock.js"].includes(src))
+    throw Error("Unsupported fixture asset URL");
+  // External, classic script: executes before modules under the shipped CSP.
+  // Never weaken script-src or inject an inline Store script.
   return original.replace(
     anchor,
-    `${anchor}\n<!-- extcheck-clock:start -->\n<script>${source.replace(/<\/script/gi, "<\\/script")}</script>\n<!-- extcheck-clock:end -->`,
+    `${anchor}\n<!-- extcheck-clock:start -->\n<script src="${src}"></script>\n<!-- extcheck-clock:end -->`,
   );
 }
 
@@ -27,7 +32,7 @@ export function clockHelper(original) {
   return original
     .replace(
       begin,
-      `  let clockPending = false;\n  let clockFailure;\n  const clockPump = setInterval(async () => {\n    if (clockPending) return;\n    clockPending = true;\n    try { const error = await page.evaluate(async () => {\n      try { await globalThis.__extcheckClock?.advance(16); return null; }\n      catch (error) { return String(error); }\n    }); clockFailure ??= error; }\n    catch {} finally { clockPending = false; }\n  }, 10);\n  try {\n${begin}`,
+      `  let clockPending = false;\n  let clockFailure;\n  const clockPump = setInterval(async () => {\n    if (clockPending) return;\n    clockPending = true;\n    try { for (const frame of page.frames()) {\n      const error = await frame.evaluate(async () => {\n        try { await globalThis.__extcheckClock?.advance(16); return null; }\n        catch (error) { return String(error); }\n      }); clockFailure ??= error;\n    } }\n    catch {} finally { clockPending = false; }\n  }, 10);\n  try {\n${begin}`,
     )
     .replace(
       end,
@@ -41,20 +46,38 @@ export async function prepare(reference) {
   }).trim();
   if (revision !== "07ed5fa17ee640659cb075f9cad1af2095011d60")
     throw Error("Wrong reference revision");
-  const htmlPath = "apps/desktop/src/renderer/index.html";
-  const original = execFileSync(
-    "git",
-    ["-C", reference, "show", `HEAD:${htmlPath}`],
-    { encoding: "utf8" },
+  const htmlEdits = [];
+  for (const [htmlPath, src] of [
+    ["apps/desktop/src/renderer/index.html", "./host/extcheck-clock.js"],
+    [
+      "apps/desktop/src/renderer/sandbox/ext-sandbox.html",
+      "../host/extcheck-clock.js",
+    ],
+  ]) {
+    const original = execFileSync(
+      "git",
+      ["-C", reference, "show", `HEAD:${htmlPath}`],
+      { encoding: "utf8" },
+    );
+    const current = await readFile(path.join(reference, htmlPath), "utf8");
+    const clean = current.replace(
+      /\n<!-- extcheck-clock:start -->\n[\s\S]*?\n<!-- extcheck-clock:end -->/,
+      "",
+    );
+    if (clean !== original) throw Error("Unrelated reference HTML edit");
+    htmlEdits.push([path.join(reference, htmlPath), clockHTML(original, src)]);
+  }
+  const assetPath = path.join(
+    reference,
+    "apps/desktop/src/renderer/public/host/extcheck-clock.js",
   );
-  const current = await readFile(path.join(reference, htmlPath), "utf8");
-  // Remove just our marked block when upgrading the fixture; refuse every
-  // other source change. Never alter the installed app or a profile.
-  const clean = current.replace(
-    /\n<!-- extcheck-clock:start -->\n[\s\S]*?\n<!-- extcheck-clock:end -->/,
-    "",
-  );
-  if (clean !== original) throw Error("Unrelated reference HTML edit");
+  try {
+    const existing = await readFile(assetPath, "utf8");
+    if (!existing.startsWith("/* extcheck-clock: owned fixture */\n"))
+      throw Error("Unrelated reference clock asset");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   execFileSync(
     "bun",
     [
@@ -68,7 +91,8 @@ export async function prepare(reference) {
     "apps/desktop/e2e/helpers/app.trace.mjs",
   );
   const helper = clockHelper(await readFile(helperPath, "utf8"));
-  await writeFile(path.join(reference, htmlPath), clockHTML(original));
+  for (const [htmlPath, html] of htmlEdits) await writeFile(htmlPath, html);
+  await writeFile(assetPath, CLOCK_ASSET);
   await writeFile(helperPath, helper);
 }
 if (

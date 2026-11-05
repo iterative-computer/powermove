@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { prepareReferenceExtension } from "./reference-profile.mjs";
 import { admitFixtureWorkspace } from "./fixture-aliases.mjs";
 import { CLOCK_FIXTURE } from "./clock-source.mjs";
+import { withBootClock } from "./startup-clock.mjs";
 
 delete process.env.ELECTRON_RUN_AS_NODE;
 delete process.env.POWERMOVE_E2E_LIVE;
@@ -78,31 +79,33 @@ try {
   );
   if (installed !== fingerprint)
     throw Error("Missing/stale trace instrumentation");
-  await session.page.evaluate(async () => {
-    await window.PM.Kernel.loader.builtinsReady;
+  await withBootClock(session.page, async () => {
+    await session.page.evaluate(async () => {
+      await window.PM.Kernel.loader.builtinsReady;
+    });
+    // builtinsReady intentionally resolves before user-extension discovery/compilation.
+    await session.page
+      .waitForFunction(
+        (id) => {
+          const loader = window.PM.Kernel.loader;
+          return (
+            loader.activeIds().includes(id) ||
+            loader
+              .records()
+              .some(
+                (record) =>
+                  record.id === id &&
+                  ["error", "blocked", "needs-trust", "needs-setup"].includes(
+                    record.health?.state,
+                  ),
+              )
+          );
+        },
+        manifest.id,
+        { timeout: 15000 },
+      )
+      .catch(() => {});
   });
-  // builtinsReady intentionally resolves before user-extension discovery/compilation.
-  await session.page
-    .waitForFunction(
-      (id) => {
-        const loader = window.PM.Kernel.loader;
-        return (
-          loader.activeIds().includes(id) ||
-          loader
-            .records()
-            .some(
-              (record) =>
-                record.id === id &&
-                ["error", "blocked", "needs-trust", "needs-setup"].includes(
-                  record.health?.state,
-                ),
-            )
-        );
-      },
-      manifest.id,
-      { timeout: 15000 },
-    )
-    .catch(() => {});
   const active = await session.page.evaluate(
     (id) => window.PM.Kernel.loader.activeIds().includes(id),
     manifest.id,
@@ -116,6 +119,26 @@ try {
     );
     if (trust !== "store")
       throw Error("Store reference did not enter its isolated facade");
+    const realms = session.page
+      .frames()
+      .filter((frame) => frame.url().startsWith("app://x-"));
+    const fixtures = await Promise.all(
+      realms.map((frame) =>
+        frame.evaluate(() => globalThis.__extcheckClock?.fixture),
+      ),
+    );
+    if (
+      !fixtures.length ||
+      fixtures.some(
+        (value) => JSON.stringify(value) !== JSON.stringify(CLOCK_FIXTURE),
+      )
+    ) {
+      status.reason = "reference-clock-fixture-unavailable";
+      throw Error(
+        "Store runtime/view does not have the shared comparison clock",
+      );
+    }
+    status.store_clock_realms = fixtures.length;
     status.store_isolated = true;
   }
   if (!active) {
@@ -178,42 +201,46 @@ try {
     );
     let result = null;
     if (["reload", "dispose", "seek", "panel", "command"].includes(step.op)) {
-      result = await session.page.evaluate(
-        async ({ step, id }) => {
-          const PM = window.PM,
-            trace = window.__PMTrace;
-          const api = PM.Kernel.api("synthetic-extcheck-driver");
-          if (step.op === "reload") {
-            await trace.call("lifecycle.reload", [id], () =>
-              PM.Kernel.loader.reload(id),
+      result = await withBootClock(session.page, () =>
+        session.page.evaluate(
+          async ({ step, id }) => {
+            const PM = window.PM,
+              trace = window.__PMTrace;
+            const api = PM.Kernel.api("synthetic-extcheck-driver");
+            if (step.op === "reload") {
+              await trace.call("lifecycle.reload", [id], () =>
+                PM.Kernel.loader.reload(id),
+              );
+              return { active: PM.Kernel.loader.activeIds().includes(id) };
+            }
+            if (step.op === "dispose") {
+              await trace.call("lifecycle.dispose", [id], () =>
+                api.extensions.setEnabled(id, false),
+              );
+              await PM.Kernel.loader.whenIdle?.();
+              return { active: PM.Kernel.loader.activeIds().includes(id) };
+            }
+            if (step.op === "seek") {
+              PM.pause();
+              trace.call("PM.setTime", [step.time], () =>
+                PM.setTime(step.time),
+              );
+              return { time: PM.time };
+            }
+            if (step.op === "panel") {
+              trace.call("panels.open", [step.id], () =>
+                api.panels.open(step.id),
+              );
+              return { open: api.panels.isOpen(step.id) };
+            }
+            return trace.call(
+              "commands.run",
+              [step.id, ...(step.args ?? [])],
+              () => api.commands.run(step.id, ...(step.args ?? [])),
             );
-            return { active: PM.Kernel.loader.activeIds().includes(id) };
-          }
-          if (step.op === "dispose") {
-            await trace.call("lifecycle.dispose", [id], () =>
-              api.extensions.setEnabled(id, false),
-            );
-            await PM.Kernel.loader.whenIdle?.();
-            return { active: PM.Kernel.loader.activeIds().includes(id) };
-          }
-          if (step.op === "seek") {
-            PM.pause();
-            trace.call("PM.setTime", [step.time], () => PM.setTime(step.time));
-            return { time: PM.time };
-          }
-          if (step.op === "panel") {
-            trace.call("panels.open", [step.id], () =>
-              api.panels.open(step.id),
-            );
-            return { open: api.panels.isOpen(step.id) };
-          }
-          return trace.call(
-            "commands.run",
-            [step.id, ...(step.args ?? [])],
-            () => api.commands.run(step.id, ...(step.args ?? [])),
-          );
-        },
-        { step, id: manifest.id },
+          },
+          { step, id: manifest.id },
+        ),
       );
     } else if (step.op === "advance") {
       await session.page.evaluate(
