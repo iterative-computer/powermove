@@ -28,6 +28,11 @@ const FAMILIES: &[&str] = &[
     "whats-new.json",
     "transcription-cache",
     "transcription-warm.json",
+    "Media Store",
+    "storage-upgrade-v1.json",
+    "project-files.json",
+    "backups",
+    "recovery",
 ];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -247,6 +252,17 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
             );
         }
     }
+    // Interrupted main association publication is a sibling of the registry,
+    // not a store key. Retain every receipt, never activate its destination.
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("project-files.json.pending-") && name.ends_with(".json") {
+            for stamp in disk::walk(&entry.path())?.into_values() {
+                out.insert(PathBuf::from(&name), stamp);
+            }
+        }
+    }
     Ok(out)
 }
 pub(crate) fn relative(path: &Path) -> Result<()> {
@@ -264,6 +280,22 @@ pub(crate) fn file_target(path: &Path) -> Result<PathBuf> {
     let first = path.components().next().context("empty path")?.as_os_str();
     if first == "extensions" {
         Ok(Path::new("extensions-shared").join(path.strip_prefix("extensions")?))
+    } else if first
+        .to_string_lossy()
+        .starts_with("project-files.json.pending-")
+        || [
+            "Media Store",
+            "storage-upgrade-v1.json",
+            "project-files.json",
+            "backups",
+            "recovery",
+        ]
+        .iter()
+        .any(|name| first == *name)
+    {
+        // These are legacy recovery inputs, not live native associations or
+        // migration receipts. Never activate an old path into a user's file.
+        Ok(Path::new("legacy-main").join(path))
     } else {
         Ok(path.into())
     }
