@@ -81,3 +81,49 @@ this adapter does not claim to discover it or provide a file chooser.
 No visual tokens, layout or product copy are introduced. No new
 `DESIGN-TODO(opus)` placeholder is introduced. All rendered output still awaits
 Mac captures and Opus review.
+
+## 2026-11-05 — final integration evidence and blocked handoff
+
+Implementation commits: `5fbeeb5ff` (native actions and joined Position),
+`dfb9ee065` (scoped pro gestures/session guards), `21c7536a5` (production worker,
+coherent projection, effect receipts and Easing service storage).
+
+Fetched and merged `origin/feat/native-engine` at
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66`: already up to date, no conflicts.
+Read-only render input `ce10963fae2eb4467492e2083b9aa15e29d9ddf6` is an ancestor
+of that base; its implementation and snapshot fixtures remain in place.
+No dependency changes were needed and no lockfile changed. Every Cargo test ran
+with `--locked`. No secrets/user projects, generated captures or private plan
+files were used or committed.
+
+Post-merge commands, from the repository root after activation:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-panel-timeline -p pm-builtins` | 193 passed: Timeline 114 behavior + 10 render + 36 v4; built-ins 33. 0 failed, 0 ignored. |
+| `cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-panel-timeline -p pm-builtins --all-targets -- -D warnings` | Passed. |
+| `cargo fmt --manifest-path apps/native/Cargo.toml -p pm-panel-timeline -p pm-builtins -- --check` | Passed. |
+| `cd apps/native/js/v4 && bun run typecheck` | Passed. |
+| `cd apps/native/js/v4 && bun test panels/timeline` | 54 passed, 0 failed; 18 snapshots. Uses locked Cargo example builds. |
+| `cd apps/native/js/v4 && bun node_modules/prettier/bin/prettier.cjs --check panels/timeline/actions.ts panels/timeline/index.ts panels/timeline/model.ts` | Passed. |
+
+Gitleaks staged scans and the configured repository hook run before every
+commit, including the final signal. The entire cross-app acceptance suite was
+not run and its aggregate is not changed by these targeted results.
+
+**Status: BLOCKED for the complete requested lane.** No U04/U05/U06/U07/U12/U13
+row is declared closed. Passing worker/kernel tests do not imply complete
+on-screen timeline operation. Remaining work is concrete:
+
+| Boundary / row | Required work outside the completed integration |
+| --- | --- |
+| U04/U05 and HANDOFF 7/8 | `apps/native/crates/app/src/v4_view.rs` needs native track/graph hit tests, pointer capture, autoscroll, drag/trim/pickwhip/marquee/resize/pan/zoom routing into `Builtins::timeline_action`. Generic raw `pointer*`, wheel and drop intents still reject where native geometry is absent. Wire the reconciled renderer to the actual viewport rather than the existing app's separate proportional track drawing. This file is outside this lane's ownership. |
+| U04/U05/U07 | App native menus, rename/property/key-time fields, per-axis affordances, columns and section headings need their specified bindings/presentation. `selectProperty`, `editKeys`, parent changes, diamonds and dimension joining are real actor routes, but those endpoints alone do not qualify the controls. Prove save/reopen with real project storage. |
+| U06 | Capture Timeline and Graph selected/unselected/locked states in light, dark and Increase Contrast on macOS, then obtain Opus review. No visual acceptance is claimed. |
+| U12 | Register/present S094/S095 Easing in the application and feed migrated `pm.easing.library.v1` source into the explicit import adapter. Native file/folder import/export, the full local curve editor, multikey/vector section application, graph fit/merge, Clean Motion Path and Create Position Controller remain incomplete. The existing worker explicitly rejects unavailable effects. App entry/shell registration and migration changes are outside the owned paths. |
+| U13 timeline captions | `apps/native/crates/kernel/src/commands/captions.rs` still returns `NotImplemented` for add/edit. The existing Timeline regression preserves this as a rejection. Cue move/trim/split/delete cannot be claimed working until that owning crate supplies the body. |
+| Host and macOS | `apps/native/crates/app/src/builtins.rs` must return actual transport/service completion or rejection, rather than only command enqueueing. Verify AppKit/GPUI focus arbitration, pointer cancellation across window lifecycle, IME/AX/VoiceOver, menus, fields and native presentation. Linux cannot certify any of these. |
+
+The requested changes in the app, kernel and migration areas are intentionally
+not made under this lane's path ownership. No existing consumer is removed.
+No new design placeholder or design decision was introduced.
