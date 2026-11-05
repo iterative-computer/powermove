@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "crates/pm-captions", "crates/pm-fx-defs"]
+members = ["hosts/pm-studio-host", "crates/*", "crates/pm-captions", "crates/pm-fx-defs"]
 # Vendored crates patched below are not members (no workspace lints or tests).
 exclude = ["third_party/wgpu"]
 

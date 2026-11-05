@@ -15,6 +15,9 @@ png = "0.18"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "wgsl"] }
+
 [features]
 # Final-frame denoising with Intel Open Image Denoise (Apache-2.0), linked
 # from OIDN_DIR or Homebrew's open-image-denoise.
