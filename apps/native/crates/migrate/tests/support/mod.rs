@@ -12,7 +12,15 @@ use std::{
 pub fn fixture() -> PathBuf {
     // Independent of the directory cargo runs from (file!() is relative to
     // whichever workspace root invoked rustc).
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/electron")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/electron")
+        .canonicalize()
+        .unwrap()
+}
+pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    // Darwin's default TMPDIR can contain /var -> /private/var. Test
+    // fixtures must use real paths without relaxing production path checks.
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
 }
 pub fn fixture_snapshot(temp: &Path) -> Snapshot {
     Snapshot::capture(
@@ -21,7 +29,7 @@ pub fn fixture_snapshot(temp: &Path) -> Snapshot {
         &temp.join("snapshot"),
         BlobCopy::All,
     )
-    .unwrap()
+    .unwrap_or_else(|error| panic!("synthetic fixture snapshot could not be created: {error:#}"))
 }
 pub fn var(mut n: u64) -> Vec<u8> {
     let mut o = Vec::new();
