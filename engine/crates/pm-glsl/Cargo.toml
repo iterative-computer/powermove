@@ -28,6 +28,9 @@ path = "src/bin/compiler.rs"
 # The production Metal inventory also pulls the macOS renderer/media stack.
 macos-inventory = []
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[example]]
 name = "inventory"
 required-features = ["macos-inventory"]

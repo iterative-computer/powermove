@@ -4844,6 +4844,7 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
+ "libc",
  "naga 30.0.1",
  "rspirv",
  "serde",
