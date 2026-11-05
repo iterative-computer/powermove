@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! WebM's Opus packet timing and metadata: the audio starts at the first
 //! frame (OpusHead's pre-skip removes libopus's lookahead), packets every
 //! 20 ms from zero, and the video carries the export's colour description.

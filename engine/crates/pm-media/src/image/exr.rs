@@ -287,17 +287,17 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         bit_depth: if half { 16 } else { 32 },
         float: true,
         color: ImageColor {
-            icc: None,
-            icc_bytes: None,
-            icc_class: None,
-            transfer: Transfer::Linear,
-            alpha: if alpha {
-                AlphaMode::Premultiplied
-            } else {
-                AlphaMode::Opaque
-            },
             chromaticities,
+            ..ImageColor::plain(
+                Transfer::Linear,
+                if alpha {
+                    AlphaMode::Premultiplied
+                } else {
+                    AlphaMode::Opaque
+                },
+            )
         },
         orientation: 1,
+        oriented: true,
     })
 }

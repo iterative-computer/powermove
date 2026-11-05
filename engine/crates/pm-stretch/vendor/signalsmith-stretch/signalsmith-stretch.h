@@ -198,7 +198,7 @@ struct SignalsmithStretch {
 	
 	// Moves the input position *and* pre-calculates some output, so that the next samples returned from `.process()` are aligned to the beginning of the sample.
 	// The time-stretch rate is inferred from `inputLength`, so use `.outputSeekLength()` to get a correct value for that.
-	template<class Inputs>
+	template<bool batchOutput=false, class Inputs>
 	void outputSeek(Inputs &&inputs, int inputLength) {
 		// TODO: add fade-out parameter to avoid clicks, instead of doing a full reset
 		reset();
@@ -222,7 +222,7 @@ struct SignalsmithStretch {
 		
 		// Use the surplus input to produce pre-roll output
 		OffsetIO<Inputs> offsetInput{inputs, seekSamples};
-		process(offsetInput, surplusInput, preRollOutput, preRollOutput.length);
+		process<batchOutput>(offsetInput, surplusInput, preRollOutput, preRollOutput.length);
 		
 		// put the thing down, flip it and reverse it
 		for (auto &v : tmpPreRollBuffer) v = -v;
@@ -235,7 +235,7 @@ struct SignalsmithStretch {
 		return inputLatency() + playbackRate*outputLatency();
 	}
 
-	template<class Inputs, class Outputs>
+	template<bool batchOutput=false, class Inputs, class Outputs>
 	void process(Inputs &&inputs, int inputSamples, Outputs &&outputs, int outputSamples) {
 #ifdef SIGNALSMITH_STRETCH_PROFILE_PROCESS_START
 		SIGNALSMITH_STRETCH_PROFILE_PROCESS_START(inputSamples, outputSamples);
@@ -446,6 +446,23 @@ struct SignalsmithStretch {
 #endif
 
 			SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN();
+			if (batchOutput && !_splitComputation) {
+				// All steps for this spectrum have completed. Until the next
+				// interval, only readOutput/moveOutput run: batch their identical
+				// divisions and clears rather than revisiting this loop per sample.
+				// Never cross a spectrum boundary or change an input offset, call
+				// length, FFT, checkpoint, or pre-roll sample.
+				size_t count = std::min<size_t>(outputSamples - outputIndex,
+					stft.defaultInterval() - blockProcess.samplesSinceLast);
+				for (int c = 0; c < channels; ++c) {
+					auto &&outputChannel = outputs[c];
+					stft.readOutput(c, count, &outputChannel[outputIndex]);
+				}
+				stft.moveOutput(count);
+				blockProcess.samplesSinceLast += count;
+				outputIndex += int(count) - 1;
+				continue;
+			}
 			++blockProcess.samplesSinceLast;
 			if (_splitComputation) stashedOutput.swap(stft.output);
 			for (int c = 0; c < channels; ++c) {
@@ -467,7 +484,7 @@ struct SignalsmithStretch {
 	}
 
 	// Read the remaining output, providing no further input.  If `outputSamples` is more than one interval, it will compute additional blocks assuming a zero-valued input
-	template<class Outputs>
+	template<bool batchOutput=false, class Outputs>
 	void flush(Outputs &&outputs, int outputSamples, Sample playbackRate=0) {
 		struct Zeros {
 			struct Channel {
@@ -481,7 +498,7 @@ struct SignalsmithStretch {
 		} zeros;
 		// If we're asked for more than an interval of extra output, then zero-pad the input
 		int outputBlock = std::max<int>(0, outputSamples - stft.defaultInterval());
-		if (outputBlock > 0) process(zeros, outputBlock*playbackRate, outputs, outputBlock);
+		if (outputBlock > 0) process<batchOutput>(zeros, outputBlock*playbackRate, outputs, outputBlock);
 
 		int tailSamples = outputSamples - outputBlock; // at most one interval
 		tmpProcessBuffer.resize(tailSamples);

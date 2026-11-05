@@ -71,3 +71,11 @@ pub use shader_layers::all_builtin_definitions;
 
 mod parallel;
 mod pass_facts;
+
+// Success-path unit fixtures share the deliberately bounded native compiler.
+// Production admission and saturation stay unchanged and have their own gates.
+#[cfg(test)]
+fn compiler_fixture() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

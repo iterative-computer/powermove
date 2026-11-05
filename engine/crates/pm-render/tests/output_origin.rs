@@ -23,6 +23,10 @@ use serde_json::{Value, json};
 use support::doc::*;
 use support::ticks;
 
+// Independent success fixtures share the bounded native compiler. Admission
+// contention and recovery remain covered by pm-glsl's process tests.
+static COMPILER_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const W: u32 = 320;
 const H: u32 = 180;
 const S: f64 = 2.0;
@@ -219,6 +223,7 @@ fn diff(
 /// (away from the canvas edges, where today's canvas also cuts effects).
 #[test]
 fn an_integer_origin_draws_the_part_of_the_whole_frame_it_starts_at() {
+    let _compiler_fixture = COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = renderer();
     let doc = document(gradient(), (0.0, 0.0));
     let full = render(
@@ -255,6 +260,7 @@ fn an_integer_origin_draws_the_part_of_the_whole_frame_it_starts_at() {
 /// layers drawn from the origin.
 #[test]
 fn a_fractional_origin_moves_every_layer_like_a_composition_translation() {
+    let _compiler_fixture = COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = renderer();
     let base = document(solid_fill("#203040"), (0.0, 0.0));
     let reference = render(&mut r, &base, &canvas(340, 220, (100.0, 60.0)));
@@ -278,6 +284,7 @@ fn a_fractional_origin_moves_every_layer_like_a_composition_translation() {
 /// placed for the previous origin.
 #[test]
 fn draw_reuse_follows_the_origin() {
+    let _compiler_fixture = COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = renderer();
     r.set_draw_reuse(true);
     let doc = document(gradient(), (0.0, 0.0));
@@ -296,6 +303,7 @@ fn draw_reuse_follows_the_origin() {
 /// sy)`, as today's does (not the crop of the whole frame's gradient).
 #[test]
 fn the_background_follows_todays_view_at_an_origin() {
+    let _compiler_fixture = COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = renderer();
     let mut doc = project(W, H, 2.0, gradient_at(90.0, "#000000", "#FFFFFF"), vec![]);
     doc["layers"] = json!([]);

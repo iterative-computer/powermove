@@ -319,7 +319,7 @@ mod tests {
 
     /// The revision and the SHA-256 of what [`EMITTED_PROGRAMS`] prepare to.
     const EMITTED: (u32, &str) = (
-        3,
+        4,
         "bbba2c6f31e120b8405c840d87f1756f7d71e8c2b1930305a49e477d9293b280",
     );
 
@@ -401,6 +401,10 @@ mod tests {
         );
         let start = std::time::Instant::now();
         let r = prepare_isolated(&source, 3, Duration::from_millis(1));
+        // Unit tests serialize their tiny compiler pool. Time the request
+        // after that test-only queue, where its real deadline starts; a
+        // neighboring 20-second compiler test must not consume this bound.
+        let start = crate::compiler::test_request_start().unwrap_or(start);
         assert!(start.elapsed() < Duration::from_secs(2));
         // Either it finished in a millisecond (never on any machine measured)
         // or the deadline answered.

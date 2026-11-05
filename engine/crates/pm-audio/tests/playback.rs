@@ -22,6 +22,16 @@ const SR: u32 = 48_000;
 const BUFFER: usize = 512;
 const LATENCY_US: u32 = 7_000;
 
+// Each simulated device models a separate app's single audio owner. The
+// native preparation pool, callback-period lease and scheduling counters are
+// process-global, so overlapping devices time and invalidate each other's
+// leases. Keep the end-to-end fixtures isolated; each test's deliberate CPU
+// contention and every callback/deadline assertion remain in effect.
+fn isolated_device_owner() -> std::sync::MutexGuard<'static, ()> {
+    static DEVICE: Mutex<()> = Mutex::new(());
+    DEVICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct CpuContention {
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -260,6 +270,7 @@ fn position_of(v: f32) -> i64 {
 
 #[test]
 fn the_clock_predicts_what_the_device_presents() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("clock");
     let file = ramp_file(&dir, 8);
     for ppm in [0.0, 150.0, -150.0] {
@@ -329,6 +340,7 @@ fn the_clock_predicts_what_the_device_presents() {
 /// on its time the same way.
 #[test]
 fn a_scheduled_play_is_heard_on_the_line_that_starts_at_its_time() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("scheduled");
     let file = ramp_file(&dir, 4);
     // Into the device's 12th buffer, a third of a buffer in; and 30 ms late.
@@ -398,6 +410,7 @@ fn a_scheduled_play_is_heard_on_the_line_that_starts_at_its_time() {
 /// within a microsecond plus the drift since its anchor.
 #[test]
 fn published_samples_re_anchor_against_drift() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("drift");
     let file = ramp_file(&dir, 6);
     let ppm = 300.0;
@@ -456,6 +469,7 @@ fn published_samples_re_anchor_against_drift() {
 /// What the device plays equals the offline render from the same sample.
 #[test]
 fn playback_equals_the_offline_render() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("equal");
     let f44 = dir.join("t44.wav");
     write_wav(
@@ -512,6 +526,7 @@ fn playback_equals_the_offline_render() {
 /// no ring underrun and no starved render.
 #[test]
 fn memory_pressure_during_playback_keeps_it_whole() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("pressure");
     let f44 = dir.join("t44.wav");
     write_wav(
@@ -579,6 +594,7 @@ fn memory_pressure_during_playback_keeps_it_whole() {
 /// not the grid of a play from the project start.
 #[test]
 fn automation_steps_from_the_play_start() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("today-grid");
     let file = dir.join("dc.wav");
     write_wav(&file, SR, &[vec![0.5; SR as usize * 4]]);
@@ -635,6 +651,7 @@ fn automation_steps_from_the_play_start() {
 /// producer feeds silence, so the device never underruns.
 #[test]
 fn an_offline_only_clip_keeps_the_clock_fed() {
+    let _device_owner = isolated_device_owner();
     native_dsp_diagnostics_enabled();
     let cache = SourceCache::new(16 << 20, 2);
     let (mut playback, side) = Playback::start_headless(
@@ -693,6 +710,7 @@ fn an_offline_only_clip_keeps_the_clock_fed() {
 /// playhead heard then.
 #[test]
 fn a_precomposition_animated_trim_reads_at_todays_index_build() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("index-trim");
     let file = ramp_file(&dir, 20);
     // The nested clip starts at 8 s in its composition; trim(t) = t / 2, so
@@ -800,6 +818,7 @@ fn a_precomposition_animated_trim_reads_at_todays_index_build() {
 
 #[test]
 fn embedded_video_animated_trim_reads_at_todays_index_build() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("index-trim");
     let file = ramp_file(&dir, 20);
     // Embedded trim(t) = t / 2, frozen when audioLayers builds its index.
@@ -904,6 +923,7 @@ fn embedded_video_animated_trim_reads_at_todays_index_build() {
 
 #[test]
 fn pause_seek_loop_and_scrub() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("transport");
     let file = ramp_file(&dir, 6);
     let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
@@ -1049,6 +1069,7 @@ fn pause_seek_loop_and_scrub() {
 /// counts device frames, and a tone keeps its pitch.
 #[test]
 fn a_device_at_another_rate() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("device-rate");
     let file = dir.join("tone.wav");
     write_wav(
@@ -1087,6 +1108,7 @@ fn a_device_at_another_rate() {
 /// playback continues from what was heard.
 #[test]
 fn a_device_change_re_anchors() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("device-change");
     let file = ramp_file(&dir, 6);
     let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
@@ -1134,6 +1156,7 @@ fn a_device_change_re_anchors() {
 /// step, and playback keeps its place: no restart, no new epoch.
 #[test]
 fn a_live_edit_glides() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("retune");
     let file = ramp_file(&dir, 4);
     let (playback, mut dev, rig) = setup(&file, 4.0, SR, 0.0);
@@ -1195,11 +1218,13 @@ fn a_live_edit_glides() {
 /// render, no dropout). The source is AAC, so decoding takes real time.
 #[test]
 fn time_mapped_clips_play_as_rendered_offline() {
+    let _device_owner = isolated_device_owner();
     time_mapped_playback(false);
 }
 
 #[test]
 fn time_mapped_clips_play_as_rendered_offline_under_load() {
+    let _device_owner = isolated_device_owner();
     time_mapped_playback(true);
 }
 
@@ -1208,6 +1233,7 @@ fn time_mapped_clips_play_as_rendered_offline_under_load() {
 /// explicit: the callback reports a ring underrun, not a source starvation.
 #[test]
 fn a_partial_callback_underrun_is_reported_and_recovers_in_order() {
+    let _device_owner = isolated_device_owner();
     use pm_audio::ring::{CHUNK, Consumer, Ring, Tag};
     let ring = Ring::new(400, 1);
     let mut consumer = Consumer::new(ring.clone());
@@ -1238,6 +1264,7 @@ fn a_partial_callback_underrun_is_reported_and_recovers_in_order() {
 /// the artificial/real decode latency and can miss the first callback.
 #[test]
 fn a_cold_mapped_start_queues_its_preroll_blocks_together() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("mapped-preroll-prefetch");
     let file = dir.join("tone.m4a");
     generate(
@@ -1309,7 +1336,6 @@ fn a_cold_mapped_start_queues_its_preroll_blocks_together() {
 fn time_mapped_playback(loaded: bool) {
     // Real-time comparisons (40 ms device, zero underruns) never overlap the
     // sixteen-voice start tests' bursts of user-interactive pool jobs.
-    let _isolated = POOL_BURSTS.read().unwrap_or_else(|e| e.into_inner());
     let _load = loaded.then(CpuContention::start);
     let dir = temp_dir(if loaded {
         "time-mapped-loaded"
@@ -1487,6 +1513,7 @@ fn heard_ramp(dev: &SimDevice, from: usize) -> Vec<(f32, f32)> {
 /// clock line, wrapping by the loop range, names what is heard.
 #[test]
 fn loops_whole_at_another_device_rate() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("loop-44k");
     let file = ramp_file(&dir, 6);
     let device = 44_100u32;
@@ -1616,6 +1643,7 @@ fn loops_whole_at_another_device_rate() {
 /// exactly 22 050 device frames and reaches the composition's end.
 #[test]
 fn a_run_ends_whole_at_another_device_rate() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("end-44k");
     let file = ramp_file(&dir, 2);
     let device = 44_100u32;
@@ -1672,6 +1700,7 @@ fn a_run_ends_whole_at_another_device_rate() {
 /// A mono device hears the bus folded, ½(L + R), not its left channel.
 #[test]
 fn a_mono_device_hears_the_fold() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("mono-device");
     let file = dir.join("pair.wav");
     write_wav(
@@ -1706,6 +1735,7 @@ fn a_mono_device_hears_the_fold() {
 /// seek's first buffer, stops at the seek target, not on the old line.
 #[test]
 fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("pause-preroll");
     let file = ramp_file(&dir, 6);
     let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
@@ -1793,6 +1823,7 @@ fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
 /// the project rate and through the converter at 44.1 kHz.
 #[test]
 fn a_run_from_before_the_loop_is_on_the_clock() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("pre-loop");
     let file = ramp_file(&dir, 6);
     for device in [SR, 44_100] {
@@ -1895,6 +1926,7 @@ fn a_run_from_before_the_loop_is_on_the_clock() {
 /// inside the loop.
 #[test]
 fn a_pause_before_the_loop_stops_where_heard() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("pre-loop-pause");
     let file = ramp_file(&dir, 6);
     let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
@@ -1958,6 +1990,7 @@ fn heard_positions(dev: &SimDevice, from: usize) -> Vec<(f64, i64)> {
 /// there.
 #[test]
 fn reverse_playback_plays_backwards_on_its_clock() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("jkl-reverse");
     let file = ramp_file(&dir, 4);
     let (playback, mut dev, _rig) = setup(&file, 4.0, SR, 0.0);
@@ -2011,6 +2044,7 @@ fn reverse_playback_plays_backwards_on_its_clock() {
 /// heard within 2 ms of the line's instant for their media).
 #[test]
 fn jkl_rates_keep_pitch_and_stay_on_their_line() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("jkl-double");
     let file = dir.join("bursts.wav");
     let n = SR as usize * 8;
@@ -2113,6 +2147,7 @@ fn jkl_rates_keep_pitch_and_stay_on_their_line() {
 /// epoch.
 #[test]
 fn a_rate_change_continues_from_what_is_heard() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("jkl-change");
     let file = ramp_file(&dir, 8);
     let (playback, mut dev, _rig) = setup(&file, 8.0, SR, 0.0);
@@ -2166,6 +2201,7 @@ fn a_rate_change_continues_from_what_is_heard() {
 /// reverse's free-position reader, and the device-rate converter.
 #[test]
 fn starved_playback_recovers_without_poisoning_dsp() {
+    let _device_owner = isolated_device_owner();
     let _load = CpuContention::start();
     let dir = temp_dir("playback-starve");
     let file = dir.join("tone.wav");
@@ -2270,6 +2306,7 @@ fn starved_playback_recovers_without_poisoning_dsp() {
 /// the gap (each block of which would miss on a cold cache).
 #[test]
 fn a_seek_after_a_starve_plays_as_rendered_offline() {
+    let _device_owner = isolated_device_owner();
     let _load = CpuContention::start();
     let dir = temp_dir("playback-seek-after-starve");
     let file = dir.join("tone.wav");
@@ -2383,12 +2420,14 @@ fn a_seek_after_a_starve_plays_as_rendered_offline() {
 /// patience hides it. (Cold starts: `a_cold_start_holds_by_device_time`.)
 #[test]
 fn a_long_decode_stall_is_reported_and_recovers() {
+    let _device_owner = isolated_device_owner();
     bounded_decode_wait(true, 48_000, 2);
     bounded_decode_wait(true, 44_100, 0);
 }
 
 #[test]
 fn a_decode_wait_below_the_bound_is_bit_exact() {
+    let _device_owner = isolated_device_owner();
     bounded_decode_wait(false, 48_000, 2);
     bounded_decode_wait(false, 44_100, 0);
 }
@@ -2577,6 +2616,7 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
 /// on the ring's reserve and the ready voice never underruns.
 #[test]
 fn a_decode_miss_during_a_live_edit_keeps_ready_voices_heard() {
+    let _device_owner = isolated_device_owner();
     decode_miss_while_editing(LiveEdit::Gain);
     decode_miss_while_editing(LiveEdit::Solo);
 }
@@ -2769,6 +2809,7 @@ fn decode_miss_while_editing(edit: LiveEdit) {
 /// cold start alone and beside a ready voice, from a stop and mid-run seek.
 #[test]
 fn a_cold_start_holds_by_device_time() {
+    let _device_owner = isolated_device_owner();
     for (with_ready, seek) in [(false, false), (true, false), (false, true), (true, true)] {
         cold_start_decode_wait(false, with_ready, seek, 48_000, 2);
     }
@@ -2777,6 +2818,7 @@ fn a_cold_start_holds_by_device_time() {
 
 #[test]
 fn a_cold_start_past_the_bound_drops_only_the_missing_voice() {
+    let _device_owner = isolated_device_owner();
     for (with_ready, seek) in [(false, false), (true, false), (true, true)] {
         cold_start_decode_wait(true, with_ready, seek, 48_000, 2);
     }
@@ -3005,6 +3047,7 @@ fn cold_start_decode_wait(
 /// 33 ms) hands each distinct message out once, not once per drain.
 #[test]
 fn recurring_errors_are_taken_once() {
+    let _device_owner = isolated_device_owner();
     let rate = 48_000u32;
     let dir = temp_dir("recurring-errors");
     let (good_file, bad_file, late_file) = (
@@ -3116,6 +3159,7 @@ fn recurring_errors_are_taken_once() {
 /// (start latency: nothing of the run is queued) and then drops only A.
 #[test]
 fn voices_own_their_waits_and_notifications() {
+    let _device_owner = isolated_device_owner();
     let _load = stress_enabled().then(CpuContention::start);
     let rate = 48_000;
     let dir = temp_dir("voice-episodes");
@@ -3280,11 +3324,13 @@ fn voices_own_their_waits_and_notifications() {
 /// per-voice wait: the initial fixed 160 ms ring could not do this at 8192.
 #[test]
 fn every_missing_voice_keeps_the_clock_running() {
+    let _device_owner = isolated_device_owner();
     callback_decode_wait(256, false, false);
 }
 
 #[test]
 fn large_callbacks_keep_per_voice_waits() {
+    let _device_owner = isolated_device_owner();
     for frames in [4096, 8192] {
         callback_decode_wait(frames, true, true);
         callback_decode_wait(frames, true, false);
@@ -3454,6 +3500,7 @@ fn callback_decode_wait(buffer: usize, with_ready: bool, recover_in_budget: bool
 /// seek use those exact vocoder histories with no source wait or lost sample.
 #[test]
 fn paused_prefetch_starts_within_one_callback() {
+    let _device_owner = isolated_device_owner();
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir("a6-paused-start");
     let file = dir.join("tone.wav");
@@ -3573,6 +3620,7 @@ fn paused_prefetch_starts_within_one_callback() {
 /// voices, a Play arriving mid-pass must not wait for the remaining starts.
 #[test]
 fn play_preempts_paused_preparation_after_an_edit() {
+    let _device_owner = isolated_device_owner();
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir("a6-preempt");
     let file = dir.join("tone.wav");
@@ -3682,11 +3730,13 @@ fn play_preempts_paused_preparation_after_an_edit() {
 /// preserves every warmed voice, and the result is the edited offline PCM.
 #[test]
 fn edit_then_play_reuses_all_sixteen_stretched_voices() {
+    let _device_owner = isolated_device_owner();
     assert_sixteen_voice_edit_starts(false, false);
 }
 
 #[test]
 fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
+    let _device_owner = isolated_device_owner();
     assert_sixteen_voice_edit_starts(true, false);
 }
 
@@ -3695,25 +3745,18 @@ fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
 /// voice is prepared by its own vocoder job and must still start complete.
 #[test]
 fn edit_then_play_reuses_sixteen_distinct_stretched_voices() {
+    let _device_owner = isolated_device_owner();
     assert_sixteen_voice_edit_starts(false, true);
 }
 
 #[test]
 fn cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous() {
+    let _device_owner = isolated_device_owner();
     assert_sixteen_voice_edit_starts(true, true);
 }
 
-/// The sixteen-voice start tests fill the process-wide preparation pool with
-/// user-interactive jobs. Run concurrently, each would time the other's
-/// sixteen jobs, and a burst would compete with another test's real-time
-/// producer in the same process (an app never prepares paused starts during
-/// its own playback). They take this lock exclusively; the real-time
-/// time-mapped comparisons share it; every other test runs beside both.
-static POOL_BURSTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
 fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
     native_dsp_diagnostics_enabled();
-    let _serial = POOL_BURSTS.write().unwrap_or_else(|e| e.into_inner());
     let _load = stress_enabled().then(CpuContention::start);
     let dir = temp_dir(match (cold, distinct) {
         (true, false) => "a8-cold-start",
@@ -4099,6 +4142,7 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
 /// that interval must keep the seek target, including a loop's first frame.
 #[test]
 fn pausing_before_the_first_buffer_is_presented_keeps_the_prepared_target() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("a8-first-presentation");
     let file = ramp_file(&dir, 8);
     for looping in [false, true] {
@@ -4148,6 +4192,7 @@ fn pausing_before_the_first_buffer_is_presented_keeps_the_prepared_target() {
 /// work area must keep the running vocoder's phase history.
 #[test]
 fn entering_the_loop_keeps_the_uninterrupted_stretch_history() {
+    let _device_owner = isolated_device_owner();
     let dir = temp_dir("a7-loop-entry");
     let file = dir.join("tone.wav");
     write_wav(
@@ -4215,6 +4260,7 @@ fn entering_the_loop_keeps_the_uninterrupted_stretch_history() {
 /// time, regardless of wall time; only then may its own prefix be dropped.
 #[test]
 fn stretched_starts_are_complete_until_the_decoder_device_bound() {
+    let _device_owner = isolated_device_owner();
     let _load = stress_enabled().then(CpuContention::start);
     for exceed in [false, true] {
         let dir = temp_dir(&format!("a8-stretched-bound-{exceed}"));

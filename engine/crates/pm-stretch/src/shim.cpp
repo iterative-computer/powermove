@@ -262,7 +262,9 @@ int pm_stretch_output_seek(void *handle, const float *const *inputs, int samples
 		pm_stretch_checkpoint_fn *checkpoint) {
 	CheckpointScope scope(checkpoint, false, 1);
 	try {
-		static_cast<Handle *>(handle)->stretch->outputSeek(inputs, samples);
+		auto &s = *static_cast<Handle *>(handle)->stretch;
+		if (checkpoint) s.outputSeek<true>(inputs, samples);
+		else s.outputSeek(inputs, samples);
 		return 0;
 	} catch (...) {
 		return -1;
@@ -275,9 +277,11 @@ int pm_stretch_process(void *handle, const float *const *inputs, int input_sampl
 	try {
 		auto &s = *static_cast<Handle *>(handle)->stretch;
 		if (input_samples == 0) {
-			s.process(Zeros{}, 0, outputs, output_samples);
+			if (checkpoint) s.process<true>(Zeros{}, 0, outputs, output_samples);
+			else s.process(Zeros{}, 0, outputs, output_samples);
 		} else {
-			s.process(inputs, input_samples, outputs, output_samples);
+			if (checkpoint) s.process<true>(inputs, input_samples, outputs, output_samples);
+			else s.process(inputs, input_samples, outputs, output_samples);
 		}
 		return 0;
 	} catch (...) {
@@ -289,7 +293,9 @@ int pm_stretch_flush(void *handle, float *const *outputs, int output_samples, fl
 		pm_stretch_checkpoint_fn *checkpoint) {
 	CheckpointScope scope(checkpoint, false, 2);
 	try {
-		static_cast<Handle *>(handle)->stretch->flush(outputs, output_samples, rate);
+		auto &s = *static_cast<Handle *>(handle)->stretch;
+		if (checkpoint) s.flush<true>(outputs, output_samples, rate);
+		else s.flush(outputs, output_samples, rate);
 		return 0;
 	} catch (...) {
 		return -1;

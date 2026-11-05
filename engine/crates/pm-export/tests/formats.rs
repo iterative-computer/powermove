@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Conformance of the formats written outside AVAssetWriter (plan section 17,
 //! "Formats at cutover"; section 25, codec and export conformance): WebM with
 //! VP9 and VP8 (with and without alpha) and Opus through FFmpeg, and PNG
@@ -313,6 +315,7 @@ fn png_sequences_and_stills_at_8_and_16_bits() {
         let params = pm_export::convert::ConvertParams {
             working: WorkingEncoding::Standard,
             alpha: s.alpha,
+            tags: s.tags,
             dither: !sixteen_bit,
             frame: 3,
         };

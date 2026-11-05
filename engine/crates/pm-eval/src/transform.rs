@@ -95,7 +95,8 @@ impl<'d> Scope<'_, 'd> {
         }
         let m = self.local_matrix_uncached(layer, time)?;
         if kept.is_none() {
-            self.ev.keep_local_matrix(self.comp, layer, &LOCAL_CHANNELS, m);
+            self.ev
+                .keep_local_matrix(self.comp, layer, &LOCAL_CHANNELS, m);
         }
         if let Some(memo) = self.local_memo.as_mut() {
             memo.insert(layer, time, m);

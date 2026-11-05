@@ -10,35 +10,38 @@
 //! `vector::level2`): a bug there would be in both, which the interior
 //! check against today's capture still catches.
 //!
-//! Modelled so far: the composition background (solid, linear and radial
-//! gradients, none), 2D solid layers (world matrix, size anchor, opacity,
-//! blend mode, radius) and 2D shape layers (shapes and editable paths:
-//! fills and strokes) in projects that composite in E, with their built-in
-//! effects (`pm_reference::effects`, from the kernel's GLSL; Grain and
-//! Displace excepted).
-//! SVG paths, gradients, normal groups and clips use independent f64 paint
-//! on a 16× grid. Unsupported SVG constructs use separate resvg 32× samples;
-//! their RGBA8 paint quantization remains a reference limitation. Other image
-//! layers and unmodelled content leave their affected footprint unreferenced
-//! (NaN), or the whole frame when that footprint cannot be bounded. The comparator judges unreferenced
+//! Modelled so far, in projects that composite in E: the composition
+//! background (solid, linear and radial gradients, none); 2D solids
+//! (radius included) and shape layers (shapes and editable paths: fills and
+//! strokes); SVG images (independent f64 paths, gradients, groups and clips
+//! on a 16× grid; unsupported constructs use separate resvg 32× samples,
+//! whose RGBA8 paint quantization remains a reference limitation); affine
+//! raster stills at mip level zero; motion blur of solids, shapes and SVG
+//! images; parametric and path masks (`mask_reference`); and the authored
+//! group, precomp and track-matte compositing graph (opacity and blend
+//! applied once to each finished boundary image). Each child source is
+//! painted from its own layers into f64 pixels before the parent samples it.
+//! Other content leaves its footprint unreferenced (NaN), or the whole frame
+//! when that footprint cannot be bounded. The comparator judges unreferenced
 //! pixels against today's capture until the lane that owns that content
 //! models it here (gate-policy.md, "Who converts what").
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use pm_eval::node;
 use pm_eval::{Comp, Evaluator, Scope};
 use pm_model::{Document, Node};
 use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
-use pm_reference::compare::{Class, classify};
 use pm_reference::composite::{Blend, Rgba, blend, scale};
 use pm_reference::coverage::{FillRule, fill};
-use pm_reference::effects::Open;
 use pm_render::AssetResolver;
 use pm_vector::kurbo::{Affine, Point};
 
-#[path = "svg_f64.rs"]
-mod svg_f64;
+use super::sampling_reference::Bitmap;
 
-/// Coverage cells per pixel side for paths and solids.
+use super::svg_f64;
+
 pub const PATH_SAMPLES: usize = 16;
 
 /// A proof variant with only one open-composition layer drawing. The other
@@ -106,49 +109,6 @@ fn isolate_layer_list(layers: &mut [pm_model::Value], index: usize) {
     }
 }
 
-/// A proof variant for one layer's effects (L6): only the layer at `index`
-/// draws, at full opacity, normal blend, without motion blur, transitions
-/// or matte, at float depth; with its effects or (`effects` false)
-/// without them. Content, masks and transforms stay authored.
-pub fn isolated_effect_layer(document: &Document, index: usize, effects: bool) -> Document {
-    use pm_model::Value;
-    let mut root = isolated_own_layer(document, index)
-        .to_value()
-        .expect("isolated project");
-    let original = document.to_value().expect("project root");
-    let fx = match &original {
-        Value::Object(fields) => match fields.get("layers") {
-            Some(Value::Array(layers)) => match &layers[index] {
-                Value::Object(layer) => layer.get("fx").cloned(),
-                _ => None,
-            },
-            _ => None,
-        },
-        _ => None,
-    };
-    let Value::Object(fields) = &mut root else {
-        panic!("project root is not an object");
-    };
-    let Some(Value::Array(layers)) = fields.get_mut("layers") else {
-        panic!("open composition layers are not an array");
-    };
-    let Value::Object(layer) = &mut layers[index] else {
-        panic!("layer is not an object");
-    };
-    if effects && let Some(fx) = fx {
-        layer.insert("fx", fx);
-    }
-    layer.insert("mblur", Value::Bool(false));
-    if let Some(Value::Object(properties)) = layer.get_mut("p")
-        && let Some(Value::Object(channel)) = properties.get_mut("opacity")
-    {
-        channel.insert("v", Value::Number(100.0));
-        channel.insert("kf", Value::Array(Vec::new()));
-        channel.insert("expr", Value::Null);
-    }
-    Document::new(Some(root), document.revision())
-}
-
 /// The intrinsic solid source before a 2.5D plane projects it. Content,
 /// opacity, masks and motion channels remain authored. Its 3D placement and
 /// 2D pose are deliberately canonical: those belong to the projection gate.
@@ -191,110 +151,18 @@ pub fn isolated_local_solid(document: &Document, index: usize) -> Document {
     Document::new(Some(root), document.revision())
 }
 
-/// A reference frame.
-#[derive(Clone)]
-pub struct Reference {
-    pub width: usize,
-    pub height: usize,
-    /// Premultiplied RGBA in the working encoding; NaN where not modelled.
-    pub rgba: Vec<f64>,
-    /// Pixels where modelled content is partially covered.
-    pub edge: Vec<bool>,
-    /// Pixels an effect took from fractional texture positions.
-    pub resampled: Vec<bool>,
-    /// Pixels whose value the formula leaves open (a Posterize level at a
-    /// storage boundary, Gradient's hash dither), composited like `rgba`.
-    pub open: Vec<Option<Open>>,
-    /// What the frame holds that is not modelled (empty when nothing).
-    pub unmodelled: Vec<String>,
-    /// An unmodelled layer's footprint could not be bounded: the whole
-    /// frame is unreferenced.
-    pub whole_frame: bool,
+#[derive(Clone, Copy)]
+struct Depth {
+    precomp: usize,
+    matte: usize,
 }
 
-impl Reference {
-    /// Pixel classes: edges and resampled pixels grown by 2 pixels;
-    /// interior elsewhere.
-    pub fn classes(&self) -> Vec<Class> {
-        classify(&self.edge, &self.resampled, self.width, self.height, 2)
-    }
-
-    /// The reference with each open pixel at the value its formula allows
-    /// nearest to `engine` (E-R3: the nearest level of the reference).
-    pub fn resolved(&self, engine: &[f64]) -> Reference {
-        let mut out = self.clone();
-        for (i, open) in self.open.iter().enumerate() {
-            // An unreferenced pixel stays unreferenced.
-            if self.rgba[i * 4 + 3].is_nan() {
-                continue;
-            }
-            if let Some(open) = open {
-                let e = [
-                    engine[i * 4],
-                    engine[i * 4 + 1],
-                    engine[i * 4 + 2],
-                    engine[i * 4 + 3],
-                ];
-                out.rgba[i * 4..][..4].copy_from_slice(&open.nearest(e));
-            }
-        }
-        out
-    }
-
-    /// [`Reference::opaque`] of the frame resolved against an opaque
-    /// engine frame.
-    pub fn opaque_resolved(&self, engine: &[f64]) -> Reference {
-        let mut opaque = Reference {
-            rgba: self.opaque(),
-            ..self.clone()
-        };
-        let over_black = |c: Rgba| -> Rgba {
-            [
-                c[0].clamp(0.0, 1.0),
-                c[1].clamp(0.0, 1.0),
-                c[2].clamp(0.0, 1.0),
-                1.0,
-            ]
-        };
-        opaque.open = self
-            .open
-            .iter()
-            .map(|o| {
-                o.as_ref().map(|o| match o {
-                    Open::Points(p) => Open::Points(p.iter().map(|c| over_black(*c)).collect()),
-                    Open::Range(lo, hi) => Open::Range(over_black(*lo), over_black(*hi)),
-                })
-            })
-            .collect();
-        opaque.resolved(engine)
-    }
-
-    /// The capture's opaque view: color over black clamped to 0…1, alpha 1.
-    pub fn opaque(&self) -> Vec<f64> {
-        self.rgba
-            .chunks_exact(4)
-            .flat_map(|p| {
-                let a = if p[3].is_nan() { f64::NAN } else { 1.0 };
-                [
-                    p[0].clamp(0.0, 1.0),
-                    p[1].clamp(0.0, 1.0),
-                    p[2].clamp(0.0, 1.0),
-                    a,
-                ]
-            })
-            .collect()
-    }
-
-    /// The share of pixels the reference models.
-    pub fn modelled(&self) -> f64 {
-        let n = self.rgba.chunks_exact(4).filter(|p| !p[3].is_nan()).count();
-        n as f64 / (self.width * self.height).max(1) as f64
-    }
-
-    pub fn alpha(&self) -> Vec<f64> {
-        self.rgba.chunks_exact(4).map(|p| p[3]).collect()
-    }
-}
+// Individual gate binaries consume different parts of this shared facade.
+#[allow(unused_imports)]
+pub use super::effect_reference::{
+    Chain, Reference, Transition, apply_effects, apply_transition, composite_open, effect_chain,
+    isolated_effect_layer, layer_transition,
+};
 
 /// `#RRGGBB` or `#RRGGBBAA` as straight E values; `None` for anything the
 /// reference does not read.
@@ -365,11 +233,142 @@ fn reference_blend(mode: BlendMode) -> Blend {
     }
 }
 
+/// The source reader is a boundary, not a pixel oracle for the renderer:
+/// it supplies decoded texels; all placement, filtering and compositing
+/// below are independent f64 calculations.
+fn decoded_bitmap(path: &Path) -> Result<Option<Bitmap>, String> {
+    let pool = pm_media::pool::FramePool::new(0);
+    let still = pm_media::image::read(path, &pool).map_err(|e| format!("bitmap source {e:?}"))?;
+    if still.format == pm_media::image::ImageFormat::Svg {
+        return Ok(None);
+    }
+    let reference = super::still_reference::reference(path);
+    Ok(Some(Bitmap {
+        width: reference.width,
+        height: reference.height,
+        rgba: reference.rgba,
+    }))
+}
+
+/// The authored fit window in decoded-source coordinates.
+fn image_uv(fit: &str, source: (f64, f64), box_size: (f64, f64)) -> Option<[f64; 4]> {
+    if ![source.0, source.1, box_size.0, box_size.1]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+    {
+        return None;
+    }
+    let source_ratio = source.0 / source.1;
+    let box_ratio = box_size.0 / box_size.1;
+    Some(match fit {
+        "cover" if source_ratio > box_ratio => {
+            let span = box_ratio / source_ratio;
+            [(1.0 - span) / 2.0, 0.0, span, 1.0]
+        }
+        "cover" => {
+            let span = source_ratio / box_ratio;
+            [0.0, (1.0 - span) / 2.0, 1.0, span]
+        }
+        "contain" if source_ratio > box_ratio => {
+            let span = source_ratio / box_ratio;
+            [0.0, (1.0 - span) / 2.0, 1.0, span]
+        }
+        "contain" => {
+            let span = box_ratio / source_ratio;
+            [(1.0 - span) / 2.0, 0.0, span, 1.0]
+        }
+        _ => [0.0, 0.0, 1.0, 1.0],
+    })
+}
+
+/// What a reference pass reads besides the composition being drawn.
+struct Ctx<'a, 'd> {
+    root: &'d Node,
+    assets: &'a dyn AssetResolver,
+    effects: &'a pm_render::effects::Effects,
+    /// Motion-blur samples per blurred layer (1: none).
+    samples: u32,
+    bitmaps: HashMap<PathBuf, Option<Bitmap>>,
+}
+
+fn surface(w: usize, h: usize) -> Reference {
+    Reference {
+        width: w,
+        height: h,
+        rgba: vec![0.0; w * h * 4],
+        edge: vec![false; w * h],
+        resampled: vec![false; w * h],
+        open: vec![None; w * h],
+        unmodelled: Vec::new(),
+        whole_frame: false,
+    }
+}
+
+fn note(out: &mut Reference, why: impl Into<String>) {
+    let why = why.into();
+    if !out.unmodelled.contains(&why) {
+        out.unmodelled.push(why);
+    }
+}
+
+/// Track-matte strength from the independently painted, premultiplied
+/// source. The authored luma mode uses encoded Rec.709 coefficients.
+fn matte_strength(matte: &Option<(Reference, bool, bool)>, index: usize) -> (f64, bool) {
+    let Some((surface, luma, inverted)) = matte else {
+        return (1.0, false);
+    };
+    let px = &surface.rgba[index * 4..][..4];
+    let value = if *luma {
+        pm_reference::composite::luma709([px[0], px[1], px[2]])
+    } else {
+        px[3]
+    };
+    (
+        if *inverted { 1.0 - value } else { value },
+        surface.edge[index] || surface.resampled[index],
+    )
+}
+
+fn render_matte<'d>(
+    ctx: &mut Ctx<'_, 'd>,
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    seconds: f64,
+    scale_xy: (f64, f64),
+    size: (usize, usize),
+    depth: Depth,
+) -> Result<Option<(Reference, bool, bool)>, String> {
+    if depth.matte >= pm_render::composite::MATTE_MAX_DEPTH as usize {
+        return Ok(None);
+    }
+    let Some(source) = pm_render::composite::build::matte_source(scope.layers(), layer) else {
+        return Ok(None);
+    };
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let (luma, inverted) =
+        pm_render::composite::build::matte_mode(scope, layer, seconds).map_err(fail)?;
+    let mut matte = surface(size.0, size.1);
+    draw_pass(
+        ctx,
+        scope,
+        seconds,
+        scale_xy,
+        None,
+        Some(source),
+        &mut matte,
+        Depth {
+            matte: depth.matte + 1,
+            ..depth
+        },
+    )?;
+    Ok(Some((matte, luma, inverted)))
+}
+
 /// The reference frame of `composition` at `time`, `width × height`
 /// output pixels at the legacy derived scale, with or without the
 /// background (transparent captures draw none), with `samples` motion-blur
 /// samples per blurred layer (1: none). `effects`: the definitions the
-/// engine draws with (for effect padding). `assets` resolves SVG source bytes.
+/// engine draws with (for effect padding). `assets` resolves image sources.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     document: &Document,
@@ -382,17 +381,21 @@ pub fn render(
     effects: &pm_render::effects::Effects,
     assets: &dyn AssetResolver,
 ) -> Reference {
-    let (w, h) = (width as usize, height as usize);
-    let mut out = Reference {
-        width: w,
-        height: h,
-        rgba: vec![0.0; w * h * 4],
-        edge: vec![false; w * h],
-        resampled: vec![false; w * h],
-        open: vec![None; w * h],
-        unmodelled: Vec::new(),
-        whole_frame: false,
-    };
+    if document.root().is_some_and(has_effects_or_transitions) {
+        return super::effect_reference::render(
+            document,
+            composition,
+            time,
+            width,
+            height,
+            background,
+            samples,
+            effects,
+            assets,
+        );
+    }
+
+    let mut out = surface(width as usize, height as usize);
     if let Err(why) = draw(
         document,
         composition,
@@ -405,14 +408,6 @@ pub fn render(
     ) {
         out.unmodelled.push(why);
         out.rgba.fill(f64::NAN);
-    }
-    for (i, open) in out.open.iter_mut().enumerate() {
-        if out.rgba[i * 4 + 3].is_nan() {
-            *open = None;
-        }
-        // A value the formula leaves open is judged against the reference,
-        // like a resampled one: today's is one value of it.
-        out.resampled[i] |= open.is_some();
     }
     out
 }
@@ -428,22 +423,47 @@ fn draw(
     effects: &pm_render::effects::Effects,
     assets: &dyn AssetResolver,
 ) -> Result<(), String> {
-    let (w, h) = (out.width, out.height);
     let root = document.root().ok_or("no document")?;
     let color = pm_render::composite::color::project_color(root)?;
     if color.working() != WorkingEncoding::Standard {
         return Err("linear-light compositing".into());
     }
-    // 8-bit storage holds 0…1 only.
-    let clamp = |c: Rgba| -> Rgba {
-        if color.precision == Precision::Unorm8 {
-            c.map(|v| v.clamp(0.0, 1.0))
-        } else {
-            c
-        }
-    };
+    // Every project composites in float, 8-bit delivery included
+    // (docs/engine/composite.md): extended values survive between blends
+    // and only the comparison boundary maps them.
     let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
     let seconds = comp.seconds_at(time.get());
+    let mut ctx = Ctx {
+        root,
+        assets,
+        effects,
+        samples,
+        bitmaps: HashMap::new(),
+    };
+    draw_comp(
+        &mut ctx,
+        &comp,
+        &comp,
+        seconds,
+        out,
+        background,
+        Depth {
+            precomp: 0,
+            matte: 0,
+        },
+    )
+}
+
+fn draw_comp<'d>(
+    ctx: &mut Ctx<'_, 'd>,
+    comp: &Comp<'d>,
+    project: &Comp<'d>,
+    seconds: f64,
+    out: &mut Reference,
+    background: bool,
+    depth: Depth,
+) -> Result<(), String> {
+    let (w, h) = (out.width, out.height);
     if background {
         let fill =
             pm_render::plan::normalize_fill(comp.member("backgroundFill"), comp.member("bg"));
@@ -460,48 +480,199 @@ fn draw(
                         [c[0], c[1], c[2], 1.0]
                     }
                 };
-                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&clamp(c));
+                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&c);
             }
         }
     }
-    let (sx, sy) = pm_render::plan::derived_scale(&comp, w as u32, h as u32);
+    let scale = pm_render::plan::derived_scale(comp, w as u32, h as u32);
     // Expressions evaluate as the engine evaluates them (pm-eval with pm-expr).
     let mut ev =
         Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
-    let mut scope = Scope::new(&mut ev, &comp, &comp);
+    let mut scope = Scope::new(&mut ev, comp, project);
+    draw_pass(ctx, &mut scope, seconds, scale, None, None, out, depth)
+}
+
+/// The scaled world matrix (layer pixels before the size anchor's offset
+/// to output pixels) and the device matrix (after it).
+fn device_of<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    (sx, sy): (f64, f64),
+) -> Result<(kurbo::Affine, kurbo::Affine), String> {
     let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
-    let layers: Vec<&Node> = comp.layers().iter().collect();
-    let solo = layers
+    let world = scope.world_matrix(layer, time).map_err(fail)?;
+    let offset = scope.size_anchor_offset(layer, time).map_err(fail)?;
+    let scaled = kurbo::Affine::new([
+        world[0] * sx,
+        world[1] * sy,
+        world[2] * sx,
+        world[3] * sy,
+        world[4] * sx,
+        world[5] * sy,
+    ]);
+    Ok((
+        scaled,
+        scaled * kurbo::Affine::translate((offset.x, offset.y)),
+    ))
+}
+
+/// Composites a finished layer (or group) image `px` (premultiplied, with
+/// its partial-coverage marks) through opacity, mask and matte.
+#[allow(clippy::too_many_arguments)]
+fn composite_layer(
+    out: &mut Reference,
+    px: &[(Rgba, bool)],
+    resampled: Option<&[bool]>,
+    opacity: f64,
+    mode: Blend,
+    mask: &Option<(Vec<f64>, Vec<bool>)>,
+    matte: &Option<(Reference, bool, bool)>,
+) {
+    for (i, (color, edge)) in px.iter().enumerate() {
+        let (mask_value, mask_edge) = mask
+            .as_ref()
+            .map_or((1.0, false), |(coverage, band)| (coverage[i], band[i]));
+        let (matte_value, matte_edge) = matte_strength(matte, i);
+        let source = scale(*color, opacity * mask_value * matte_value);
+        if source[3] == 0.0 && !edge && !source[0].is_nan() {
+            continue;
+        }
+        if mode == Blend::Normal && source[3] >= 1.0 - 1e-12 {
+            out.edge[i] = false;
+            out.resampled[i] = false;
+        }
+        out.edge[i] |= *edge || mask_edge || matte_edge;
+        if let Some(r) = resampled {
+            out.resampled[i] |= r[i];
+        }
+        let at = &mut out.rgba[i * 4..][..4];
+        let dst = [at[0], at[1], at[2], at[3]];
+        at.copy_from_slice(&blend(mode, source, dst));
+    }
+}
+
+/// Why this reference does not model a leaf layer (`None`: it does).
+fn unmodelled_leaf<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    ty: &str,
+    seconds: f64,
+) -> Result<Option<&'static str>, String> {
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let flag = |k: &str| node::truthy(node::member(Some(layer), k));
+    Ok(if !matches!(ty, "solid" | "image" | "shape" | "precomp") {
+        Some("other layer types")
+    } else if flag("threeD") || scope.is_3d_layer(layer).map_err(fail)? {
+        Some("2.5D planes")
+    } else if scope
+        .active_transition(layer, seconds, &|_| true)
+        .map_err(fail)?
+        .is_some()
+    {
+        Some("transitions")
+    } else if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+        Some("effects")
+    } else if flag("mblur") && ty == "precomp" {
+        Some("motion-blurred precomps")
+    } else {
+        None
+    })
+}
+
+/// A compositing pass, with pure transform groups flattened by pm-eval's
+/// authored group index. Boundary groups and precomps have their own
+/// transparent f64 surface; their opacity and blend are applied once to the
+/// finished image.
+#[allow(clippy::too_many_arguments)]
+fn draw_pass<'d>(
+    ctx: &mut Ctx<'_, 'd>,
+    scope: &mut Scope<'_, 'd>,
+    seconds: f64,
+    scale_xy: (f64, f64),
+    parent: Option<&'d Node>,
+    explicit: Option<&'d Node>,
+    out: &mut Reference,
+    depth: Depth,
+) -> Result<(), String> {
+    let (w, h) = (out.width, out.height);
+    let (sx, sy) = scale_xy;
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let all: Vec<&Node> = scope.layers().iter().collect();
+    let solo = all
         .iter()
         .any(|l| node::truthy(node::member(Some(l), "solo")));
+    let parent_id = parent.map(|layer| node::get(layer, b"id").to_js());
+    let mut boundary = |s: &mut Scope<'_, 'd>, layer: &'d Node| {
+        s.group_creates_compositing_boundary(layer, seconds, true, &|_| true)
+    };
+    let layers = if let Some(layer) = explicit {
+        vec![layer]
+    } else {
+        scope
+            .compositing_layers(&all, parent_id.as_ref(), &mut boundary)
+            .map_err(fail)?
+    };
+    let matte_sources: Vec<_> = all
+        .iter()
+        .filter_map(|layer| node::member(Some(layer), "matteSource"))
+        .map(|id| node::to_js_string(Some(id)))
+        .collect();
     // Motion blur (C-K4): a blurred layer is the average of its content at
     // `t + ((s + ½)/n − ½) · shutter / fps`, masked at the center time.
-    let blur = (samples > 1).then(|| {
-        let fps = pm_render::motion::level_fps(&comp);
-        let shutter = pm_render::motion::shutter_frames(comp.node()) / fps;
-        (0..samples)
-            .map(|s| ((f64::from(s) + 0.5) / f64::from(samples) - 0.5) * shutter)
+    let blur = (ctx.samples > 1).then(|| {
+        let fps = pm_render::motion::level_fps(scope.comp);
+        let shutter = pm_render::motion::shutter_frames(scope.comp.node()) / fps;
+        (0..ctx.samples)
+            .map(|s| ((f64::from(s) + 0.5) / f64::from(ctx.samples) - 0.5) * shutter)
             .collect::<Vec<f64>>()
     });
-    // Layers used as track mattes draw only through their targets.
-    let matte_sources: Vec<pm_model::JsString> = layers
-        .iter()
-        .filter_map(|l| node::string(node::member(Some(l), "matteSource")).cloned())
-        .collect();
     // Bottom (last) to top (first), with today's skip rules.
     for &layer in layers.iter().rev() {
         let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
         let flag = |k: &str| node::truthy(node::member(Some(layer), k));
-        let group = flag("group") || ty == "group";
-        if (solo && !flag("solo")) || matches!(ty.as_str(), "null" | "audio") {
-            continue;
-        }
-        if node::string(node::member(Some(layer), "id"))
-            .is_some_and(|id| matte_sources.contains(id))
+        if explicit.is_none()
+            && matte_sources
+                .iter()
+                .any(|id| *id == node::to_js_string(node::member(Some(layer), "id")))
         {
             continue;
         }
-        if !group && !scope.active(layer, seconds).map_err(fail)? {
+        if matches!(ty.as_str(), "null" | "audio") {
+            continue;
+        }
+        if explicit.is_none() && solo && !flag("solo") {
+            let within_solo_group = scope
+                .group_ancestors(layer)
+                .map_err(fail)?
+                .iter()
+                .any(|group| node::truthy(node::member(Some(group), "solo")));
+            let contains_solo = if ty == "group" {
+                let mut found = false;
+                for candidate in all
+                    .iter()
+                    .filter(|candidate| node::truthy(node::member(Some(candidate), "solo")))
+                {
+                    found |= scope
+                        .group_ancestors(candidate)
+                        .map_err(fail)?
+                        .iter()
+                        .any(|group| std::ptr::eq(*group, layer));
+                }
+                found
+            } else {
+                false
+            };
+            if !within_solo_group && !contains_solo {
+                continue;
+            }
+        }
+        let active = if explicit.is_some() {
+            scope.active_forced_on(layer, seconds)
+        } else {
+            scope.active(layer, seconds)
+        };
+        if !active.map_err(fail)? {
             continue;
         }
         let opacity = scope.num(layer, "opacity", seconds).map_err(fail)? / 100.0;
@@ -510,121 +681,9 @@ fn draw(
         } else {
             opacity.clamp(0.0, 1.0)
         };
-        if !group && opacity <= 0.001 {
+        if opacity <= 0.001 {
             continue;
         }
-        // What this reference does not model: the layer's footprint, grown
-        // by its effects' padding, is unreferenced (and anything drawn over
-        // it); the rest of the frame keeps its reference.
-        let chain = if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
-            effect_chain(&mut scope, effects, layer, seconds)?
-        } else {
-            Some(Vec::new())
-        };
-        // A transition reads the whole stack below the layer and the stack
-        // with it, so it is applied to the frame after the composite.
-        let transition = layer_transition(&mut scope, effects, layer, seconds)?;
-        let unmodelled = if group || ty == "precomp" {
-            Some("groups and precomps")
-        } else if !matches!(ty.as_str(), "solid" | "image" | "shape") {
-            Some("other layer types")
-        } else if flag("matteSource") {
-            Some("mattes")
-        } else if scope.is_3d_layer(layer).map_err(fail)? {
-            Some("2.5D planes")
-        } else if matches!(transition, Some(Err(_))) {
-            Some("transitions")
-        } else if chain.is_none() {
-            Some("effects")
-        } else {
-            None
-        };
-        let chain = chain.unwrap_or_default();
-        // A layer this reference does not draw under a transition leaves
-        // the whole moved stack unreferenced.
-        let transition = transition.map(|t| t.expect("unmodelled transitions are refused above"));
-        macro_rules! skip_layer {
-            () => {{
-                if transition.is_some() {
-                    out.rgba.fill(f64::NAN);
-                    out.whole_frame = true;
-                }
-                continue;
-            }};
-        }
-        let world = scope.world_matrix(layer, seconds).map_err(fail)?;
-        let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
-        let scaled = kurbo::Affine::new([
-            world[0] * sx,
-            world[1] * sy,
-            world[2] * sx,
-            world[3] * sy,
-            world[4] * sx,
-            world[5] * sy,
-        ]);
-        let device = scaled * kurbo::Affine::translate((offset.x, offset.y));
-        if let Some(why) = unmodelled {
-            if !out.unmodelled.iter().any(|u| u == why) {
-                out.unmodelled.push(why.into());
-            }
-            let times: Vec<f64> = match &blur {
-                Some(offsets) if flag("mblur") => offsets.iter().map(|o| seconds + o).collect(),
-                _ => vec![seconds],
-            };
-            footprint(
-                &mut scope,
-                effects,
-                layer,
-                &ty,
-                &times,
-                seconds,
-                (sx, sy),
-                out,
-            )?;
-            skip_layer!();
-        }
-        let d = scope
-            .ev
-            .resolve_content(scope.comp, layer, seconds)
-            .map_err(fail)?;
-        let svg = if ty == "image" {
-            svg_source(scope.comp.root(), &d, assets)?
-        } else {
-            None
-        };
-        if ty == "image" && svg.is_none() {
-            // Resampled content no lane models yet: its box (centered on
-            // the anchor), grown by a pixel, is unreferenced.
-            if !out
-                .unmodelled
-                .iter()
-                .any(|reason| reason == "resampled image content")
-            {
-                out.unmodelled.push("resampled image content".into());
-            }
-            if !chain.is_empty() {
-                // Its effects reach as far as their padding.
-                footprint(
-                    &mut scope,
-                    effects,
-                    layer,
-                    &ty,
-                    &[seconds],
-                    seconds,
-                    (sx, sy),
-                    out,
-                )?;
-                skip_layer!();
-            }
-            let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
-            let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
-            let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
-            unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
-            skip_layer!();
-        }
-        let mode = reference_blend(
-            pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
-        );
         let blurred = blur.as_ref().filter(|_| {
             scope
                 .evaluated(
@@ -635,349 +694,326 @@ fn draw(
                 )
                 .is_ok_and(|v| v.truthy())
         });
-        // The layer's own pixels: one draw, or the samples' average.
         let times: Vec<f64> = match blurred {
             Some(offsets) => offsets.iter().map(|o| seconds + o).collect(),
             None => vec![seconds],
         };
-        let mut layer_px = vec![([0.0f64; 4], false); w * h];
-        for &t in &times {
-            let sample = if let Some(svg) = &svg {
-                svg_pixels(&mut scope, layer, t, (sx, sy), w, h, svg)?
-            } else {
-                content_pixels(&mut scope, layer, &ty, t, (sx, sy), w, h)?
-            };
-            for (acc, (px, edge)) in layer_px.iter_mut().zip(sample) {
-                for (sum, value) in acc.0.iter_mut().zip(px) {
-                    *sum += value / times.len() as f64;
-                }
-                acc.1 |= edge;
-            }
-        }
-        if blurred.is_some() {
-            // Averaged edges are partial coverage wherever samples differ.
-            for p in &mut layer_px {
-                p.1 |= p.0[3] > 0.0 && p.0[3] < 1.0 - 1e-12;
-            }
-        }
-        // Masks (at the center time), from the mask reference.
-        if let Some((mask, band)) =
-            super::mask_reference::layer_mask(&mut scope, layer, seconds, scaled, w, h)?
-        {
-            for (i, p) in layer_px.iter_mut().enumerate() {
-                p.0 = scale(p.0, mask[i]);
-                p.1 |= band[i];
-            }
-        }
-        // Effects (after masks, before the composite), on the frame-sized
-        // effect buffer the compositor gives a full-frame pass; a blurred
-        // layer's accumulated samples are its input, at the center time
-        // (docs/engine/motion.md).
-        let mut layer_open: Vec<Option<Open>> = vec![None; w * h];
-        if !chain.is_empty() {
-            let applied = apply_effects(&chain, &layer_px, w, h, seconds, color.precision);
-            let Some((image, open, resampled)) = applied else {
-                if !out.unmodelled.iter().any(|u| u == "effects") {
-                    out.unmodelled.push("effects".into());
-                }
+        if ty == "adjustment" {
+            if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+                note(out, "effects");
                 footprint(
-                    &mut scope,
-                    effects,
+                    scope,
+                    ctx.effects,
                     layer,
                     &ty,
-                    &[seconds],
+                    &times,
                     seconds,
-                    (sx, sy),
+                    scale_xy,
                     out,
                 )?;
-                skip_layer!();
-            };
-            for (i, p) in layer_px.iter_mut().enumerate() {
-                let was = p.0;
-                p.0 = image.at(i % w, i / w);
-                if resampled && (p.0.iter().any(|v| *v != 0.0) || was.iter().any(|v| *v != 0.0)) {
-                    out.resampled[i] = true;
-                }
             }
-            layer_open = open;
+            continue;
         }
-        let before = transition.as_ref().map(|_| out.rgba.clone());
-        for (i, (px, edge)) in layer_px.iter().enumerate() {
-            if px[3] <= 0.0 && !edge && layer_open[i].is_none() && px.iter().all(|v| *v == 0.0) {
+        let why = if ty == "group" {
+            if flag("threeD") || scope.is_3d_layer(layer).map_err(fail)? {
+                note(out, "2.5D planes");
+                footprint(
+                    scope,
+                    ctx.effects,
+                    layer,
+                    &ty,
+                    &times,
+                    seconds,
+                    scale_xy,
+                    out,
+                )?;
                 continue;
             }
-            out.edge[i] |= *edge;
-            let dst = [
-                out.rgba[i * 4],
-                out.rgba[i * 4 + 1],
-                out.rgba[i * 4 + 2],
-                out.rgba[i * 4 + 3],
-            ];
-            // Normal is source-over on premultiplied values, which also adds
-            // the light an effect writes at zero alpha (Chroma's fringes);
-            // the W3C form drops it there and is equal everywhere else.
-            let over = |src: Rgba, dst: Rgba| {
-                let src = scale(src, opacity);
-                clamp(if mode == Blend::Normal {
-                    pm_reference::composite::porter_duff(
-                        pm_reference::composite::Operator::SourceOver,
-                        src,
-                        dst,
+            (blurred.is_some()
+                || scope.has_renderable_effects(layer, seconds).map_err(fail)?
+                || scope
+                    .active_transition(layer, seconds, &|_| true)
+                    .map_err(fail)?
+                    .is_some())
+            .then_some("groups with effects, motion blur or transitions")
+        } else {
+            unmodelled_leaf(scope, layer, &ty, seconds)?
+        };
+        if let Some(why) = why {
+            note(out, why);
+            footprint(
+                scope,
+                ctx.effects,
+                layer,
+                &ty,
+                &times,
+                seconds,
+                scale_xy,
+                out,
+            )?;
+            continue;
+        }
+        if ty == "precomp" && depth.precomp >= pm_render::plan::PRECOMP_MAX_DEPTH as usize {
+            continue;
+        }
+        let (scaled, device) = device_of(scope, layer, seconds, scale_xy)?;
+        let mask = super::mask_reference::layer_mask(scope, layer, seconds, scaled, w, h)?;
+        let matte = if flag("matteSource") {
+            render_matte(ctx, scope, layer, seconds, scale_xy, (w, h), depth)?
+        } else {
+            None
+        };
+        let mode = reference_blend(
+            pm_render::composite::build::blend_mode(scope, layer, seconds).map_err(fail)?,
+        );
+        if ty == "group" {
+            let mut child = surface(w, h);
+            draw_pass(
+                ctx,
+                scope,
+                seconds,
+                scale_xy,
+                Some(layer),
+                None,
+                &mut child,
+                depth,
+            )?;
+            let px: Vec<(Rgba, bool)> = (0..w * h)
+                .map(|i| {
+                    (
+                        [
+                            child.rgba[4 * i],
+                            child.rgba[4 * i + 1],
+                            child.rgba[4 * i + 2],
+                            child.rgba[4 * i + 3],
+                        ],
+                        child.edge[i],
                     )
-                } else {
-                    blend(mode, src, dst)
                 })
-            };
-            out.rgba[i * 4..][..4].copy_from_slice(&over(*px, dst));
-            out.open[i] = composite_open(*px, layer_open[i].as_ref(), dst, out.open[i].as_ref(), over);
+                .collect();
+            composite_layer(
+                out,
+                &px,
+                Some(&child.resampled),
+                opacity,
+                mode,
+                &mask,
+                &matte,
+            );
+            for why in child.unmodelled {
+                note(out, why);
+            }
+            out.whole_frame |= child.whole_frame;
+            continue;
         }
-        if let (Some((id, params, edge_in, progress)), Some(before)) = (transition, before) {
-            apply_transition(out, before, &id, &params, edge_in, progress);
+        let d = scope
+            .ev
+            .resolve_content(scope.comp, layer, seconds)
+            .map_err(fail)?;
+        if ty == "solid" || ty == "shape" {
+            let px = layer_pixels(&times, |t| {
+                content_pixels(scope, layer, &ty, t, scale_xy, w, h)
+            })?;
+            composite_layer(out, &px, None, opacity, mode, &mask, &matte);
+            continue;
         }
+        if ty == "image"
+            && let Some(svg) = svg_source(ctx.root, &d, ctx.assets)?
+        {
+            let px = layer_pixels(&times, |t| {
+                svg_pixels(scope, layer, t, scale_xy, w, h, &svg)
+            })?;
+            composite_layer(out, &px, None, opacity, mode, &mask, &matte);
+            continue;
+        }
+        // Image and precomp sources: decoded (or independently painted) f64
+        // texels, sampled at mip level zero through the layer's quad.
+        let default_size = |key: &str, fallback: usize| {
+            if ty == "precomp" {
+                node::to_number(scope.comp.member(key))
+            } else {
+                fallback as f64
+            }
+        };
+        let (fw, fh) = (default_size("w", w), default_size("h", h));
+        let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), fw);
+        let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), fh);
+        let (sw, sh) = if ty == "precomp" {
+            (sw.max(1.0), sh.max(1.0))
+        } else {
+            (sw, sh)
+        };
+        // Image quads are centered on the layer origin (ax=w/2, ay=h/2);
+        // a precomp's box starts at its local origin.
+        let rect = if ty == "precomp" {
+            kurbo::Rect::new(0.0, 0.0, sw, sh)
+        } else {
+            kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0)
+        };
+        let precomp = if ty == "precomp" {
+            // The child is painted from its own authored layers into f64
+            // texels; the parent then filters them. No native framebuffer
+            // enters the expected image, and the child's unmodelled pixels
+            // stay unknown where the parent samples them.
+            let id = pm_render::js::string(pm_render::js::get(&d, "comp"));
+            let sub = Comp::in_root(ctx.root, &id, scope.comp.revision())
+                .map_err(|e| format!("precomp {id}: {e:?}"))?;
+            let target_w = (sw * sx).round().max(2.0);
+            let target_h = (sh * sy).round().max(2.0);
+            if !target_w.is_finite()
+                || !target_h.is_finite()
+                || target_w > 16384.0
+                || target_h > 16384.0
+            {
+                note(out, "precomp targets outside reference bounds");
+                unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
+                continue;
+            }
+            let child_time = scope.source_time(layer, seconds, None).map_err(fail)?;
+            let child_time = pm_render::retime::keep_frame_rate(layer, &sub, child_time);
+            let mut child = surface(target_w as usize, target_h as usize);
+            draw_comp(
+                ctx,
+                &sub,
+                scope.project,
+                child_time,
+                &mut child,
+                false,
+                Depth {
+                    precomp: depth.precomp + 1,
+                    ..depth
+                },
+            )?;
+            for why in &child.unmodelled {
+                note(out, format!("precomp {id}: {why}"));
+            }
+            Some(Bitmap {
+                width: child.width,
+                height: child.height,
+                rgba: child.rgba,
+            })
+        } else {
+            None
+        };
+        let asset_id = pm_render::js::string(pm_render::js::get(&d, "asset"));
+        let record = ctx.root.get("assets").and_then(|v| v.get(&asset_id));
+        if precomp.is_none()
+            && let Some(path) = ctx.assets.path(&asset_id, record)
+        {
+            ctx.bitmaps
+                .entry(path.clone())
+                .or_insert_with(|| decoded_bitmap(&path).ok().flatten());
+        }
+        let bitmap = precomp.as_ref().or_else(|| {
+            ctx.assets
+                .path(&asset_id, record)
+                .and_then(|path| ctx.bitmaps.get(&path)?.as_ref())
+        });
+        let [a, b, c, dd, e, f] = device.as_coeffs();
+        let det = a * dd - b * c;
+        let natural = record.map(|r| {
+            (
+                node::to_number(node::member(Some(r), "w")),
+                node::to_number(node::member(Some(r), "h")),
+            )
+        });
+        let fit = pm_render::js::string(pm_render::js::get(&d, "fit"));
+        let model = bitmap.filter(|_| blurred.is_none()).and_then(|bitmap| {
+            let source = natural.unwrap_or((bitmap.width as f64, bitmap.height as f64));
+            let uv = if ty == "precomp" {
+                Some([0.0, 0.0, 1.0, 1.0])
+            } else {
+                image_uv(&fit, source, (sw, sh))
+            }?;
+            let du = uv[2] * bitmap.width as f64 / sw;
+            let dv = uv[3] * bitmap.height as f64 / sh;
+            let dx = (du * dd / det, -dv * b / det);
+            let dy = (-du * c / det, dv * a / det);
+            (det.is_finite()
+                && det.abs() > 1e-12
+                && Bitmap::mip_zero(dx, dy)
+                && (ty == "precomp"
+                    || record.is_some_and(|r| pm_render::footage::interpretation(r).is_none()))
+                && !pm_render::sampling::is_level2(layer))
+            .then_some((bitmap, uv, dx, dy))
+        });
+        let Some((bitmap, uv, dx, dy)) = model else {
+            note(
+                out,
+                format!("{ty} sources outside the f64 mip-zero model (resampled content)"),
+            );
+            unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
+            continue;
+        };
+        // Only the fitted content draws: a contain fit's letterbox is empty
+        // (the window's part of the box where source coordinates are 0…1).
+        let span =
+            |origin: f64, size: f64| ((-origin / size).max(0.0), ((1.0 - origin) / size).min(1.0));
+        let (s0, s1) = span(uv[0], uv[2]);
+        let (t0, t1) = span(uv[1], uv[3]);
+        let content = kurbo::Rect::new(
+            rect.x0 + s0 * sw,
+            rect.y0 + t0 * sh,
+            rect.x0 + s1 * sw,
+            rect.y0 + t1 * sh,
+        );
+        let coverage = fill(
+            &(device * kurbo::Shape::to_path(&content, 1e-9)),
+            FillRule::NonZero,
+            PATH_SAMPLES,
+            w,
+            h,
+        );
+        let centered = if ty == "precomp" { 0.0 } else { 0.5 };
+        let mut px = vec![([0.0; 4], false); w * h];
+        let mut resampled = vec![false; w * h];
+        for y in coverage.y0..coverage.y0 + coverage.height {
+            for x in coverage.x0..coverage.x0 + coverage.width {
+                let k = coverage.at(x, y);
+                if k <= 0.0 {
+                    continue;
+                }
+                let p = (x as f64 + 0.5 - e, y as f64 + 0.5 - f);
+                let local_x = (dd * p.0 - c * p.1) / det;
+                let local_y = (-b * p.0 + a * p.1) / det;
+                let u = (uv[0] + uv[2] * (local_x / sw + centered)).clamp(0.0, 1.0)
+                    * bitmap.width as f64;
+                let v = (uv[1] + uv[3] * (local_y / sh + centered)).clamp(0.0, 1.0)
+                    * bitmap.height as f64;
+                let index = y * w + x;
+                px[index] = (scale(bitmap.sample((u, v), dx, dy), k), k < 1.0 - 1e-12);
+                resampled[index] = true;
+            }
+        }
+        composite_layer(out, &px, Some(&resampled), opacity, mode, &mask, &matte);
     }
     Ok(())
 }
 
-/// What stays open after compositing `src` (open at `mine`) over `dst`
-/// (open at `below`): every allowed source over every allowed destination.
-/// A range's extremes after compositing lie at its corners, colour and
-/// alpha each at either end (source-over is bilinear in them; the blend
-/// modes are monotone per channel).
-pub fn composite_open(
-    src: Rgba,
-    mine: Option<&Open>,
-    dst: Rgba,
-    below: Option<&Open>,
-    over: impl Fn(Rgba, Rgba) -> Rgba,
-) -> Option<Open> {
-    let corners = |lo: &Rgba, hi: &Rgba| -> Vec<Rgba> {
-        [lo, hi]
-            .iter()
-            .flat_map(|c| [lo[3], hi[3]].map(|a| [c[0], c[1], c[2], a]))
-            .collect()
-    };
-    let values_of = |open: Option<&Open>, value: Rgba| match open {
-        Some(Open::Points(points)) => points.clone(),
-        Some(Open::Range(lo, hi)) => corners(lo, hi),
-        None => vec![value],
-    };
-    let ranged = matches!(mine, Some(Open::Range(..))) || matches!(below, Some(Open::Range(..)));
-    let (mine, below) = (values_of(mine, src), values_of(below, dst));
-    let values: Vec<Rgba> = mine
-        .iter()
-        .flat_map(|m| below.iter().map(|b| over(*m, *b)))
-        .collect();
-    if values.len() < 2 {
-        return None;
-    }
-    Some(if ranged {
-        let fold = |f: fn(f64, f64) -> f64, from: f64| -> Rgba {
-            std::array::from_fn(|k| values.iter().map(|v| v[k]).fold(from, f))
-        };
-        Open::Range(fold(f64::min, f64::INFINITY), fold(f64::max, f64::NEG_INFINITY))
-    } else {
-        Open::Points(values)
-    })
-}
-
-/// A built-in transition step: definition, parameters, `edge === 'in'`,
-/// progress.
-pub type Transition = (String, Vec<pm_reference::effects::Param>, bool, f64);
-
-/// The layer's active transition (`runTransition`): `None` when none runs,
-/// `Some(Err)` when it is not a built-in the reference models.
-pub fn layer_transition<'d>(
-    scope: &mut Scope<'_, 'd>,
-    effects: &pm_render::effects::Effects,
-    layer: &'d Node,
-    seconds: f64,
-) -> Result<Option<Result<Transition, String>>, String> {
-    use pm_protocol::definitions::DefinitionKind;
-    use pm_reference::effects::Param;
-    use pm_render::effects::plan::{Binding, transition_at};
-    let step = transition_at(scope, effects, layer, seconds)
-        .map_err(|e| format!("evaluation: {e:?}"))?;
-    let step = match step {
-        Ok(Some(step)) => step,
-        Ok(None) => return Ok(None),
-        Err(feature) => return Ok(Some(Err(format!("transition: {feature}")))),
-    };
-    // A fork or an override by id is a user program, not the built-in.
-    let builtin = pm_render::builtin_definitions().definitions.iter().any(|d| {
-        d.id.as_str() == step.definition
-            && d.kind == DefinitionKind::Transition
-            && effects
-                .get(DefinitionKind::Transition, &step.definition)
-                .and_then(|drawn| drawn.glsl.as_ref().map(|g| &g.source))
-                == d.glsl.as_ref().map(|g| &g.source)
-    });
-    if !builtin || !pm_reference::effects::models_transition(&step.definition) {
-        return Ok(Some(Err(format!("transition {}", step.definition))));
-    }
-    let params = step
-        .params
-        .iter()
-        .map(|p| match p.value {
-            Binding::Float(v) => Param::Float(v),
-            Binding::Color(c) => Param::Color(c),
-        })
-        .collect();
-    Ok(Some(Ok((step.definition, params, step.edge_in, step.progress))))
-}
-
-/// Runs a transition on the frame: `before` the stack below the layer,
-/// `out` the stack with it. Moved pixels are resampled where the
-/// transition samples away from the pixel; an open value below makes the
-/// frame unreferenced where it is moved (the transition would mix it).
-/// Returns the pixels the transition moved.
-pub fn apply_transition(
-    out: &mut Reference,
-    before: Vec<f64>,
-    id: &str,
-    params: &[pm_reference::effects::Param],
-    edge_in: bool,
-    progress: f64,
-) -> Vec<bool> {
-    use pm_reference::effects::Image;
-    let (w, h) = (out.width, out.height);
-    let with_layer = out.rgba.clone();
-    let (from, to) = if edge_in { (before, with_layer) } else { (with_layer, before) };
-    let image = |rgba: Vec<f64>| Image { width: w, height: h, rgba };
-    let (from, to) = (image(from), image(to));
-    let result = pm_reference::effects::transition(id, params, &from, &to, progress)
-        .expect("a modelled transition");
-    let open_below = out.open.iter().any(Option::is_some);
-    fn px(img: &Image, i: usize) -> &[f64] {
-        &img.rgba[i * 4..][..4]
-    }
-    let moved: Vec<bool> = (0..w * h)
-        .map(|i| px(&from, i) != px(&to, i) || px(&result.image, i) != px(&to, i))
-        .collect();
-    for i in (0..w * h).filter(|&i| moved[i]) {
-        if open_below {
-            out.rgba[i * 4..][..4].fill(f64::NAN);
-            out.open[i] = None;
-            continue;
-        }
-        out.rgba[i * 4..][..4].copy_from_slice(px(&result.image, i));
-        out.resampled[i] |= result.resampled;
-        if let Some(open) = &result.open[i] {
-            out.open[i] = Some(open.clone());
-        }
-    }
-    moved
-}
-
-/// A built-in effect chain: each step's definition and parameters.
-pub type Chain = Vec<(String, Vec<pm_reference::effects::Param>)>;
-
-/// A layer's built-in effect chain as `(definition, parameters)`, when the
-/// reference models every step (`pm_reference::effects::model`) and each is
-/// the kernel's own definition; `None` otherwise.
-pub fn effect_chain<'d>(
-    scope: &mut Scope<'_, 'd>,
-    effects: &pm_render::effects::Effects,
-    layer: &'d Node,
-    seconds: f64,
-) -> Result<Option<Chain>, String> {
-    use pm_reference::effects::Param;
-    use pm_render::effects::plan::Binding;
-    let steps = pm_render::effects::plan::effect_steps(scope, effects, layer, seconds)
-        .map_err(|e| format!("evaluation: {e:?}"))?;
-    let Ok(steps) = steps else {
-        return Ok(None);
-    };
-    let builtins = pm_render::builtin_definitions();
-    let mut chain = Vec::new();
-    for step in steps {
-        let kernel = builtins.definitions.iter().find(|d| {
-            d.id.as_str() == step.definition
-                && d.kind == pm_protocol::definitions::DefinitionKind::Effect
-        });
-        let drawn = effects.get(
-            pm_protocol::definitions::DefinitionKind::Effect,
-            &step.definition,
-        );
-        // A fork or an override by id is a user program: its formula is
-        // its own GLSL, not the built-in's.
-        let builtin = match (kernel, drawn) {
-            (Some(k), Some(d)) => {
-                k.glsl.as_ref().map(|g| &g.source) == d.glsl.as_ref().map(|g| &g.source)
+/// A layer's own pixels: one draw at `times[0]`, or the average of every
+/// motion-blur sample (partial wherever the samples differ).
+fn layer_pixels(
+    times: &[f64],
+    mut draw: impl FnMut(f64) -> Result<Vec<(Rgba, bool)>, String>,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    let mut px: Option<Vec<(Rgba, bool)>> = None;
+    for &t in times {
+        let sample = draw(t)?;
+        let acc = px.get_or_insert_with(|| vec![([0.0; 4], false); sample.len()]);
+        for (acc, (color, edge)) in acc.iter_mut().zip(sample) {
+            for (sum, value) in acc.0.iter_mut().zip(color) {
+                *sum += value / times.len() as f64;
             }
-            _ => false,
-        };
-        if !builtin || step.clamp || pm_reference::effects::model(&step.definition).is_none() {
-            return Ok(None);
-        }
-        let params = step
-            .params
-            .iter()
-            .map(|p| match p.value {
-                Binding::Float(v) => Param::Float(v),
-                Binding::Color(c) => Param::Color(c),
-            })
-            .collect();
-        chain.push((step.definition, params));
-    }
-    Ok(Some(chain))
-}
-
-/// The chain over a `w × h` effect buffer holding the layer's pixels, as
-/// the full-frame pass runs it: each effect's output stored at the
-/// project's precision (8-bit storage holds 0…1). The image, what is open
-/// at each pixel, and whether any step resampled; `None` when a step
-/// leaves values open that a later step would transform.
-#[allow(clippy::type_complexity)]
-pub fn apply_effects(
-    chain: &Chain,
-    layer: &[(Rgba, bool)],
-    w: usize,
-    h: usize,
-    seconds: f64,
-    precision: Precision,
-) -> Option<(pm_reference::effects::Image, Vec<Option<Open>>, bool)> {
-    use pm_reference::effects::{Frame, Image, run};
-    let mut image = Image {
-        width: w,
-        height: h,
-        rgba: layer.iter().flat_map(|(p, _)| *p).collect(),
-    };
-    // The storage error of a value going into an effect.
-    let storage = match precision {
-        Precision::Unorm8 => 0.5 / 255.0,
-        Precision::Float16 => 1.0 / 2048.0,
-        _ => 1e-7,
-    };
-    let mut open = vec![None; w * h];
-    let mut resampled = false;
-    for (n, (id, params)) in chain.iter().enumerate() {
-        if open.iter().any(Option::is_some) {
-            return None;
-        }
-        let frame = Frame::full(&image, seconds);
-        let out = run(id, params, &image, &frame, storage)?;
-        resampled |= out.resampled;
-        image = out.image;
-        if precision == Precision::Unorm8 {
-            for v in &mut image.rgba {
-                *v = v.clamp(0.0, 1.0);
-            }
-        }
-        open = out.open;
-        if n + 1 == chain.len() && precision == Precision::Unorm8 {
-            for o in open.iter_mut().flatten() {
-                *o = match o {
-                    Open::Points(p) => {
-                        Open::Points(p.iter().map(|c| c.map(|v| v.clamp(0.0, 1.0))).collect())
-                    }
-                    Open::Range(lo, hi) => {
-                        Open::Range(lo.map(|v| v.clamp(0.0, 1.0)), hi.map(|v| v.clamp(0.0, 1.0)))
-                    }
-                };
-            }
+            acc.1 |= edge;
         }
     }
-    Some((image, open, resampled))
+    let mut px = px.unwrap_or_default();
+    if times.len() > 1 {
+        for p in &mut px {
+            p.1 |= p.0[3] > 0.0 && p.0[3] < 1.0 - 1e-12;
+        }
+    }
+    Ok(px)
 }
 
 struct SvgSource {
@@ -1576,6 +1612,147 @@ pub fn preview_and_export(
 }
 
 #[cfg(test)]
+mod tests {
+    use super::super::doc;
+    use super::*;
+    use serde_json::json;
+
+    fn authored_graph_frame(mut project: serde_json::Value, width: u32, height: u32) -> Reference {
+        project["colorDepth"] = json!(32);
+        let loaded = pm_model::json::parse(&project.to_string()).expect("authored graph JSON");
+        let document = Document::new(Some(loaded), 1);
+        render(
+            &document,
+            "Ptest-root",
+            super::super::ticks(0.0),
+            width,
+            height,
+            false,
+            1,
+            &pm_render::effects::Effects::new("reference tests"),
+            &pm_render::MapResolver::default(),
+        )
+    }
+
+    fn pixel(frame: &Reference, x: usize, y: usize) -> [f64; 4] {
+        let i = (y * frame.width + x) * 4;
+        frame.rgba[i..i + 4].try_into().expect("RGBA pixel")
+    }
+
+    fn assert_pixel(actual: [f64; 4], expected: [f64; 4]) {
+        for (a, e) in actual.into_iter().zip(expected) {
+            assert!((a - e).abs() < 1e-12, "{actual:?} != {expected:?}");
+        }
+    }
+
+    fn solid(id: &str, color: &str, width: u32, height: u32, x: f64, y: f64) -> serde_json::Value {
+        doc::layer(
+            id,
+            "solid",
+            json!({ "color": color, "w": width, "h": height }),
+            x,
+            y,
+            1.0,
+        )
+    }
+
+    #[test]
+    fn graph_reference_composites_group_once_before_opacity_and_blend() {
+        // Top green completely covers lower red within the group. A 50%
+        // multiply group over gray therefore has no red from the child.
+        let mut top = solid("top", "#00FF00", 4, 4, 0.0, 0.0);
+        top["group"] = json!("g");
+        let mut lower = solid("lower", "#FF0000", 4, 4, 0.0, 0.0);
+        lower["group"] = json!("g");
+        let mut group = doc::layer("g", "group", json!({}), 0.0, 0.0, 1.0);
+        group["blend"] = json!("multiply");
+        doc::set(&mut group, "opacity", json!(50));
+        let back = solid("back", "#808080", 4, 4, 0.0, 0.0);
+        let frame = authored_graph_frame(
+            doc::project(4, 4, 1.0, doc::no_fill(), vec![top, lower, group, back]),
+            4,
+            4,
+        );
+        assert_eq!(frame.modelled(), 1.0, "{:?}", frame.unmodelled);
+        assert_pixel(
+            pixel(&frame, 2, 2),
+            [64.0 / 255.0, 128.0 / 255.0, 64.0 / 255.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn graph_reference_paints_child_before_parent_precomp_blend() {
+        let top = solid("top", "#00FF00", 4, 4, 0.0, 0.0);
+        let lower = solid("lower", "#FF0000", 4, 4, 0.0, 0.0);
+        let mut nested = doc::layer(
+            "nested",
+            "precomp",
+            json!({ "comp": "C001", "w": 4, "h": 4 }),
+            0.0,
+            0.0,
+            1.0,
+        );
+        nested["blend"] = json!("multiply");
+        doc::set(&mut nested, "opacity", json!(50));
+        let back = solid("back", "#808080", 4, 4, 0.0, 0.0);
+        let mut project = doc::project(4, 4, 1.0, doc::no_fill(), vec![nested, back]);
+        doc::composition(&mut project, "C001", 4, 4, 1.0, vec![top, lower]);
+        let frame = authored_graph_frame(project, 4, 4);
+        assert_eq!(frame.modelled(), 1.0, "{:?}", frame.unmodelled);
+        // Opaque green hides red in C001; the parent applies multiply at 50%.
+        assert_pixel(
+            pixel(&frame, 2, 2),
+            [64.0 / 255.0, 128.0 / 255.0, 64.0 / 255.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn graph_reference_matte_source_uses_fractional_coverage_and_is_hidden() {
+        // The source spans x=.5..2.5: [half, full, half, empty] coverage.
+        // It is green with 128/255 alpha, so encoded Rec.709 luma is
+        // 0.7152 times its premultiplied alpha.
+        for (mode, luma, inverted) in [
+            ("alpha", false, false),
+            ("alpha-inverted", false, true),
+            ("luma", true, false),
+            ("luma-inverted", true, true),
+        ] {
+            let mut target = solid("target", "#FF0000", 4, 2, 0.0, 0.0);
+            target["matteSource"] = json!("matte");
+            target["matteMode"] = doc::ch(json!(mode));
+            let matte = solid("matte", "#00FF0080", 2, 2, 0.5, 0.0);
+            let frame = authored_graph_frame(
+                doc::project(4, 2, 1.0, doc::no_fill(), vec![target, matte]),
+                4,
+                2,
+            );
+            assert_eq!(frame.modelled(), 1.0, "{mode}: {:?}", frame.unmodelled);
+            for (x, coverage) in [0.5, 1.0, 0.5, 0.0].into_iter().enumerate() {
+                let source = coverage * (128.0 / 255.0) * if luma { 0.7152 } else { 1.0 };
+                let alpha = if inverted { 1.0 - source } else { source };
+                assert_pixel(pixel(&frame, x, 0), [alpha, 0.0, 0.0, alpha]);
+            }
+        }
+    }
+
+    #[test]
+    fn fit_windows_preserve_authored_cover_and_contain_geometry() {
+        assert_eq!(
+            image_uv("cover", (2.0, 1.0), (1.0, 1.0)),
+            Some([0.25, 0.0, 0.5, 1.0])
+        );
+        assert_eq!(
+            image_uv("contain", (2.0, 1.0), (1.0, 1.0)),
+            Some([0.0, -0.5, 1.0, 2.0])
+        );
+        assert_eq!(
+            image_uv("fill", (2.0, 1.0), (1.0, 1.0)),
+            Some([0.0, 0.0, 1.0, 1.0])
+        );
+    }
+}
+
+#[cfg(test)]
 mod svg_sampling_tests {
     /// A fractional rounded contour, nested clip, gradient, and group
     /// opacity exercise the same resvg storage and f64 accumulation as the
@@ -1638,5 +1815,28 @@ mod svg_sampling_tests {
             fine.0 < coarse.0 && fine.0 <= 2.0,
             "8→16 {coarse:?}, 16→32 {fine:?}"
         );
+    }
+}
+
+// Keep the full base effect/transition oracle until it is folded into the
+// graph oracle. Neither oracle consumes native renderer pixels.
+fn has_effects_or_transitions(node: &Node) -> bool {
+    if node
+        .get("fx")
+        .and_then(|n| pm_eval::node::array(Some(n)))
+        .is_some_and(|a| !a.is_empty())
+        || node
+            .get("transitionIn")
+            .is_some_and(|v| pm_eval::node::truthy(Some(v)))
+        || node
+            .get("transitionOut")
+            .is_some_and(|v| pm_eval::node::truthy(Some(v)))
+    {
+        return true;
+    }
+    match node.kind() {
+        pm_model::NodeKind::Object(fields) => fields.values().any(has_effects_or_transitions),
+        pm_model::NodeKind::Array(nodes) => nodes.iter().any(has_effects_or_transitions),
+        _ => false,
     }
 }

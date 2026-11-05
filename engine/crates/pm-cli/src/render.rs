@@ -864,7 +864,6 @@ fn absolute(p: &Path) -> Result<PathBuf, Failure> {
 mod depth_tests {
     use super::*;
     use pm_protocol::color::Precision;
-
     #[test]
     fn precision_flag_changes_only_the_render_copy() {
         let original =

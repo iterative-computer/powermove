@@ -14,9 +14,12 @@ fn main() {
     use pm_text::registry::CoreTextRegistry;
 
     let mut measure = CompatMeasure::new(CoreTextRegistry::new());
+    // The captured SF Pro Display case has Helvetica's fallback metrics.
+    // Name that reference face directly
+    // so installing SF Pro does not change these exact ink/anchor goldens.
     let content = |text: &str, size: f64| TextContent {
         text: text.into(),
-        font: Some("SF Pro Display".into()),
+        font: Some("Helvetica".into()),
         weight: Some(500.0),
         size: Some(size),
         tracking: Some(0.0),
@@ -110,7 +113,7 @@ fn saved_anchors_keep_todays_placement(
 
     let content = |text: &str, size: f64, italic: bool| pm_text::compat::TextContent {
         text: text.into(),
-        font: Some("SF Pro Display".into()),
+        font: Some("Helvetica".into()),
         weight: Some(500.0),
         size: Some(size),
         italic: Some(italic),
@@ -166,7 +169,7 @@ fn saved_anchors_keep_todays_placement(
             r#"{{"id":"t","type":"text","from":0,"dur":10,"on":true,
             "p":{{"position.x":{{"v":960,"kf":[],"expr":null}},"position.y":{{"v":540,"kf":[],"expr":null}},
             "anchor.x":{{"v":37,"kf":[],"expr":null}},"anchor.y":{{"v":-15,"kf":[],"expr":null}}}},
-            "d":{{"text":"{case_519}","font":"SF Pro Display","weight":500,
+            "d":{{"text":"{case_519}","font":"Helvetica","weight":500,
             "size":{size},"tracking":0,"leading":1.15,
             "fontAnchorBounds":{{"x0":4.72265625,"y0":-24,"x1":713,"y1":201}}}}}}"#
         );

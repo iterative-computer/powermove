@@ -3,9 +3,10 @@
 //!
 //! Pixels come from the image's data provider as stored (no color
 //! matching) for RGB and gray images at 8, 16, or 32-bit (integer, half, or
-//! float). Images in other color models (CMYK, Lab, indexed) are drawn into
-//! a 16-bit sRGB context, which color-converts them; such images report an
-//! `Other` profile class.
+//! float). Images in other color models (CMYK, Lab, indexed) are converted
+//! by ColorSync through their profile into extended linear sRGB in half
+//! float (`IccClass::ConvertedToSrgb`); CMYK without a profile is device
+//! CMYK.
 
 use super::{
     Animation, ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, icc, orient, pool_rgba,
@@ -54,7 +55,6 @@ unsafe extern "C" {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    static kCGColorSpaceSRGB: CFStringRef;
     fn CGImageGetWidth(img: CGImageRef) -> usize;
     fn CGImageGetHeight(img: CGImageRef) -> usize;
     fn CGImageGetBitsPerComponent(img: CGImageRef) -> usize;
@@ -133,37 +133,13 @@ pub fn convert_to_linear_srgb(
         return Err(MediaError::invalid("the still has no ICC profile"));
     };
     let f = &still.frame;
-    if f.format.layout != crate::frame::Layout::Rgba || f.format.is_float() {
+    if f.format.layout != crate::frame::Layout::Rgba {
         return Err(MediaError::unsupported(
-            "ColorSync conversion of float or planar stills",
+            "ColorSync conversion of planar stills",
         ));
     }
     let (w, h) = (f.format.width, f.format.height);
-    let sixteen = f.format.planes[0].format == crate::frame::PlaneFormat::Rgba16;
-    let max = if sixteen {
-        ((1u32 << f.format.bits.clamp(1, 16)) - 1) as f32
-    } else {
-        255.0
-    };
-    // Stored samples as 0..1 RGBA.
-    let stored: Vec<f32> = f.with_planes(|pl| {
-        let p = &pl[0];
-        let mut out = Vec::with_capacity(w * h * 4);
-        for y in 0..h {
-            let row = unsafe {
-                std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * if sixteen { 8 } else { 4 })
-            };
-            if sixteen {
-                out.extend(
-                    row.chunks_exact(2)
-                        .map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / max),
-                );
-            } else {
-                out.extend(row.iter().map(|&v| f32::from(v) / max));
-            }
-        }
-        out
-    })?;
+    let stored = rgba_unit(f)?;
     // The color to convert (straight, stored encoding), the alpha to keep,
     // and whether the pixel is premultiplied again after conversion.
     let mut color = Vec::with_capacity(w * h * 4);
@@ -301,25 +277,60 @@ pub fn convert_to_linear_srgb(
             backend: still.backend,
             bit_depth: 32,
             float: true,
-            color: ImageColor {
-                icc: None,
-                icc_bytes: None,
-                icc_class: None,
-                transfer: Transfer::Linear,
-                alpha: if opaque {
+            color: ImageColor::plain(
+                Transfer::Linear,
+                if opaque {
                     AlphaMode::Opaque
                 } else {
                     AlphaMode::Premultiplied
                 },
-                chromaticities: None,
-            },
+            ),
             orientation: still.orientation,
+            oriented: still.oriented,
         })
     }
 }
 
+/// The samples of a packed RGBA frame as 0..1 RGBA (integers over their
+/// maximum code; floats as stored).
+pub fn rgba_unit(f: &crate::frame::DecodedFrame) -> Result<Vec<f32>> {
+    use crate::frame::PlaneFormat;
+    let (w, h) = (f.format.width, f.format.height);
+    let format = f.format.planes[0].format;
+    let max = ((1u32 << f.format.bits.clamp(1, 16)) - 1) as f32;
+    f.with_planes(|pl| {
+        let p = &pl[0];
+        let mut out = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            // SAFETY: the plane holds `height` rows of `stride` bytes.
+            let row = |n: usize| unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride), n) };
+            match format {
+                PlaneFormat::Rgba8 => out.extend(row(w * 4).iter().map(|&v| f32::from(v) / max)),
+                PlaneFormat::Rgba16 => out.extend(
+                    row(w * 8)
+                        .chunks_exact(2)
+                        .map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / max),
+                ),
+                PlaneFormat::Rgba16Float => out.extend(
+                    row(w * 8)
+                        .chunks_exact(2)
+                        .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()),
+                ),
+                _ => out.extend(
+                    row(w * 16)
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                ),
+            }
+        }
+        out
+    })
+}
+
 const MODEL_MONOCHROME: i32 = 0;
 const MODEL_RGB: i32 = 1;
+const MODEL_CMYK: i32 = 2;
+const MODEL_INDEXED: i32 = 5;
 const ALPHA_MASK: u32 = 0x1F;
 const FLOAT: u32 = 1 << 8;
 const ORDER_MASK: u32 = 0x7000;
@@ -491,18 +502,50 @@ pub fn read_frame(
             class,
             icc_bytes,
         )
+    } else if model == MODEL_INDEXED
+        && matches!(bpc, 1 | 2 | 4 | 8)
+        && bpp == bpc
+        && !embedded_profile(path, format)?
+    {
+        // Untagged RGB palette entries are sRGB samples. Drawing their
+        // device RGB base through ColorSync would silently assign a profile.
+        let table = super::raster::tiff_palette(path)?
+            .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?;
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
+        (
+            Unpacked::U16(indexed_rgb(&bytes, w, h, row, bpc, &table)?),
+            16,
+            false,
+            false,
+            None,
+            None,
+        )
+    } else if model == MODEL_CMYK && !embedded_profile(path, format)? {
+        // CMYK without a profile has no colorimetry: device CMYK, read as
+        // the shipped converter reads it (R = (1 − C)(1 − K), likewise G and
+        // B), in float, into 16-bit device RGB read as sRGB.
+        let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
+            .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
+        let rgba = device_cmyk(&bytes, w, h, row, bpc, comps, info)?;
+        (Unpacked::U16(rgba), 16, false, false, None, None)
     } else {
         // Other color models (CMYK, Lab, indexed) and packings: ColorSync
-        // draws them through the file's profile into 16-bit sRGB, so the
-        // samples are sRGB from here on and the profile is kept for the
-        // facts only (`IccClass::ConvertedToSrgb`).
+        // converts them through the file's profile (ICC.1, relative
+        // colorimetric unless the image says otherwise) into extended
+        // linear sRGB in half float, so nothing is clipped before output.
+        // The samples are linear sRGB from here on and the profile is kept
+        // for the facts only (`IccClass::ConvertedToSrgb`).
         //
         // A bitmap context only holds premultiplied alpha, and ColorSync
         // converts a straight-alpha image premultiplied, so the color under
         // partial alpha would not be the file's color converted. Straight
         // alpha is therefore split off: the color converts as an opaque
-        // image and the file's alpha is attached unchanged, keeping the
-        // file's (straight) reading for alpha overrides.
+        // image and the file's alpha is attached unchanged.
         let straight = matches!(alpha_info, ALPHA_LAST | ALPHA_FIRST);
         let split = if straight {
             unsafe { split_straight_alpha(p, space, w, h, bpc, comps, row, info) }
@@ -511,26 +554,22 @@ pub fn read_frame(
         };
         let (buf, straight) = match split {
             Some((opaque, alpha)) => {
-                let mut buf = unsafe { draw_srgb16(opaque.as_mut_ptr(), w, h)? };
+                let mut buf = unsafe { draw_linear(opaque.as_mut_ptr(), w, h)? };
                 for (px, a) in buf.chunks_exact_mut(4).zip(alpha) {
-                    px[3] = a;
+                    px[3] = f32::from(a) / 65535.0;
                 }
                 (buf, true)
             }
-            None => {
-                let mut buf = unsafe { draw_srgb16(p, w, h)? };
-                // A packing the split does not read: divide the drawn color
-                // back out (approximate under partial alpha).
-                if straight {
-                    unpremultiply_u16(&mut buf);
-                }
-                (buf, straight)
-            }
+            None => (unsafe { draw_linear(p, w, h)? }, false),
         };
+        let half: Vec<u16> = buf
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
         (
-            Unpacked::U16(buf),
+            Unpacked::U16(half),
             16,
-            false,
+            true,
             !straight,
             Some(icc::IccClass::ConvertedToSrgb),
             icc_bytes,
@@ -569,42 +608,42 @@ pub fn read_frame(
             icc_bytes: icc.as_ref().map(|d| d.len()),
             icc,
             icc_class,
-            transfer: if float {
-                Transfer::Linear
-            } else {
-                Transfer::DisplayE
-            },
-            alpha: match (has_alpha, premultiplied) {
-                (false, _) => AlphaMode::Opaque,
-                (true, true) => AlphaMode::Premultiplied,
-                (true, false) => AlphaMode::Straight,
-            },
-            chromaticities: None,
+            ..ImageColor::plain(
+                if float {
+                    Transfer::Linear
+                } else {
+                    Transfer::DisplayE
+                },
+                match (has_alpha, premultiplied) {
+                    (false, _) => AlphaMode::Opaque,
+                    (true, true) => AlphaMode::Premultiplied,
+                    (true, false) => AlphaMode::Straight,
+                },
+            )
         },
         orientation,
+        oriented: true,
     })
 }
 
-/// Draws `img` into 16-bit premultiplied sRGB (little-endian RGBA)
-/// through ColorSync.
-unsafe fn draw_srgb16(img: CGImageRef, w: usize, h: usize) -> Result<Vec<u16>> {
-    let mut buf = vec![0u16; w * h * 4];
+/// Draws `img` into premultiplied extended linear sRGB (f32 RGBA) through
+/// ColorSync.
+unsafe fn draw_linear(img: CGImageRef, w: usize, h: usize) -> Result<Vec<f32>> {
+    let mut buf = vec![0f32; w * h * 4];
     unsafe {
-        let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
         let ctx = CGBitmapContextCreate(
             buf.as_mut_ptr() as *mut c_void,
             w,
             h,
-            16,
-            w * 8,
-            srgb,
-            PREMULTIPLIED_LAST | ORDER_16_LITTLE,
+            32,
+            w * 16,
+            space,
+            PREMULTIPLIED_LAST | FLOAT | ORDER_32_LITTLE,
         );
-        CGColorSpaceRelease(srgb);
+        CGColorSpaceRelease(space);
         if ctx.is_null() {
-            return Err(MediaError::Image(
-                "could not create a bitmap context".into(),
-            ));
+            return Err(MediaError::Image("could not create a float context".into()));
         }
         CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
         CGContextDrawImage(
@@ -620,6 +659,91 @@ unsafe fn draw_srgb16(img: CGImageRef, w: usize, h: usize) -> Result<Vec<u16>> {
         CGContextRelease(ctx);
     }
     Ok(buf)
+}
+
+/// Whether the file embeds an ICC profile ImageIO converts from (TIFF tag
+/// 34675; other containers' CMYK readings always carry their own).
+fn embedded_profile(path: &Path, format: ImageFormat) -> Result<bool> {
+    Ok(format != ImageFormat::Tiff || super::raster::tiff_icc(path)?.is_some())
+}
+
+/// Expands MSB-first packed indices without changing their RGB entries.
+fn indexed_rgb(
+    bytes: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    bits: usize,
+    table: &[[u16; 3]],
+) -> Result<Vec<u16>> {
+    if !matches!(bits, 1 | 2 | 4 | 8)
+        || stride < (w * bits).div_ceil(8)
+        || bytes.len() < stride * h
+        || table.is_empty()
+    {
+        return Err(MediaError::Image("invalid RGB palette layout".into()));
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let bit = x * bits;
+            let index = usize::from(
+                (bytes[y * stride + bit / 8] >> (8 - bits - bit % 8)) & ((1u16 << bits) - 1) as u8,
+            );
+            let rgb = table
+                .get(index)
+                .ok_or_else(|| MediaError::Image("palette index outside its table".into()))?;
+            rgba.extend_from_slice(rgb);
+            rgba.push(u16::MAX);
+        }
+    }
+    Ok(rgba)
+}
+
+/// Device CMYK (ink amounts, 8 or 16-bit, with or without a trailing alpha)
+/// to 16-bit RGBA: (1 − C)(1 − K) per channel. Alpha is kept straight.
+fn device_cmyk(
+    b: &[u8],
+    w: usize,
+    h: usize,
+    row: usize,
+    bpc: usize,
+    comps: usize,
+    info: u32,
+) -> Result<Vec<u16>> {
+    if !matches!(bpc, 8 | 16) || !(4..=5).contains(&comps) || info & FLOAT != 0 {
+        return Err(MediaError::unsupported("this CMYK sample layout"));
+    }
+    let little = info & ORDER_MASK == ORDER_16_LITTLE;
+    let bytes = bpc / 8;
+    if b.len() < row * h.saturating_sub(1) + w * comps * bytes {
+        return Err(MediaError::Image("short pixel data".into()));
+    }
+    let max = ((1u32 << bpc) - 1) as f64;
+    let first = info & ALPHA_MASK == ALPHA_FIRST;
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let read = |c: usize| {
+                let o = y * row + (x * comps + c) * bytes;
+                f64::from(match (bytes, little) {
+                    (1, _) => u16::from(b[o]),
+                    (_, false) => u16::from_be_bytes([b[o], b[o + 1]]),
+                    (_, true) => u16::from_le_bytes([b[o], b[o + 1]]),
+                }) / max
+            };
+            let at = usize::from(comps == 5 && first);
+            let k = 1.0 - read(at + 3);
+            let v = |c: usize| ((1.0 - read(at + c)) * k * 65535.0).round() as u16;
+            let a = if comps == 5 {
+                (read(if first { 0 } else { 4 }) * 65535.0).round() as u16
+            } else {
+                u16::MAX
+            };
+            out.extend_from_slice(&[v(0), v(1), v(2), a]);
+        }
+    }
+    Ok(out)
 }
 
 /// An owned `CGImage`, released on drop.
@@ -720,20 +844,6 @@ unsafe fn split_straight_alpha(
     }
 }
 
-/// Premultiplied 16-bit RGBA to straight, rounded; fully transparent
-/// pixels keep color 0.
-fn unpremultiply_u16(px: &mut [u16]) {
-    for p in px.chunks_exact_mut(4) {
-        let a = u32::from(p[3]);
-        if a == 0 || a == 65535 {
-            continue;
-        }
-        for c in &mut p[..3] {
-            *c = ((u32::from(*c) * 65535 + a / 2) / a).min(65535) as u16;
-        }
-    }
-}
-
 enum Unpacked {
     U8(Vec<u8>),
     U16(Vec<u16>),
@@ -829,4 +939,81 @@ fn unpack(
         (16, _) => Unpacked::U16(out.into_iter().map(|v| v as u16).collect()),
         _ => Unpacked::F32(out.into_iter().map(|v| v as f32).collect()),
     })
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    #[test]
+    fn unprofiled_tiff_palette_entries_are_not_color_matched() {
+        // One index into a 16-bit TIFF RGB color table, independently authored.
+        let tags = 9u32;
+        let palette_at = 8 + 2 + tags * 12 + 4;
+        let pixel_at = palette_at + 3 * 256 * 2;
+        let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&(tags as u16).to_le_bytes());
+        for (tag, ty, count, value) in [
+            (256u16, 4u16, 1u32, 1u32),
+            (257, 4, 1, 1),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),
+            (273, 4, 1, pixel_at),
+            (277, 3, 1, 1),
+            (279, 4, 1, 1),
+            (320, 3, 768, palette_at),
+        ] {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&ty.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for code in [36u16, 72, 252] {
+            bytes.extend_from_slice(&(code * 257).to_le_bytes());
+            bytes.extend_from_slice(&[0; 255 * 2]);
+        }
+        bytes.push(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("palette.tiff");
+        std::fs::write(&path, bytes).unwrap();
+        let still = read_frame(&path, 0, &FramePool::new(0), ImageFormat::Tiff).unwrap();
+        assert_eq!(still.color.icc_class, None);
+        assert_eq!(still.color.transfer, Transfer::DisplayE);
+        let rgba = rgba_unit(&still.frame).unwrap();
+        for (actual, code) in rgba.iter().zip([36.0, 72.0, 252.0, 255.0]) {
+            assert!((actual * 255.0 - code).abs() < 0.01, "{rgba:?}");
+        }
+    }
+
+    #[test]
+    fn packed_palette_indices_preserve_entries_and_validate_bounds() {
+        let table = [[65535, 0, 0], [0, 65535, 0], [0, 0, 65535], [65535; 3]];
+        assert_eq!(
+            indexed_rgb(&[0b00011011, 0], 4, 1, 2, 2, &table).unwrap(),
+            [
+                65535, 0, 0, 65535, 0, 65535, 0, 65535, 0, 0, 65535, 65535, 65535, 65535, 65535,
+                65535
+            ]
+        );
+        assert!(indexed_rgb(&[3], 1, 1, 1, 8, &table[..3]).is_err());
+        assert!(indexed_rgb(&[], 4, 1, 1, 2, &table).is_err());
+    }
+
+    #[test]
+    fn packed_byte_samples_use_the_declared_precision() {
+        let pool = FramePool::new(0);
+        let frame = super::super::pool_rgba(
+            &pool,
+            1,
+            1,
+            Rgba::U8(&[0, 1, 2, 3]),
+            false,
+            2,
+            "2-bit samples".into(),
+        )
+        .unwrap();
+        assert_eq!(rgba_unit(&frame).unwrap(), [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+    }
 }

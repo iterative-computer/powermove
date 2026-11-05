@@ -2,7 +2,7 @@
 //! their stored depth: 8-bit formats to RGBA8, 16-bit to RGBA16, float TIFF
 //! to RGBA32F. No color management; the ICC profile is classified.
 
-use super::{ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, icc, orient, pool_rgba};
+use super::{ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, orient, pool_rgba};
 use crate::error::{MediaError, Result};
 use crate::pool::FramePool;
 use image::{DynamicImage, ImageDecoder, metadata::Orientation};
@@ -140,44 +140,85 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
             )
         }
     };
-    let icc_class = profile.as_deref().map(icc::classify);
+    let color = ImageColor::plain(
+        // Float TIFF is scene-linear by convention; 8 and 16-bit stills are
+        // display-encoded.
+        if float {
+            Transfer::Linear
+        } else {
+            Transfer::DisplayE
+        },
+        if format == ImageFormat::Tiff
+            && color_type.has_alpha()
+            && tiff_short(path, 338)? == Some(1)
+        {
+            AlphaMode::Premultiplied
+        } else if color_type.has_alpha() {
+            AlphaMode::Straight
+        } else {
+            AlphaMode::Opaque
+        },
+    )
+    .with_icc(profile);
+    let color = match format {
+        ImageFormat::Png => match super::png_color::PngChunks::read(path)? {
+            Some(chunks) => chunks.apply(color),
+            None => color,
+        },
+        _ => color,
+    };
     Ok(StillImage {
         frame,
         format,
         backend: ImageBackend::ImageCrate,
         bit_depth: bits,
         float,
-        color: ImageColor {
-            icc_bytes: profile.as_ref().map(|p| p.len()),
-            icc: profile,
-            icc_class,
-            // Float TIFF is scene-linear by convention; 8 and 16-bit stills
-            // are display-encoded.
-            transfer: if float {
-                Transfer::Linear
-            } else {
-                Transfer::DisplayE
-            },
-            alpha: if format == ImageFormat::Tiff
-                && color_type.has_alpha()
-                && tiff_short(path, 338)? == Some(1)
-            {
-                AlphaMode::Premultiplied
-            } else if color_type.has_alpha() {
-                AlphaMode::Straight
-            } else {
-                AlphaMode::Opaque
-            },
-            chromaticities: None,
-        },
+        color,
         orientation,
+        oriented: true,
     })
 }
 
 /// ICC's TIFF tag is UNDEFINED, which some versions of the TIFF decoder's
 /// `get_tag_u8_vec` reject. Read that bounded first-IFD payload directly so
 /// native-depth/level-2 color management retains the original profile.
-fn tiff_icc(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn tiff_icc(path: &Path) -> Result<Option<Vec<u8>>> {
+    Ok(tiff_field(path, 34675, &[1, 7], 1)?.map(|(bytes, _)| bytes))
+}
+
+/// Original 16-bit RGB palette entries, without ImageIO's 8-bit rounding.
+pub(crate) fn tiff_palette(path: &Path) -> Result<Option<Vec<[u16; 3]>>> {
+    let Some((bytes, le)) = tiff_field(path, 320, &[3], 2)? else {
+        return Ok(None);
+    };
+    if bytes.is_empty() || !bytes.len().is_multiple_of(6) {
+        return Err(MediaError::invalid("TIFF RGB color table length"));
+    }
+    let values: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| {
+            let b = [b[0], b[1]];
+            if le {
+                u16::from_le_bytes(b)
+            } else {
+                u16::from_be_bytes(b)
+            }
+        })
+        .collect();
+    let count = values.len() / 3;
+    Ok(Some(
+        (0..count)
+            .map(|i| [values[i], values[i + count], values[i + count * 2]])
+            .collect(),
+    ))
+}
+
+fn tiff_field(
+    path: &Path,
+    tag: u64,
+    types: &[u64],
+    component_bytes: u64,
+) -> Result<Option<(Vec<u8>, bool)>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let mut h = [0u8; 16];
@@ -205,24 +246,26 @@ fn tiff_icc(path: &Path) -> Result<Option<Vec<u8>>> {
     let mut entry = vec![0u8; entry_size];
     for _ in 0..count {
         f.read_exact(&mut entry)?;
-        if n(&entry[..2]) != 34675 {
+        if n(&entry[..2]) != tag {
             continue;
         }
-        if !matches!(n(&entry[2..4]), 1 | 7) {
-            return Err(MediaError::invalid("TIFF ICC tag type"));
+        if !types.contains(&n(&entry[2..4])) {
+            return Err(MediaError::invalid(format!("TIFF tag {tag} type")));
         }
-        let size = n(&entry[4..entry_size - inline]);
+        let size = n(&entry[4..entry_size - inline])
+            .checked_mul(component_bytes)
+            .ok_or_else(|| MediaError::invalid("TIFF field size overflow"))?;
         if size > 1 << 20 {
-            return Err(MediaError::invalid("TIFF ICC profile exceeds 1 MiB"));
+            return Err(MediaError::invalid("TIFF field exceeds 1 MiB"));
         }
         let value = &entry[entry_size - inline..];
         if size <= inline as u64 {
-            return Ok(Some(value[..size as usize].to_vec()));
+            return Ok(Some((value[..size as usize].to_vec(), le)));
         }
         f.seek(SeekFrom::Start(n(value)))?;
         let mut bytes = vec![0; size as usize];
         f.read_exact(&mut bytes)?;
-        return Ok(Some(bytes));
+        return Ok(Some((bytes, le)));
     }
     Ok(None)
 }

@@ -1505,8 +1505,20 @@ fn corpus_render_parity() {
                             );
                             let theirs = geometry(&alpha(&today), r.width);
                             shape = format!(
-                                " geometry: area {:.3} engine {:.3} today {:.3}",
-                                wanted.area, ours.area, theirs.area
+                                " geometry: f64 area {:.3} centroid ({:.6}, {:.6}); engine area {:.3} centroid ({:.6}, {:.6}), delta area {:.3} centroid {:.6} px; today area {:.3} centroid ({:.6}, {:.6})",
+                                wanted.area,
+                                wanted.centroid[0],
+                                wanted.centroid[1],
+                                ours.area,
+                                ours.centroid[0],
+                                ours.centroid[1],
+                                ours.area - wanted.area,
+                                (ours.centroid[0] - wanted.centroid[0])
+                                    .abs()
+                                    .max((ours.centroid[1] - wanted.centroid[1]).abs()),
+                                theirs.area,
+                                theirs.centroid[0],
+                                theirs.centroid[1]
                             );
                             if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
                                 problems.push(format!("engine {e}"));
@@ -1554,6 +1566,7 @@ fn corpus_render_parity() {
                 }
             }
             compared += 1;
+            let mut model_png = None;
             let (line, pass) = match &three_d {
                 // The 3D class (section 25) until the 3D lane converts it.
                 Some((object, edges, class)) => {
@@ -1663,6 +1676,22 @@ fn corpus_render_parity() {
                         &opaque.rgba,
                         &opaque.classes(),
                     );
+                    if diffs.is_some() && !problems.is_empty() {
+                        model_png = Some(
+                            r.opaque()
+                                .chunks_exact(4)
+                                .flat_map(|pixel| {
+                                    if pixel[0].is_nan() {
+                                        [255, 0, 255, 255]
+                                    } else {
+                                        std::array::from_fn(|c| {
+                                            (pixel[c].clamp(0.0, 1.0) * 255.0).round() as u8
+                                        })
+                                    }
+                                })
+                                .collect::<Vec<u8>>(),
+                        );
+                    }
                     let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
                     let eligible = !r.unmodelled.is_empty()
                         && problems.iter().all(|p| p.starts_with("unreferenced:"));
@@ -1705,6 +1734,9 @@ fn corpus_render_parity() {
                     let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
                     write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
                     write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                    if let Some(model) = &model_png {
+                        write_png(&dir.join(format!("{stem}-f64.png")), w, h, model);
+                    }
                     let marked: Vec<u8> = ours
                         .chunks_exact(4)
                         .zip(reference.chunks_exact(4))

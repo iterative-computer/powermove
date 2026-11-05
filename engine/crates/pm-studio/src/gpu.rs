@@ -5,6 +5,9 @@ use crate::scene::{Prepared, Scene};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
+/// Denoises scene radiance using matching albedo and normal guides.
+pub type Denoiser<'a> = dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String> + 'a;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -730,7 +733,7 @@ impl Renderer {
     /// albedo and normals, goes through `denoise` (color, albedo, normal; RGBA
     /// f32, RGB read) before it is composed. The backdrop's shadow-catcher
     /// shading is denoised the same way. Returns (pixels, ms).
-    pub fn finish_with(&mut self, denoise: &dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>) -> (Vec<u8>, f64) {
+    pub fn finish_with(&mut self, denoise: &Denoiser<'_>) -> (Vec<u8>, f64) {
         self.post(0, true, Some(denoise), None)
     }
 
@@ -773,7 +776,7 @@ impl Renderer {
     }
 
     #[allow(clippy::type_complexity)]
-    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
+    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&Denoiser<'_>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
         let (w, h) = (self.width, self.height);
         let groups = (w.div_ceil(8), h.div_ceil(8));

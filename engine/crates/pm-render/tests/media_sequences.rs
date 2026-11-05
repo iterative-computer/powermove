@@ -118,7 +118,7 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
                     &resolver,
                 )
                 .unwrap();
-            if format == "svg" && level == 1 && corrupt != 0 {
+            if format == "svg" && corrupt != 0 {
                 // Chromium's broken <img> paints nothing. Valid SVG paint
                 // records remain gated independently of this XML check.
                 assert!(frame.failures.is_empty());
@@ -131,7 +131,12 @@ fn offline_and_corrupt_media_are_named_failures_without_routing() {
                 );
                 continue;
             }
-            assert_eq!(frame.failures.len(), 1, "{kind}: {:?}", frame.failures);
+            assert_eq!(
+                frame.failures.len(),
+                1,
+                "{kind}/{format} level {level} corrupt={corrupt}: {:?}",
+                frame.failures
+            );
             assert_eq!(frame.failures[0].layer, "source");
             assert!(!frame.failures[0].message.is_empty());
         }

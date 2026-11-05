@@ -10,15 +10,6 @@
 // (composite.wgsl); `view` turns a fragment position into top-down
 // full-frame output pixels.
 
-struct Quad {
-    m0: vec4<f32>,
-    m1: vec4<f32>,
-    m2: vec4<f32>,
-    res: vec4<f32>,
-    uv: vec4<f32>,
-    color: vec4<f32>,
-};
-
 struct Resample {
     // Output pixel (top-down, full frame) to unit quad, column-major.
     inv0: vec4<f32>,
@@ -34,17 +25,19 @@ struct Resample {
     // Source width and height at level 0, mip levels.
     tex: vec4<f32>,
     // xy: the origin the edges are relative to (output pixels), so edge
-    // distances keep their precision far from the frame's origin.
+    // distances keep their precision far from the frame's origin. z: the
+    // first mip is box-filtered inline; w: texels map one to one.
     origin: vec4<f32>,
     // Content polygon edges, unit normals: a·x + b·y + c ≥ 0 inside, with
     // (x, y) relative to `origin`.
-    edges: array<vec4<f32>, 6>,
+    edges: array<vec4<f32>, 5>,
+    bounds: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> q: Quad;
+@group(0) @binding(0) var<uniform> r: Resample;
 @group(1) @binding(0) var src: texture_2d<f32>;
 @group(1) @binding(1) var trilinear: sampler;
-@group(1) @binding(2) var<uniform> r: Resample;
+@group(1) @binding(2) var tail: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -53,10 +46,10 @@ struct VsOut {
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
-    let m = mat3x3<f32>(q.m0.xyz, q.m1.xyz, q.m2.xyz);
-    let p = m * vec3<f32>(a, 1.0);
+    let p = r.bounds.xy + a * r.bounds.zw;
+    let size = vec2<f32>(r.view.w, r.tex.w);
     var o: VsOut;
-    o.pos = vec4<f32>((p.x / q.res.x) * 2.0 - p.z, (p.y / q.res.y) * 2.0 - p.z, 0.0, p.z);
+    o.pos = vec4<f32>(p / size * 2.0 - vec2<f32>(1.0), 0.0, 1.0);
     return o;
 }
 
@@ -64,6 +57,17 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `origin`) inside the polygon: Sutherland–Hodgman against each edge in
 // coordinates relative to the pixel center, then the shoelace formula.
 fn coverage(c: vec2<f32>) -> f32 {
+    // Most pixels are wholly inside or outside the convex content polygon.
+    // Test the pixel square's support against every half-plane before clipping.
+    var interior = true;
+    for (var e = 0u; e < u32(r.params.w); e++) {
+        let normal = r.edges[e].xy;
+        let d = r.edges[e].z + dot(normal, c);
+        let radius = 0.5 * (abs(normal.x) + abs(normal.y));
+        if (d < -radius) { return 0.0; }
+        interior = interior && d >= radius;
+    }
+    if (interior) { return 1.0; }
     var poly: array<vec2<f32>, 12>;
     var next: array<vec2<f32>, 12>;
     poly[0] = vec2<f32>(-0.5, -0.5);
@@ -126,6 +130,45 @@ fn lanczos3(x: f32) -> f32 {
 // stronger minification reads a coarser (box-filtered) level.
 const MAX_KERNEL_SCALE: f32 = 4.0;
 
+fn mip_size(level: i32) -> vec2<u32> {
+    if (r.origin.z > 0.5 && level == 1) {
+        return max(textureDimensions(src, 0) / 2u, vec2<u32>(1u));
+    }
+    if (level == 0) {
+        return textureDimensions(src, 0);
+    }
+    return textureDimensions(tail, level - 1);
+}
+
+fn mip_texel(at: vec2<i32>, level: i32) -> vec4<f32> {
+    if (r.origin.z > 0.5 && level == 1) {
+        let last = vec2<i32>(textureDimensions(src, 0)) - vec2<i32>(1);
+        let p = at * 2;
+        return (textureLoad(src, min(p, last), 0)
+            + textureLoad(src, min(p + vec2<i32>(1, 0), last), 0)
+            + textureLoad(src, min(p + vec2<i32>(0, 1), last), 0)
+            + textureLoad(src, min(p + vec2<i32>(1, 1), last), 0)) * 0.25;
+    }
+    if (level == 0) {
+        return textureLoad(src, at, 0);
+    }
+    return textureLoad(tail, at, level - 1);
+}
+
+fn first_mip_bilinear(uv: vec2<f32>) -> vec4<f32> {
+    let size = mip_size(1);
+    let p = uv * vec2<f32>(size) - vec2<f32>(0.5);
+    let at = vec2<i32>(floor(p));
+    let f = fract(p);
+    let last = vec2<i32>(size) - vec2<i32>(1);
+    let zero = vec2<i32>(0);
+    let a = mip_texel(clamp(at, zero, last), 1);
+    let b = mip_texel(clamp(at + vec2<i32>(1, 0), zero, last), 1);
+    let c = mip_texel(clamp(at + vec2<i32>(0, 1), zero, last), 1);
+    let d = mip_texel(clamp(at + vec2<i32>(1, 1), zero, last), 1);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 // Lanczos-3 in the principal axes of the mapping (`j` = texels per output
 // pixel along x and y), with the anti-ringing clamp to the central texels.
 fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
@@ -154,7 +197,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let levels = r.tex.z;
     let level = clamp(ceil(log2(s1 / MAX_KERNEL_SCALE)), 0.0, levels - 1.0);
     let k = exp2(level);
-    let size = vec2<f32>(textureDimensions(src, i32(level)));
+    let size = vec2<f32>(mip_size(i32(level)));
     let a1 = max(1.0, s1 / k);
     let a2 = max(1.0, s2 / k);
     // The sample position at this level, in texel units (centers at +0.5).
@@ -175,7 +218,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
             if (abs(kx) >= 3.0 || abs(ky) >= 3.0) {
                 continue;
             }
-            let c = textureLoad(src, clamp(vec2<i32>(x, y), vec2<i32>(0), last), i32(level));
+            let c = mip_texel(clamp(vec2<i32>(x, y), vec2<i32>(0), last), i32(level));
             let w = lanczos3(kx) * lanczos3(ky);
             sum += c * w;
             wsum += w;
@@ -192,8 +235,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     return out;
 }
 
-@fragment
-fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
+fn resample_value(in: VsOut) -> vec4<f32> {
     // Top-down full-frame output pixel of this fragment.
     let px = vec2<f32>(in.pos.x + r.view.x, r.view.y + r.view.z - in.pos.y);
     let inv = mat3x3<f32>(r.inv0.xyz, r.inv1.xyz, r.inv2.xyz);
@@ -220,10 +262,32 @@ fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
     // Pixels at the polygon's edge sample the nearest content (clamp).
     let cuv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
     var c: vec4<f32>;
-    if (r.params.z < 0.5) {
-        c = textureSampleGrad(src, trilinear, cuv, duvx, duvy);
+    if (r.origin.w > 0.5) {
+        // A one-to-one draw copies its texel exactly.
+        let last = vec2<i32>(textureDimensions(src, 0)) - vec2<i32>(1);
+        c = textureLoad(src, min(vec2<i32>(floor(cuv * r.tex.xy)), last), 0);
+    } else if (r.params.z < 0.5) {
+        if (r.origin.z > 0.5) {
+            let lod = clamp(log2(max(length(dx), length(dy))), 0.0, 1.0);
+            c = mix(textureSampleLevel(src, trilinear, cuv, 0.0), first_mip_bilinear(cuv), lod);
+        } else if (r.tex.z <= 1.0) {
+            c = textureSampleLevel(src, trilinear, cuv, 0.0);
+        } else {
+            let lod = clamp(log2(max(length(dx), length(dy))), 0.0, r.tex.z - 1.0);
+            if (lod < 1.0) {
+                let base = textureSampleLevel(src, trilinear, cuv, 0.0);
+                let first = textureSampleLevel(tail, trilinear, cuv, 0.0);
+                c = mix(base, first, lod);
+            } else {
+                c = textureSampleLevel(tail, trilinear, cuv, lod - 1.0);
+            }
+        }
     } else {
         c = lanczos(cuv * r.tex.xy, dx, dy);
     }
     return c * (cov * r.params.x);
 }
+
+@fragment fn fs_resample(in: VsOut) -> @location(0) vec4<f32> { return resample_value(in); }
+// RGBA16F targets store the nearest half (Metal's conversion truncates).
+@fragment fn fs_resample_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(resample_value(in)); }

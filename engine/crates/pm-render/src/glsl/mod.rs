@@ -328,6 +328,7 @@ mod tests {
 
     #[test]
     fn round_polyfill_reaches_naga_as_a_named_function() {
+        let _compiler_fixture = crate::compiler_fixture();
         // The prefix `ANGLE_POLYFILLS` matches what naga writes for
         // `pm_glsl`'s polyfill.
         let src = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform float u_x;\nout vec4 o;\nvoid main(){ o = vec4(round(u_x), roundEven(u_x), round(v_uv)); }\n";

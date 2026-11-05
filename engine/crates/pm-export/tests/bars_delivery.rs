@@ -31,13 +31,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use block2::RcBlock;
-use objc2::AnyThread;
 use objc2::rc::Retained;
+use objc2::{AnyThread, runtime::AnyObject};
 use objc2_av_foundation::*;
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeRange};
-use objc2_foundation::{NSString, NSURL};
+use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 use pm_export::convert::{EncoderInput, PlaneData};
-use pm_export::mac::pixbuf::{PixelBuffer, output_attributes};
+use pm_export::mac::pixbuf::PixelBuffer;
 use pm_export::mac::reader::decode_frame;
 use pm_export::render::*;
 use pm_export::timescale::video_timing;
@@ -884,8 +884,10 @@ fn ffmpeg_rgb48(path: &Path) -> Vec<u16> {
         .collect()
 }
 
-/// RGB of frame 0 decoded by AVFoundation to 32BGRA (the reader converts with
-/// the stream's matrix and range).
+/// RGB of frame 0 decoded through AVFoundation's macOS ARGB conversion.
+/// CPU readback needs no Metal/IOSurface constraints. Apple recommends ARGB
+/// for macOS RGB reading (AVAssetReaderTrackOutput); return BGRA byte order
+/// to keep the chart consumer independent of the reader's storage order.
 fn avfoundation_bgra(path: &Path) -> Vec<u8> {
     let url = file_url(path);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
@@ -893,7 +895,12 @@ fn avfoundation_bgra(path: &Path) -> Vec<u8> {
         .firstObject()
         .unwrap();
     let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }.unwrap();
-    let settings = output_attributes(u32::from_be_bytes(*b"BGRA"));
+    let key = NSString::from_str(
+        &unsafe { objc2_core_video::kCVPixelBufferPixelFormatTypeKey }.to_string(),
+    );
+    let format = NSNumber::new_u32(objc2_core_video::kCVPixelFormatType_32ARGB);
+    let settings: Retained<NSDictionary<NSString, AnyObject>> =
+        NSDictionary::from_slices(&[&*key], &[&*format]);
     let output = unsafe {
         AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
             &track,
@@ -912,7 +919,11 @@ fn avfoundation_bgra(path: &Path) -> Vec<u8> {
     let sb: &CMSampleBuffer = &sb;
     let image = unsafe { sb.image_buffer() }.unwrap();
     let pb = unsafe { PixelBuffer::retain(std::ptr::NonNull::from(&*image)) };
-    let bytes = pb.bytes().unwrap();
+    let mut bytes = pb.bytes().unwrap();
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel.swap(0, 3);
+        pixel.swap(1, 2);
+    }
     unsafe { reader.cancelReading() };
     bytes
 }

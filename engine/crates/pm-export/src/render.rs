@@ -527,56 +527,31 @@ impl Timeline {
     /// `max(1, round(duration × fps))` frames from `range.start`, as today's
     /// exporter counts them (`Math.round`, half up).
     pub fn new(start: Ticks, end: Ticks, rate: Rate) -> Result<Timeline, JobError> {
-        let span = i128::from(end.get()) - i128::from(start.get());
-        if span <= 0 {
-            return Err(JobError::Invalid("the export range is empty".into()));
-        }
-        let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
-        let unit = den * i128::from(TICKS_PER_SECOND);
-        let frames = ((2 * span * num + unit) / (2 * unit)).max(1);
-        let timeline = Timeline {
+        let schedule = crate::schedule::FrameSchedule::new(start.get(), end.get(), rate)
+            .map_err(|e| JobError::Invalid(e.to_string()))?;
+        Ok(Timeline {
             start,
             rate,
-            frames: u64::try_from(frames)
-                .map_err(|_| JobError::Invalid("too many frames".into()))?,
-        };
-        // Every frame's time and the end of the last one (its audio) must be
-        // representable ticks.
-        let end_tick = i128::from(start.get()) + timeline.offset(timeline.frames);
-        if i64::try_from(end_tick).map_or(true, |v| Ticks::new(v).is_err()) {
-            return Err(JobError::Invalid(
-                "the export range ends past the latest representable time".into(),
-            ));
+            frames: schedule.frames,
+        })
+    }
+
+    fn schedule(&self) -> crate::schedule::FrameSchedule {
+        crate::schedule::FrameSchedule {
+            start: self.start.get(),
+            rate: self.rate,
+            frames: self.frames,
         }
-        Ok(timeline)
     }
 
-    /// Ticks from `start` to frame `n`: `n / rate`, rounded half to even
-    /// onto the tick grid (exact for rates that divide the flick).
-    fn offset(&self, n: u64) -> i128 {
-        let (num, den) = (i128::from(self.rate.num()), i128::from(self.rate.den()));
-        let x = i128::from(n) * den * i128::from(TICKS_PER_SECOND);
-        let (q, r) = (x.div_euclid(num), x.rem_euclid(num));
-        let up = match (2 * r).cmp(&num) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Equal => q % 2 != 0,
-            std::cmp::Ordering::Less => false,
-        };
-        q + i128::from(up)
-    }
-
-    /// The composition time of export frame `n` (`0 ..= frames`; `new`
-    /// checked that these are representable): `start + n / rate`. Past
-    /// `frames` it saturates at the latest representable time.
+    /// Composition time of export frame n, relative to the exact authored in point.
     pub fn tick(&self, n: u64) -> Ticks {
-        Ticks::saturating_from_i128(i128::from(self.start.get()) + self.offset(n))
+        Ticks::new(self.schedule().tick(n)).expect("schedule clamps document ticks")
     }
 
     /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
     pub fn samples(&self, n: u64, sample_rate: u32) -> (i64, i64) {
-        let a = pm_audio::offline::sample_of_ticks(self.tick(n).get(), sample_rate);
-        let b = pm_audio::offline::sample_of_ticks(self.tick(n + 1).get(), sample_rate);
-        (a, b.max(a))
+        self.schedule().samples(n, sample_rate)
     }
 }
 
@@ -849,6 +824,17 @@ pub fn offline_media(
     composition: &str,
     media: &MediaPaths,
 ) -> Vec<OfflineClip> {
+    offline_media_with_audio(document, composition, media, true)
+}
+
+/// The job's offline dependencies, excluding standalone audio when the
+/// output has no audio track. Video and image layers always remain required.
+pub fn offline_media_with_audio(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+    include_audio: bool,
+) -> Vec<OfflineClip> {
     use pm_eval::node;
     let Some(root) = document.root() else {
         return vec![];
@@ -887,6 +873,7 @@ pub fn offline_media(
                         }
                     }
                 }
+                "audio" if !include_audio => {}
                 "video" | "image" | "audio" => {
                     let Some(asset) = node::member(d, "asset").map(|a| string(Some(a))) else {
                         continue;
@@ -912,7 +899,8 @@ pub fn offline_media(
 /// Validates `job` and builds its plan: capability routing (pm-render's
 /// `unsupported_with_media`, audio sources pm-audio cannot open), the encoder
 /// spec, and the audio graph. Offline media is not checked here; the job
-/// engine asks [`offline_media`] first (queued jobs wait for it, section 14.8).
+/// engine asks [`offline_media_with_audio`] first (queued jobs wait for it,
+/// section 14.8).
 pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
     plan_export_checked(job, &|doc, composition, media| {
         pm_render::unsupported_with_media(doc, composition, media)
@@ -944,7 +932,12 @@ fn plan_export_checked(
     } else {
         job.document.clone()
     };
-    let offline = offline_media(&document, &job.composition, &job.media);
+    let offline = offline_media_with_audio(
+        &document,
+        &job.composition,
+        &job.media,
+        s.audio && !s.format.is_image(),
+    );
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
@@ -1110,12 +1103,14 @@ pub fn preview_jpeg(
             }
             let n = ((y1 - y0) * (x1 - x0)) as f32;
             let o = px * 4;
-            for k in 0..3 {
-                let v = sum[k] / n;
-                row[o + k] =
-                    (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
-            }
-            row[o + 3] = 255;
+            let pixel = crate::convert::rgba8_pixel(
+                [sum[0] / n, sum[1] / n, sum[2] / n, 1.0],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            );
+            row[o..o + 4].copy_from_slice(&pixel);
         }
     });
     Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
@@ -1484,15 +1479,22 @@ pub fn composition_size(document: &Document, composition: &str) -> Result<(u32, 
     Ok((dim("w")?, dim("h")?))
 }
 
-/// Premultiplied working values (Standard: E-encoded, over black when the
-/// background is transparent) to 8-bit RGBA as a unorm render-target write
-/// stores them (clamp, scale, round half to even; NaN is 0), which is what
-/// today's canvas readback holds.
+/// Premultiplied, already E-encoded frame values to opaque 8-bit sRGB RGBA.
+/// The shared SDR boundary maps the over-black RGB before quantizing.
 pub fn to_rgba8(rgba: &[f32]) -> Vec<u8> {
-    rgba.iter()
-        .map(|v| {
-            let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-            (v * 255.0).round_ties_even() as u8
+    assert!(
+        rgba.len().is_multiple_of(4),
+        "RGBA has four channels per pixel"
+    );
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            crate::convert::rgba8_pixel(
+                [p[0], p[1], p[2], p[3]],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            )
         })
         .collect()
 }
@@ -1718,8 +1720,8 @@ mod tests {
 
     #[test]
     fn rgba8_rounds_and_clamps() {
-        assert_eq!(to_rgba8(&[-0.1, 0.0, 0.5, 1.2]), vec![0, 0, 128, 255]);
-        assert_eq!(to_rgba8(&[f32::NAN]), vec![0], "NaN is 0");
+        assert_eq!(to_rgba8(&[0.0, 0.0, 0.5, 1.0]), vec![0, 0, 128, 255]);
+        assert_eq!(to_rgba8(&[f32::NAN, 0.0, 0.0, 1.0]), vec![0, 0, 0, 255]);
     }
 
     #[test]
@@ -1766,10 +1768,10 @@ mod tests {
                 }
                 let n = ((y1 - y0) * (x1 - x0)) as f32;
                 let o = (py * pw as usize + px) * 4;
+                let rgb = (sum.map(|v| v / n)).map(f64::from);
+                let mapped = pm_color::css_srgb(rgb);
                 for k in 0..3 {
-                    let v = sum[k] / n;
-                    out[o + k] =
-                        (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
+                    out[o + k] = (mapped[k] * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
                 }
                 out[o + 3] = 255;
             }

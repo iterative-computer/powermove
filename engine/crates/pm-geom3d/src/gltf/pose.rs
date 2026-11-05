@@ -174,7 +174,10 @@ impl<'a> Poser<'a> {
                 if influence == 0.0 {
                     continue;
                 }
-                let source_len = g.morph.source_counts[0].get(k).copied().unwrap_or(t.count());
+                let source_len = g.morph.source_counts[0]
+                    .get(k)
+                    .copied()
+                    .unwrap_or(t.count());
                 if i >= source_len {
                     m = [f64::NAN; 3];
                     break;

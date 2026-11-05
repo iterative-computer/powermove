@@ -20,8 +20,8 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{Seq, Size, Ticks};
 use pm_protocol::definitions::{DefinitionKind, DefinitionSetSnapshot, DefinitionSnapshot};
 use pm_protocol::error::ErrorCode;
+use pm_render::RenderRequest;
 use pm_render::effects::watchdog::{FnTiming, Span, Subject, TimingSource};
-use pm_render::{RenderRequest, Renderer};
 use serde_json::{Value, json};
 
 fn ch(v: Value) -> Value {
@@ -113,8 +113,10 @@ fn blur_takes(ms: Arc<AtomicU64>) -> Arc<dyn TimingSource> {
 
 #[test]
 fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
-    let headless = Renderer::headless().unwrap();
-    let mut composer = Composer::new(headless.device(), headless.queue());
+    // Composer owns the only renderer in this simulated device. Constructing
+    // another Renderer just to borrow its device also starts unused programs.
+    let gpu = pm_gpu::Gpu::new("definition set fixture").unwrap();
+    let mut composer = Composer::new(&gpu.device, &gpu.queue);
     let blur_ms = Arc::new(AtomicU64::new(300));
     let builtins = Arc::new({
         let mut set = pm_render::builtin_definitions();
@@ -162,7 +164,11 @@ fn a_disabled_effect_stays_off_across_unrelated_pushes_and_other_views() {
     // An unrelated registration reaches view A as a new set version.
     let extended = Arc::new(with_extra(&builtins, 2));
     let failures = composer.use_definitions(a, Some(&(extended.clone(), 2)), &[]);
-    assert_eq!(failures.map(|f| f.len()), Some(0), "the new set loaded");
+    assert_eq!(
+        failures.as_ref().map(|f| f.len()),
+        Some(0),
+        "the new set loaded: {failures:?}"
+    );
     let effects = composer.renderer().effects();
     assert!(
         effects.watchdog.is_disabled(DefinitionKind::Effect, "blur"),

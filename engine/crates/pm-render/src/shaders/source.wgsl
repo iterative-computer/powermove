@@ -10,7 +10,8 @@
 //   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 and tone
 //   mapped with the BT.2390 EETF to linear light with SDR white at 1.0
 //   (pm_color::tonemap's WGSL is prepended too); the primaries columns
-//   then convert the source's primaries to Rec.709.
+//   then convert the source's primaries to Rec.709. Transfer 7 is a pure
+//   power with the exponent in `hdr.z` (PNG gAMA).
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -19,7 +20,7 @@
 struct Params {
     // kind (0 RGB, 1 Y′CbCr), transfer, working (0 Standard, 1 linear), alpha plan.
     a: vec4<u32>,
-    // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom).
+    // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
     // chroma plane width, height; quantize to f16; convert primaries.
     c: vec4<u32>,
@@ -35,7 +36,8 @@ struct Params {
     p2: vec4<f32>,
     // Matte color for "premultiplied with color".
     matte: vec4<f32>,
-    // HDR tone mapping: x the content peak in cd/m².
+    // HDR tone mapping: x the content peak in cd/m²; y 1 for BT.2020
+    // constant luminance; z the exponent of the pure power transfer (7).
     hdr: vec4<f32>,
 };
 
@@ -61,6 +63,14 @@ fn catmull_rom(t: f32) -> vec4<f32> {
     );
 }
 
+// Separable, normalized Lanczos-3, with edge extension by chroma_at.
+fn lanczos3(x: f32) -> f32 {
+    if (abs(x) < 0.000001) { return 1.0; }
+    if (abs(x) >= 3.0) { return 0.0; }
+    let p = 3.141592653589793 * x;
+    return sin(p) / p * sin(p / 3.0) / (p / 3.0);
+}
+
 // One chroma row j sampled horizontally at luma column x.
 fn chroma_row(x: u32, j: i32) -> vec2<f32> {
     let kind = P.b.z;
@@ -80,6 +90,16 @@ fn chroma_row(x: u32, j: i32) -> vec2<f32> {
     if (t == 0.0) {
         return chroma_at(i, j);
     }
+    if (kind == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_at(i + offset, j) * w;
+            weight += w;
+        }
+        return sum / weight;
+    }
     let w = catmull_rom(t);
     return chroma_at(i - 1, j) * w.x + chroma_at(i, j) * w.y + chroma_at(i + 1, j) * w.z
         + chroma_at(i + 2, j) * w.w;
@@ -95,6 +115,16 @@ fn chroma_sample(x: u32, y: u32) -> vec2<f32> {
     let j = i32(fj);
     if (t == 0.0) {
         return chroma_row(x, j);
+    }
+    if (P.b.w == 3u) {
+        var sum = vec2<f32>(0.0);
+        var weight = 0.0;
+        for (var offset = -2; offset <= 3; offset++) {
+            let w = lanczos3(t - f32(offset));
+            sum += chroma_row(x, j + offset) * w;
+            weight += w;
+        }
+        return sum / weight;
     }
     return chroma_row(x, j) * (1.0 - t) + chroma_row(x, j + 1) * t;
 }
@@ -117,6 +147,15 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
         }
         case 4u: {
             return sign(c) * pow(abs(c), vec3<f32>(2.2));
+        }
+        case 8u, 9u: {
+            let decades = select(2.0, 2.5, P.a.y == 9u);
+            let light = pow(vec3<f32>(10.0), decades * (c - vec3<f32>(1.0)));
+            return select(light, vec3<f32>(0.0), c <= vec3<f32>(0.0));
+        }
+        case 7u: {
+            // A pure power (PNG gAMA alone), odd-symmetric.
+            return sign(c) * pow(abs(c), vec3<f32>(P.hdr.z));
         }
         default: {
             return c;

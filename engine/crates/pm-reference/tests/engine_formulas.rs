@@ -149,11 +149,31 @@ fn transfers_agree() {
         // The engine uses BT.709-6's rounded α = 1.099, β = 0.018; the
         // reference H.273's exact constants. They differ by < 2e-4 (0.05 CV).
         let pairs = [
-            (pm_color::transfer::display_decode(v), Transfer::Srgb.to_linear(v), 1e-12),
-            (pm_color::transfer::display_encode(v), Transfer::Srgb.from_linear(v), 1e-12),
-            (pm_color::transfer::bt709_inverse_oetf(v), Transfer::Bt709.to_linear(v), 2e-4),
-            (pm_color::transfer::gamma22_decode(v), Transfer::Gamma(2.2).to_linear(v), 1e-12),
-            (pm_color::transfer::bt1886_decode(v), Transfer::Bt1886.to_linear(v), 1e-12),
+            (
+                pm_color::transfer::display_decode(v),
+                Transfer::Srgb.to_linear(v),
+                1e-12,
+            ),
+            (
+                pm_color::transfer::display_encode(v),
+                Transfer::Srgb.from_linear(v),
+                1e-12,
+            ),
+            (
+                pm_color::transfer::bt709_inverse_oetf(v),
+                Transfer::Bt709.to_linear(v),
+                2e-4,
+            ),
+            (
+                pm_color::transfer::gamma22_decode(v),
+                Transfer::Gamma(2.2).to_linear(v),
+                1e-12,
+            ),
+            (
+                pm_color::transfer::bt1886_decode(v),
+                Transfer::Bt1886.to_linear(v),
+                1e-12,
+            ),
         ];
         for (k, (x, y, tolerance)) in pairs.into_iter().enumerate() {
             assert!((x - y).abs() < tolerance, "pair {k} at {v}: {x} vs {y}");
@@ -165,12 +185,19 @@ fn transfers_agree() {
 fn primaries_and_matrices_agree() {
     for (engine, reference) in [
         (pm_protocol::color::Primaries::Bt709, Primaries::BT709),
-        (pm_protocol::color::Primaries::Bt601_525, Primaries::BT601_525),
-        (pm_protocol::color::Primaries::Bt601_625, Primaries::BT601_625),
+        (
+            pm_protocol::color::Primaries::Bt601_525,
+            Primaries::BT601_525,
+        ),
+        (
+            pm_protocol::color::Primaries::Bt601_625,
+            Primaries::BT601_625,
+        ),
         (pm_protocol::color::Primaries::DisplayP3, Primaries::P3_D65),
         (pm_protocol::color::Primaries::Bt2020, Primaries::BT2020),
     ] {
-        let m = pm_color::primaries::rgb_to_xyz(&pm_color::primaries::chromaticities(engine).unwrap());
+        let m =
+            pm_color::primaries::rgb_to_xyz(&pm_color::primaries::chromaticities(engine).unwrap());
         let r = reference.to_xyz();
         for i in 0..3 {
             for j in 0..3 {
@@ -187,15 +214,31 @@ fn primaries_and_matrices_agree() {
         let k = color::matrix_coefficients(code).unwrap().unwrap();
         for ycc in [[0.5, 0.1, -0.2], [0.9, -0.4, 0.3], [0.1, 0.0, 0.0]] {
             let (x, y) = (m.ycbcr_to_rgb(ycc), color::ycbcr_to_rgb(ycc, k));
-            assert!(x.iter().zip(y).all(|(a, b)| (a - b).abs() < 1e-12), "{engine:?}");
+            assert!(
+                x.iter().zip(y).all(|(a, b)| (a - b).abs() < 1e-12),
+                "{engine:?}"
+            );
         }
     }
-    for (bits, range, full) in [(8, Range::Limited, false), (10, Range::Limited, false), (10, Range::Full, true)] {
+    for (bits, range, full) in [
+        (8, Range::Limited, false),
+        (10, Range::Limited, false),
+        (10, Range::Full, true),
+    ] {
         let q = pm_color::ycbcr::Quantizer::new(bits, range);
-        for code in [0u32, 16, 64, 128, 235, 512, 940, 1023].into_iter().filter(|c| *c < 1 << bits) {
+        for code in [0u32, 16, 64, 128, 235, 512, 940, 1023]
+            .into_iter()
+            .filter(|c| *c < 1 << bits)
+        {
             let c = f64::from(code);
-            assert!((q.luma_value(code) - color::dequantize_luma(c, u32::from(bits), full)).abs() < 1e-12);
-            assert!((q.chroma_value(code) - color::dequantize_chroma(c, u32::from(bits), full)).abs() < 1e-12);
+            assert!(
+                (q.luma_value(code) - color::dequantize_luma(c, u32::from(bits), full)).abs()
+                    < 1e-12
+            );
+            assert!(
+                (q.chroma_value(code) - color::dequantize_chroma(c, u32::from(bits), full)).abs()
+                    < 1e-12
+            );
         }
     }
 }

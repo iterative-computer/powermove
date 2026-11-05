@@ -22,6 +22,7 @@
 pub mod cache;
 pub mod compile;
 pub mod compiler;
+pub mod const_tables;
 pub mod errors;
 pub mod fuzz;
 pub mod limits;

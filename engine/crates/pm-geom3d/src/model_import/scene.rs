@@ -318,7 +318,9 @@ impl Builder<'_> {
 
     /// `loadNode` (`_loadNodeShallow` plus children).
     fn node(&mut self, n: usize) -> usize {
-        if let Some(node) = self.node_objects[n] { return node; }
+        if let Some(node) = self.node_objects[n] {
+            return node;
+        }
         let def = &self.model.nodes[n];
         let node_name = self.names.nodes[n].clone();
         let mut objects = vec![];

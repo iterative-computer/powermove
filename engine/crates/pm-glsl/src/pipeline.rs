@@ -65,7 +65,7 @@ pub const VARYINGS: &[(&str, u32)] = &[("v_uv", 0), ("v_st", 1), ("v_px", 2)];
 ///   away from zero, as WebGL).
 /// - 3: the `radians`/`degrees` polyfills removed (naga's `x * c` is the
 ///   same IEEE product as ANGLE's `c * x`).
-pub const PIPELINE_REVISION: u32 = 3;
+pub const PIPELINE_REVISION: u32 = 4;
 
 /// The stage a program failed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -434,6 +434,13 @@ fn naga_module(words: &[u32]) -> Result<naga::Module, Failure> {
     };
     derivative_uniformity_off(&mut module);
     naga_validate(&module).map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
+    // Constant tables indexed at run time read from the constants
+    // (`crate::const_tables`); a module the validator refuses afterwards
+    // stays as it was.
+    let mut hoisted = module.clone();
+    if crate::const_tables::hoist(&mut hoisted) > 0 && naga_validate(&hoisted).is_ok() {
+        module = hoisted;
+    }
     Ok(module)
 }
 

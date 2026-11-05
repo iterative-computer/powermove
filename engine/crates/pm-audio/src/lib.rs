@@ -25,6 +25,7 @@ pub mod chromium;
 pub mod clock;
 pub mod conform;
 pub mod device;
+pub mod device_policy;
 pub mod error;
 pub mod graph;
 pub mod kernel;

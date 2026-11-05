@@ -14,6 +14,16 @@ use std::time::{Duration, Instant};
 use crate::{Failure, FailureStage, Prepared, Program};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_request_start() -> Option<Instant> {
+    TEST_REQUEST_START.get()
+}
+
 pub const PROCESS_SLOTS: usize = 2;
 pub const MAX_FRAME: usize = 64 << 20;
 pub const MAX_RESIDENT_BYTES: u64 = 1 << 30;
@@ -236,6 +246,8 @@ impl Pool {
         // deliberately tiny production pool; integration tests exercise real admission.
         #[cfg(test)]
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        TEST_REQUEST_START.set(Some(Instant::now()));
         let _permit = self.admit()?;
         let deadline = Instant::now()
             .checked_add(timeout)

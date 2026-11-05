@@ -15,13 +15,16 @@ thread_local! {
 
 /// Installs a playback-aware refresh callback for conversions on this thread.
 /// A nested call restores its predecessor when the scope exits.
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 pub(crate) fn install_qos_refresh(refresh: Option<Refresh>) -> RefreshGuard {
     let previous = QOS_REFRESH.with(|slot| slot.replace(refresh));
     RefreshGuard(previous)
 }
 
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 pub(crate) struct RefreshGuard(Option<Refresh>);
 
+#[cfg(all(target_os = "macos", any(feature = "engine", test)))]
 impl Drop for RefreshGuard {
     fn drop(&mut self) {
         QOS_REFRESH.with(|slot| {
@@ -30,6 +33,7 @@ impl Drop for RefreshGuard {
     }
 }
 
+#[cfg(all(feature = "engine", target_os = "macos"))]
 pub(crate) fn refresh_current_qos() {
     let refresh = QOS_REFRESH.with(|slot| slot.borrow().clone());
     if let Some(refresh) = refresh {
@@ -106,7 +110,8 @@ pub(crate) fn rows_limited<T: Send>(
 #[cfg(target_vendor = "apple")]
 pub(crate) type Qos = Option<libc::qos_class_t>;
 #[cfg(not(target_vendor = "apple"))]
-pub(crate) type Qos = ();
+#[derive(Clone, Copy)]
+pub(crate) struct Qos;
 
 #[cfg(target_vendor = "apple")]
 pub(crate) fn current_qos() -> Qos {
@@ -120,7 +125,9 @@ pub(crate) fn current_qos() -> Qos {
 }
 
 #[cfg(not(target_vendor = "apple"))]
-pub(crate) fn current_qos() -> Qos {}
+pub(crate) fn current_qos() -> Qos {
+    Qos
+}
 
 #[cfg(target_vendor = "apple")]
 pub(crate) fn apply_qos(qos: Qos) {

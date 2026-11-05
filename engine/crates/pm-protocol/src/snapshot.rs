@@ -1938,7 +1938,7 @@ mod tests {
                 source: CompatSource::RasterOverride,
                 scale,
                 revision: Revision::ZERO,
-                    frame: None,
+                frame: None,
                 blender: None,
             };
             assert_eq!(

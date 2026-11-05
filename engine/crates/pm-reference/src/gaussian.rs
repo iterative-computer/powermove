@@ -112,7 +112,10 @@ mod tests {
             // Box reconstruction adds the box's variance, 1/12 (Sheppard's
             // correction, exact up to terms in exp(−2π²σ²)).
             if sigma >= 1.0 {
-                assert!((var - (sigma * sigma + 1.0 / 12.0)).abs() < 1e-6, "{sigma}: {var}");
+                assert!(
+                    (var - (sigma * sigma + 1.0 / 12.0)).abs() < 1e-6,
+                    "{sigma}: {var}"
+                );
             }
         }
         assert_eq!(kernel(0.0), vec![1.0]);

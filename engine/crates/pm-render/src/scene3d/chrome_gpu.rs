@@ -54,12 +54,7 @@ fn scene_override(scene: &Scene3d, side: Side) -> Scene3d {
     scene.shadows = false;
     for object in &mut scene.objects {
         for mesh in &mut object.meshes {
-            mesh.materials = match &mesh.materials {
-                Materials::Single(_) => Materials::Single(Box::new(override_material(side))),
-                Materials::Slots(slots) => {
-                    Materials::Slots(slots.iter().map(|_| override_material(side)).collect())
-                }
-            };
+            mesh.materials = Materials::new(override_material(side));
         }
     }
     scene
@@ -98,7 +93,6 @@ fn adjust(draw: &mut DrawDesc, projection: &Mat4, fragment: &str) {
     {
         *p = projection.to_vec();
     }
-    draw.state.hdr = true;
     draw.state.blend = false;
     draw.state.depth_write = true;
     draw.state.depth_test = true;
