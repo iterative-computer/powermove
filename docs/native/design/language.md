@@ -103,7 +103,7 @@ running Electron app.
 | Surface | Material | Why |
 |---|---|---|
 | Toolbar, tool capsule, toolbar buttons | Liquid Glass (`NSGlassEffectView`, macOS 26); `NSVisualEffectView` `.titlebar` before 26 | HIG: glass is the control layer above content |
-| Viewer overlays (zoom/quality pop-ups, 3D view cube, safe-area toggle) | Glass, small, clear variant | Floats over the image; content scrolls/plays beneath |
+| Viewer overlays (zoom/quality pop-ups in Focus, 3D status capsule, Light panel frame) | Glass, small, clear variant | Floats over the image; content scrolls/plays beneath |
 | Popovers (colour, easing, gradient, zoom, layer blend) | System `NSPopover` (glass on 26) | Transient, anchored to a control |
 | Menus, context menus, palette, field menu | System menus; palette/field menu are glass child panels | System behaviour |
 | Sheets (Save Layout, New Composition, Export, Composition Settings) | System sheet frame (glass); content on **panel** material in cards | Electron's Nov 2026 rule: dialogs are cut from the panel material. The system owns the frame; we own the content. |

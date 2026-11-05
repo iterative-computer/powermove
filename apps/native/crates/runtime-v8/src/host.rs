@@ -193,6 +193,11 @@ pub struct IsolateMemory {
     pub used_heap_bytes: usize,
     pub physical_heap_bytes: usize,
     pub external_bytes: usize,
+    /// Response capacity reserved before native fetch jobs start. Not RSS and
+    /// not part of V8's external_memory statistic.
+    pub fetch_reserved_bytes: usize,
+    /// Capacity held while a synchronous native engine call executes.
+    pub engine_reserved_bytes: usize,
     pub snapshot_bytes: usize,
 }
 #[derive(Debug, Clone)]
