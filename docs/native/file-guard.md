@@ -126,10 +126,14 @@ archives are separate integration boundaries outside this lane's ownership.
 **Proposal only.** Apply to a reviewed transition release on its own branch.
 The following capture-free function is the executable part of the proposal;
 the native tests run it directly from this document against native PMV4 output.
-The strings are machine error codes, neutral placeholders rather than approved
-user-facing copy. `DESIGN-TODO(opus)`: approve the refusal message and its
-presentation in existing open/error surfaces; explain that the file is intact
-and which compatible app can open it. No new UI is implemented here.
+The strings are machine error codes. Map them to Opus's existing alert in
+[the migration spec](design/surfaces/migration.md#n003-outcomes),
+added by integration commit `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`:
+message `“{file}” needs a newer version of Powermove.`, informative text
+`This version can’t read it, so it wasn’t opened. The file wasn’t changed.`,
+and button `OK`. The alert belongs to the transition release. No UI is
+implemented by this lane and no design placeholder remains. Mac/Opus review
+of the actual integrated alert is still required.
 
 <!-- transition-guard:start -->
 ```js
@@ -204,7 +208,7 @@ separately; acceptance by a shipped reader is intentionally **not** a guard pass
 
 Linux tests cannot prove AppKit dialogs, WebKit/GPUI state, LaunchServices,
 APFS cloning/F_FULLFSYNC, signed shipped binaries or physical crash durability.
-Run the integrated transition patch on macOS with both actual shipped builds,
+Run the integrated transition patch on macOS with the actual audited shipped builds,
 synthetic private copies and an isolated profile before claiming safe refusal.
 
 Vendored source provenance (SHA-256 of the complete original file, including
@@ -215,3 +219,38 @@ its import; equal at all four release tags):
 | `shared/project-incremental.ts` | `5ebfa3ef44dbd761eb826d470cf020ce8ee44699ee2a6c8630f7cb7aa488e233` |
 | `shared/project-container.ts` | `38de97465e2e76604701ad7bfe120926f1756de6b1381de8fb71715f21545a88` |
 | `main/project-document-validator.ts` | `ace7716ba88002dd65b9501c387586b1e3bd5fc03f0f4e05c8d11e91a713ecae` |
+
+## Merge validation — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9` without conflicts. Only the
+owned save module, its new sibling module and this document differ from that
+base. No dependencies were added; both lockfiles remain unchanged and all Cargo
+checks below use `--locked`. Rust 1.96.1 / Node 24.19.0 / Linux.
+
+Run from `apps/native` after sourcing `/workspace/.tools/activate.sh`:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pm-kernel -- --test-threads=1` | **283 passed, 0 failed, 1 existing ignored** real-store-copy smoke; no synthetic file-guard case skipped. |
+| `cargo test --locked -p pm-kernel --lib file_guard` | **10 passed**, including **59 native PMV4 fixtures / 236 release-reader comparisons** across the four audited versions. |
+| `cargo test --locked -p pm-kernel --test slice2 workspace_mutations_keep_partial_writes_without_document_undo_and_emit_events -- --exact` | **1 passed** on focused replay of the existing failure below. |
+| `cargo clippy --locked -p pm-kernel --all-targets --no-deps -- -D warnings` | Passed. |
+| `cargo fmt -p pm-kernel --check` | Passed. |
+
+Keep the default-concurrency failure visible: the first post-merge
+`cargo test --locked -p pm-kernel` stopped with **230 passed, 1 failed,
+1 existing ignored**, at `slice2.rs:801`,
+`workspace_mutations_keep_partial_writes_without_document_undo_and_emit_events`.
+It expected the next event to be `Published`. That test subscribes after an
+open acknowledgement, while actor event delivery can still be in progress;
+this is outside the save path and its source is unchanged by this lane.
+The focused replay and complete serial replay pass. The earlier pre-merge
+default-concurrency suite also passed **283/0/1**. This lane does not alter the
+test, event ordering, timeouts or tolerances to erase the failure.
+
+Mac/integration requirements remain the transition patch attachment points
+above, actual signed v1.2.0/v1.3.0/v1.3.1/v1.3.2 opens and safe refusal UI,
+APFS clone/durable-publication checks, and physical interruption verification.
+Shipped marker ignorance remains an explicit release blocker; the green native
+unit/oracle tests do not change that finding.

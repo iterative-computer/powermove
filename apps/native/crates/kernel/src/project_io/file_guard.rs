@@ -2,7 +2,7 @@
 //!
 //! N3/N4: preserve authored data and opaque fields, including Undo/Redo. This is
 //! metadata for the proposed transition reader, NOT protection in v1.2.0/main:
-//! both shipped readers ignore unknown fields. See docs/native/file-guard.md.
+//! the audited shipped readers ignore unknown fields. See docs/native/file-guard.md.
 
 use std::borrow::Cow;
 
@@ -403,6 +403,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     #[test]
@@ -1040,7 +1041,7 @@ const sha256Hex = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha256HexOf = async bytes => sha256Hex(bytes);
 `;
 // These extracts are byte-identical at all four audited release sources. Share the
-// immutable vendored module while reporting/testing both reference contracts.
+// immutable vendored module while reporting/testing all four release contracts.
 const old = await load(prefix + request.incremental + request.container + request.validator + request.hydration);
 const transition = await load(request.proposal);
 const roster = ['solid','text','shape','image','video','audio','adjustment','shader','extension','null','group','precomp','captions'];
