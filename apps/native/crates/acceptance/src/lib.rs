@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod closure_mcp;
 pub mod curve_oracle;
 pub mod fixture;
+pub mod headless;
 pub mod keyboard;
 pub mod main_reference;
 pub mod mcp_cases;
