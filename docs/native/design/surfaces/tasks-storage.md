@@ -77,8 +77,15 @@ graph shows `Missing` at once, per the model; pins remain stored until freed. No
 
 ## Settings ▸ Storage
 
-New Settings section `Storage` (symbol `internaldrive`), after Transcription. Description:
+New Settings section `Storage` (symbol `internaldrive`), after Extensions as main. Description:
 `Where Powermove keeps media and renders on this Mac.`
+
+**Space on This Mac** group, first. It ports main's report (P06). Summary row `{size} used`,
+detail `{size} can be freed from older backups and temporary caches.`, trailing `Free Up
+Space…`, disabled at zero. While reading: `Calculating storage…` / `Checking backups, media and
+app data.` Failed: `Storage unavailable`. Then one row per category from the storage service,
+Title Case, size trailing `t.body` tabular. Last row `Storage Folder`: `Show in Finder`,
+`Refresh`.
 
 **Usage** group: one row per class, `Originals`, `Proxies`, `Optimized Media`, `Renders`.
 Each: `{used} of {quota}` tabular, `ProgressRow` determinate; over quota shows
@@ -106,13 +113,20 @@ work over a limit fails with `{class} is full. Raise its limit or free up space.
 Rendered.` When kept frames alone exceed the target: Error `Kept frames need more than this
 limit. Turn off Keep Rendered on some compositions.`
 
-**Free Up Space** — button `Free Up Space…` at the end, opening a sheet.
+**Automatic Cleanup** group. `Clean Up Automatically`, switch, detail `Move older backups and
+expired recovery files to your archive, and keep temporary caches small.` `Older Backup Budget`,
+pop-up `1 GB`, `5 GB`, `10 GB`, `20 GB`, detail `How much older backups can use before they move
+to your archive. The two newest per project stay put.` When the newest copies alone are over
+budget: `The newest recovery copies are over this budget. They’ll be kept.` Main's cleanup deletes;
+native's moves (N4), so no copy here says `remove`.
+
+**Free Up Space** — button `Free Up Space…` at the end, and in the first group, opening a sheet.
 
 | Element | Spec |
 |---|---|
 | Title | `Free Up Space` |
 | Line | `Powermove moves media that nothing uses into your archive folder. It’s never deleted.` |
-| Rows | checkbox per class with `{n} items · {size}`; `Originals` off by default |
+| Rows | checkbox per class with `{n} items · {size}`, including `Older Backups`; `Originals` off by default. Last row `Temporary Caches`, detail `Rebuilt when needed, so these are removed, not archived.` The two newest backups per project and recovery snapshots in each group never appear here |
 | Scanning | `Checking what’s still in use…`, spinner; rows wait |
 | Note | when the archive shares a volume: `The archive is on the same disk, so this won’t free disk space. Choose another location for the archive to free it.` (`c.warning`) |
 | Footer | `Cancel`, `Move to Archive` (default); disabled with nothing to move |
@@ -130,6 +144,6 @@ the task's `DiskFull` copy applies.
 
 ## Don't
 
-- Don't delete anything from Settings ▸ Storage.
+- Don't delete anything from Settings ▸ Storage, except rebuildable caches.
 - Don't move existing files when a location changes.
 - Don't expose priority or queue order.

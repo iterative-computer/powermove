@@ -2,8 +2,8 @@
 
 Rows S097 S098. Grammar: [README](README.md) §1–5. Sources:
 `R/panels/MixerPanel.svelte`, `R/mixer/{MixerStrip,Fader,LevelReadout}.svelte`,
-`R/mixer/{levels,strips,level-control}.ts`, `E/layers-3d/`,
-`E/viewer/GizmoToolbar.svelte`. Timeline waveforms are not part of this file.
+`R/mixer/{levels,strips,level-control}.ts`. Timeline waveforms are not part of this
+file. 3D is in [3d-studio.md](3d-studio.md).
 
 Two new tokens, listed here for the pm-design lane:
 
@@ -76,78 +76,16 @@ meters add a 1 pt `c.text` tick at 0 dB. Increase Contrast: strips draw their ed
 
 ## S098 3D
 
-**Scope, reconciled.** Three sources disagree. v1.2.0 ships the `layers-3d`
-extension (`Legacy 3D Scene`, model, light and camera layers). The inspector spec
-says these rows hide *while 3D is unshipped*. The owner's 2026-10-29 product
-decision says the older three.js and Blender system never shipped, and that its
-replacement is to upgrade old projects with no compatibility mode. This spec covers
-**what v1.2.0 ships**, so a project with these layers keeps working and stays
-editable. It does not design the replacement 3D system; that needs its own spec. See
-[README §6](README.md#6-owner-questions-raised-by-these-specs).
+The old 3D surfaces are retired. The new 3D system ships with the rewrite, and its whole
+spec is [3d-studio.md](3d-studio.md): viewer toolbar, preview tiers, navigation, gizmos, light
+tool, inspector, import, materials, progress and failure.
 
-**Add 3D layer** menu: from `Layer ▸ Add 3D Layer`, timeline and viewer context
-menus, and the palette (`Add 3D {primitive}`, `Add 3D {type} Light`, `Add Camera`).
-
-`Cube` · `Sphere` · `Plane` · `Cylinder` · `Cone` · `Torus` · `Capsule` · `Icosphere`
-· separator · `Import 3D Model…` · separator · `Sun Light` · `Point Light` · `Spot
-Light` · `Camera`
-
-Other commands keep their names: `New 3D Model`, `Add 3D Studio Cube`, `Convert to 3D
-Layers`, `Duplicate 3D Layers`, `Delete 3D Layers`.
-
-**Import**: `NSOpenPanel`, `.obj`, `.glb`, `.gltf`. Wrong type: viewer banner `Choose
-an OBJ, GLB or glTF model.` Failed: banner with the reason. `.blend` is not offered.
-
-**Properties section `3D`** (after content, single selection). Rows use a
-`SceneField`: normal inspector row with its keyframe diamond (AX `Add keyframe for
-{label}`). Fields are Title Case as listed.
-
-| Group | Rows |
-|---|---|
-| `Model` | `Source` (read-only text), `Model Materials` checkbox for imported models |
-| `Material` | `Color`, `Roughness` 0.02–1, `Metalness` 0–1, `Opacity` 0–1; disclosure `More`: `Emission`, `Emission Strength`, then texture slots `Color Map`, `Normal Map`, `Roughness Map`, `Metalness Map`, `Emissive Map`, `Occlusion Map`; `Cast Shadows`, `Receive Shadows` checkboxes |
-| `Light` | `Type` pop-up `Sun`, `Point`, `Spot`; `Color`, `Intensity`; point and spot `Range`, `Falloff`; spot `Cone Angle` 1–89°, `Softness` 0–1; `Cast Shadows` |
-| `Camera` | `Projection` pop-up `Perspective`, `Orthographic`; `Field of View` 1–150° or `Zoom`; `Clip Start`, `Clip End` |
-| `Environment` | `Shadows`, `Background` checkboxes; `Ambient`, `Ambient Color`, `Exposure` |
-
-Texture slot: value-column button showing the file name or `None`; `NSMenu` `Choose
-Image…`, `Remove`. Undo names are the field names.
-
-**Viewer controls** (`GizmoToolbar`), shown only with a 3D layer selected: a group at
-the **leading** end of the viewer bar, so the zoom and quality pop-ups keep their
-trailing place. In Focus mode they join the glass `ViewerOverlay`, using dark-scheme
-tokens.
-
-| Control | Options | AX |
-|---|---|---|
-| Segmented | `Move` · `Rotate` · `Scale` | `3D transform` |
-| Segmented | `Global` · `Local` | `3D axes` |
-| Segmented | `Camera` · `Editor` | `3D viewpoint` |
-| Pop-up | `Select`, `Orbit`, `Pan`, `Dolly`, `Frame Selection`, `Frame All` | `3D view` |
-
-Below `m.min_center × 2` of viewer width the three segmented controls collapse into
-one `3D` pull-down with the same items. Pop-up tooltip: `3D view: middle-drag or
-Option-drag to orbit; Shift to pan. In a navigation tool, scroll to dolly, F to
-frame selection, Home to frame all.` Those gestures and keys stay as v1.2.0.
-
-Gizmo lines use the viewer gizmo tokens. Axis handles carry `X`, `Y`, `Z` letters at
-`t.minimum` so axes aren't told apart by colour alone; v1.2.0's red, green and blue
-axes keep their conventional colours because they are data in a 3D view.
-
-| State | Spec |
-|---|---|
-| Layer's scene won't load | Properties section Error `This 3D layer couldn’t be loaded.`; viewer shows the layer's last frame or nothing; project stays editable |
-| Missing model file | Offline treatment from media-browser and `Relink…` |
-| Refused edit | viewer banner with the refusal |
-| Empty scene | no special state; the viewer shows the composition |
-
-VoiceOver: segmented controls per kit; the view pop-up announces its value. Gizmos
-aren't exposed; every transform is reachable from Properties. Under Reduce Motion
-framing commands jump rather than ease.
+Old projects upgrade automatically when opened, with no compatibility mode
+([3d-studio.md §9](3d-studio.md#9-upgrading-old-projects)). A lane builds none of the
+earlier controls: not the `Global`/`Local` or `Camera`/`Editor` segments, the `3D view`
+pop-up, or `Intensity` and `Cone Angle` as labels.
 
 ## Don't
 
 - Don't add pan, sends, EQ or inserts to the Mixer.
 - Don't move the zoom or quality pop-ups to make room for 3D controls.
-- Don't offer `.blend` import or a Blender handoff.
-- Don't treat this S098 spec as the design for the new 3D system.
