@@ -20,6 +20,8 @@ serde_json = "1"
 sha2 = "0.10"
 url = "2.5"
 semver = "1"
+pm-first-launch = { path = "../../first-launch" }
+pm-promedia = { path = "../../promedia" }
 
 [dev-dependencies]
 tempfile = "3"

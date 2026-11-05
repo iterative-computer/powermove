@@ -1263,3 +1263,63 @@ The requested Linux `cargo test --locked -p pm-native-app --no-run` stops in the
 existing Apple-only `objc2` dependency; the Linux harness is the actual-source
 substitute, not a claim that the app runs here. No Mac runtime/visual gate is
 closed by these checks.
+## Cloud surface backing B — 2026-11-04
+
+`pm-services::surface_backing` adds CPU-only models and worker boundaries for
+Item 6B. This is **backing coverage**, not an installed application surface,
+macOS runtime pass or Opus visual acceptance. No views, visual literals, token
+substitutes, legacy consumers or user-data deletion were added. The authority is
+the family specs merged at `ce36cb6fc` and tagged `v1.2.0` sources named below.
+
+| Rows | Backing added | Remaining application/service binding |
+| --- | --- | --- |
+| S097 | Audible graph/strip projection; gain/mute command plans; captured-time gesture identity; temporary solo; real meter arithmetic and clip latch. No pan. | Kernel gesture/animation adapter, audio taps/retuning and panel visibility attachment. Animated mute follows S097's playhead rule. |
+| S098 | Existing scene field domains, property command plans, primitive/map identities, ephemeral navigation and explicit unavailable structural host. | Kernel `Scene3dCommand::{SetData,Edit}` still returns `NotImplemented`; model importer/texture admission and the new 3D replacement remain separate. |
+| S099–S102 | Full-definition JSON draft with id/revision guard and host validation; saved workspace archival and fallback; shelf/preview identity; generated local/source/parameter routing, stripped manifest authority, tool jobs and stale-result fences. | Atomic kernel `RecordHost`, definition validator/custom registration, live preview/editor, composition-fill binding, V8 tool execution and v4 control installation. Unknown schemas/payloads are retained, never silently converted into another binding. |
+| S103–S105 | Session-scoped notes debounce/flush/failure retention; 24 visible Takes with archived overflow and guarded restore/delete; Mods health/action projection with retained provenance. | Kernel notes-without-Undo/autosave command, exact take restore transaction and atomic retained record replacement; extension lifecycle/store adapters. No optimistic enablement. |
+| S107–S110 | Ordered onboarding choices, worker completion/marker outcomes and explicit agent-before-import ordering; speech download ownership contract; unchanged-draft/thread import handoff guard. | Welcome/window lifecycle, shared transcription service and real agent handoff. Animation remains inside the Welcome window under the new spec; no overlay or suitcase implementation was added. |
+| S111–S112 | Existing TR-gated metadata checker; downloading/verifying/ready/failure states and staged receipt requirement; normal-quit barrier contract; per-version notices/skip; semantic release filtering, one-window claim and seen-on-shown receipt. | Signed Sparkle/download/cancel/timer implementation, durable preferences and frontmost-sheet scheduling. No installer, signing or publishing is claimed. |
+| S115 | Native typed/missing metric snapshots, visibility gate and 2 Hz admission. Exact native label catalog; no Pause control or GL-label imitation. | Presented-frame/CPU+GPU/render-graph telemetry and real composition counters. |
+| N001–N003 | Real first-launch event/outcome adapter; durable-boundary pause and fresh consent requests; every outcome count retained; private review port; explicit unavailable reverse migration. | Gate/library lifecycle, private report inventory and blocked-owner relink. **DESIGN-TODO(opus):** N002's visible Not Now/Continue Without Them cannot complete until the first-launch owner supplies `skip_secret_consent`; `decline_secrets` returns Unavailable. |
+| N004 | Real pm-promedia scope/LUT worker calls with explicit stage/frame/pipeline identity, HDR values retained, invalid pixels rejected and stale results refused. | Engine frame-stage provider, panel scheduling/selection/workspace persistence and embedded LUT effect/export adoption. No tone mapping or document-local LUT simulation. |
+| S045–S046/N005 | Existing task queue/storage adapters; window-scoped control, indeterminate summary, archive-before-retire, preserved frozen render-queue project/options and complete-reference-closure archival gate. | Native task events, retry worker identities, rendition/cache/location/settings integration and actual utility/popover hosts. Archive moves do not promise reclaimed space on the same disk. |
+| S114/N007 | Session/resource-scoped OS outcomes; notification first-run authorization, foreground/visible/stopped guards, thread identifiers, exact event copy and system-owned sound contract. | Signed UNUserNotificationCenter/TCC/bookmark/local-network adapters and click-to-question/current-thread fallback. Extensions' camera/microphone/screen requests are refused; NSColorSampler requires no authorization. |
+
+Source evidence: `git show v1.2.0:apps/desktop/src/` followed by
+`renderer/src/mixer/{strips,edits,levels,level-control}.ts`,
+`renderer/src/panels/{MixerPanel,GeneratedPanel,TakesPanel,NotesPanel,WorkspacesPanel,PerfPanel}.svelte`,
+`renderer/src/core/{generated-bindings.ts,types/workspace.ts}`,
+`renderer/src/legacy/core/{workspace,history,render-queue}.ts`,
+`extensions/{mods,layers-3d}/`, `renderer/src/onboarding/{welcome,workspace-import}.ts`,
+`main/{onboarding,updates,whats-new,agent-notifications,permissions}.ts`,
+`renderer/src/shell/{app-updates,tasks.svelte}.ts` and
+`shared/{creative-workspace,agent-notifications}.ts`. Native additions call the
+existing first-launch/promedia implementations, not Electron emulations.
+
+Decisions and selecting rules:
+
+- N3: Opus's new family specs supersede tagged details for animated mute,
+  24-visible archived Takes, seen-on-shown release notes, window-contained welcome,
+  notification timing/sound and observer-only Performance. No Mixer pan added.
+- N4/N6: preserve full authored/unknown JSON and every archived generation; notes
+  never switch ownership; queued renders retain frozen source/options/output.
+  `RecordHost` requires atomic revision comparison plus archival, not get/set.
+- N1/N3: structural 3D, missing generated bindings, unknown reference closure and
+  unverified updates fail explicitly; model existence does not establish capability.
+- N7: stable object ids, per-open session incarnations and unique worker tickets
+  fence callbacks after project/window replacement.
+- N8: adapters are worker-side Rust; app callbacks submit/poll `ServiceWorker`.
+  No Node/Chromium dependency or synchronous JavaScript wait was introduced.
+- Opus ownership/prune rule: no new view or token fallback; no old consumer removed.
+
+Production lockfile change adds only the two existing local crate dependencies
+to pm-services; no workspace member or engine lockfile change is needed. The
+services-owned isolated manifest/lock also includes these real dependencies.
+All fixtures are synthetic, self-contained Rust source. Filesystem fixtures
+canonicalize temporary roots for macOS system symlinks; no ffmpeg is required.
+
+Validation and final reconciliation are recorded in the dated follow-up below.
+macOS still requires full app build; audio/3D sound and Undo; actual panel/session
+switches, IME and AX; Welcome focus; signed updater/save/export barrier; migration,
+secret-decline API, Keychain/TCC/bookmarks/notifications; live scopes/LUT pipeline;
+storage volume outcomes; and Opus review of actual light/dark/accessibility output.
