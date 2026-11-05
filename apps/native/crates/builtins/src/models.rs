@@ -771,6 +771,11 @@ impl Backend {
                         "Local controls must dispatch their authored change listener".into(),
                     );
                 }
+                if self.panel_id == "layer-effects" {
+                    return self
+                        .parameter_write(handle, model(&args["value"])?, time)
+                        .map(NativeCommand::Kernel);
+                }
                 let request = self.native.properties.write(
                     self.model.as_mut().ok_or("No open project")?,
                     self.caller,

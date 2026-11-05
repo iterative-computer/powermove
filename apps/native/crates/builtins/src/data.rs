@@ -44,6 +44,7 @@ pub(crate) struct Backend {
     panel: EffectsPanel,
     extension: String,
     bindings: BTreeMap<String, Vec<String>>,
+    binding_owners: BTreeMap<String, (u64, Vec<String>)>,
     pending: Vec<Inflight>,
     states: Vec<StateInflight>,
     retired: bool,
@@ -106,6 +107,7 @@ impl Backend {
             service_revision: 0,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
+            binding_owners: BTreeMap::new(),
             pending: vec![],
             states: vec![],
             retired: false,
@@ -170,6 +172,7 @@ impl Backend {
                 .ok_or("No open project")?
                 .remove_definition(&id);
         }
+        self.panel.presentation.parameters.clear();
         for (id, d) in latest {
             let mut params = vec![];
             for p in d["params"].as_array().into_iter().flatten() {
@@ -273,6 +276,54 @@ impl Backend {
             .filter_map(|f| f["type"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
         Ok(json!({"id":id,"effects":fx}))
+    }
+    pub(crate) fn parameter_write(
+        &mut self,
+        handle: &str,
+        value: pm_model::Value,
+        time: f64,
+    ) -> Result<Request, String> {
+        let owner = self
+            .binding_owners
+            .get(handle)
+            .ok_or("Unregistered effect binding")?;
+        let inspector = self.model.as_ref().ok_or("No open project")?;
+        if owner.0 != inspector.document_id() || owner.1 != inspector.selected_layers() {
+            return Err("Effect binding selection changed".into());
+        }
+        let channels = self
+            .bindings
+            .get(handle)
+            .ok_or("Disposed effect binding")?
+            .clone();
+        let projection = self.projection()?;
+        let row = projection["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| {
+                r["kind"] == "parameter"
+                    && r["parameter"]["binding"] == handle
+                    && r["parameter"]["readonly"] == false
+                    && channels == [r["parameter"]["id"].as_str().unwrap_or("").to_owned()]
+            })
+            .ok_or("Effect binding no longer editable")?;
+        let address = model(&row["parameter"]["id"])?;
+        let property = pm_panel_inspector::PropertyId::from_value(
+            &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .set(
+                self.caller,
+                pm_panel_inspector::Binding::Property(property),
+                value,
+                time,
+            )
+            .map_err(|e| e.to_string())
     }
     pub fn local_fields(&mut self) {
         self.bindings.insert("effects.search".into(), vec![]);
@@ -438,10 +489,14 @@ impl KernelData for Data {
                     if !valid {
                         return Err("unknown model binding".into());
                     }
+                    let model = b.model.as_ref().ok_or("No open project")?;
+                    let owner = (model.document_id(), model.selected_layers().to_vec());
+                    b.binding_owners.insert(handle.clone(), owner);
                     b.bindings.insert(handle.clone(), channels.clone());
                 }
                 HostOperation::DisposeBinding { handle } => {
                     b.bindings.remove(handle);
+                    b.binding_owners.remove(handle);
                 }
                 HostOperation::GetSetting { key } => {
                     let state = b.kernel.state();
@@ -519,6 +574,7 @@ impl KernelData for Data {
                 }
                 HostOperation::Command { command, args } if command == "panel.effect-controls" => {
                     let caller = b.caller;
+                    let time = b.time();
                     let Backend {
                         panel, model: m, ..
                     } = &mut *b;
@@ -527,7 +583,7 @@ impl KernelData for Data {
                             m.as_mut().ok_or("No open project")?,
                             caller,
                             &model(args)?,
-                            0.,
+                            time,
                         )
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
@@ -590,6 +646,7 @@ impl KernelData for Data {
                     .call(&identity.project, Request::new(b.caller, Call::RealmFailed)),
             );
             b.bindings.clear();
+            b.binding_owners.clear();
             b.retired = true;
         }
         Ok(())

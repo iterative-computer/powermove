@@ -270,7 +270,8 @@ impl EffectsPanel {
                     (
                         "binding",
                         format!(
-                            "effect-parameter:{}",
+                            "effect-parameter:{}:{}",
+                            model.document_id(),
                             pm_model::json::to_canonical_string(&property.value())
                         )
                         .into(),

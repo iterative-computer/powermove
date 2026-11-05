@@ -496,11 +496,36 @@ impl EngineProxy for Broker {
                     id,
                     panel: panel.into(),
                     generation: generation.number,
-                    operation: input["operation"]
-                        .as_str()
-                        .ok_or(Error::Invalid("platform operation"))?
-                        .into(),
-                    input: input["input"].clone(),
+                    operation: if panel == "inspector" && input["operation"] == "inspector" {
+                        match input["input"]["type"].as_str() {
+                            Some("add-effect-menu") => "effectMenu",
+                            Some("row-menu") => "contextMenu",
+                            _ => "inspector",
+                        }
+                        .into()
+                    } else {
+                        input["operation"]
+                            .as_str()
+                            .ok_or(Error::Invalid("platform operation"))?
+                            .into()
+                    },
+                    input: if panel == "inspector"
+                        && input["operation"] == "inspector"
+                        && input["input"]["type"] == "row-menu"
+                    {
+                        json!(
+                            input["input"]["items"]
+                                .as_array()
+                                .ok_or(Error::Invalid("row menu"))?
+                                .iter()
+                                .map(|item| json!({"id":item["action"],"label":item["label"],
+                                "disabled":item["enabled"] != true,"checked":item["checked"],
+                                "separator":item["separatorBefore"]}))
+                                .collect::<Vec<_>>()
+                        )
+                    } else {
+                        input["input"].clone()
+                    },
                 });
                 (self.wake)();
                 Ok(json!(id))

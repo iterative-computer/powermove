@@ -22,7 +22,8 @@ impl Backend {
             "project.name",
             "project.fps",
             "project.duration",
-            "project.background"
+            "project.background",
+            "project.colorDepth"
         ]))?;
         let mut rows = vec![];
         for (id, group, label, control, value, detail) in [
@@ -79,6 +80,12 @@ impl Backend {
             }
             rows.push(row);
         }
+        rows.push(json!({"id":"project.colorDepth","section":"project","group":"Composition",
+            "label":"Color Depth","control":"choice","value":root.get("colorDepth")
+                .map(|n| wire(&n.to_value())).unwrap_or(json!(8)),
+            "options":[{"v":8,"label":"8-bit"},{"v":16,"label":"16-bit"},{"v":32,"label":"32-bit float"}],
+            "detail":"Precision per color channel. Applies to every composition in this project.",
+            "binding":fields["project.colorDepth"],"disabled":false}));
         Ok(rows)
     }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
@@ -98,6 +105,14 @@ impl Backend {
                     Some("project.fps") => patch.fps = Some(number(value, 1., 240.)?),
                     Some("project.duration") => {
                         patch.duration = Some(number(value, 0.1, f64::MAX)?)
+                    }
+                    Some("project.colorDepth") => {
+                        patch.color_depth = Some(
+                            value
+                                .as_u64()
+                                .filter(|n| [8, 16, 32].contains(n))
+                                .ok_or("Invalid color depth")? as u32,
+                        );
                     }
                     Some("project.background") => {
                         let s = value.as_str().ok_or("Background must be a colour")?;
