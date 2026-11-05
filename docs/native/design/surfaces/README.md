@@ -1,12 +1,17 @@
 # Surface specs — dialogs, alerts, recovery and secondary windows
 
-Status: **build specs** for the P0 and P1 rows of
-[surfaces.md](../../surfaces.md) that carried `DESIGN-TODO(opus)`. Owner:
+Status: **build specs** for the rows of [surfaces.md](../../surfaces.md) that
+carried `DESIGN-TODO(opus)`: P0 and P1 (first table), P2, P3 and the native-only
+rows (second table). Owner:
 design lead, 2026-11-01. Same contract as [panels/README.md](../panels/README.md):
 a lane builds from the spec **without making design decisions**; if the spec
 is silent it writes `DESIGN-TODO(opus): <question>` and stops. Token short
 forms (`c.`, `m.`, `t.`, `mo.`) and copy conventions (`…`, `“ ”`, `{name}`)
 are those of panels/README §1.
+
+| File | Family | Rows |
+|---|---|---|
+| [agent-auth.md](agent-auth.md) | Agent surfaces, providers, runtime, sign-in, account | S057 S059 S060 S062–S066 S070–S072 S083–S086 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
@@ -81,3 +86,33 @@ Error alerts take their message and informative text from the
 The last row's informative text is amended here to
 `Try again. If it keeps happening, choose Window ▸ Error Log for details.`
 (the shipped app has no Help menu entry for reporting).
+
+## 5. Baseline for the P2, P3 and native-only families
+
+The family files state only what differs from this baseline. A state a family
+does not mention is the panels/README §3 default, not an open question.
+
+| Topic | Rule |
+|---|---|
+| Light and dark | Tokens only, so both schemes come from the same spec. Anything drawn over footage or artwork uses dark-scheme tokens in light mode too (language §4). |
+| Increase Contrast | `m.border` 2; panels and cards draw their edge; selected rows gain an `m.border` `c.separator` outline; data marks (meters, curves, scope graticules) gain a `c.separator` keyline. |
+| Reduce Transparency | Glass frames turn solid through `Tokens::material`. No panel content changes. |
+| Reduce Motion | Springs and scale become the `mo.reduced` cross-fade. Live data (meters, scopes, progress) keeps moving because it is content. |
+| Focus | Full Keyboard Access reaches every control in reading order. AppKit controls use the system ring; GPUI controls draw `c.focus`. Esc cancels the innermost transient. |
+| Loading | Nothing for 0.5 s, then the panels/README Loading state. |
+| Disabled | panels/README Disabled state. A control unavailable for a reason shows that reason as its tooltip. |
+| VoiceOver | panels/README §7: visible text is the label, values read with units, status lines are polite live regions, errors post `.high`. |
+| Window-level panels | A dockable panel takes the panels/README §2 card, header and dock menu. Its id and default dock are the v1.2.0 ones. |
+| Errors | README §4 error copy. Developer text goes to the Error Log (S053). |
+
+
+## 6. Owner questions raised by these specs
+
+The specs below hold a default so a lane is never blocked, except where a row
+says *do not build*. Reverse a default here and in the owning family file.
+
+| # | Question | Default in the spec | Owning row |
+|---|---|---|---|
+| 1 | The region-selection overlay exists in v1.2.0 code but nothing opens it. Ship it, or retire the row? | Specified, **do not build** until decided | S066 |
+| 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | Archive is kept, copy says so, no restore UI | S060, S095, S103 |
+| 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | Keep automatic registration, and make it visible and reversible in Settings | S070 |
