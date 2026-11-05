@@ -52,6 +52,7 @@ pub(crate) fn blur_layer<'d>(
     blur: Blur,
 ) -> JsResult<Option<Draw>> {
     let n = blur.samples.max(1);
+    let outer_shutters = std::mem::replace(&mut b.studio_shutters, n);
     let fps = level_fps(scope.comp);
     let sample_alpha = alpha / f64::from(n);
     let outer_center = b.video_center;
@@ -82,6 +83,7 @@ pub(crate) fn blur_layer<'d>(
         }
     }
     b.video_center = outer_center;
+    b.studio_shutters = outer_shutters;
     result?;
     if draws.is_empty() {
         return Ok(None);
@@ -120,6 +122,7 @@ pub(crate) fn blur_group<'d>(
     blur: Blur,
 ) -> Draw {
     let n = blur.samples.max(1);
+    let outer_shutters = std::mem::replace(&mut b.studio_shutters, n);
     let fps = level_fps(scope.comp);
     let outer_blur = b.blur.take();
     let outer_center = b.video_center;
@@ -139,6 +142,7 @@ pub(crate) fn blur_group<'d>(
         });
     }
     b.video_center = outer_center;
+    b.studio_shutters = outer_shutters;
     b.blur = outer_blur;
     Draw {
         layer: js::layer_id(group),

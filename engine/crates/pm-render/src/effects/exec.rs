@@ -459,6 +459,13 @@ impl<'c> Gpu<'c> {
             ));
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
+            if let Some(owner) = &step.owner {
+                calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
+                calls.push(("u_layerRes".into(), f(&owner.size)));
+                calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
+                calls.push(("u_sampleLod".into(), f(&[0.])));
+            }
             let program = self
                 .effects
                 .program(device, DefinitionKind::Effect, &step.definition, format)
@@ -606,6 +613,13 @@ impl<'c> Gpu<'c> {
                 ));
                 calls.push(("u_time".into(), f(&[time])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
+                if let Some(owner) = &step.owner {
+                    calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
+                    calls.push(("u_layerRes".into(), f(&owner.size)));
+                    calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                    calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
+                    calls.push(("u_sampleLod".into(), f(&[0.])));
+                }
                 runner_param_calls(&step.params, &mut calls);
                 calls
             })

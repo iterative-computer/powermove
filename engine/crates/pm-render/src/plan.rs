@@ -286,6 +286,7 @@ pub struct Build<'r> {
     /// The composition time at which video sources select their frame
     /// inside motion-blur samples (the center time of their level).
     pub(crate) video_center: Option<f64>,
+    pub(crate) studio_shutters: u32,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
     /// The output origin of the level being built (the request's at the
@@ -481,6 +482,7 @@ pub(crate) fn build_reusing<'r>(
         text,
         blur: options.blur,
         video_center: None,
+        studio_shutters: 1,
         sampling: options.sampling,
         origin: options.origin.unwrap_or((0.0, 0.0)),
         passes: Vec::new(),
@@ -1432,7 +1434,9 @@ fn native_content_quad<'d>(
             let ch = node::to_number(scope.comp.member("h"));
             let w = js::max(1.0, or_chain(js::get(&d, "w"), cw, wf));
             let hh = js::max(1.0, or_chain(js::get(&d, "h"), ch, hf));
-            let (tw, th) = if crate::sampling::is_level2(layer) {
+            let (tw, th) = if crate::sampling::is_level2(layer)
+                || node::truthy(node::member(Some(layer), "continuousRaster"))
+            {
                 // Continuous rasterization (section 8): the child renders
                 // at the density it is drawn at, never below its own size.
                 let density = crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?;
@@ -1536,7 +1540,28 @@ fn native_content_quad<'d>(
             }
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
-                    match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
+                    match if let Some(settings) = b.options3d.studio {
+                        Ok(crate::scene3d::Object3dPlan {
+                            layer: js::layer_id(layer),
+                            scene: std::sync::Arc::new(crate::scene3d::Scene3d::empty(
+                                width, height,
+                            )),
+                            kind: crate::scene3d::Render3d::Studio {
+                                request: pm_studio::extract::SceneRequest {
+                                    composition: comp_id.clone(),
+                                    revision: settings.revision,
+                                    ticks: crate::compat::ticks_of(time).get(),
+                                    width,
+                                    height,
+                                },
+                                settings,
+                                final_output: b.options3d.studio_final,
+                                shutter_samples: b.studio_shutters,
+                            },
+                        })
+                    } else {
+                        crate::scene3d::plan_layer(b.pass3d.last(), layer)
+                    } {
                         Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
                         })),

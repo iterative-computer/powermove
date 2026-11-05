@@ -516,6 +516,41 @@ impl Renderer {
         }
     }
 
+    /// Install the pinned native current and historical built-in programs.
+    /// File provenance is carried outside authored JSON and frozen per job.
+    pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
+        let set = crate::effects::versions::for_document(document);
+        let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
+        if !failures.is_empty() {
+            return Err(format!("effect definition failures: {failures:?}"));
+        }
+        self.effects.versioned_builtins = true;
+        self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
+        Ok(())
+    }
+
+    /// Attach an immutable, worker-safe Studio source for viewer and exports.
+    /// Replacing it retires presented scenes and draws, retaining immutable BLASes.
+    pub fn set_studio_source(
+        &mut self,
+        source: Option<Arc<dyn crate::scene3d::provider::Source>>,
+        settings: crate::scene3d::provider::Settings,
+    ) {
+        self.options3d.studio = source.as_ref().map(|_| settings);
+        match (self.scene3d.provider.as_mut(), source) {
+            (Some(pass), Some(source)) => pass.replace_source(source),
+            (_, source) => self.scene3d.provider = source.map(crate::scene3d::provider::Pass::new),
+        }
+        self.clear_draw_reuse();
+    }
+
+    pub fn studio_counters(&self) -> crate::scene3d::provider::Counters {
+        self.scene3d
+            .provider
+            .as_ref()
+            .map_or_else(Default::default, |p| p.counters())
+    }
+
     /// Runs layer effects and adjustment layers through `host` instead of
     /// the renderer's definitions; `None` goes back to them.
     pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
@@ -1530,6 +1565,9 @@ impl Renderer {
         rows: SnapshotRows,
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
+        if let Some(studio) = self.scene3d.provider.as_mut() {
+            studio.begin_frame();
+        }
         if self.fallback_host.is_none() {
             return self.render_into_once(
                 document,

@@ -23,6 +23,7 @@ pub mod fallback;
 pub mod plan;
 pub(crate) mod prewarm;
 pub mod program;
+pub mod versions;
 pub mod watchdog;
 
 use std::collections::BTreeMap;
@@ -69,6 +70,8 @@ struct Entry {
 
 /// The renderer's definitions and their programs.
 pub struct Effects {
+    pub(crate) file_app_version: Option<String>,
+    pub(crate) versioned_builtins: bool,
     set: DefinitionSet,
     /// Whether any definitions were given. Without them nothing is known
     /// missing either, and effects and transitions are routed.
@@ -236,6 +239,8 @@ impl Effects {
 
     fn with_cache(cache: Arc<pm_glsl::Cache>, context: String) -> Effects {
         Effects {
+            file_app_version: None,
+            versioned_builtins: false,
             set: DefinitionSet::default(),
             configured: false,
             missing_ids: Default::default(),
@@ -319,6 +324,8 @@ impl Effects {
         &mut self,
         snapshot: &DefinitionSetSnapshot,
     ) -> Result<Vec<EngineError>, UpdateError> {
+        self.versioned_builtins = false;
+        self.file_app_version = None;
         let mut set = DefinitionSet::default();
         let generation = snapshot.generation.max(Seq::new(1).expect("safe"));
         let update = DefinitionsUpdate {
@@ -757,7 +764,7 @@ impl crate::composite::EffectHost for Effects {
         layer: &'d pm_model::Node,
         frame: crate::composite::effects::EffectFrame,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps = match plan::effect_steps(scope, self, layer, frame.time)? {
+        let steps = match plan::effect_steps_scaled(scope, self, layer, frame.time, frame.scale)? {
             Ok(steps) => steps,
             Err(f) => return Ok(Err(f)),
         };

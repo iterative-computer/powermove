@@ -613,6 +613,9 @@ pub struct ApplyOutcome {
 /// `pm_eval`) are valid exactly while the edition they were filled at holds.
 /// The edition is not part of the document's value (`==` ignores it).
 pub struct Document {
+    /// Saving application's version, outside the authored JSON. Clones and
+    /// scratch edits retain it; decoding/reopening supplies it from the file.
+    saving_app_version: Option<String>,
     root: Option<Node>,
     revision: u64,
     digest: OnceLock<Option<[u8; 32]>>,
@@ -630,6 +633,7 @@ impl Clone for Document {
     /// A copy is other nodes: it takes its own edition.
     fn clone(&self) -> Document {
         Document {
+            saving_app_version: self.saving_app_version.clone(),
             root: self.root.clone(),
             revision: self.revision,
             // The same content: its canonical digest holds for the copy.
@@ -642,6 +646,7 @@ impl Clone for Document {
 impl Default for Document {
     fn default() -> Document {
         Document {
+            saving_app_version: None,
             root: None,
             revision: 0,
             digest: OnceLock::new(),
@@ -669,6 +674,7 @@ impl Document {
     /// A document at revision `revision` holding `root`.
     pub fn new(root: Option<Value>, revision: u64) -> Document {
         Document {
+            saving_app_version: None,
             root: root.map(|v| Node::from_value(v, revision)),
             revision,
             digest: OnceLock::new(),
@@ -680,6 +686,7 @@ impl Document {
     /// with wherever it came from until either changes it).
     pub fn from_root(root: Option<Node>, revision: u64) -> Document {
         Document {
+            saving_app_version: None,
             root,
             revision,
             digest: OnceLock::new(),
@@ -694,6 +701,15 @@ impl Document {
         let mut document = self.clone();
         document.revision = revision;
         document
+    }
+
+    pub fn saving_app_version(&self) -> Option<&str> {
+        self.saving_app_version.as_deref()
+    }
+
+    pub fn set_saving_app_version(&mut self, version: Option<String>) {
+        self.saving_app_version = version;
+        self.edition = next_edition();
     }
 
     pub fn revision(&self) -> u64 {
@@ -1012,5 +1028,26 @@ pub mod reads {
             assert!(finish(Some(&index)).is_empty());
             assert_eq!(TRACING.load(Ordering::Relaxed), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod saving_version_tests {
+    use super::*;
+    #[test]
+    fn saving_version_is_pinned_across_clones_and_absent_from_authored_bytes() {
+        let mut document = Document::new(Some(Value::from("artwork")), 1);
+        let before = document.to_value();
+        document.set_saving_app_version(Some("1.3.0".into()));
+        assert_eq!(document.to_value(), before);
+        assert_eq!(document.clone().saving_app_version(), Some("1.3.0"));
+        assert_eq!(
+            document.shared_at_revision(2).saving_app_version(),
+            Some("1.3.0")
+        );
+        assert_eq!(
+            Document::reconciled(&document, before, 2).saving_app_version(),
+            Some("1.3.0")
+        );
     }
 }

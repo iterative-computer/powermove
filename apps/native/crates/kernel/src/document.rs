@@ -284,8 +284,19 @@ impl DocumentStore {
         history: History,
         history_owned: bool,
     ) -> DocumentStore {
-        let (document, history) =
+        let (mut document, history) =
             crate::commands::scene3d::upgrade_document_history(document, history);
+        // Native saves preserve the original effect-generation evidence even
+        // though the envelope's own application version changes on Save.
+        let version = file
+            .envelope
+            .extra
+            .get("effectDefinitionSavingVersion")
+            .or(file.envelope.version.as_ref());
+        document.set_saving_app_version(version.and_then(|v| match v {
+            Value::String(v) => v.as_str().map(str::to_owned),
+            _ => None,
+        }));
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
@@ -1044,8 +1055,9 @@ impl DocumentStore {
         })
     }
 
-    fn publish(&mut self, document: Document, ops: Arc<[Op]>, cause: ChangeCause) {
+    fn publish(&mut self, mut document: Document, ops: Arc<[Op]>, cause: ChangeCause) {
         let base_revision = self.revision();
+        document.set_saving_app_version(self.current.saving_app_version().map(str::to_owned));
         let document = Arc::new(document);
         let revision = document.revision();
         debug_assert!(revision > base_revision);
@@ -1160,6 +1172,16 @@ impl DocumentStore {
             _ => HistoryToWrite::Session(self.history.snapshot()),
         };
         let mut extra = self.file.envelope.extra.clone();
+        if pm_fx_defs::catalog::saving_generation(self.current.saving_app_version())
+            == pm_fx_defs::catalog::ReferenceGeneration::Main
+        {
+            extra.insert(
+                "effectDefinitionSavingVersion",
+                self.current
+                    .saving_app_version()
+                    .map_or(Value::Null, Value::from),
+            );
+        }
         if self.history_owned
             && let Some(raw) = &self.file.envelope.history
             && project_io::history_needs_archive(

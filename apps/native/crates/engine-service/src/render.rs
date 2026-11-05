@@ -47,6 +47,7 @@ pub struct Engine {
     cache: VecDeque<(crate::policy::CacheKey, Arc<ExportedSurface>)>,
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
+    studio_content: Option<(usize, u64)>,
 }
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
@@ -104,6 +105,7 @@ impl Engine {
             cache: VecDeque::with_capacity(8),
             offscreen: None,
             cache_enabled: true,
+            studio_content: None,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -121,9 +123,24 @@ impl Engine {
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
+    fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
+        let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
+        if self.studio_content != Some(key) {
+            self.renderer
+                .set_main_effects_for_document(&scene.doc)
+                .map_err(anyhow::Error::msg)?;
+            #[cfg(feature = "kernel")]
+            crate::studio::attach(&mut self.renderer, scene.doc.clone(), &scene.media);
+            self.studio_content = Some(key);
+        }
+        Ok(())
+    }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.sync_studio(scene)?;
         self.sync_fonts();
-        let request = pm_render::RenderRequest::sized(size, Precision::Float16);
+        let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
+        request.export = true;
+        request.output_kind = pm_render::OutputKind::Final;
         let f = pm_export::render::render_frame(
             &mut self.renderer,
             &scene.doc,
@@ -166,6 +183,7 @@ impl Engine {
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        self.sync_studio(scene)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let key = crate::policy::CacheKey {
@@ -219,7 +237,9 @@ impl Engine {
                 }
             };
             let target = Target::wrap(surface.texture.clone());
-            let request = pm_render::RenderRequest::sized(size, Precision::Float16);
+            let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
+            request.export = true;
+            request.output_kind = pm_render::OutputKind::Final;
             trace.lock().unwrap().render_start = now();
             let rendered = self.renderer.render_into(
                 &scene.doc,

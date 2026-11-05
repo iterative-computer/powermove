@@ -35,6 +35,7 @@ pub struct Param {
 /// One effect pass node: an effect instance's passes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectStep {
+    pub owner: Option<std::sync::Arc<Owner>>,
     /// `fx.id`.
     pub instance: String,
     /// `fx.type`, the definition id.
@@ -49,6 +50,13 @@ pub struct EffectStep {
     /// `viewportPadding` parameter values.
     pub padding: f64,
     pub params: Vec<Param>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Owner {
+    pub uv: [f32; 9],
+    pub size: [f64; 2],
+    pub pixel_scale: [f64; 2],
 }
 
 /// A transition node.
@@ -187,6 +195,7 @@ pub fn effect_step(
         })
         .sum();
     EffectStep {
+        owner: None,
         instance: instance.to_owned(),
         definition: def.id.as_str().to_owned(),
         passes: def.flags.passes,
@@ -247,6 +256,16 @@ pub fn effect_steps<'d>(
     layer: &'d Node,
     time: f64,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
+    effect_steps_scaled(scope, effects, layer, time, (1., 1.))
+}
+
+pub fn effect_steps_scaled<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
     for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
@@ -260,6 +279,13 @@ pub fn effect_steps<'d>(
             continue;
         }
         let ty = node::to_js_string(node::member(Some(fx), "type")).to_string_lossy();
+        let ty = match effects.saved_key(&ty, node::member(Some(fx), "version")) {
+            Ok(key) => key,
+            Err(message) => {
+                refused.get_or_insert(Feature::Definition(message));
+                continue;
+            }
+        };
         let Some(def) = effects.get(DefinitionKind::Effect, &ty) else {
             if !effects.is_missing(DefinitionKind::Effect, &ty) {
                 refused.get_or_insert(Feature::Definition(format!("effect {ty}")));
@@ -292,7 +318,62 @@ pub fn effect_steps<'d>(
             };
             values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
-        steps.push(effect_step(def, &fx_id, &values));
+        let mut step = effect_step(def, &fx_id, &values);
+        if effects.versioned_builtins
+            && def
+                .glsl
+                .as_ref()
+                .is_some_and(|g| g.source.contains("u_layerUV"))
+        {
+            if node::is_str(node::member(Some(layer), "effectSpace"), "source")
+                || node::truthy(node::member(Some(layer), "threeD"))
+            {
+                refused.get_or_insert(Feature::Definition(format!(
+                    "effect {}: source/3D owner binding unavailable",
+                    step.definition
+                )));
+                continue;
+            }
+            let Some(bounds) = scope.size_bounds(layer, time)? else {
+                refused.get_or_insert(Feature::Definition(
+                    "effect owner bounds unavailable".into(),
+                ));
+                continue;
+            };
+            let offset = scope.size_anchor_offset(layer, time)?;
+            let world = scope.world_matrix(layer, time)?;
+            let scaled = [
+                world[0] * scale.0,
+                world[1] * scale.1,
+                world[2] * scale.0,
+                world[3] * scale.1,
+                world[4] * scale.0,
+                world[5] * scale.1,
+            ];
+            let Some(inv) = pm_eval::transform::invert(&scaled) else {
+                refused.get_or_insert(Feature::Definition(
+                    "effect owner transform is singular".into(),
+                ));
+                continue;
+            };
+            let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+            step.owner = Some(std::sync::Arc::new(Owner {
+                uv: [
+                    (inv[0] / w) as f32,
+                    (inv[1] / h) as f32,
+                    0.,
+                    (inv[2] / w) as f32,
+                    (inv[3] / h) as f32,
+                    0.,
+                    ((inv[4] - bounds.x0 + offset.x) / w) as f32,
+                    ((inv[5] - bounds.y0 + offset.y) / h) as f32,
+                    1.,
+                ],
+                size: [w, h],
+                pixel_scale: [scale.0, scale.1],
+            }));
+        }
+        steps.push(step);
     }
     Ok(match refused {
         Some(f) => Err(f),
