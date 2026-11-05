@@ -160,8 +160,13 @@ fn cancel_drains_held_questions_and_interrupts_exact_turn() {
         e.outgoing
             .contains(&json!({"id":"q","result":{"answers":{}}}))
     );
-    assert_eq!(completed(&e), 1);
+    assert_eq!(completed(&e), 0);
     assert!(c.answer("a", "i", &BTreeMap::new()).is_none());
+    let interrupt = e.outgoing.last().unwrap()["id"].clone();
+    assert_eq!(
+        completed(&c.receive(json!({"id":interrupt,"result":{}}), 1)),
+        1
+    );
 }
 #[test]
 fn cancellation_before_turn_id_interrupts_late_ack_once() {
@@ -205,7 +210,10 @@ fn stale_turn_and_foreign_thread_cannot_finish_run() {
         let e=c.receive(json!({"method":"turn/completed","params":{"threadId":t,"turn":{"id":u,"status":"completed"}}}),0);
         assert_eq!(completed(&e), 0);
     }
-    assert_eq!(completed(&c.cancel("a", 0).unwrap()), 1);
+    let e = c.cancel("a", 0).unwrap();
+    assert_eq!(completed(&e), 0);
+    let id = e.outgoing.last().unwrap()["id"].clone();
+    assert_eq!(completed(&c.receive(json!({"id":id,"result":{}}), 1)), 1);
 }
 #[test]
 fn async_updates_never_replace_final_answer() {
@@ -388,7 +396,10 @@ fn rejected_steering_does_not_destroy_active_turn() {
         0,
     );
     assert_eq!(completed(&e), 0);
-    assert_eq!(completed(&c.cancel("a", 0).unwrap()), 1);
+    let e = c.cancel("a", 0).unwrap();
+    assert_eq!(completed(&e), 0);
+    let id = e.outgoing.last().unwrap()["id"].clone();
+    assert_eq!(completed(&c.receive(json!({"id":id,"result":{}}), 1)), 1);
 }
 #[test]
 fn item_without_turn_identity_cannot_become_the_answer() {
@@ -430,4 +441,62 @@ fn bounded_activity_formatting_keeps_unicode_and_line_structure() {
             .count(),
         2000
     );
+}
+
+#[test]
+fn cancel_completion_waits_for_ack_and_survives_rejection_or_timeout() {
+    for reply in [
+        Some(json!({"result":{}})),
+        Some(json!({"error":{"code":-1,"message":"already done"}})),
+        None,
+    ] {
+        let mut c = started();
+        let e = c.cancel("a", 10).unwrap();
+        assert_eq!(completed(&e), 0);
+        assert!(c.cancel("a", 11).unwrap().outgoing.is_empty());
+        assert!(c.steer("a", "too late", &[], 11).is_err());
+        let e = if let Some(mut reply) = reply {
+            reply["id"] = e.outgoing[0]["id"].clone();
+            c.receive(reply, 20)
+        } else {
+            assert_eq!(completed(&c.tick(30_009)), 0);
+            c.tick(30_010)
+        };
+        assert!(
+            matches!(&e.events[..], [Event::Completed { run, result:RunResult::Failure{cancelled:true,..} }] if run=="a")
+        );
+        assert_eq!(completed(&c.tick(3_600_001)), 0);
+        assert_eq!(completed(&c.stopped("exit")), 0);
+    }
+}
+#[test]
+fn cancelled_turn_cannot_publish_late_progress_questions_or_success() {
+    let mut c = started();
+    c.cancel("a", 0).unwrap();
+    for message in [
+        json!({"method":"warning","params":{"threadId":"t","message":"Reconnecting..."}}),
+        json!({"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","delta":"late"}}),
+        json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}),
+    ] {
+        let e = c.receive(message, 1);
+        assert!(e.events.iter().all(|e| matches!(e, Event::Notification(_))));
+    }
+    let e = c.receive(json!({"id":"late-q","method":"item/tool/requestUserInput","params":{"threadId":"t","turnId":"u","itemId":"late","questions":[{"id":"q","question":"Late?"}]}}),1);
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":"late-q","result":{"answers":{}}})]
+    );
+    assert_eq!(completed(&c.receive(json!({"id":4,"result":{}}), 2)), 1);
+}
+#[test]
+fn stopping_during_interrupt_completes_once_then_reinitializes() {
+    let mut c = started();
+    c.cancel("a", 0).unwrap();
+    assert_eq!(completed(&c.stopped("pipe closed")), 1);
+    assert_eq!(completed(&c.receive(json!({"id":4,"result":{}}), 1)), 0);
+    let e = c.run(run("b"), 2).unwrap();
+    assert_eq!(e.outgoing[0]["method"], "initialize");
+    let id = e.outgoing[0]["id"].clone();
+    let e = c.receive(json!({"id":id,"result":{}}), 3);
+    assert_eq!(e.outgoing[1]["method"], "thread/start");
 }

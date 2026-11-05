@@ -198,3 +198,22 @@ history; mutation/rollback/export/media/extension tool bodies; full extension
 activation and tool availability. The existing MCP inventory has only 13 of
 67 implemented standalone bodies (54 pending); catalog identity does not close
 that gap. These limitations prevent declaring all of Gate P4 complete.
+
+## 2026-11-04 — cloud agents3 cancellation boundary
+
+The cancellation timing discrepancy is fixed in production `codex::Client`.
+`turn/interrupt` is now a run-owned pending RPC; completion follows its success,
+rejection or 30-second timeout. The frozen runner explicitly awaits that RPC
+(`app-server-runner.ts:432–446`), so this is authored interruption sequencing,
+not a reproduced Chromium microtask quirk (N3, N1). Queued steering is discarded
+at cancellation, held questions are settled, and late work cannot publish success.
+A cancellation before `turn/start` returns still reports once and retains a
+cleanup tombstone to interrupt the late turn identity. Stop/restart and repeated
+cancel/timeout paths produce one terminal event (N1/N3, quirk policy).
+
+The difference ledger removes only the now-resolved cancellation causal shift.
+Native lifecycle additions and MCP error discrepancies remain recorded; the
+original full-observation strict gate is still open. No reference transcript was
+replaced. The shared workspace lock already contains `pm-agents` on the lane's
+base; `scripts/check.sh` now uses it directly with `--locked`. Its former
+alternate lockfile is retained as historical input, with no active script consumer.
