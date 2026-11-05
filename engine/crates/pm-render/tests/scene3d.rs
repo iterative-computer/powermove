@@ -479,6 +479,7 @@ fn our_draws(c: &Case) -> Vec<(usize, Vec<DrawDesc>)> {
             PassDesc::Prepass(d) | PassDesc::Color { draws: d, .. } => draws.extend(d),
         };
         match &plan.kind {
+            Render3d::Studio { .. } => panic!("legacy fixture unexpectedly selected Studio"),
             Render3d::Layer {
                 object,
                 depth_set,

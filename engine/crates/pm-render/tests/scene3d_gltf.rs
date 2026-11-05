@@ -671,6 +671,7 @@ fn our_draws(c: &Case) -> Vec<(usize, Vec<(DrawDesc, bool)>)> {
             }
         };
         match &plan.kind {
+            Render3d::Studio { .. } => panic!("legacy glTF fixture unexpectedly selected Studio"),
             Render3d::Layer {
                 object,
                 depth_set,

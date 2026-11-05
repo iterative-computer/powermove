@@ -4829,8 +4829,10 @@ dependencies = [
  "pm-media",
  "pm-model",
  "pm-node",
+ "pm-perf",
  "pm-protocol",
  "pm-render",
+ "pm-scene3d",
  "pm-studio",
  "pm-time",
  "serde",
@@ -4931,6 +4933,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-fx-defs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
@@ -4986,6 +4996,7 @@ dependencies = [
  "pm-edit",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-model",
  "pm-scene3d",
  "pm-text",
@@ -5367,6 +5378,7 @@ dependencies = [
  "pm-color",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-geom3d",
  "pm-glsl",
  "pm-gpu",

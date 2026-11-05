@@ -12,6 +12,7 @@ pub mod mesh;
 #[cfg(feature = "oidn")]
 pub mod oidn;
 pub mod scene;
+pub mod splats;
 
 pub mod extract;
 

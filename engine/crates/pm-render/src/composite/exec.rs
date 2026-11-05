@@ -652,6 +652,57 @@ impl Exec<'_> {
         full: (u32, u32),
         view: Option<crate::plan::OutputView>,
     ) -> Result<Option<Target>, String> {
+        let mut ready = vec![];
+        for producer in effects.passes.input_plans() {
+            if ready
+                .iter()
+                .any(|r: &crate::effects::resources::Ready| r.request == producer.request)
+            {
+                continue;
+            }
+            let target = self.take_rect(Region::full(producer.plan.width, producer.plan.height));
+            self.render_comp_nodes(encoder, &producer.plan, None, &target);
+            ready.push(crate::effects::resources::Ready {
+                request: producer.request.clone(),
+                target,
+                owner: producer.owner,
+                origin: producer.plan.view.map_or([0., 0.], |v| v.origin),
+            });
+        }
+        for asset in effects.passes.vector_assets() {
+            let target = self.take_rect(Region::full(asset.width, asset.height));
+            let plan = crate::plan::CompPlan {
+                composition: "brush".into(),
+                group: true,
+                width: asset.width,
+                height: asset.height,
+                background: crate::plan::Background::Transparent,
+                view: None,
+                draws: vec![crate::plan::Draw {
+                    layer: "brush".into(),
+                    matrix: [asset.width as f64, 0., 0., asset.height as f64, 0., 0.],
+                    content: crate::plan::Content::Texture {
+                        source: crate::plan::Source::Vector(Box::new(
+                            asset.vector.as_ref().unwrap().clone(),
+                        )),
+                        uv: [0., 0., 1., 1.],
+                        alpha: 1.,
+                    },
+                }],
+            };
+            self.render_comp_nodes(encoder, &plan, None, &target);
+            ready.push(crate::effects::resources::Ready {
+                request: asset.request(),
+                target,
+                owner: crate::effects::plan::Owner {
+                    uv: [1., 0., 0., 0., 1., 0., 0., 0., 1.],
+                    size: [asset.width as f64, asset.height as f64],
+                    bounds: [0., 0., asset.width as f64, asset.height as f64],
+                    pixel_scale: [1., 1.],
+                },
+                origin: [0., 0.],
+            });
+        }
         let mut taken = Vec::new();
         let result = {
             let mut cx = EffectContext {
@@ -665,6 +716,7 @@ impl Exec<'_> {
                 view,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
+                    inputs: &ready,
                     effects: self.effects,
                     timer: self.timer.as_mut(),
                     linear: &self.pipelines.linear,
@@ -712,6 +764,7 @@ impl Exec<'_> {
                 view,
                 taken: &mut taken,
                 native: Some(crate::effects::exec::Native {
+                    inputs: &[],
                     effects: self.effects,
                     timer: self.timer.as_mut(),
                     linear: &self.pipelines.linear,

@@ -739,3 +739,55 @@ fn set_transition(
     values::obj(&mut layer).insert(field, Value::Object(t));
     cx.put_layer(&loc, layer)
 }
+
+/// Resolve a saved built-in against the file's saving version. Extension hosts
+/// must supply the winning provider's own full history instead of calling this.
+pub fn saved_builtin_definition(
+    document: &pm_model::Document,
+    id: &str,
+    version: Option<&Value>,
+    width: f64,
+    height: f64,
+) -> Result<EffectDefinition, CommandError> {
+    let version = version
+        .map(|v| serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v)))
+        .transpose()
+        .map_err(|e| CommandError::Invalid(e.to_string()))?;
+    let def = pm_fx_defs::catalog::definition_for_file(
+        id,
+        version.as_ref(),
+        document.saving_app_version(),
+    )
+    .map_err(|e| CommandError::Invalid(e.to_string()))?;
+    Ok(EffectDefinition {
+        effect_type: def.id.clone(),
+        version: pm_fx_defs::catalog::effect_version(def.metadata.get("version"))
+            .map_err(|e| CommandError::Invalid(e.to_string()))? as u32,
+        label: def.label.clone(),
+        params: def
+            .params
+            .iter()
+            .map(|p| ParamDefinition {
+                key: p.k.clone(),
+                kind: p.kind.clone().unwrap_or_else(|| "number".into()),
+                default: pm_model::json::parse(
+                    &pm_fx_defs::catalog::parameter_default(p, width, height).to_string(),
+                )
+                .expect("JSON default"),
+                min: p.min.as_ref().and_then(|n| n.as_f64()),
+                max: p.max.as_ref().and_then(|n| n.as_f64()),
+                reference: p.is_reference(),
+            })
+            .collect(),
+        source_processing: def
+            .metadata
+            .get("sourceProcessing")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        backdrop: def
+            .metadata
+            .get("backdrop")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}

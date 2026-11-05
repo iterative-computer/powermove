@@ -370,6 +370,7 @@ pub struct Scene3dRenderer {
     gltf: super::gltf::gpu::GltfGpu,
     /// Studio renders object layers when on (path traced, scene3d/studio.rs).
     studio: Option<super::studio::StudioPass>,
+    pub(crate) provider: Option<super::provider::Pass>,
     /// The resolve weighting pass, once asked for (`None` inside: the
     /// device has no passthrough MSL).
     weighting: Option<Option<super::karis::Weighting>>,
@@ -402,6 +403,7 @@ impl Default for Scene3dRenderer {
             cache_write_failures: 0,
             legacy: Default::default(),
             gltf: Default::default(),
+            provider: None,
             studio: std::env::var_os("PM_STUDIO")
                 .filter(|v| v != "0")
                 .map(|_| super::studio::StudioPass::default()),
@@ -1878,6 +1880,32 @@ impl Scene3dRenderer {
         precision: pm_protocol::color::Precision,
     ) -> Result<Rendered3d, Error3d> {
         self.start_generation();
+        if let super::Render3d::Studio {
+            request,
+            settings,
+            final_output,
+            shutter_samples,
+        } = &plan.kind
+        {
+            if depth_surface {
+                return Err("Studio depth/id output is unavailable".into());
+            }
+            return self
+                .provider
+                .as_mut()
+                .ok_or("Studio scene provider is not attached")?
+                .render(
+                    device,
+                    queue,
+                    encoder,
+                    pool,
+                    &plan.layer,
+                    request,
+                    *settings,
+                    *final_output,
+                    *shutter_samples,
+                );
+        }
         // Studio traces object layers (perspective cameras; no depth surface).
         if let (
             Some(studio),
@@ -1906,6 +1934,7 @@ impl Scene3dRenderer {
             });
         }
         match &plan.kind {
+            super::Render3d::Studio { .. } => unreachable!(),
             super::Render3d::Layer {
                 object,
                 depth_set,

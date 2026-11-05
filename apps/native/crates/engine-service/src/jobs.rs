@@ -28,6 +28,8 @@ pub struct ExportRequest {
     pub proxies: std::collections::BTreeMap<String, PathBuf>,
     pub destination: PathBuf,
     #[serde(default)]
+    pub saving_app_version: Option<String>,
+    #[serde(default)]
     pub resources: crate::resources::ResourceSnapshot,
 }
 impl ExportRequest {
@@ -50,6 +52,7 @@ impl ExportRequest {
             originals: media.originals,
             proxies: media.proxies,
             destination,
+            saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
         })
     }
@@ -278,10 +281,11 @@ pub fn run_child() -> Result<()> {
             proxies: request.proxies,
         };
         let media = catalog.export_paths(settings.draft_from_proxies);
-        let doc = pm_model::Document::new(
+        let mut doc = pm_model::Document::new(
             Some(pm_model::json::parse(&request.document)?),
             request.revision,
         );
+        doc.set_saving_app_version(request.saving_app_version);
         ensure!(
             pm_export::render::offline_media(&doc, composition.as_str(), &media).is_empty(),
             "export originals are offline; relink originals or explicitly choose draft"
@@ -290,7 +294,11 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("cancelled");
         }
         let mut renderer = pm_render::Renderer::headless()?;
-        renderer.set_definitions(&pm_render::all_builtin_definitions())?;
+        renderer
+            .set_main_effects_for_document(&doc)
+            .map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "kernel")]
+        crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
         fonts.sync(&mut renderer, &mut None);
         let job = pm_export::render::ExportJob {
             document: Arc::new(doc),

@@ -272,3 +272,33 @@ fn typed_references_create_static_inputs_instead_of_animated_channels() {
         json!({"kind":"asset","assetId":null})
     );
 }
+
+#[test]
+fn owner_saving_version_policy_keeps_old_and_unknown_artwork_exact() {
+    for app in [
+        None,
+        Some(""),
+        Some("unknown"),
+        Some("1.0.0"),
+        Some("1.2.0"),
+        Some("v1.2.0"),
+    ] {
+        assert_eq!(
+            definition_for_file("gradient", None, app).unwrap(),
+            builtins().effect("gradient").unwrap()
+        );
+        assert_eq!(
+            definition_for_file("gradient", Some(&json!(1)), app).unwrap(),
+            builtins().effect("gradient").unwrap()
+        );
+    }
+    assert_eq!(
+        definition_for_file("gradient", None, Some("1.3.0")).unwrap(),
+        main_catalog().get("gradient", 1).unwrap()
+    );
+    assert_eq!(
+        definition_for_file("gradient", Some(&json!(2)), None).unwrap(),
+        main_catalog().get("gradient", 2).unwrap()
+    );
+    assert!(definition_for_file("gradient", Some(&json!(999)), Some("9.0.0")).is_err());
+}
