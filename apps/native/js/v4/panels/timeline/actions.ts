@@ -4,6 +4,7 @@ import type { Json } from "../../src/protocol";
 /** Native hit-test/field actions. Times are composition seconds; drag samples
  * are totals from pointer-down. The Rust worker owns previews and history. */
 export type NativeDrag =
+  | ({ kind: "proEdit"; linked?: boolean } & ProEdit)
   | {
       kind:
         | "layers"
@@ -78,7 +79,7 @@ export type NativeAction = (
   | { type: "selectProperty"; layer: string; path: string }
   | { type: "parent"; ids: string[]; parent: string | null }
   | { type: "separateDimensions"; layer: string; separate: boolean }
-  | { type: "editKeys"; ids: string[]; time?: number; value?: Json }
+  | { type: "editKeys"; ids: string[]; time?: number; value?: number }
   | { type: "easing"; ids: string[]; curve: [number, number, number, number] }
   | { type: "easing"; ids: string[]; preset: string }
   | {
@@ -91,3 +92,19 @@ export type NativeAction = (
   | { type: "command"; command: string }
   | ({ type: "proEdit"; linked?: boolean } & ProEdit)
 ) & { document?: string; revision?: string };
+
+/** Production built-in service action; source bytes/JSON come from migration or
+ * explicit import. Library inspection supplies the exact stateRevision. */
+export type EasingLibraryAction = {
+  type: "easingLibrary";
+  stateRevision: string;
+} & (
+  | { action: "import"; source: Json; ids?: string[] }
+  | { action: "addGroup"; id: string; name: string }
+  | { action: "save"; group: string; id: string; name: string; curve: Json }
+  | { action: "duplicate"; id: string; newId: string; name: string }
+  | { action: "color"; id: string; color: string }
+  | { action: "rename"; id: string; name: string }
+  | { action: "move"; id: string; group: string; before?: string }
+  | { action: "archive"; id: string }
+);

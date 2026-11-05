@@ -126,6 +126,21 @@ impl TimelineClient {
         }
         self.sync()?;
         let mut drag = Drag::begin(&self.model, kind)?;
+        if let DragKind::ProEdit(command) = &drag.kind {
+            let source = self
+                .model
+                .index
+                .source
+                .as_ref()
+                .ok_or(ModelError::InvalidGesture)?;
+            let command: pm_kernel::Command = command.clone().into();
+            command
+                .plan(
+                    source.root().ok_or(ModelError::InvalidGesture)?,
+                    self.caller.origin,
+                )
+                .map_err(|e| ClientError::Rejected(e.to_string()))?;
+        }
         if let DragKind::Property { targets, time } = &drag.kind {
             let published = self
                 .kernel
@@ -162,15 +177,19 @@ impl TimelineClient {
     }
     pub async fn drag(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
         let (id, drag) = self.active.as_mut().ok_or(ClientError::NoGesture)?;
-        let revision = self
+        let published = self
             .kernel
             .published(&self.project)
-            .ok_or(ClientError::Closed)?
-            .revision();
+            .ok_or(ClientError::Closed)?;
+        if published.snapshot.doc_id != drag.start.doc_id {
+            return Err(ClientError::DocumentChanged);
+        }
+        let revision = published.revision();
         if self.active_revision.is_some_and(|r| r != revision)
             && matches!(
                 drag.kind,
-                DragKind::Keys { .. }
+                DragKind::ProEdit(_)
+                    | DragKind::Keys { .. }
                     | DragKind::GraphKeys { .. }
                     | DragKind::StretchKeys { .. }
                     | DragKind::TransformKeys { .. }
@@ -196,7 +215,16 @@ impl TimelineClient {
     /// Escape uses the kernel's selective cancellation; foreign edits survive.
     /// A conflict notice is returned intact so the host can report a kept edit.
     pub async fn finish_drag(&mut self, commit: bool) -> Result<Ack, ClientError> {
-        let (id, _) = self.active.as_ref().ok_or(ClientError::NoGesture)?;
+        let (id, drag) = self.active.as_ref().ok_or(ClientError::NoGesture)?;
+        let published = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        if published.snapshot.doc_id != drag.start.doc_id {
+            self.active = None;
+            self.active_revision = None;
+            return Err(ClientError::DocumentChanged);
+        }
         let call = if commit {
             GestureCall::Commit { gesture: *id }
         } else {

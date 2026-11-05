@@ -29,3 +29,25 @@ commands and drag implementation. No extension contract or frozen MCP tool
 catalog changes, and no consumer is pruned.
 
 Verification and application-host boundaries are appended after integration.
+
+## 2026-11-05 — scoped pro gestures and session admission
+
+The native action route also admits linked/scoped move, trim, slip, ripple trim,
+ripple delete, roll and slide. Continuous pro edits use the same actor gesture
+lease and replacement steps; pro planners validate the supplied tracks, source
+bounds, lock state and caller origin before a lease opens. Relative pro edits
+refuse a concurrently changed revision. A gesture from a closed/reopened document
+cannot write a new document reusing its layer ids. Disposal retires the stale
+local gesture without touching the replacement document.
+
+N1/N3 selects the existing pro planners and their exact validation, not a second
+approximation of edit semantics. N4 selects selective cancellation and retention
+of opaque source/key data. N7 selects stable ids and inspectable decimal stamps.
+Native numeric key editing follows main's layer-local frame snapping (including
+subframe layer origins), composition bounds and neighbour collision guard.
+Simplification is an explicit action, never a drag-finishing side effect.
+
+Linux actor regressions cover every pro-edit dispatch variant, replacement ripple
+steps, cancellation, locked downstream refusal, joined/per-axis diamonds, exact
+subframe membership, graph/handle/property/work-area gestures, stale documents,
+numeric collision/validation, opaque key preservation and document Undo.

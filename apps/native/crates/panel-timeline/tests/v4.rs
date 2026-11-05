@@ -729,3 +729,183 @@ fn malformed_native_actions_and_stale_decimal_stamps_make_no_edit_or_lease() {
     assert_eq!(c.model.index.revision, revision);
     assert!(c.active_drag().is_none());
 }
+
+fn media_client() -> (KernelActor, TimelineClient) {
+    let layers = [("a",0.),("b",4.),("c",8.)].into_iter().map(|(id,from)|json!({"id":id,"name":id,"type":"video","from":from,"dur":4,"track":0,"on":true,"d":{"asset":"source","trim":{"v":from+2.,"kf":[],"expr":null},"speed":1,"future":{"keep":true}},"p":{},"future":{"keep":id}})).collect::<Vec<_>>();
+    let value = json!({"id":"P","compId":"C","fps":30,"dur":40,"w":100,"h":100,"assets":{"source":{"id":"source","kind":"video","dur":100}},"layers":layers});
+    let actor = KernelActor::spawn(KernelConfig::default());
+    block_on(actor.handle().open(
+        "P",
+        OpenSource::Untitled(parse(&value.to_string()).unwrap()),
+    ))
+    .unwrap()
+    .unwrap();
+    let c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    (actor, c)
+}
+fn document(c: &TimelineClient) -> pm_model::Value {
+    c.kernel
+        .published(&c.project)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value()
+}
+#[test]
+fn all_scoped_pro_edit_actions_reach_the_real_kernel_and_undo_exactly() {
+    for (mut input, target, from) in [
+        (json!({"operation":"move","ids":["b"],"delta":1.}), "b", 5.),
+        (
+            json!({"operation":"trim","edge":"in","ids":["b"],"delta":1.}),
+            "b",
+            5.,
+        ),
+        (json!({"operation":"slip","ids":["b"],"delta":1.}), "b", 4.),
+        (
+            json!({"operation":"rippleTrim","edge":"out","layer":"b","delta":1.,"tracks":[{"track":0}]}),
+            "c",
+            9.,
+        ),
+        (
+            json!({"operation":"roll","left":"a","right":"b","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"slide","previous":"a","layer":"b","next":"c","delta":1.}),
+            "b",
+            5.,
+        ),
+        (
+            json!({"operation":"rippleDelete","ids":["b"],"tracks":[{"track":0}]}),
+            "c",
+            4.,
+        ),
+    ] {
+        let (_actor, mut c) = media_client();
+        let before = document(&c);
+        input["type"] = json!("proEdit");
+        dispatch(&mut c, input).unwrap();
+        assert_eq!(c.model.index.layer(target).unwrap().from, from);
+        assert_ne!(document(&c), before);
+        block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn ripple_pointer_steps_use_total_delta_and_dispose_restores_downstream_clips() {
+    let (_actor, mut c) = media_client();
+    let before = document(&c);
+    dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":0.,"tracks":[{"track":0}]})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":1.})).unwrap();
+    dispatch(&mut c, json!({"type":"drag","timeDelta":2.})).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().duration, 6.);
+    assert_eq!(c.model.index.layer("c").unwrap().from, 10.);
+    dispatch(&mut c, json!({"type":"dispose"})).unwrap();
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn locked_downstream_pro_drag_refuses_before_a_gesture_and_preserves_document() {
+    let (_actor, mut c) = media_client();
+    dispatch(&mut c, json!({"type":"switch","id":id("c"),"name":"lock"})).unwrap();
+    let before = document(&c);
+    assert!(dispatch(&mut c,json!({"type":"beginDrag","kind":"proEdit","operation":"rippleTrim","layer":"b","edge":"out","delta":1.,"tracks":[{"track":0}]})).is_err());
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), before);
+}
+
+#[test]
+fn simplify_is_explicit_and_retains_unknown_authored_key_fields() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"simplify","ids":["a:[]"]})).unwrap();
+    assert_eq!(
+        document(&c),
+        before,
+        "unknown authored key fields prevent simplification"
+    );
+}
+
+#[test]
+fn old_native_gesture_cannot_edit_a_reopened_document_with_reused_layer_ids() {
+    let (_actor, mut c) = media_client();
+    dispatch(
+        &mut c,
+        json!({"type":"beginDrag","kind":"layers","ids":["b"]}),
+    )
+    .unwrap();
+    let saved = document(&c);
+    block_on(c.kernel.close("P")).unwrap();
+    block_on(c.kernel.open("P", OpenSource::Untitled(saved.clone())))
+        .unwrap()
+        .unwrap();
+    c.sync().unwrap();
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"drag","timeDelta":2.})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"dispose"})),
+        Err(v4::Error::Client(ClientError::DocumentChanged))
+    ));
+    assert!(c.active_drag().is_none());
+    assert_eq!(document(&c), saved);
+}
+
+#[test]
+fn handle_property_and_work_area_native_gestures_cancel_without_losing_authored_data() {
+    for begin in [
+        json!({"type":"beginDrag","kind":"handle","id":"original","side":"out"}),
+        json!({"type":"beginDrag","kind":"property","layer":"a:[]","path":"opacity"}),
+        json!({"type":"beginDrag","kind":"workIn"}),
+        json!({"type":"beginDrag","kind":"workOut"}),
+        json!({"type":"beginDrag","kind":"workMove"}),
+        json!({"type":"beginDrag","kind":"transformKeys","ids":["original"],"anchorTime":0.,"anchorValue":0.}),
+        json!({"type":"beginDrag","kind":"stretchKeys","ids":["original"],"anchorTime":0.,"grabbedTime":1.}),
+        json!({"type":"beginDrag","kind":"keys","ids":["original"]}),
+        json!({"type":"beginDrag","kind":"trimIn","ids":["a:[]"]}),
+        json!({"type":"beginDrag","kind":"offsetLayers","ids":["a:[]","b"]}),
+    ] {
+        let (_actor, mut c) = client();
+        let before = document(&c);
+        dispatch(&mut c, begin).unwrap();
+        dispatch(&mut c,json!({"type":"drag","timeDelta":0.1,"valueDelta":1.,"timeScale":1.5,"valueScale":2.,"handleTime":0.25,"handleValue":0.5})).unwrap();
+        dispatch(&mut c, json!({"type":"cancelDrag"})).unwrap();
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn native_numeric_key_dialog_rejects_non_numeric_values_before_any_edit() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    for value in [json!(null), json!("12"), json!([1, 2]), json!({"v":12})] {
+        assert!(
+            dispatch(
+                &mut c,
+                json!({"type":"editKeys","ids":["original"],"value":value})
+            )
+            .is_err()
+        );
+        assert_eq!(document(&c), before);
+    }
+}
+
+#[test]
+fn graph_native_commands_persist_view_facts_without_document_edits() {
+    let (_actor, mut c) = client();
+    let before = document(&c);
+    dispatch(&mut c, json!({"type":"command","command":"graph.speed"})).unwrap();
+    let state = c.kernel.state();
+    assert_eq!(
+        state.ui["P"]
+            .timeline
+            .get("graphMode")
+            .and_then(pm_model::Value::as_str),
+        Some("speed")
+    );
+    assert_eq!(document(&c), before);
+}

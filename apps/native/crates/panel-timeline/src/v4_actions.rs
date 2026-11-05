@@ -93,8 +93,56 @@ fn tracks(v: &Value) -> Result<Vec<TrackTarget>> {
         })
         .collect()
 }
+fn pro_edit(v: &Value) -> Result<ProEditCommand> {
+    let linked = flag(v, "linked")?;
+    Ok(match text(v, "operation")? {
+        "move" => ProEditCommand::Move {
+            layer_ids: ids(v, "ids")?,
+            delta: number(v, "delta")?,
+            linked,
+        },
+        "trim" => ProEditCommand::Trim {
+            layer_ids: ids(v, "ids")?,
+            edge: edge(v)?,
+            delta: number(v, "delta")?,
+            linked,
+        },
+        "slip" => ProEditCommand::Slip {
+            layer_ids: ids(v, "ids")?,
+            delta: number(v, "delta")?,
+            linked,
+        },
+        "rippleDelete" => ProEditCommand::RippleDelete {
+            layer_ids: ids(v, "ids")?,
+            tracks: tracks(v)?,
+            linked,
+        },
+        "rippleTrim" => ProEditCommand::RippleTrim {
+            layer_id: text(v, "layer")?.into(),
+            edge: edge(v)?,
+            delta: number(v, "delta")?,
+            tracks: tracks(v)?,
+            linked,
+        },
+        "roll" => ProEditCommand::Roll {
+            left_id: text(v, "left")?.into(),
+            right_id: text(v, "right")?.into(),
+            delta: number(v, "delta")?,
+            linked,
+        },
+        "slide" => ProEditCommand::Slide {
+            previous_id: text(v, "previous")?.into(),
+            layer_id: text(v, "layer")?.into(),
+            next_id: text(v, "next")?.into(),
+            delta: number(v, "delta")?,
+            linked,
+        },
+        _ => return Err(invalid("operation")),
+    })
+}
 fn drag_kind(c: &TimelineClient, v: &Value, time: f64) -> Result<DragKind> {
     Ok(match text(v, "kind")? {
+        "proEdit" => DragKind::ProEdit(pro_edit(v)?),
         "layers" => DragKind::Layers {
             ids: ids(v, "ids")?,
         },
@@ -215,6 +263,16 @@ pub(super) async fn dispatch(
     }
     let edit = |commands: Vec<Command>| Plan::edit(commands, c.model.index.revision);
     let mut reveal_dimensions = None;
+    let persist_view = action == "command"
+        && v["command"].as_str().is_some_and(|id| {
+            (id.starts_with("timeline.reveal")
+                || id.starts_with("timeline.mode:")
+                || matches!(id, "timeline.toggleMode" | "toggleLayerStrips"))
+                || matches!(
+                    id,
+                    "graph" | "graph.value" | "graph.speed" | "graph.combined"
+                )
+        });
     let plan = match action {
         "selectKeys" => {
             let calls = c.model.select_keys(
@@ -316,7 +374,12 @@ pub(super) async fn dispatch(
             };
             let value = v
                 .get("value")
-                .map(|v| pm_model::json::parse(&v.to_string()).map_err(|_| invalid("value")))
+                .map(|v| {
+                    v.as_f64()
+                        .filter(|n| n.is_finite())
+                        .map(pm_model::Value::Number)
+                        .ok_or_else(|| invalid("value"))
+                })
                 .transpose()?;
             if time.is_none() && value.is_none() {
                 return Err(invalid("key edit"));
@@ -386,51 +449,7 @@ pub(super) async fn dispatch(
             context.property_facts,
         )?,
         "proEdit" => {
-            let linked = flag(v, "linked")?;
-            let command = match text(v, "operation")? {
-                "move" => ProEditCommand::Move {
-                    layer_ids: ids(v, "ids")?,
-                    delta: number(v, "delta")?,
-                    linked,
-                },
-                "trim" => ProEditCommand::Trim {
-                    layer_ids: ids(v, "ids")?,
-                    edge: edge(v)?,
-                    delta: number(v, "delta")?,
-                    linked,
-                },
-                "slip" => ProEditCommand::Slip {
-                    layer_ids: ids(v, "ids")?,
-                    delta: number(v, "delta")?,
-                    linked,
-                },
-                "rippleDelete" => ProEditCommand::RippleDelete {
-                    layer_ids: ids(v, "ids")?,
-                    tracks: tracks(v)?,
-                    linked,
-                },
-                "rippleTrim" => ProEditCommand::RippleTrim {
-                    layer_id: text(v, "layer")?.into(),
-                    edge: edge(v)?,
-                    delta: number(v, "delta")?,
-                    tracks: tracks(v)?,
-                    linked,
-                },
-                "roll" => ProEditCommand::Roll {
-                    left_id: text(v, "left")?.into(),
-                    right_id: text(v, "right")?.into(),
-                    delta: number(v, "delta")?,
-                    linked,
-                },
-                "slide" => ProEditCommand::Slide {
-                    previous_id: text(v, "previous")?.into(),
-                    layer_id: text(v, "layer")?.into(),
-                    next_id: text(v, "next")?.into(),
-                    delta: number(v, "delta")?,
-                    linked,
-                },
-                _ => return Err(invalid("operation")),
-            };
+            let command = pro_edit(v)?;
             edit(vec![command.into()])
         }
         _ => return Ok(None),
@@ -449,7 +468,14 @@ pub(super) async fn dispatch(
             }
         }
         c.model.rebuild_rows();
-        c.publish_view().await?;
+    }
+    if action == "separateDimensions" || persist_view {
+        if let Err(error) = c.publish_view().await {
+            if let Some(published) = c.kernel.published(&c.project) {
+                c.model.restore_ui(&published.ui_state);
+            }
+            return Err(error.into());
+        }
     }
     Ok(Some(effects))
 }
