@@ -1168,3 +1168,5 @@ fn collapsed_properties_dispose_native_binding_capabilities() {
 }
 
 mod effect_delta;
+
+mod precomp_delta;
