@@ -244,3 +244,18 @@ Selected file-store aggregates: 47 project slots (196,411,402 bytes); 51 history
 Current production code needs Electron for logical Chromium storage reads and `safeStorage` decryption. **No verified standalone migration of Chromium data/secrets was demonstrated here.** A correct direct reader plus Keychain access removes the running-Electron dependency for persisted state; implementing/testing that reader, secure handoff and rollback is S6/P1 work. Volatile older Blender surfaces are the special case that must be captured while their owning process still exists. Live closures, native handles, blob URLs, IPC tokens and GPU caches are reconstructed, not serialized as user-authored state.
 
 Required gates: media only in IndexedDB with original deleted; proxy-only assets; transformed still/animation bytes; old bare asset ids; history/take-only media; already-offline sources; missing posters; inconsistent index/slot counts; packed/unpacked undo with redo cursor; agent resume and attachment closure; post-TR imports; skipped TR; profile snapshot with Electron running; interrupted/low-space migration; separate beta edits/deletions; native-imported media then rollback; and journal compaction after extended native editing.
+
+## Main data delta — 2026-11-04 (cloud delta-data)
+
+The behavior reference for this lane is main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`.
+The `pm-model` lens now names `Comp.memory`, `memoryEnabled`, and project
+`colorDepth`; nested composition notes, disabled notes, caption words/times,
+animated nested audio gain/mute, source metadata, transcription preferences and
+retired `web` export preferences are covered by synthetic lossless fixtures.
+Malformed and future fields remain exact raw values instead of being sanitized
+on load (**N3/N4**). Memory stays a project-level field under the pinned main's
+`COMP_FIELDS` behavior; no composition rotation or UI behavior is invented.
+This establishes data coverage, not Memory MCP/Settings or rendering parity.
+Validation: `cd engine && cargo test --locked -p pm-model --test main_delta`
+(**2 passed**); pm-model all-target Clippy with `-D warnings` passed.
+No visual changes or new design decisions.

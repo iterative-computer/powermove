@@ -5,6 +5,21 @@ use super::{JsMap, Layer, Render3D, record, string_enum};
 use crate::json::{JsString, Map, Value};
 
 record! {
+    /// Authored project intent (`core/types/project.ts` at main c7f46a056).
+    /// Unknown kinds/authors and malformed fields remain in the lossless lens.
+    pub struct MemoryEntry {
+        id: JsString = "id",
+        kind: JsString = "kind",
+        text: JsString = "text",
+        why: JsString = "why",
+        author: JsString = "author",
+        created_at: f64 = "createdAt",
+        updated_at: f64 = "updatedAt",
+        resolved: bool = "resolved",
+    }
+}
+
+record! {
     /// A gradient stop.
     pub struct FillStop {
         id: JsString = "id",
@@ -174,6 +189,11 @@ record! {
         export_defaults: ExportDefaults = "exportDefaults",
         library: Map = "library",
         notes: JsString = "notes",
+        /// Kept while disabled. Loading never sanitizes or truncates notes (N4).
+        memory: Vec<MemoryEntry> = "memory",
+        memory_enabled: bool = "memoryEnabled",
+        /// Working precision: 8, 16 or 32; absent means 16. Preserve other values.
+        color_depth: f64 = "colorDepth",
         comp_id: JsString = "compId",
         comp_name: JsString = "compName",
         /// Additive (section 6): the exact rate `[num, den]`.
