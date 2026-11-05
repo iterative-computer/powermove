@@ -136,3 +136,63 @@ parses with exactly allow-jit. The actual Linux launcher returns **BLOCKED / 2**
 as required. macOS remains unexecuted. Item 5 remains **BLOCKED** for the hard
 allocator, complete compatibility/resource integrations and real Mac budgets
 listed above; passing these Linux suites is not a phase sign-off.
+
+## Headless ARM64 Mac verification — 2026-11-04
+
+macOS **27.3**, ARM64, Rust **1.96.1**, `macos-sandbox` enabled. Recovered the
+binding from the documented existing S1 CI artifact (run 41286550390); the surviving
+archive and recovered binding both match the pins above. The verified pair is
+stored durably at `$HOME/Developer/pm-v8-s1/`, with `V8_FROM_SOURCE` unset. No V8
+source rebuild, workflow dispatch, owner data, installed app, Keychain access or
+UI/timing gate was used.
+
+The first signed diagnostic attempt failed **before running its eight tests**:
+the launcher searched for literal `(runtime)`, but this Mac's genuine hardened
+ad-hoc signature reports `flags=0x10002(adhoc,runtime)`. The verifier now parses
+the CodeDirectory hexadecimal flags and requires `CS_RUNTIME` (`0x10000`). The
+exact allow-jit-only entitlement comparison is unchanged. Four executions of the
+actual verifier block accepted combined/standalone runtime flags and refused
+ad-hoc-only/missing flags. No signing permission or entitlement was broadened.
+
+| Final check | Pass | Fail | Ignored |
+| --- | ---: | ---: | ---: |
+| Standalone sandbox runtime: unit + helper integration | 69 (61 + 8) | 0 | 0 |
+| Workspace runtime + recorder + raster/golden | 199 | 0 | 0 |
+| Hardened ad-hoc signed release helper integration | 8 | 0 | 0 |
+
+Strict three-package all-target Clippy, all three isolated formatting checks and
+launcher Bash syntax passed. The signed production initialization probe reported
+`platform=macos`, `seatbelt=true`, TurboFan status **41** (required bits 8 and 32),
+and successful optimized execution. Read/write/connect/spawn worked before
+confinement and returned EPERM/EACCES afterward. Forbidden file creation was
+absent. Snapshot reuse, inherited-pipe IPC, cancellation/capacity and fatal helper
+OOM isolation passed; the expected fatal-OOM subprocess is not a parent failure.
+
+Environment: source `engine/env.sh`, shared target, four build jobs,
+`PM_MEDIA_NATIVE_PYTHON=/opt/homebrew/bin/python3.14`, canonical
+`TMPDIR=/private/tmp/pm-native-tests/`, and
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only` matching development output. All
+commands below used `nice -n 20 flock /tmp/pm-build.lock`; admission honored
+`PAUSE_LOCAL` and the disk reserve. Tests ran serially to limit peak resource use;
+no assertion, case or deadline changed.
+
+```sh
+export RUSTY_V8_ARCHIVE="$HOME/Developer/pm-v8-s1/librusty_v8.a"
+export RUSTY_V8_SRC_BINDING_PATH="$HOME/Developer/pm-v8-s1/src_binding.rs"
+unset V8_FROM_SOURCE
+nice -n 20 flock /tmp/pm-build.lock bash apps/native/crates/runtime-v8/scripts/verify-macos.sh
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --features macos-sandbox -- --test-threads=1 --nocapture
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 test --locked --no-fail-fast --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster --features pm-runtime-v8/macos-sandbox -- --test-threads=1
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-runtime-v8 -p pm-recorder -p pm-recorder-raster --features pm-runtime-v8/macos-sandbox --all-targets --no-deps -- -D warnings
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/recorder/isolated/Cargo.toml --check
+nice -n 20 flock /tmp/pm-build.lock cargo +1.96.1 fmt --manifest-path apps/native/crates/recorder-raster/isolated/Cargo.toml --check
+nice -n 20 flock /tmp/pm-build.lock bash -n apps/native/crates/runtime-v8/scripts/verify-macos.sh
+```
+
+This closes only this lane's headless Mac verification. **Item 5 remains open**
+for the hard external allocator, complete production resource/compatibility
+bindings, actual reconciler/39-extension budgets and the other owning integrations
+listed above. Hardened ad-hoc diagnostic copies do not certify shipping identities,
+notarization/Gatekeeper, other supported OS versions or Intel. Heap statistics do
+not establish physical footprint or the 20-MB budget.

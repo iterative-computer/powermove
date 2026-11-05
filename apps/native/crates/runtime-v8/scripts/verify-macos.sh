@@ -69,6 +69,7 @@ done
 python3 - <<'PY'
 import os
 import plistlib
+import re
 
 root = os.environ['PM_RUNTIME_VERIFY']
 for name in ('pm-store-helper', 'store_helper'):
@@ -76,7 +77,8 @@ for name in ('pm-store-helper', 'store_helper'):
         if plistlib.load(source) != {'com.apple.security.cs.allow-jit': True}:
             raise SystemExit('Unexpected or missing signing entitlement: ' + name)
     with open(os.path.join(root, name + '.signature.txt')) as source:
-        if '(runtime)' not in source.read():
+        flags = re.search(r'^CodeDirectory\b.*\bflags=0x([0-9a-fA-F]+)\b', source.read(), re.MULTILINE)
+        if flags is None or not int(flags.group(1), 16) & 0x10000:
             raise SystemExit('Hardened runtime flag missing: ' + name)
 PY
 PM_STORE_HELPER="$PM_RUNTIME_VERIFY/pm-store-helper" \
