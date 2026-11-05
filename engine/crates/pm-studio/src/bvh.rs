@@ -22,7 +22,18 @@ struct Aabb {
 }
 
 impl Aabb {
-    const EMPTY: Aabb = Aabb { lo: Vec3 { x: f32::MAX, y: f32::MAX, z: f32::MAX }, hi: Vec3 { x: f32::MIN, y: f32::MIN, z: f32::MIN } };
+    const EMPTY: Aabb = Aabb {
+        lo: Vec3 {
+            x: f32::MAX,
+            y: f32::MAX,
+            z: f32::MAX,
+        },
+        hi: Vec3 {
+            x: f32::MIN,
+            y: f32::MIN,
+            z: f32::MIN,
+        },
+    };
     fn grow(&mut self, p: Vec3) {
         self.lo = self.lo.min(p);
         self.hi = self.hi.max(p);
@@ -33,7 +44,11 @@ impl Aabb {
     }
     fn area(&self) -> f32 {
         let e = self.hi - self.lo;
-        if e.x < 0.0 { 0.0 } else { e.x * e.y + e.y * e.z + e.z * e.x }
+        if e.x < 0.0 {
+            0.0
+        } else {
+            e.x * e.y + e.y * e.z + e.z * e.x
+        }
     }
 }
 
@@ -41,6 +56,9 @@ impl Aabb {
 /// triangle order the leaves refer to.
 #[allow(clippy::needless_range_loop)] // axis indexes Vec3 components
 pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
+    if tris.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
     let bounds: Vec<Aabb> = tris
         .iter()
         .map(|t| {
@@ -53,10 +71,10 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
     let mut order: Vec<u32> = (0..tris.len() as u32).collect();
     let mut nodes = vec![Node::default(); 1];
     nodes.reserve(tris.len() * 2);
-    let mut stack = vec![(0usize, 0usize, tris.len())];
+    let mut stack = vec![(0usize, 0usize, tris.len(), 0u32)];
     // Reserve slot 1 so children always come in pairs at even offsets.
     nodes.push(Node::default());
-    while let Some((index, first, count)) = stack.pop() {
+    while let Some((index, first, count, depth)) = stack.pop() {
         let mut b = Aabb::EMPTY;
         let mut cb = Aabb::EMPTY;
         for &t in &order[first..first + count] {
@@ -64,9 +82,16 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
             cb.grow(centroids[t as usize]);
         }
         let leaf = |nodes: &mut Vec<Node>| {
-            nodes[index] = Node { min: [b.lo.x, b.lo.y, b.lo.z], left_first: first as u32, max: [b.hi.x, b.hi.y, b.hi.z], count: count as u32 };
+            nodes[index] = Node {
+                min: [b.lo.x, b.lo.y, b.lo.z],
+                left_first: first as u32,
+                max: [b.hi.x, b.hi.y, b.hi.z],
+                count: count as u32,
+            };
         };
-        if count <= 2 {
+        // Both shader stacks are fixed; a depth cap keeps pathological SAH trees
+        // exact by using a larger leaf instead of dropping intersections.
+        if count <= 2 || depth >= 20 {
             leaf(&mut nodes);
             continue;
         }
@@ -131,9 +156,14 @@ pub fn build(tris: &[[Vec3; 3]]) -> (Vec<Node>, Vec<u32>) {
         let left = nodes.len();
         nodes.push(Node::default());
         nodes.push(Node::default());
-        nodes[index] = Node { min: [b.lo.x, b.lo.y, b.lo.z], left_first: left as u32, max: [b.hi.x, b.hi.y, b.hi.z], count: 0 };
-        stack.push((left, first, mid - first));
-        stack.push((left + 1, mid, first + count - mid));
+        nodes[index] = Node {
+            min: [b.lo.x, b.lo.y, b.lo.z],
+            left_first: left as u32,
+            max: [b.hi.x, b.hi.y, b.hi.z],
+            count: 0,
+        };
+        stack.push((left, first, mid - first, depth + 1));
+        stack.push((left + 1, mid, first + count - mid, depth + 1));
     }
     (nodes, order)
 }
@@ -156,10 +186,29 @@ pub struct WideNode {
 }
 
 pub fn widen(nodes: &[Node]) -> Vec<WideNode> {
-    let root = nodes[0];
+    let Some(root) = nodes.first().copied() else {
+        return vec![WideNode {
+            lmin: [f32::MAX; 3],
+            lmax: [f32::MIN; 3],
+            lcount: u32::MAX,
+            rmin: [f32::MAX; 3],
+            rmax: [f32::MIN; 3],
+            rcount: u32::MAX,
+            ..Default::default()
+        }];
+    };
     let empty = ([f32::MAX; 3], [f32::MIN; 3]);
     if root.count > 0 {
-        return vec![WideNode { lmin: root.min, left: root.left_first, lmax: root.max, lcount: root.count, rmin: empty.0, right: 0, rmax: empty.1, rcount: u32::MAX }];
+        return vec![WideNode {
+            lmin: root.min,
+            left: root.left_first,
+            lmax: root.max,
+            lcount: root.count,
+            rmin: empty.0,
+            right: 0,
+            rmax: empty.1,
+            rcount: u32::MAX,
+        }];
     }
     let mut out: Vec<WideNode> = Vec::with_capacity(nodes.len() / 2);
     // Map interior node index → wide index, breadth-first so parents come first.
@@ -169,7 +218,11 @@ pub fn widen(nodes: &[Node]) -> Vec<WideNode> {
     out.push(WideNode::default());
     while let Some(i) = queue.pop_front() {
         let n = nodes[i];
-        let child = |c: usize, out: &mut Vec<WideNode>, queue: &mut std::collections::VecDeque<usize>, index: &mut std::collections::HashMap<usize, u32>| -> (u32, u32) {
+        let child = |c: usize,
+                     out: &mut Vec<WideNode>,
+                     queue: &mut std::collections::VecDeque<usize>,
+                     index: &mut std::collections::HashMap<usize, u32>|
+         -> (u32, u32) {
             let cn = nodes[c];
             if cn.count > 0 {
                 (cn.left_first, cn.count)
@@ -185,7 +238,16 @@ pub fn widen(nodes: &[Node]) -> Vec<WideNode> {
         let (li, lc) = child(l, &mut out, &mut queue, &mut index);
         let (ri, rc) = child(r, &mut out, &mut queue, &mut index);
         let me = index[&i] as usize;
-        out[me] = WideNode { lmin: nodes[l].min, left: li, lmax: nodes[l].max, lcount: lc, rmin: nodes[r].min, right: ri, rmax: nodes[r].max, rcount: rc };
+        out[me] = WideNode {
+            lmin: nodes[l].min,
+            left: li,
+            lmax: nodes[l].max,
+            lcount: lc,
+            rmin: nodes[r].min,
+            right: ri,
+            rmax: nodes[r].max,
+            rcount: rc,
+        };
     }
     out
 }
@@ -207,7 +269,11 @@ mod tests {
         (0..n)
             .map(|_| {
                 let c = v3(r() * 200.0, r() * 50.0, r() * 120.0);
-                [c, c + v3(r() * 4.0, r(), 0.5), c + v3(0.3, r() * 4.0, r() * 3.0)]
+                [
+                    c,
+                    c + v3(r() * 4.0, r(), 0.5),
+                    c + v3(0.3, r() * 4.0, r() * 3.0),
+                ]
             })
             .collect()
     }
@@ -260,6 +326,34 @@ mod tests {
             }
         }
         assert_eq!(leaf_tris as usize, tris.len());
+    }
+
+    #[test]
+    fn pathological_sah_depth_fits_the_shader_stacks_without_losing_triangles() {
+        let tris: Vec<_> = (0..1000)
+            .map(|i| {
+                let x = 2f32.powf(-(i as f32) / 8.);
+                [v3(x, 0., 0.), v3(x, x * 0.1, 0.), v3(x, 0., x * 0.1)]
+            })
+            .collect();
+        let (nodes, order) = build(&tris);
+        let mut stack = vec![(0, 0)];
+        let mut count = 0;
+        while let Some((i, depth)) = stack.pop() {
+            assert!(
+                depth <= 20,
+                "fixed shader traversal stacks must never overflow"
+            );
+            let n = nodes[i];
+            if n.count > 0 {
+                count += n.count as usize;
+            } else {
+                stack.push((n.left_first as usize, depth + 1));
+                stack.push((n.left_first as usize + 1, depth + 1));
+            }
+        }
+        assert_eq!(count, tris.len());
+        assert_eq!(order.len(), tris.len());
     }
 
     #[test]

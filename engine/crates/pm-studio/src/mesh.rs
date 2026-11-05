@@ -34,11 +34,17 @@ impl Mesh {
 
     /// Rotate about x by `tilt`, then about y by `turn`, then move by `offset`.
     pub fn placed(&self, tilt: f32, turn: f32, offset: Vec3) -> Mesh {
-        self.transformed(move |p| p.rotate_x(tilt).rotate_y(turn) + offset, move |n| n.rotate_x(tilt).rotate_y(turn))
+        self.transformed(
+            move |p| p.rotate_x(tilt).rotate_y(turn) + offset,
+            move |n| n.rotate_x(tilt).rotate_y(turn),
+        )
     }
 
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        self.positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)))
+        self.positions.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), &p| (lo.min(p), hi.max(p)),
+        )
     }
 }
 
@@ -64,9 +70,21 @@ fn rounded_rect(half_w: f32, half_d: f32, radius: f32, segments: usize) -> Vec<(
 }
 
 /// A flat, fan-triangulated cap over a convex outline at height `y`.
-fn cap(mesh: &mut Mesh, outline: &[(Vec3, Vec3)], inset: f32, y: f32, up: bool, uv_extent: (f32, f32)) {
+fn cap(
+    mesh: &mut Mesh,
+    outline: &[(Vec3, Vec3)],
+    inset: f32,
+    y: f32,
+    up: bool,
+    uv_extent: (f32, f32),
+) {
     let n = if up { Vec3::Y } else { -Vec3::Y };
-    let uv = |p: Vec3| [0.5 + p.x / (2.0 * uv_extent.0), 0.5 - p.z / (2.0 * uv_extent.1)];
+    let uv = |p: Vec3| {
+        [
+            0.5 + p.x / (2.0 * uv_extent.0),
+            0.5 - p.z / (2.0 * uv_extent.1),
+        ]
+    };
     let center = mesh.vertex(v3(0.0, y, 0.0), n, [0.5, 0.5]);
     let ring: Vec<u32> = outline
         .iter()
@@ -77,7 +95,8 @@ fn cap(mesh: &mut Mesh, outline: &[(Vec3, Vec3)], inset: f32, y: f32, up: bool, 
         .collect();
     for i in 0..ring.len() {
         let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-        mesh.indices.push(if up { [center, b, a] } else { [center, a, b] });
+        mesh.indices
+            .push(if up { [center, b, a] } else { [center, a, b] });
     }
 }
 
@@ -101,11 +120,21 @@ pub fn tablet() -> Tablet {
     let mut profile: Vec<(f32, f32, f32, f32)> = Vec::new();
     for s in 0..=8 {
         let a = (-90.0 + 90.0 * s as f32 / 8.0f32).to_radians();
-        profile.push((-edge + edge * a.cos(), edge + edge * a.sin(), a.cos(), a.sin()));
+        profile.push((
+            -edge + edge * a.cos(),
+            edge + edge * a.sin(),
+            a.cos(),
+            a.sin(),
+        ));
     }
     for s in 0..=8 {
         let a = (90.0 * s as f32 / 8.0f32).to_radians();
-        profile.push((-edge + edge * a.cos(), t - edge + edge * a.sin(), a.cos(), a.sin()));
+        profile.push((
+            -edge + edge * a.cos(),
+            t - edge + edge * a.sin(),
+            a.cos(),
+            a.sin(),
+        ));
     }
 
     let mut body = Mesh::default();
@@ -120,7 +149,12 @@ pub fn tablet() -> Tablet {
     for i in 0..count {
         let j = (i + 1) % count;
         for r in 0..rows - 1 {
-            let (a, b, c, e) = (i * rows + r, j * rows + r, j * rows + r + 1, i * rows + r + 1);
+            let (a, b, c, e) = (
+                i * rows + r,
+                j * rows + r,
+                j * rows + r + 1,
+                i * rows + r + 1,
+            );
             body.indices.push([a, e, b]);
             body.indices.push([b, e, c]);
         }
@@ -132,13 +166,26 @@ pub fn tablet() -> Tablet {
 
     let screen_outline = rounded_rect(w / 2.0 - bezel, d / 2.0 - bezel, corner - bezel * 0.75, 16);
     let mut display = Mesh::default();
-    cap(&mut display, &screen_outline, 0.0, t + 0.01, true, (w / 2.0 - bezel, d / 2.0 - bezel));
+    cap(
+        &mut display,
+        &screen_outline,
+        0.0,
+        t + 0.01,
+        true,
+        (w / 2.0 - bezel, d / 2.0 - bezel),
+    );
 
     // Camera bump on the back, near one corner.
     let at = v3(w / 2.0 - 13.0, 0.0, -(d / 2.0 - 13.0));
     let camera_ring = cylinder(at, 5.6, -0.7, 48).0;
     let camera_lens = cylinder(at, 4.4, -0.72, 48).1;
-    Tablet { body, glass, display, camera_ring, camera_lens }
+    Tablet {
+        body,
+        glass,
+        display,
+        camera_ring,
+        camera_lens,
+    }
 }
 
 /// A short cylinder from y=0 to y=`height` around `center`: (side + cap, cap only).
@@ -175,7 +222,11 @@ fn cylinder(center: Vec3, radius: f32, height: f32, segments: usize) -> (Mesh, M
     both.positions.extend(&lid.positions);
     both.normals.extend(&lid.normals);
     both.uvs.extend(&lid.uvs);
-    both.indices.extend(lid.indices.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+    both.indices.extend(
+        lid.indices
+            .iter()
+            .map(|t| [t[0] + base, t[1] + base, t[2] + base]),
+    );
     (both, lid)
 }
 
@@ -185,12 +236,21 @@ pub fn stylus() -> Mesh {
     let segments = 48usize;
     let mut m = Mesh::default();
     // Rings: back cap edge, barrel start, barrel end, tip end.
-    let rings = [(0.0f32, radius), (barrel, radius), (barrel + tip * 0.85, 1.2), (barrel + tip, 0.35)];
+    let rings = [
+        (0.0f32, radius),
+        (barrel, radius),
+        (barrel + tip * 0.85, 1.2),
+        (barrel + tip, 0.35),
+    ];
     for &(x, r) in &rings {
         for s in 0..=segments {
             let a = std::f32::consts::TAU * s as f32 / segments as f32;
             let (c, sn) = (a.cos(), a.sin());
-            let slope = if x > barrel { (radius - 1.2) / (tip * 0.85) } else { 0.0 };
+            let slope = if x > barrel {
+                (radius - 1.2) / (tip * 0.85)
+            } else {
+                0.0
+            };
             m.vertex(v3(x, radius + r * c, r * sn), v3(slope, c, sn), [0.0, 0.0]);
         }
     }
@@ -219,7 +279,11 @@ pub fn sphere(center: Vec3, radius: f32, rings: usize, segments: usize) -> Mesh 
         for s in 0..=segments {
             let th = std::f32::consts::TAU * s as f32 / segments as f32;
             let n = v3(phi.sin() * th.cos(), phi.cos(), phi.sin() * th.sin());
-            m.vertex(center + n * radius, n, [s as f32 / segments as f32, r as f32 / rings as f32]);
+            m.vertex(
+                center + n * radius,
+                n,
+                [s as f32 / segments as f32, r as f32 / rings as f32],
+            );
         }
     }
     let stride = segments as u32 + 1;
@@ -242,7 +306,9 @@ pub fn load_obj(text: &str, scale: f32) -> Mesh {
     let mut cache = std::collections::HashMap::new();
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        let f = |it: &mut std::str::SplitWhitespace| -> f32 { it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0) };
+        let f = |it: &mut std::str::SplitWhitespace| -> f32 {
+            it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+        };
         match it.next() {
             Some("v") => p.push(v3(f(&mut it), f(&mut it), f(&mut it)) * scale),
             Some("vn") => n.push(v3(f(&mut it), f(&mut it), f(&mut it))),
@@ -254,7 +320,11 @@ pub fn load_obj(text: &str, scale: f32) -> Mesh {
                             let mut parts = c.split('/');
                             let idx = |s: Option<&str>, len: usize| -> Option<usize> {
                                 let v: i64 = s?.parse().ok()?;
-                                Some(if v < 0 { (len as i64 + v) as usize } else { v as usize - 1 })
+                                Some(if v < 0 {
+                                    (len as i64 + v) as usize
+                                } else {
+                                    v as usize - 1
+                                })
                             };
                             let pi = idx(parts.next(), p.len()).unwrap_or(0);
                             let ti = idx(parts.next(), t.len());
