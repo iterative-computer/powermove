@@ -199,3 +199,31 @@ archive the previous attempt before create-new publication. The empty-payload
 scratch input remains owned and retained even when import fails. Focused tests
 verify that interrupted state metadata, snapshot metadata, payload copies and an
 unexpected existing empty-payload input retain their exact prior bytes.
+
+
+Final post-merge Linux verification: **167 Rust pass / 0 fail / 0 ignored**
+(32 first-launch, 27 migrate, 33 distribution, 75 services), plus **15 Python
+bundle-audit tests pass**. Canonical-temp SIGKILL/resume retains the actual kernel
+31-second stale-lock grace. Formatting, strict Clippy for touched crates, Python
+3.9 syntax parsing for both new scripts, diff whitespace and staged gitleaks pass.
+Final fetched/merged integration base: `ed5482622f41c533199a724dcb8c8738dd4dcc93`
+(already an ancestor; no conflicts). The final full locked test/lint commands:
+
+```sh
+cd apps/native
+cargo test --locked -p pm-first-launch -p pm-native-migrate -p pm-distribution -p pm-services
+cargo fmt -p pm-first-launch -p pm-native-migrate --check
+cargo clippy --locked -p pm-first-launch -p pm-native-migrate --all-targets --no-deps -- -D warnings
+```
+
+From repository root:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s apps/native/scripts/tests -v
+gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow
+```
+
+These results certify the tested worker/models and audit tooling only. Item 13,
+production Sparkle installation, full current-state Restore and signed Mac proof
+remain blocked as listed above. No workflow was dispatched and no release action
+was taken. N001–N007 presentation stays `DESIGN-TODO(opus)`.
