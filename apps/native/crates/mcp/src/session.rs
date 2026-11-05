@@ -255,7 +255,7 @@ impl McpSession {
                 )
             }
             "save_project" => host.save_project(&id),
-            "apply_commands" | "edit_layer_strips" | "edit_video" => {
+            "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
                 let expected = session
                     .transaction
                     .as_ref()
@@ -266,10 +266,15 @@ impl McpSession {
                         "The project changed during the agent run (expected revision {expected}, found {revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry."
                     )));
                 }
+                let default_label = if name == "edit_3d" {
+                    "Edit 3D Layers"
+                } else {
+                    "Agent composition edit"
+                };
                 let label = args["label"]
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("Agent composition edit")
+                    .unwrap_or(default_label)
                     .trim()
                     .chars()
                     .take(80)
@@ -295,7 +300,17 @@ impl McpSession {
                 } else {
                     None
                 };
-                let batch = if strips.is_none() && video.is_none() {
+                let batch = if name == "edit_3d" {
+                    Some(crate::scene3d::batch(
+                        &host.store(&id)?.snapshot(),
+                        args,
+                        &selection,
+                        host.playhead(&id),
+                        host.scene3d_assets
+                            .as_deref()
+                            .unwrap_or(&pm_scene3d::geometry::NoAssets),
+                    )?)
+                } else if strips.is_none() && video.is_none() {
                     Some(commands::plan_with_definitions(
                         &p,
                         &selection,
@@ -308,7 +323,7 @@ impl McpSession {
                 };
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
-                        snapshot: p,
+                        snapshot: p.clone(),
                         mark: host.history_mark(&id, self.writer)?,
                         revision,
                         changed: false,
@@ -356,6 +371,14 @@ impl McpSession {
                 let mut result = json!({"applied":descriptions,"clip":clip,"results":results,"message":message,"revision":ack.revision});
                 if let Some(notice) = ack.notice {
                     result["notice"] = json!(format!("{notice:?}"));
+                }
+                if name == "edit_3d" {
+                    let after = host.read_document(&id)?;
+                    let target = crate::scene3d::result_id(&p, &after, args, &selection);
+                    if let Some(ref target) = target {
+                        host.select_layers(&id, std::slice::from_ref(target), false, self.writer)?;
+                    }
+                    result["result"] = json!({"id":target,"layerId":target});
                 }
                 if let Some(strips) = strips_result {
                     result["strips"] = strips;

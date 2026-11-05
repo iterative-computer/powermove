@@ -116,52 +116,12 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
     for (index, l) in p["layers"].as_array().into_iter().flatten().enumerate() {
         let Some(role) = role(l) else { continue };
         layers.push(json!({"id":l["id"],"name":l["name"],"role":role,"parent":l["parent"],"visible":l["on"],"locked":l["lock"],"from":l["from"],"duration":l["dur"],"content":l["d"]["data"]}));
-        let props = ev.query("allProps", index, time, json!({}))?;
-        for prop in props.as_array().into_iter().flatten() {
-            let path = &prop["key"];
-            let mut extra = json!({"key":path});
-            if let Some(v) = prop["path"].get("value") {
-                extra["prop"] = v.clone();
-            } else {
-                extra["path"] = prop["path"].clone();
-            }
-            let value = ev.query("evP", index, time, extra)?;
-            // allProps paths address the layer except detached structured channels.
-            let mut value_prop = prop["path"].get("value");
-            let mut current = l;
-            if value_prop.is_none()
-                && let Some(path) = prop["path"].as_array()
-            {
-                for k in path {
-                    current = if let Some(k) = k.as_str() {
-                        &current[k]
-                    } else {
-                        &current[k.as_u64().unwrap_or(0) as usize]
-                    };
-                }
-                value_prop = Some(current);
-            }
-            channels.push(json!({"layerId":l["id"],"path":path,"value":value,"keyframeCount":value_prop.and_then(|p|p["kf"].as_array()).map_or(0,Vec::len)}));
+        for (path, prop) in crate::scene3d::properties(l) {
+            let value = ev.query("evP", index, time, json!({"key":path,"prop":prop}))?;
+            channels.push(json!({"layerId":l["id"],"path":path,"value":value,"keyframeCount":prop["kf"].as_array().map_or(0,Vec::len)}));
         }
     }
-    let mut scene = ev.query("compositionScene", 0, time, json!({}))?;
-    // Engine light evaluation supports newer area-size channels. The frozen
-    // v1.2.0 MCP scene schema has neither width nor height.
-    if let Some(lights) = scene["lights"].as_array_mut() {
-        for light in lights {
-            if let Some(p) = light["p"].as_object_mut() {
-                p.remove("width");
-                p.remove("height");
-            }
-        }
-    }
-    if let Some(objects) = scene["objects"].as_array_mut() {
-        for object in objects {
-            if let Some(o) = object.as_object_mut() {
-                o.remove("slots");
-            }
-        }
-    }
+    let scene = crate::scene3d::evaluated_scene(&p, time, &mut ev)?;
     let assets = p["assets"]
         .as_object()
         .into_iter()
@@ -175,9 +135,15 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
             out
         })
         .collect::<Vec<_>>();
-    Ok(
-        json!({"layerId":args["target"].as_str().filter(|s|!s.is_empty()),"scene":scene,"layers":layers,"channels":channels,"assets":assets,"revision":p["revision"]}),
-    )
+    let mut result = json!({"layerId":args["target"].as_str().filter(|s|!s.is_empty()),"scene":scene,"layers":layers,"channels":channels,"assets":assets,"revision":p["revision"]});
+    let issues=p["layers"].as_array().into_iter().flatten().filter(|l|l["native3dUpgradeIssue"].is_string()).map(|l|json!({"layerId":l["id"],"message":l["native3dUpgradeIssue"],"diagnostic":l["native3dUpgradeDiagnostic"],"sourceRetained":l["native3dArchive"].get("source").is_some()})).collect::<Vec<_>>();
+    if !issues.is_empty() {
+        result["upgradeIssues"] = json!(issues);
+    }
+    if let Some(issue) = p.get("native3dHistoryIssue") {
+        result["historyUpgradeIssue"] = issue.clone();
+    }
+    Ok(result)
 }
 fn issue(code: &str, severity: &str, l: &Value, message: String) -> Value {
     json!({"code":code,"severity":severity,"layerId":l["id"],"message":message})

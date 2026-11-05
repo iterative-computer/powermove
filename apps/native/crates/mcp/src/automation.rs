@@ -99,6 +99,8 @@ pub struct Automation {
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    /// Loaded 3D geometry from the native import/engine worker, for snapshot-bound placement and exploded views.
+    pub scene3d_assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
     pub export_child: Arc<dyn crate::services::ExportChild>,
     pub store_reads: Option<Arc<dyn crate::store::StoreRead>>,
     pub extension_sources: Option<Arc<dyn crate::extensions::ExtensionSources>>,
@@ -138,6 +140,7 @@ impl Automation {
             engine: None,
             surfaces: None,
             media_registry: None,
+            scene3d_assets: None,
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
             extension_sources: None,

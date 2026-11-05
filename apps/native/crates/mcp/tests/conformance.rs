@@ -100,17 +100,31 @@ fn all_schemas_equal_executed_tag_source() {
     }
 }
 #[test]
-fn captured_installed_stdio_pairs_replay() {
+fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
     let f = Fixture::new();
     let mut rpc = Rpc::new(f.session());
     let fixture: Value =
         serde_json::from_str(include_str!("../fixtures/transport-installed.json")).unwrap();
     assert_eq!(fixture["projectToolsCaptured"], false);
     for pair in fixture["pairs"].as_array().unwrap() {
-        assert_eq!(
-            rpc.handle(pair["request"].clone()).unwrap(),
-            pair["response"]
-        );
+        let mut expected = pair["response"].clone();
+        if pair["request"]["method"] == "tools/list"
+            && let Some(tools) = expected
+                .get_mut("result")
+                .and_then(|r| r.get_mut("tools"))
+                .and_then(Value::as_array_mut)
+        {
+            // Only the two owner-selected 3D definitions supersede this
+            // installed-app capture. All protocol and other tool data stays frozen.
+            for tool in tools {
+                if ["edit_3d", "get_3d_scene"].contains(&tool["name"].as_str().unwrap_or("")) {
+                    *tool = catalog::spec(tool["name"].as_str().unwrap())
+                        .unwrap()
+                        .clone();
+                }
+            }
+        }
+        assert_eq!(rpc.handle(pair["request"].clone()).unwrap(), expected);
     }
 }
 #[test]

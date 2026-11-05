@@ -1,4 +1,4 @@
-//! Public names, descriptions and schemas are generated from v1.2.0, unchanged.
+//! Frozen catalog with the owner-selected Studio 3D contract overlaid from b81b94c66.
 use crate::{Error, Result};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -6,8 +6,22 @@ use std::sync::OnceLock;
 pub fn catalog() -> &'static Value {
     static VALUE: OnceLock<Value> = OnceLock::new();
     VALUE.get_or_init(|| {
-        serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
-            .expect("frozen catalog")
+        let mut value: Value =
+            serde_json::from_str(include_str!("../fixtures/catalog-v1.2.0.json"))
+                .expect("frozen catalog");
+        let studio: Value =
+            serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                .expect("3D source catalog");
+        for replacement in studio["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing 3D tool");
+            *tool = replacement.clone();
+        }
+        value
     })
 }
 pub fn tools() -> &'static Vec<Value> {
@@ -138,6 +152,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "rollback_changes",
     "get_panel_layout",
     "get_3d_scene",
+    "edit_3d",
     "check_project",
     "list_media",
     "manage_media",
@@ -215,7 +230,8 @@ pub fn backing(name: &str) -> &'static str {
         }
         "edit_video" => "pm-kernel guarded id-keyed layer edits and source-aware timing adapter",
         "export_captions" => "native caption text exporter",
-        "edit_3d" | "generate_captions" => "kernel 3D/caption commands and transcription runtime",
+        "edit_3d" => "pm-scene3d and guarded kernel Studio document commands",
+        "generate_captions" => "kernel caption commands and transcription runtime",
         "list_media" => {
             "pm-kernel asset/folder/reference snapshot and optional live media registry"
         }
