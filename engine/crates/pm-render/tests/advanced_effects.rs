@@ -1216,3 +1216,15 @@ fn metal_source_shared_plan_replays_each_count_toward_admission() {
         .to_string();
     assert!(error.contains("memory budget"), "{error}");
 }
+
+#[path = "advanced/color_contract.rs"]
+mod color_contract;
+
+#[path = "advanced/shadow_ramp.rs"]
+mod shadow_ramp;
+
+#[path = "advanced/spatial_contract.rs"]
+mod spatial_contract;
+
+#[path = "advanced/producer_policy.rs"]
+mod producer_policy;
