@@ -388,3 +388,37 @@ legacy command API and frozen tools unchanged; N7/N8 keep completion and facts
 on the existing single-writer actor with no main-thread JS/media wait. Real
 engine seek delivery and native source-monitor presentation remain Mac/app host
 verification, not implied by publication of session facts.
+
+## 2026-11-04 — cloud pro2 final merge validation
+
+Merged integration base: `711f44ba0667f81ce8388c4ec57565d1d0378630`.
+The final fetch/merge reports Already up to date; that integration commit is
+an ancestor of this branch and the owned-path diff is conflict/whitespace clean.
+Current behavior reference: `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`.
+
+Final Linux commands, from `apps/native`, all pass with Rust 1.96.1:
+
+```sh
+cargo test --locked -p pm-kernel
+cargo fmt -p pm-kernel -- --check
+cargo clippy --locked -p pm-kernel --all-targets --no-deps -- -D warnings
+```
+
+**310 passed / 0 failed / 1 pre-existing ignored**. This lane adds **37 Rust
+tests**: 14 actor workflows, 16 render lifecycle tests, 6 MCP tests (including
+real subprocess stdio), and 1 main-body pairing test containing 12 exact cases.
+The existing tagged compatibility, journal crash/kill, history, IO and other
+kernel tests remain green. The documented observer setup race is corrected
+without weakening event assertions. Node 24.19.0 is test-only; no Node/Chromium
+runtime dependency is introduced. The native lockfile adds only pm-kernel's
+serde edge; no dependency version is upgraded. Staged gitleaks and the enabled
+repository hook pass before every commit.
+
+Mac/app work remains as listed above: physical clock/seek/reverse A/V and source
+frame identity; tool/menu/pointer/modifier/AX and source-monitor presentation;
+existing app MCP forwarding; production RenderJobHost/cache/tasks/resource
+adapters, native producer cancellation/reaping and actual volume/ENOSPC/archive
+interruption checks. The standalone runner's edits are disposable and never
+save over its explicit input. Headless passing results do not certify those
+Mac integrations, rendered pixels, real codecs or the P1–P5 product gates.
+There are no new DESIGN-TODO(opus) entries or visual output from this lane.
