@@ -346,3 +346,45 @@ Reported totals can be None or exactly one; progress and restored counters canno
 exceed one. A receipt never fabricates completion for an entire frame range.
 The host aggregates frame jobs into the existing BackgroundTasks range model.
 Decision: N1/N3 require measured progress to describe the bytes actually verified.
+
+## 2026-11-04 — owner reference change and merged Opus N006
+
+The behavior reference for this lane is now `origin/main` pinned at
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, per the owner's new decision in
+p0-decisions.md. This supersedes the historical v1.2.0-oracle wording above;
+v1.2.0 projects/extensions and the existing tagged compatibility tests remain
+required inputs. The main-delta audit and decision were merged from
+`711f44ba0667f81ce8388c4ec57565d1d0378630` without conflicts.
+
+A06's relevant media-edit body (`legacy/assistant/video-editing.ts`) is byte
+identical at this pinned main and v1.2.0. The new test-only main oracle executes
+main's actual editVideo and content-property bodies at three source rates and
+compares move, In/Out trim and slip source/key timing and opaque data against
+the native commands (12 exact cases, no tolerance). J/K/L, ripple, roll, slide,
+persistent A/V pairs and source three-point editing remain native cutover
+additions; pinned-main keymap/shortcuts and source-preview were inspected rather
+than assuming they supplied these commands. Source-preview's relevant controller
+has no new three-point command to port. A06's layer-strip clone diff delegates
+to the new effect-input remapper (E02), which belongs to delta-fx. P03–P07/P10
+storage/import/autosave changes belong to delta-data/media; U editing/panel rows
+go to the owner's later UI lane. They are not reported as completed here.
+
+Merged Opus `design/surfaces/pro-edit.md` N006 is now the source for native
+source-edit completion: successful Insert/Overwrite moves the session playhead
+to the resolved timeline Out and clears Source In/Out, retaining timeline marks
+and opaque facts. The actor stages those facts before planning, applies them
+only after a successful document command, and publishes document plus session
+before acknowledging. A refusal changes neither. The SourceEdit reply includes
+the state revision, so MCP can issue its next command without a stale self-fence.
+State failure after an applied document edit retains the acknowledgement and
+reports a notice; it is never relabelled an unapplied edit. Insert/Overwrite and
+Slip Edit use the exact N006 undo labels. No new menu, key binding, visual copy,
+material, layout or gesture was chosen by this lane.
+
+Decisions: the owner's explicit new pin overrides the older reference text;
+N3 uses actual immutable main bodies and the authored Opus completion behavior;
+N4 keeps tagged inputs, opaque fields and applied edits/notices; N6 leaves the
+legacy command API and frozen tools unchanged; N7/N8 keep completion and facts
+on the existing single-writer actor with no main-thread JS/media wait. Real
+engine seek delivery and native source-monitor presentation remain Mac/app host
+verification, not implied by publication of session facts.

@@ -129,7 +129,7 @@ impl ProMcp {
             (
                 "description",
                 s(
-                    "Native pro edits by stable id, in seconds. Inspect with layerIds first to refresh the document/state fence and sync badges. Timing commands require explicit linked; ripple commands require tracks. sourceMarks accepts partial marks; sourceEdit uses those marks and requires targets and splits (possibly empty). select requires bypass and add. Each document operation is undoable through the kernel. Shuttle reports session intent; unavailable/paused keys decline. No legacy MCP tool is replaced.",
+                    "Native pro edits by stable id, in seconds. Inspect with layerIds first to refresh the document/state fence and sync badges. Timing commands require explicit linked; ripple commands require tracks. sourceMarks replaces the four marks (omitted/null clears a mark); sourceEdit uses those marks and requires targets and splits (possibly empty). select requires bypass and add. Each document operation is undoable through the kernel. Shuttle reports session intent; unavailable/paused keys decline. No legacy MCP tool is replaced.",
                 ),
             ),
             ("inputSchema", schema),
@@ -153,7 +153,18 @@ impl ProMcp {
             Some(Err(e)) => return failure(e.to_string()),
             None => return failure("Kernel stopped; outcome is unknown. Inspect before retrying."),
         };
+        let reply = match reply {
+            ProReply::SourceEdit {
+                ack,
+                state_revision,
+            } => {
+                self.state_revision = state_revision;
+                ProReply::Document(ack)
+            }
+            other => other,
+        };
         match reply {
+            ProReply::SourceEdit { .. } => unreachable!("normalized above"),
             ProReply::Inspection(v) => {
                 let read = |key| {
                     v.get(key)

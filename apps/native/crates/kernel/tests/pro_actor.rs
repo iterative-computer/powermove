@@ -34,7 +34,7 @@ fn send(h: &KernelHandle, v: Json) -> ProReply {
     h.pro_editing("P", request(h, v)).wait().unwrap().unwrap()
 }
 fn good(h: &KernelHandle, v: Json) {
-    if let ProReply::Document(a) = send(h, v) {
+    if let ProReply::Document(a) | ProReply::SourceEdit { ack: a, .. } = send(h, v) {
         assert!(!matches!(a.reply, Reply::Throw(_)), "{:?}", a.reply);
     } else {
         panic!("not a document reply")
@@ -212,6 +212,18 @@ fn monitor_marks_insert_and_overwrite_av_with_one_document_undo() {
             json!({"op":"sourceEdit","mode":mode,"targets":[{"media":"video","track":{"track":0},"layerId":"new-v"},{"media":"audio","track":{"track":1},"layerId":"new-a"}],"linkId":"source-pair","splits":[]}),
         );
         let after = tree(&h);
+        assert_eq!(
+            h.published("P").unwrap().history.undo_label.as_deref(),
+            Some(if mode == "insert" {
+                "Insert"
+            } else {
+                "Overwrite"
+            })
+        );
+        assert_eq!(
+            n(&h.published("P").unwrap().ui_state.transport, &["time"]),
+            6.
+        );
         assert_eq!(n(&get(&h, "new-v"), &["from"]), 4.);
         assert_eq!(n(&get(&h, "new-v"), &["dur"]), 2.);
         assert_eq!(n(&get(&h, "b"), &["from"]), 6.);
@@ -681,5 +693,50 @@ fn source_mark_updates_preserve_unknown_fields_and_refuse_malformed_existing_pay
             .unwrap()
             .get("opaque"),
         value(json!({"opaque":{"retain":true}})).get("opaque")
+    );
+}
+
+#[test]
+fn source_refusal_retains_marks_playhead_and_document_while_success_publishes_both_facts() {
+    use pm_kernel::KernelEvent;
+    let a = actor(vec![]);
+    let h = a.handle();
+    marks(&h);
+    let before = tree(&h);
+    let ui = h.published("P").unwrap().ui_state.clone();
+    let refused = send(
+        &h,
+        json!({"op":"sourceEdit","mode":"insert","targets":[],"splits":[]}),
+    );
+    assert!(matches!(
+        refused,
+        ProReply::SourceEdit {
+            ack: pm_kernel::Ack {
+                reply: Reply::Throw(_),
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(tree(&h), before);
+    assert_eq!(h.published("P").unwrap().ui_state, ui);
+    h.sync().wait().unwrap();
+    let events = h.subscribe();
+    good(
+        &h,
+        json!({"op":"sourceEdit","mode":"insert","targets":[{"media":"video","track":{"track":0},"layerId":"new"}],"splits":[]}),
+    );
+    let p = h.published("P").unwrap();
+    assert_eq!(p.history.undo_label.as_deref(), Some("Insert"));
+    assert_eq!(n(&p.ui_state.transport, &["time"]), 6.);
+    let monitor = p.ui_state.session.get("proSource").unwrap();
+    assert_eq!(monitor.get("sourceIn"), Some(&Value::Null));
+    assert_eq!(monitor.get("sourceOut"), Some(&Value::Null));
+    assert_eq!(monitor.get("timelineIn").and_then(Value::as_f64), Some(4.));
+    assert!(
+        matches!(events.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),KernelEvent::Published{revision,..}if revision==p.revision())
+    );
+    assert!(
+        matches!(events.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),KernelEvent::StateChanged{change:pm_kernel::state::StateChange::Ui{project},..}if project=="P")
     );
 }

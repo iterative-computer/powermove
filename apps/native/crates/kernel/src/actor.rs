@@ -300,6 +300,7 @@ enum Msg {
     Call {
         project: String,
         request: Request,
+        source_finish: Option<crate::pro_editing::SourceFinish>,
         reply: Reply<Result<Ack, KernelFailure>>,
     },
     Open {
@@ -506,6 +507,7 @@ impl KernelHandle {
         self.send(Msg::Call {
             project: project.to_owned(),
             request,
+            source_finish: None,
             reply: Box::new(reply),
         });
     }
@@ -736,10 +738,25 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                     Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
                         project,
                         request,
+                        source_finish: None,
                         reply: Box::new(move |v| {
                             reply(v.map(crate::pro_editing::ProReply::Document))
                         }),
                     },
+                    Ok(crate::pro_editing::Prepared::SourceEdit { request, finish }) => {
+                        let state = shared.clone();
+                        Msg::Call {
+                            project,
+                            request,
+                            source_finish: Some(finish),
+                            reply: Box::new(move |v| {
+                                reply(v.map(|ack| crate::pro_editing::ProReply::SourceEdit {
+                                    ack,
+                                    state_revision: state.state.lock().expect("state").revision,
+                                }))
+                            }),
+                        }
+                    }
                     Ok(crate::pro_editing::Prepared::State(tx)) => Msg::State {
                         tx,
                         reply: Box::new(move |v| reply(v.map(crate::pro_editing::ProReply::State))),
@@ -858,6 +875,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             Msg::Call {
                 project,
                 request,
+                source_finish,
                 reply,
             } => {
                 let actor_started = std::time::Instant::now();
@@ -865,13 +883,16 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                 let before_selection = kernel
                     .project(&project)
                     .map(|p| p.store().selection().clone());
-                let handled = match kernel.handle(&project, request) {
+                let mut handled = match kernel.handle(&project, request) {
                     Ok(h) => h,
                     Err(e) => {
                         reply(Err(e));
                         continue;
                     }
                 };
+                if let Some(finish) = source_finish {
+                    crate::pro_editing::finish_source(&mut kernel, &project, finish, &mut handled);
+                }
                 if before_state.revision != kernel.state().revision {
                     *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
                 }
@@ -951,6 +972,17 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                     );
                 }
                 if before_state.revision != kernel.state().revision {
+                    if before_state.ui.get(&project) != kernel.state().ui.get(&project) {
+                        emit(
+                            &shared,
+                            KernelEvent::StateChanged {
+                                revision: kernel.state().revision,
+                                change: crate::state::StateChange::Ui {
+                                    project: project.clone(),
+                                },
+                            },
+                        );
+                    }
                     for key in before_state
                         .settings
                         .keys()

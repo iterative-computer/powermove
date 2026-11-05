@@ -146,11 +146,11 @@ fn real_stdio_source_marks_av_insert_and_explicit_decline() {
                 2,
                 json!({"op":"sourceEdit","mode":"insert","targets":[{"media":"video","track":{"track":0},"layerId":"new-v"},{"media":"audio","track":{"track":1},"layerId":"new-a"}],"linkId":"source-pair","splits":[]}),
             ),
+            rpc(3, json!({"op":"shuttle","key":"reverse"})),
             rpc(
-                3,
+                4,
                 json!({"op":"inspect","layerIds":["new-v","new-a","tail"]}),
             ),
-            rpc(4, json!({"op":"shuttle","key":"reverse"})),
             rpc(5, json!({"op":"undo"})),
             rpc(6, json!({"op":"inspect","layerIds":[]})),
         ],
@@ -159,11 +159,13 @@ fn real_stdio_source_marks_av_insert_and_explicit_decline() {
     for reply in &replies {
         assert_eq!(reply["result"]["isError"], false, "{reply}");
     }
-    let inspected = decoded(&replies[2]);
+    let inspected = decoded(&replies[3]);
     assert_eq!(inspected["layers"][2]["from"], 6.);
-    assert_eq!(inspected["sourceMonitor"]["sourceIn"], 2.);
+    assert_eq!(inspected["sourceMonitor"]["sourceIn"], Json::Null);
+    assert_eq!(inspected["sourceMonitor"]["sourceOut"], Json::Null);
+    assert_eq!(inspected["transport"]["time"], 6.);
     assert_eq!(inspected["clockAvailable"], false);
-    assert_eq!(decoded(&replies[3])["declined"], true);
+    assert_eq!(decoded(&replies[2])["declined"], true);
     assert_eq!(decoded(&replies[5])["layers"].as_array().unwrap().len(), 1);
 }
 #[test]

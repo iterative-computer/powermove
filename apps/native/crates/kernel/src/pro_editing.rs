@@ -84,13 +84,25 @@ pub struct SourceMonitor {
 #[derive(Clone, Debug)]
 pub enum ProReply {
     Document(Ack),
+    SourceEdit {
+        ack: Ack,
+        state_revision: u64,
+    },
     State(StateAck),
     Inspection(Value),
     /// Key resolver may invoke the next binding exactly once.
     Declined,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct SourceFinish {
+    state: StateTransaction,
+}
 pub(crate) enum Prepared {
     Call(Request),
+    SourceEdit {
+        request: Request,
+        finish: SourceFinish,
+    },
     State(StateTransaction),
     Inspection(Value),
     Declined,
@@ -647,7 +659,23 @@ pub(crate) fn prepare(
                 return Err(error("Source-monitor composition is no longer active"));
             }
             monitor.points.playhead = num(&ui.transport, "time").map_err(bad)?;
-            return Ok(transact(
+            let end = monitor.points.resolve().map_err(bad)?.timeline_out;
+            // Opus N006: successful source edits leave the playhead at the end
+            // and clear source marks. Preserve timeline marks and opaque facts.
+            ui.transport
+                .as_object_mut()
+                .ok_or_else(|| error("Malformed transport facts"))?
+                .insert("time", Value::Number(end));
+            let marks = ui
+                .session
+                .as_object_mut()
+                .ok_or_else(|| error("Malformed session facts"))?
+                .get_mut("proSource")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| error("Malformed source-monitor facts"))?;
+            marks.insert("sourceIn", Value::Null);
+            marks.insert("sourceOut", Value::Null);
+            let Prepared::Call(request) = transact(
                 ProSourceCommand {
                     comp_id: monitor.comp_id,
                     asset_id: monitor.asset_id,
@@ -658,7 +686,21 @@ pub(crate) fn prepare(
                     splits,
                 }
                 .into(),
-            ));
+            ) else {
+                unreachable!()
+            };
+            return Ok(Prepared::SourceEdit {
+                request,
+                finish: SourceFinish {
+                    state: StateTransaction {
+                        expected_revision: r.state_revision,
+                        ops: vec![StateOp::Ui {
+                            project: project.into(),
+                            next: ui,
+                        }],
+                    },
+                },
+            });
         }
         ProAction::Shuttle(input) => {
             let comp = crate::model::open_comp_id(root);
@@ -700,4 +742,37 @@ pub(crate) fn prepare(
             next: ui,
         }],
     }))
+}
+
+/// Only after a successful document apply, and before actor publication/reply.
+/// Failure is an applied-with-notice outcome, never a false command refusal.
+pub(crate) fn finish_source(
+    kernel: &mut Kernel,
+    project: &str,
+    finish: SourceFinish,
+    handled: &mut crate::tx::Handled,
+) {
+    let Some(ack) = handled.reply.as_mut() else {
+        return;
+    };
+    if !matches!(ack.reply, crate::Reply::Applied { changed: true, .. }) {
+        return;
+    }
+    if let Err(e) = kernel.state_transaction(finish.state) {
+        let message = format!("Source edit applied, but session facts could not be updated: {e}");
+        let notice = crate::Notice::NotDurable { message };
+        let diagnostic = match ack.notice.take() {
+            Some(crate::Notice::NotDurable { message: earlier }) => format!("{earlier}; {e}"),
+            Some(earlier) => format!("{earlier:?}; {e}"),
+            None => e.to_string(),
+        };
+        ack.notice = Some(crate::Notice::NotDurable {
+            message: format!(
+                "Source edit applied, but session facts could not be updated: {diagnostic}"
+            ),
+        });
+        if let Some(p) = kernel.project_mut(project) {
+            p.push_notice(notice);
+        }
+    }
 }
