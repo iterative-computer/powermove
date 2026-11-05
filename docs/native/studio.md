@@ -231,3 +231,35 @@ A new real-GPU regression renders an authored 8-bit grey screen and the same
 scene with its independently calculated linear emission. It failed before the
 repair and now requires **identical RGBA bytes for every pixel in every layer**.
 No tolerance was introduced. The qualification counts above include this test.
+
+## 2026-11-05 — Mac production hook (partial)
+
+`Renderer::set_studio_source` now installs a typed immutable scene provider and
+settings. `Render3d::Studio` carries composition, pinned revision, exact ticks,
+output dimensions, Final/preview intent and the actual outer shutter count.
+The native service attaches `DocumentSource` on its render worker and reconstructs
+it in the windowless export child from the same document and media paths.
+`pm-kernel::commands::scene3d::resolve_scene` supplies evaluated transforms,
+materials, camera and lights. Procedural/explicit mesh geometry retains immutable
+identity across provider replacement; the extractor and GPU BLAS cache survive.
+
+Layer outputs enter the normal compositor as premultiplied encoded SDR textures,
+with the FBO row convention applied during presentation. Masks, opacity, blends
+and supported effects use the existing compositor. Final selects the authored
+sample budget, rounded up per shutter with the source's four-sample minimum,
+eight bounces and a deterministic seed/time salt. It cannot silently select Fast.
+The export child composites and encodes these outputs through `pm-export`.
+
+Headless Mac regressions cover the native kernel/service/compositor boundary,
+an emissive card behind the camera reflected in a metal sphere, layer opacity,
+repeated Final pixels, and two matching decoded shutter-enabled PNG exports.
+These are offscreen Metal tests, not app-window captures or visual acceptance.
+Work counters are emitted by the synthetic integration test; no performance
+baseline or acceptance threshold changes here.
+
+This is **not full Studio closure**. Imported model parts/materials, material
+maps/slots/live screens and rounded-box geometry still require adapters and fail
+explicitly rather than drawing placeholders. Fast, depth/id, view overrides,
+full depth-set/barrier/background/catcher presentation, cancellation between GPU
+slices and float/HDR Studio output remain unqualified. No panels, Blender,
+release, packaging or physical-display acceptance is added by this hook.
