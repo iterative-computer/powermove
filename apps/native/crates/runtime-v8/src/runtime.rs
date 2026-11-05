@@ -610,6 +610,30 @@ impl Live {
         n.in_flight = 0;
         n.reserved = 0;
     }
+    /// AbortSignal rejects in JS immediately. Retire the corresponding native
+    /// job before acknowledging that task, even if no future idle tick occurs.
+    fn cancel_aborted(&mut self) {
+        let (aborted, mut retired) = {
+            let mut n = self.vm.native.lock().unwrap();
+            let aborted = std::mem::take(&mut n.aborted);
+            let before = n.queued.len();
+            n.queued.retain(|(id, _)| !aborted.contains(id));
+            (aborted, before - n.queued.len())
+        };
+        self.requests.retain_mut(|request| {
+            if aborted.contains(&request.id) {
+                request.cancel.cancel();
+                request.job.cancel();
+                retired += 1;
+                false
+            } else {
+                true
+            }
+        });
+        let mut n = self.vm.native.lock().unwrap();
+        n.in_flight -= retired;
+        n.reserved -= retired * n.limits.max_response_bytes;
+    }
     fn pump(&mut self, config: &Config) -> Result<()> {
         let (queued, aborted, logs) = {
             let mut n = self.vm.native.lock().unwrap();
@@ -674,7 +698,9 @@ impl Live {
         config: &Config,
         control: &Arc<Control>,
     ) -> Result<String> {
-        let value = self.vm.start(source).map_err(|error| {
+        let started = self.vm.start(source);
+        self.cancel_aborted();
+        let value = started.map_err(|error| {
             if self.vm.task_cancelled() {
                 Error::Terminated
             } else {
@@ -690,7 +716,9 @@ impl Live {
                 self.vm.handle().terminate_execution();
                 return Err(Error::Closed);
             }
-            if let Some(value) = self.vm.settle(&value)? {
+            let settled = self.vm.settle(&value);
+            self.cancel_aborted();
+            if let Some(value) = settled? {
                 return Ok(value);
             }
             self.pump(config)?;

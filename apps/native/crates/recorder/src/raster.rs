@@ -195,7 +195,10 @@ impl CpuRasterizer {
             }
         }
     }
-    pub(crate) fn read_into(&self, x: i64, y: i64, data: &mut ImageData) {
+    /// Read only the requested region into an existing buffer. Every output
+    /// pixel is overwritten, including transparent out-of-bounds pixels.
+    /// Coordinates are signed and may span the entire i64 range.
+    pub fn read_into(&self, x: i64, y: i64, data: &mut ImageData) {
         if x == 0 && y == 0 && data.width() == self.width && data.height() == self.height {
             if let Some(base) = &self.base {
                 data.bytes_mut().copy_from_slice(base.bytes());
@@ -206,6 +209,8 @@ impl CpuRasterizer {
                         }
                     }
                 }
+            } else {
+                data.bytes_mut().fill(0);
             }
             let width = self.width;
             let height = self.height;
@@ -229,8 +234,10 @@ impl CpuRasterizer {
         }
         let w = data.width();
         for (i, rgba) in data.bytes_mut().chunks_exact_mut(4).enumerate() {
-            let (sx, sy) = (x + (i % w as usize) as i64, y + (i / w as usize) as i64);
+            let sx = x.saturating_add((i % w as usize) as i64);
+            let sy = y.saturating_add((i / w as usize) as i64);
             if sx < 0 || sy < 0 || sx >= self.width as i64 || sy >= self.height as i64 {
+                rgba.fill(0);
                 continue;
             }
             encode(self.get(sx as u32, sy as u32), rgba);

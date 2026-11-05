@@ -262,3 +262,19 @@ gates**, not permission to expose an invented JS exception for a valid Canvas
 call: the host must finish the synchronous fallback at that boundary. This
 package does not supply that production runtime fallback. Drawing zero-length
 line segments follows the spec's tracing/pruning step, including round caps.
+
+## 2026-11-04 — runtime2 regional readback
+
+`CpuRasterizer::read_into` is now public and overwrites every pixel of a reused
+output buffer, including transparent pixels outside the bitmap and on a blank
+full-frame read. Signed i64 origins cannot overflow. `pm-recorder-raster` uses
+this method directly: a small read no longer allocates/converts the whole canvas.
+Two spec tests cover extreme coordinates, buffer reuse, immutable source bases
+and modified float tiles. Decision: preserve the exact existing conversion while
+bounding work to the requested region (N1/N2/N3/N6); retain all consumers (prune).
+
+Linux validation: `cargo test --locked --manifest-path apps/native/Cargo.toml
+-p pm-recorder -p pm-recorder-raster` passes **130 tests** (94 recorder, 15 raster,
+21 golden); package all-target Clippy with `--no-deps -- -D warnings` passes.
+The current native workspace lockfile already supports these packages; no lock
+regeneration is needed. No complete JS/EXT-RASTER-1 or macOS result is claimed.

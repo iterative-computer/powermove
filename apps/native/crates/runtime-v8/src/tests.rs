@@ -69,11 +69,13 @@ impl KernelHooks for Kernel {
 #[derive(Default)]
 struct Watch {
     notices: AtomicUsize,
+    noticed_executions: Mutex<Vec<u64>>,
     prompts: AtomicUsize,
     stop: AtomicBool,
 }
 impl WatchdogHooks for Watch {
-    fn notice(&self, _: &Generation, _: u64) {
+    fn notice(&self, _: &Generation, execution: u64) {
+        self.noticed_executions.lock().unwrap().push(execution);
         self.notices.fetch_add(1, Ordering::Relaxed);
     }
     fn prompt(&self, _: &Generation, _: u64) -> WatchdogDecision {
@@ -285,6 +287,47 @@ fn one_isolate_per_extension_and_all_snapshot_kinds() {
     assert!(f.pool.realm(RealmKind::Store("synthetic".into())).is_err());
     close(&a);
     close(&b);
+}
+
+#[test]
+fn snapshot_reuse_child() {
+    if std::env::var_os("PM_RUNTIME_SNAPSHOT_REUSE_CHILD").is_none() {
+        return;
+    }
+    let f = fixture();
+    // Finalize one custom compiler snapshot, retire its last isolate, then
+    // restore it while another kind owns the shared read-only heap.
+    let compiler = f.pool.realm(RealmKind::Compiler).unwrap();
+    eval(&compiler, "__kind");
+    close(&compiler);
+    let extension = f
+        .pool
+        .realm(RealmKind::V4Extension("snapshot".into()))
+        .unwrap();
+    eval(&extension, "globalThis.answer=42");
+    for _ in 0..3 {
+        let compiler = f.pool.realm(RealmKind::Compiler).unwrap();
+        assert_eq!(eval(&compiler, "typeof svelte.compile"), "function");
+        close(&compiler);
+        assert_eq!(eval(&extension, "answer"), "42");
+    }
+    close(&extension);
+}
+
+#[test]
+fn compiler_snapshot_can_be_restored_after_a_different_kind_replaces_the_shared_heap() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::snapshot_reuse_child", "--nocapture"])
+        .env("PM_RUNTIME_SNAPSHOT_REUSE_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 #[test]
 fn locked_parking_survives_idle_and_cross_thread_submission() {
@@ -750,6 +793,104 @@ fn external_memory_quota_recreates_from_storage() {
     assert_eq!(eval(&r, "storage.n+':'+typeof bytes"), "19:undefined");
     close(&r);
 }
+
+#[test]
+fn fetch_reservation_includes_buffers_allocated_in_the_same_js_stack() {
+    let f = fixture_with(|c| {
+        c.limits.external_bytes = 2 * 1024 * 1024;
+        c.limits.max_response_bytes = 1024 * 1024;
+    });
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "globalThis.bytes=new Uint8Array(1536*1024);fetch('https://example.test/').catch(e=>String(e).includes('reservation quota'))"
+        ),
+        "true"
+    );
+    assert_eq!(f.host.starts.load(Ordering::Relaxed), 0);
+    let measured = wait(r.measure().unwrap()).unwrap();
+    assert!(measured[0].memory.external_bytes >= 1536 * 1024);
+    assert_eq!(measured[0].memory.fetch_reserved_bytes, 0);
+    assert_eq!(eval(&r, "bytes.length"), "1572864");
+    close(&r);
+}
+
+#[test]
+fn pending_fetch_capacity_is_attributed_and_released_on_abort() {
+    let f = fixture_with(|c| c.limits.max_response_bytes = 1024 * 1024);
+    f.host.mode.store(1, Ordering::Relaxed);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(
+        &r,
+        "globalThis.abort=new AbortController();globalThis.pending=fetch('https://example.test/',{signal:abort.signal}).catch(e=>e.name);'started'",
+    );
+    let measured = wait(r.measure().unwrap()).unwrap();
+    assert_eq!(measured[0].memory.fetch_reserved_bytes, 1024 * 1024);
+    assert_eq!(measured[0].memory.engine_reserved_bytes, 0);
+    assert_eq!(eval(&r, "abort.abort();pending"), "AbortError");
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .fetch_reserved_bytes,
+        0
+    );
+    assert_eq!(f.host.cancels.load(Ordering::Relaxed), 1);
+    close(&r);
+}
+
+#[test]
+fn abort_before_host_start_releases_capacity_even_when_js_throws() {
+    let f = fixture_with(|c| c.limits.max_response_bytes = 1024 * 1024);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert!(matches!(wait(r.eval("const c=new AbortController();fetch('https://example.test/',{signal:c.signal}).catch(()=>{});c.abort();throw new Error('after abort')").unwrap()), Err(Error::JavaScript(_))));
+    assert_eq!(f.host.starts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .fetch_reserved_bytes,
+        0
+    );
+    assert_eq!(
+        eval(&r, "fetch('https://example.test/').then(r=>r.text())"),
+        "{\"ok\":true}"
+    );
+    close(&r);
+}
+
+#[test]
+fn engine_reservation_counts_v8_and_pending_fetch_memory_before_calling_host() {
+    let engine = Arc::new(Engine::default());
+    let f = fixture_with(|c| {
+        c.engine = Some(engine.clone());
+        c.limits.external_bytes = 2 * 1024 * 1024;
+        c.limits.max_response_bytes = 1024 * 1024;
+    });
+    f.host.mode.store(1, Ordering::Relaxed);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(
+        &r,
+        "globalThis.bytes=new Uint8Array(768*1024);globalThis.abort=new AbortController();globalThis.pending=fetch('https://example.test/',{signal:abort.signal}).catch(e=>e.name);'started'",
+    );
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{try{runtime.engine('read')}catch(e){return String(e).includes('reservation quota')}})()"
+        ),
+        "true"
+    );
+    assert_eq!(engine.calls.load(Ordering::Relaxed), 0);
+    eval(&r, "abort.abort();pending");
+    assert_eq!(eval(&r, "runtime.engine('read').operation"), "read");
+    assert_eq!(engine.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        wait(r.measure().unwrap()).unwrap()[0]
+            .memory
+            .engine_reserved_bytes,
+        0
+    );
+    close(&r);
+}
 #[test]
 fn admission_refuses_then_releases_after_owner_disposal() {
     let f = fixture_with(|c| c.admission = Admission::new(64 * 1024 * 1024));
@@ -904,11 +1045,24 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
 fn idle_realms_do_not_poll_or_commit_and_timers_wake_them() {
     let f = fixture();
     let r = f.pool.realm(RealmKind::Compat).unwrap();
-    eval(&r, "42");
+    let initial = r.eval("42").unwrap();
+    let initial_execution = initial.execution;
+    assert_eq!(wait(initial).unwrap().value, "42");
+    assert!(r.active_execution().is_none());
     let before = f.kernel.calls.load(Ordering::Relaxed);
     thread::sleep(Duration::from_millis(100));
     assert_eq!(f.kernel.calls.load(Ordering::Relaxed), before);
-    assert_eq!(f.watch.notices.load(Ordering::Relaxed), 0);
+    assert!(r.active_execution().is_none());
+    // CPU contention may legitimately trigger the watchdog during the initial
+    // task. Attribute notices by execution instead of calling that idle work.
+    assert!(
+        f.watch
+            .noticed_executions
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|id| *id == initial_execution)
+    );
     eval(
         &r,
         "setTimeout(()=>{storage.timer=19;runtime.stage({id:'timer'})},15)",

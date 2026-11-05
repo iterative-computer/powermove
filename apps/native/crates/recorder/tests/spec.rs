@@ -34,6 +34,62 @@ fn default_state_and_context_attributes() {
     assert_eq!(c.state().font.desc.size, 10.);
     assert_eq!(c.key(), SourceKey { id: 1, version: 0 });
 }
+
+#[test]
+fn regional_read_into_overwrites_reused_buffers_and_extreme_origins() {
+    let mut c = canvas(2, 1);
+    fill(&mut c, "red", [0., 0., 1., 1.]);
+    let mut r = CpuRasterizer::new(2, 1).unwrap();
+    r.replay(c.commands()).unwrap();
+    let mut output = ImageData::from_rgba(3, 1, vec![255; 12]).unwrap();
+    r.read_into(-1, 0, &mut output);
+    assert_eq!(output.bytes(), &[0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0]);
+    for origin in [i64::MIN, i64::MAX] {
+        output.bytes_mut().fill(255);
+        r.read_into(origin, origin, &mut output);
+        assert_eq!(output.bytes(), &[0; 12]);
+    }
+    let empty = CpuRasterizer::new(3, 1).unwrap();
+    output.bytes_mut().fill(255);
+    empty.read_into(0, 0, &mut output);
+    assert_eq!(output.bytes(), &[0; 12]);
+    CpuRasterizer::new(0, 0)
+        .unwrap()
+        .read_into(0, 0, &mut output);
+    assert_eq!(output.bytes(), &[0; 12]);
+}
+
+#[test]
+fn regional_read_matches_full_read_for_source_base_and_changed_tiles() {
+    let mut sources = Sources::default();
+    let source = sources
+        .insert(
+            SourceKey { id: 42, version: 1 },
+            ImageData::from_rgba(33, 2, [25, 50, 100, 128].repeat(66)).unwrap(),
+        )
+        .unwrap();
+    let mut c = canvas(33, 2);
+    c.set_composite("copy");
+    c.draw_image(
+        source,
+        Rect::new(0., 0., 33., 2.),
+        Rect::new(0., 0., 33., 2.),
+    )
+    .unwrap();
+    c.set_composite("source-over");
+    fill(&mut c, "red", [16., 0., 1., 1.]);
+    let mut r = CpuRasterizer::new(33, 2).unwrap();
+    r.replay(c.commands()).unwrap();
+    let full = r.image_data().unwrap();
+    let mut output = ImageData::new(3, 2).unwrap();
+    r.read_into(15, 0, &mut output);
+    for row in 0..2usize {
+        assert_eq!(
+            &output.bytes()[row * 12..row * 12 + 12],
+            &full.bytes()[(row * 33 + 15) * 4..(row * 33 + 18) * 4]
+        );
+    }
+}
 #[test]
 fn state_stack_preserves_current_path() {
     let mut c = canvas(4, 1);
