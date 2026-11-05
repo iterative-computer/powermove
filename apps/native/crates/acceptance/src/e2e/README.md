@@ -32,24 +32,22 @@ strip/library operations and selection-after-Undo/Redo scenarios. Their direct
 PM/agent-tool assertions have native actor/MCP equivalents; this does not
 certify their enclosing app workflow or macOS launch/input/transport.
 
-`cargo test` has **36 passing tests**: the strict passing checks, one explicit
-known-defect guard, and six ledger/report tests. This test-harness count is
-not a claim that 36 product contracts passed. The report always executes the
-unchanged strict failed check and returns a failure exit code.
+`cargo test` has **36 tests**: the native checks and six ledger/report tests.
+This harness count does not claim that 36 product contracts passed.
 
-### Measured failure requiring a change outside this lane
+### Repaired Glide batch easing
 
 `agent-keyframe-easing.spec.ts:5`, `set_property` variant: keys at 0/2/3 s with
-values 10/110/−40 and `ease: 'glide'` must retain the complete curve. At 1 s,
-native evaluation gives **90.42094586353606**, expected
-**104.94929544957891**. `replace_keyframes` passes the same oracle.
-The expected curve is independently inverted in f64 from the frozen Glide
-handles `[0.16, 0.84, 0.24, 1]`, rather than read back from native output.
-The owning kernel/MCP lane needs to preserve all incoming/outgoing easing
-handles when sequential `set_property` keyframe commands build a track.
-`checks::tests::known_failure_easing_set_batch` requires this precise failure
-class to remain explicit; a fix must remove that guard and promote the strict
-check to a normal passing test. Do not change the expected authored curve.
+values 10/110/−40 and `ease: 'glide'` must retain the complete curve. Before the
+repair, native evaluation at 1 s gave **90.42094586353606**, expected
+**104.94929544957891**. Both `set_property` and `replace_keyframes` now pass the
+unchanged oracle. It independently inverts the frozen Glide handles
+`[0.16, 0.84, 0.24, 1]` in f64 rather than reading native output.
+
+The kernel finishes named presets against final neighbours at the end of each
+uninterrupted property-command run. The former known-defect guard is an ordinary
+passing test. The complete declaration retains its missing-controller blocker;
+a passing supporting probe cannot certify complete application parity.
 
 ## Run
 
@@ -68,7 +66,7 @@ cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.t
 
 The JSON runner exits **1 for any measured failure**, **2 for unresolved
 declarations**, **0 only for a passing requested scope**, and **64 for invalid
-arguments/ledger**. The current full report exits **1**, deliberately.
+arguments/ledger**. The current full report exits **2** for unresolved declarations.
 Checks run on a worker, including on macOS; no actor wait runs on main.
 An individual native check is inspectable/drivable by its registered ID:
 
@@ -156,3 +154,13 @@ old complete headless check, or `pm-e2e-triage --check MAIN.MCP.list_projects.ca
 for a current schema-only check. Neither filtered result establishes app parity.
 
 Existing non-MAIN check IDs still select their original compatibility source when no explicit reference is given; result metadata identifies that scope. Full/default reports use main.
+
+## Easing batch repair — 2026-11-05
+
+Both unchanged Glide operation oracles now pass. Native finishes named presets
+against each property run's final neighbours, before a following operation can
+read or override animation. The former known-failure guard is an ordinary test.
+The complete main declaration retains its existing controller blocker; a
+passing curve probe does not certify the full editor workflow. See
+[the integration repairs](../../../../../../docs/native/int2-fixes.md) for the
+remaining current-main failures and complete verification counts.

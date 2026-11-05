@@ -467,3 +467,27 @@ fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
         matches!(&scene.row("[\"track\",\"Video\",0]").unwrap().content,paint::RowContent::Track{clips} if clips.len()==2)
     );
 }
+
+#[test]
+fn shell_mask_reveal_persists_disclosure_without_editing_animation() {
+    let (_actor, mut c) = client();
+    let before = c.kernel.published("P").unwrap();
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
+    let shown = c.model.reveal.layers.clone();
+    assert!(!shown.is_empty());
+    assert!(
+        shown
+            .values()
+            .all(|d| !d.collapsed && d.paths == Some(vec!["*".into()]))
+    );
+    let after = c.kernel.published("P").unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(
+        after.snapshot.document.to_value(),
+        before.snapshot.document.to_value()
+    );
+    c.sync().unwrap();
+    assert_eq!(c.model.reveal.layers, shown);
+    dispatch(&mut c, json!({"type":"keyDown","event":{"key":"m"}})).unwrap();
+    assert!(c.model.reveal.layers.values().all(|d| d.collapsed));
+}

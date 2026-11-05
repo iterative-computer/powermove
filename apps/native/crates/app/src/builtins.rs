@@ -259,7 +259,7 @@ impl Controller {
         })
         .detach();
     }
-    fn drain_builtins(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };

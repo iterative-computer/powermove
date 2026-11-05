@@ -13,8 +13,17 @@ use pm_protocol::{
 use pm_shell::{Command as ShellCommand, Host};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
+#[derive(Clone)]
+struct CompositionView {
+    time: f64,
+    timeline: pm_model::Value,
+    viewer: pm_model::Value,
+}
+
 pub struct Controller {
     pub builtins: crate::builtins::Host,
+    /// Per-composition navigation view, scoped to the live document identity.
+    composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
     pub kernel: KernelHandle,
     pub engine: Arc<EngineService>,
     pub host: Rc<RefCell<Host>>,
@@ -212,6 +221,7 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         Self {
             builtins: Default::default(),
+            composition_views: Default::default(),
             kernel,
             engine,
             profile,
@@ -262,9 +272,50 @@ impl Controller {
             cx.notify();
             return;
         };
-        let Some(p) = self.kernel.published(&session.project) else {
+        let Some(mut p) = self.kernel.published(&session.project) else {
             return;
         };
+        let switched = self.published.as_ref().is_some_and(|old| {
+            old.snapshot.doc_id == p.snapshot.doc_id
+                && old.snapshot.open_comp() != p.snapshot.open_comp()
+        });
+        if switched {
+            self.host.borrow_mut().close_flowchart();
+            if let Some(old) = &self.published
+                && let Some(id) = old.snapshot.open_comp()
+            {
+                self.composition_views.insert(
+                    (old.snapshot.doc_id, id),
+                    CompositionView {
+                        time: self.time(),
+                        timeline: old.ui_state.timeline.clone(),
+                        viewer: old.ui_state.viewer.clone(),
+                    },
+                );
+            }
+            let key = (
+                p.snapshot.doc_id,
+                p.snapshot.open_comp().unwrap_or_default(),
+            );
+            let saved = self.composition_views.get(&key).cloned();
+            let mut next = (*p).clone();
+            let time = if let Some(saved) = saved {
+                next.ui_state.timeline = saved.timeline;
+                next.ui_state.viewer = saved.viewer;
+                saved.time
+            } else {
+                0.
+            };
+            self.zoom = pm_panel_viewerchrome::Chrome::read(&next.ui_state)
+                .ok()
+                .and_then(|c| (!c.navigation.fit).then_some(c.navigation.zoom));
+            p = Arc::new(next);
+            self.published = Some(p.clone());
+            self.bind_composition();
+            self.apply_viewer_options();
+            self.rebuild_popout_viewer();
+            self.seek(time);
+        }
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
@@ -563,11 +614,43 @@ impl Controller {
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
         }
+        self.host.borrow_mut().close_flowchart();
+        self.composition_views.clear();
         self.session = Some(session);
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);
-        let p = self.published.as_ref().unwrap();
+        self.media = media.unwrap_or_default();
+        // The status bar shows document state and counts; only exceptions get words.
+        self.message = [
+            copy_notice(&decision),
+            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        self.bind_composition();
+        self.apply_viewer_options();
+        self.rebuild_popout_viewer();
+        if let Some(ui) = self.published.as_ref().map(|p| p.ui_state.clone()) {
+            let time = ui
+                .transport
+                .get("time")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            self.seek(time);
+        }
+        self.show_library = false;
+        self.mcp.bind(self.session.clone());
+    }
+    fn bind_composition(&mut self) {
+        if let Some(viewer) = self.viewer.take() {
+            viewer.retire();
+        }
+        let Some(p) = self.published.clone() else {
+            return;
+        };
         let comp = p.snapshot.open_comp().unwrap_or_default();
         let root = p.snapshot.document.root().unwrap();
         let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
@@ -582,21 +665,11 @@ impl Controller {
         let fps = number("fps", 30.);
         self.rate =
             pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
-        let media = media.unwrap_or_default();
-        self.media = media.clone();
+        let media = self.media.clone();
         self.background = composition
             .get("bg")
             .and_then(crate::node_string)
             .and_then(panels::parse_background);
-        // The status bar shows document state and counts; only exceptions get words.
-        self.message = [
-            copy_notice(&decision),
-            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
         match self.engine.viewer(ViewerConfig {
             snapshot: p.snapshot.clone(),
             composition: comp,
@@ -615,18 +688,6 @@ impl Controller {
             Ok(viewer) => self.viewer = Some(viewer),
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
-        self.apply_viewer_options();
-        self.rebuild_popout_viewer();
-        if let Some(ui) = self.published.as_ref().map(|p| p.ui_state.clone()) {
-            let time = ui
-                .transport
-                .get("time")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.);
-            self.seek(time);
-        }
-        self.show_library = false;
-        self.mcp.bind(self.session.clone());
     }
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
         let current = self.mcp.current();
@@ -814,6 +875,114 @@ impl Controller {
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
+            "composition.flowchart" => {
+                let mut host = self.host.borrow_mut();
+                if cmd.token.is_some()
+                    && !host.composition_canvas_focused()
+                    && !host.flowchart_open()
+                {
+                    return false;
+                }
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let Some(chart) = pm_kernel::navigation::Flowchart::read(&published.snapshot)
+                else {
+                    return false;
+                };
+                use pm_shell::FlowchartRow;
+                let mut rows = vec![FlowchartRow::Heading("Used In".into())];
+                let mut group = |items: Vec<pm_kernel::navigation::Composition>, empty: &str| {
+                    if items.is_empty() {
+                        rows.push(FlowchartRow::Empty(empty.into()));
+                    }
+                    for item in items {
+                        rows.push(FlowchartRow::Composition {
+                            id: item.id,
+                            name: item.name,
+                            current: false,
+                        });
+                    }
+                };
+                group(chart.parents, "Not nested anywhere");
+                rows.push(FlowchartRow::Composition {
+                    id: chart.current.id,
+                    name: chart.current.name,
+                    current: true,
+                });
+                rows.push(FlowchartRow::Heading("Contains".into()));
+                if chart.children.is_empty() {
+                    rows.push(FlowchartRow::Empty("No nested compositions".into()));
+                }
+                for child in chart.children {
+                    rows.push(FlowchartRow::Composition {
+                        id: child.id,
+                        name: child.name,
+                        current: false,
+                    });
+                }
+                return host.toggle_flowchart(rows, published.snapshot.doc_id);
+            }
+            "composition.open" => {
+                let Some(id) = cmd.args.first().and_then(|a| a.as_str()) else {
+                    return false;
+                };
+                let Some(document) = cmd.args.get(1).and_then(|a| a.as_u64()) else {
+                    return false;
+                };
+                if self
+                    .published
+                    .as_ref()
+                    .is_none_or(|p| p.snapshot.doc_id != document)
+                {
+                    return false;
+                }
+                if self
+                    .published
+                    .as_ref()
+                    .and_then(|p| p.snapshot.open_comp())
+                    .as_deref()
+                    == Some(id)
+                {
+                    return true;
+                }
+                if let Some(viewer) = &self.viewer {
+                    let _ = viewer.command(TransportCommand::Pause);
+                }
+                self.call(
+                    Call::OpenComposition {
+                        comp_id: id.into(),
+                        document,
+                    },
+                    cx,
+                );
+            }
+            "toggleLayerStrips" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.reveal_masks() else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = ticket.await;
+                    let _ = this.update(cx, |v, cx| {
+                        if !v
+                            .builtins
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+                        {
+                            return;
+                        }
+                        if let Err(error) = result {
+                            v.message = format!("Mask properties could not be shown: {error}");
+                        }
+                        v.drain_builtins(cx);
+                    });
+                })
+                .detach();
+            }
             "fit" | "fitComp" | "viewer.fit" => {
                 self.zoom = None;
                 self.persist_ui();

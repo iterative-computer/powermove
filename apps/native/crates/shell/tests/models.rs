@@ -91,8 +91,8 @@ fn keymap_matches_every_w1_cell() {
         .filter(|s| s.starts_with("| K") && s.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
         .collect();
     let bindings = shipped();
-    assert_eq!(bindings.len(), 195);
-    assert_eq!(rows.len(), bindings.len());
+    assert_eq!(bindings.len(), 198);
+    assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
         assert_eq!(b.id, c[1]);
@@ -274,4 +274,81 @@ fn shifted_physical_keys_and_escape_extension_priority() {
     );
     assert_eq!(r.resolve(2, true), [Effect::Consumed(2)]);
     assert_eq!(r.pending_token(), Some(1));
+}
+
+#[test]
+fn maximizing_keeps_saved_layout_and_fills_workspace() {
+    let layout = Layout::preset("design");
+    let original = layout.clone();
+    let bounds = Rect {
+        x: 6.,
+        y: 58.,
+        w: 1428.,
+        h: 810.,
+    };
+    let full = layout.geometry_with_maximized(bounds, &tokens(), Some("timeline"));
+    assert_eq!(full.panels.len(), 1);
+    assert_eq!(full.panels[0].rect, bounds);
+    assert_eq!(
+        layout.docks[full.panels[0].dock].groups[full.panels[0].group].active(),
+        "timeline"
+    );
+    assert!(full.dividers.is_empty());
+    assert_eq!(layout, original);
+    assert_eq!(
+        layout
+            .geometry_with_maximized(bounds, &tokens(), None)
+            .panels
+            .len(),
+        5
+    );
+    assert_eq!(
+        layout
+            .geometry_with_maximized(bounds, &tokens(), Some("absent"))
+            .panels
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn current_main_actions_keep_the_exact_registration_metadata() {
+    for (chord, command, priority) in [("`", "maximizePanel", 100), ("m", "toggleLayerStrips", 90)]
+    {
+        let binding = shipped()
+            .into_iter()
+            .find(|b| b.command == command)
+            .unwrap();
+        assert_eq!(binding.chord, chord);
+        assert_eq!(binding.priority, priority);
+        assert!(binding.args.is_empty());
+        assert!(!binding.in_fields && !binding.repeat && !binding.loose);
+    }
+}
+
+#[test]
+fn composition_tab_enters_fields_but_declines_back_to_focus_navigation() {
+    let binding = shipped()
+        .into_iter()
+        .find(|b| b.command == "composition.flowchart")
+        .unwrap();
+    assert_eq!(binding.chord, "tab");
+    assert_eq!(binding.priority, 0);
+    assert!(binding.in_fields);
+    assert!(!binding.repeat && !binding.loose);
+    assert!(binding.args.is_empty());
+    let mut resolver = Resolver::new();
+    let key = Key {
+        token: 90,
+        chord: "tab".into(),
+        field: true,
+        repeat: false,
+        up: false,
+        compat: false,
+    };
+    assert!(
+        matches!(resolver.submit(key).as_slice(), [Effect::Dispatch { command, .. }]
+        if command == "composition.flowchart")
+    );
+    assert_eq!(resolver.resolve(90, false), [Effect::Replay(90)]);
 }

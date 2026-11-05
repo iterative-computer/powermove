@@ -17,6 +17,26 @@ pub fn snapshot() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| serde_json::from_str(include_str!("../data/catalog-main.json")).unwrap())
 }
+/// Owner-selected Studio contracts extend pinned main. Keep the bare source
+/// snapshot unchanged, and compare every field of each exact overlay as well.
+pub fn expected_catalog() -> Value {
+    let mut catalog = snapshot()["catalog"].clone();
+    let studio: Value = serde_json::from_str(include_str!(
+        "../../mcp/fixtures/scene3d-source-catalog.json"
+    ))
+    .expect("pinned Studio source contracts");
+    for overlay in studio["tools"].as_array().unwrap() {
+        assert!(["edit_3d", "get_3d_scene"].contains(&overlay["name"].as_str().unwrap()));
+        let base = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == overlay["name"])
+            .expect("existing main tool");
+        *base = overlay.clone();
+    }
+    catalog
+}
 pub fn declarations() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| serde_json::from_str(include_str!("../data/main-e2e-frozen.json")).unwrap())
@@ -164,14 +184,14 @@ pub fn run(
             }
         }};
     }
-    let expected = &snapshot()["catalog"];
+    let expected = &expected_catalog();
     for tool in expected["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
         check!(
             format!("MAIN.MCP.{name}.catalog"),
             "W033",
             "main-tool-contract",
-            "Exact pinned main name, description and input schema",
+            "Exact pinned main plus owner-selected Studio name, description and input schema",
             || exact(tool, pm_mcp::catalog::spec(name).unwrap_or(&Value::Null))
         );
         let (backing, mac) = if name == "project_memory" {
@@ -212,7 +232,7 @@ pub fn run(
             format!("MAIN.MCP.{field}.identity"),
             "W033",
             "main-catalog-contract",
-            "Exact pinned main catalog/allowlist/instruction/command/easing identity",
+            "Exact pinned main plus owner-selected Studio catalog/allowlist/instruction/command/easing identity",
             || exact(&expected[field], &pm_mcp::catalog::catalog()[field])
         );
     }

@@ -827,7 +827,7 @@ impl CoreTextRegistry {
             let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
             FontBytes::from_shared(Arc::new(MappedFont(map)))
         } else {
-            FontBytes::new(std::fs::read(path).ok()?)
+            font_file_snapshot(path, &meta)?
         };
         self.blobs.insert(key.clone(), data.clone());
         self.files
@@ -1365,6 +1365,80 @@ struct Custom {
     web: Option<WebDescriptors>,
 }
 
+/// A copied font file can serve multiple registries without copying it again.
+/// A replacement or in-place edit gets a new snapshot. Keep at most 16 MiB
+/// between users; active registries retain their own immutable references.
+#[derive(Clone, PartialEq, Eq)]
+struct FontFileStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    device: u64,
+    inode: u64,
+    changed: (i64, i64),
+}
+impl FontFileStamp {
+    fn new(path: &std::path::Path, meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            path: path.into(),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            device: meta.dev(),
+            inode: meta.ino(),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+}
+#[derive(Default)]
+struct FontFiles {
+    entries: std::collections::VecDeque<(FontFileStamp, FontBytes)>,
+    bytes: usize,
+}
+fn font_file_snapshot(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<FontBytes> {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    static FILES: std::sync::OnceLock<std::sync::Mutex<FontFiles>> = std::sync::OnceLock::new();
+    let files = FILES.get_or_init(Default::default);
+    let stamp = FontFileStamp::new(path, meta);
+    {
+        let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = files.entries.iter().position(|(s, _)| *s == stamp) {
+            let entry = files.entries.remove(index).expect("located snapshot");
+            let data = entry.1.clone();
+            files.entries.push_back(entry);
+            return Some(data);
+        }
+    }
+    let data = FontBytes::new(std::fs::read(path).ok()?);
+    // Do not cache a snapshot when the file changed during the read.
+    if data.as_slice().len() > LIMIT
+        || FontFileStamp::new(path, &std::fs::metadata(path).ok()?) != stamp
+    {
+        return Some(data);
+    }
+    let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
+    // Another caller may have read it while this one was outside the lock.
+    if let Some((_, existing)) = files.entries.iter().find(|(s, _)| *s == stamp) {
+        return Some(existing.clone());
+    }
+    let mut i = 0;
+    while i < files.entries.len() {
+        if files.entries[i].0.path == stamp.path {
+            let (_, old) = files.entries.remove(i).expect("old snapshot");
+            files.bytes -= old.as_slice().len();
+        } else {
+            i += 1;
+        }
+    }
+    while files.entries.len() >= 64 || files.bytes + data.as_slice().len() > LIMIT {
+        let (_, old) = files.entries.pop_front().expect("cache has retained bytes");
+        files.bytes -= old.as_slice().len();
+    }
+    files.bytes += data.as_slice().len();
+    files.entries.push_back((stamp, data.clone()));
+    Some(data)
+}
+
 /// A read-only mapping of a system font file.
 struct MappedFont(memmap2::Mmap);
 
@@ -1733,5 +1807,25 @@ mod memory_usage_tests {
             unique_font_bytes([&system_file, &blob_view, &separate_font]),
             17
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    #[test]
+    fn registries_share_copies_but_file_replacement_keeps_old_bytes_immutable() {
+        let path = std::env::temp_dir().join(format!("pm-font-snapshot-{}", std::process::id()));
+        std::fs::write(&path, b"original font snapshot").unwrap();
+        let first = super::font_file_snapshot(&path, &path.metadata().unwrap()).unwrap();
+        let shared = super::font_file_snapshot(&path, &path.metadata().unwrap()).unwrap();
+        assert_eq!(first.id(), shared.id());
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, b"replaced font snapshot").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let next = super::font_file_snapshot(&path, &path.metadata().unwrap()).unwrap();
+        assert_ne!(first.id(), next.id());
+        assert_eq!(first.as_slice(), b"original font snapshot");
+        assert_eq!(next.as_slice(), b"replaced font snapshot");
+        std::fs::remove_file(path).unwrap();
     }
 }

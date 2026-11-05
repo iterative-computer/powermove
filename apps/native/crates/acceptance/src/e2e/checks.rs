@@ -15,39 +15,46 @@ pub struct NativeCheck {
 
 // This is the executable registry, shared by cargo test and the JSON report.
 macro_rules! registry {
-    ($($name:ident),+ $(,)?; known_failure $known:ident) => {
+    ($($name:ident),+ $(,)?) => {
         pub const ALL: &[NativeCheck] = &[
-            $(NativeCheck { id: stringify!($name), run: $name }),+,
-            NativeCheck { id: stringify!($known), run: $known }
+            $(NativeCheck { id: stringify!($name), run: $name }),+
         ];
         #[cfg(test)] mod tests {
             $(#[test] fn $name() { super::$name().unwrap(); })+
-            // Measured defect, NOT a passing e2e contract. The JSON runner
-            // executes the unchanged strict check above and reports FAIL.
-            // A production fix makes this guard fail until its owner removes
-            // the baseline and promotes the strict check to an ordinary test.
-            #[test] fn known_failure_easing_set_batch() {
-                let message=super::$known().expect_err("Glide regression fixed; remove the failure baseline");
-                assert!(message.starts_with("set_property: rotation at 1s is "),"{message}");
-                assert!(message.ends_with("complete glide curve was not preserved"),"{message}");
-            }
         }
     }
 }
 registry!(
-    easing_replace_batch, revision_recovery,
-    selection_preserves_redo, strip_move_and_library,
-    speed_double, speed_half, speed_undo_redo,
-    video_split_continuity, video_slip_bounds, video_trim_bounds,
-    keyframe_drag_values, markers_persist,
-    live_drag_commit, live_drag_cancel,
-    authored_fractional_rates, portable_opaque_data, portable_redo_tail,
-    library_trash_retains_work, media_folder_undo, media_delete_lock,
-    caption_srt, caption_vtt,
-    capture_preserves_document, capture_rejects_stale, capture_failure_preserves_edits,
-    surface_stable_ids, surface_unknown_ids,
-    mcp_tool_contract, pending_tools_are_explicit;
-    known_failure easing_set_batch
+    easing_replace_batch,
+    revision_recovery,
+    selection_preserves_redo,
+    strip_move_and_library,
+    speed_double,
+    speed_half,
+    speed_undo_redo,
+    video_split_continuity,
+    video_slip_bounds,
+    video_trim_bounds,
+    keyframe_drag_values,
+    markers_persist,
+    live_drag_commit,
+    live_drag_cancel,
+    authored_fractional_rates,
+    portable_opaque_data,
+    portable_redo_tail,
+    library_trash_retains_work,
+    media_folder_undo,
+    media_delete_lock,
+    caption_srt,
+    caption_vtt,
+    capture_preserves_document,
+    capture_rejects_stale,
+    capture_failure_preserves_edits,
+    surface_stable_ids,
+    surface_unknown_ids,
+    mcp_tool_contract,
+    pending_tools_are_explicit,
+    easing_set_batch
 );
 
 fn start(f: &mut Fixture) -> Check {

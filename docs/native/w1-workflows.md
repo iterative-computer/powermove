@@ -2794,7 +2794,7 @@ See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04) and
 | W058 | blocked-by | 0 | 0 | 3 | decoded-source-retiming-integration |
 | W059 | blocked-by | 0 | 0 | 7 | native-embedded-audio-routing |
 | W060 | blocked-by | 183 | 0 | 277 | native-keyframe-editor; real-keyboard-dispatch |
-| W061 | fail | 37 | 1 | 72 | native-graph-editor-and-curve-oracle; real-keyboard-dispatch |
+| W061 | blocked-by | 38 | 0 | 72 | native-graph-editor-and-curve-oracle; real-keyboard-dispatch |
 | W062 | blocked-by | 99 | 0 | 159 | native-group-parent-precompose-pixels; real-keyboard-dispatch |
 | W063 | blocked-by | 1 | 0 | 59 | native-inspector-property-bindings |
 | W064 | blocked-by | 0 | 0 | 7 | native-effects-matte-controls |
@@ -2821,13 +2821,13 @@ See [acceptance.md](acceptance.md#parity-follow-up--2026-11-04) and
 <!-- native-acceptance-status:2026-11-04:end -->
 
 <!-- main-acceptance-c7f46a0:start -->
-## Native execution status — main reference, 2026-11-04
+## Native execution status — main reference, 2026-11-05
 
 Active behavior reference: `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. This supersedes earlier tagged parity counts;
 v1.2.0 remains a separate required file/extension compatibility inventory.
-Current main assertions: **1,651 pass / 32 fail / 2,661 blocked**.
+Current main assertions: **1,672 pass / 10 fail / 2,662 blocked**.
 Schema/routing/supporting passes do not certify a complete tool body, native key dispatch or workflow.
-All 83 current workflow contracts remain blocked; main declarations retain 1 measured failure and 718 blockers.
+All 83 current workflow contracts remain blocked; main declarations retain 0 measured failures and 719 blockers.
 The union map preserves all 396 legacy specs and the frozen 370 roster; main adds one further spec.
 
 | Workflow | Status | Pass | Fail | Blocked | Remaining backing |
@@ -2841,7 +2841,7 @@ The union map preserves all 396 legacy specs and the frozen 370 roster; main add
 | W007 | blocked-by | 0 | 0 | 27 | delta-data:native-portable-document-flow; main:native-portable-document-flow |
 | W008 | blocked-by | 0 | 0 | 12 | delta-data:native-async-project-open; main:native-async-project-open |
 | W009 | blocked-by | 0 | 0 | 6 | main:native-composition-settings-controls; native-app:native-composition-settings-controls |
-| W010 | fail | 1560 | 24 | 1788 | main:native-key-command-dispatch; main:native-keyboard-dispatch; native-app:native-key-command-dispatch |
+| W010 | fail | 1576 | 8 | 1788 | main:native-key-command-dispatch; main:native-keyboard-dispatch; native-app:native-key-command-dispatch |
 | W011 | blocked-by | 0 | 0 | 1 | main:native-menu-command-dispatch |
 | W012 | blocked-by | 0 | 0 | 7 | main:native-settings-service-bindings; native-app:native-settings-service-bindings |
 | W013 | blocked-by | 0 | 0 | 2 | main:native-first-run-about; native-app:native-first-run-about |
@@ -2861,10 +2861,10 @@ The union map preserves all 396 legacy specs and the frozen 370 roster; main add
 | W027 | blocked-by | 0 | 0 | 13 | main:agent-run-thread-coordinator; native-app:agent-run-thread-coordinator |
 | W028 | blocked-by | 0 | 0 | 3 | main:agent-approval-question-stream-host; native-app:agent-approval-question-stream-host |
 | W029 | blocked-by | 0 | 0 | 8 | main:agent-visual-reply-publication; native-app:agent-visual-reply-publication |
-| W030 | fail | 3 | 3 | 14 | main:agent-project-tool-integration; native-app:agent-project-tool-integration |
+| W030 | blocked-by | 5 | 0 | 15 | main:agent-project-tool-integration; native-app:agent-project-tool-integration |
 | W031 | blocked-by | 3 | 0 | 6 | main:engine-media-registry-integration; native-app:engine-media-registry-integration |
 | W032 | blocked-by | 1 | 0 | 10 | main:native-panel-semantic-surface-host; native-app:native-panel-semantic-surface-host |
-| W033 | fail | 82 | 4 | 71 | delta-data:project-memory-index-and-tool; main:external-mcp-application-integration; main:mcp:apply_commands; main:mcp:capture_panel; main:mcp:check_project; main:mcp:computer_use_panel; main:mcp:create_project; main:mcp:delegate_task; main:mcp:edit_3d; main:mcp:edit_layer_strips; main:mcp:edit_video; main:mcp:export_captions; main:mcp:export_video; main:mcp:finish_session; main:mcp:fork_builtin_extension; main:mcp:generate_captions; main:mcp:get_3d_scene; main:mcp:get_panel_layout; main:mcp:get_panel_state; main:mcp:get_project_state; main:mcp:get_timeline; main:mcp:get_workspace_state; main:mcp:import_media; main:mcp:import_media_to_timeline; main:mcp:inspect_creative_extension; main:mcp:inspect_creative_workspace; main:mcp:interact_panel; main:mcp:list_media; main:mcp:list_projects; main:mcp:manage_media; main:mcp:manage_project; main:mcp:media_contact_sheet; main:mcp:media_waveform; main:mcp:open_panel; main:mcp:open_project; main:mcp:orchestrator_capabilities; main:mcp:probe_media; main:mcp:publish_extensions; main:mcp:publish_visual_reply; main:mcp:render_frames; main:mcp:replace_media; main:mcp:rollback_changes; main:mcp:sample_media_frames; main:mcp:save_project; main:mcp:select_layers; main:mcp:set_panel_layout; main:mcp:stage_fork_rebase; main:mcp:start_session; main:mcp:store_extension; main:mcp:store_install; main:mcp:store_library; main:mcp:store_publish; main:mcp:store_publish_prepare; main:mcp:store_search; main:mcp:store_source; main:mcp:store_uninstall; main:mcp:store_update; main:mcp:task_cancel; main:mcp:task_send; main:mcp:task_status; main:mcp:thread_cancel; main:mcp:thread_launch; main:mcp:thread_list; main:mcp:thread_read; main:mcp:thread_send; main:mcp:thread_unwatch; main:mcp:thread_watch; main:mcp:transcribe_media; main:mcp:validate_effect; native-app:external-mcp-application-integration |
+| W033 | fail | 84 | 2 | 71 | delta-data:project-memory-index-and-tool; main:external-mcp-application-integration; main:mcp:apply_commands; main:mcp:capture_panel; main:mcp:check_project; main:mcp:computer_use_panel; main:mcp:create_project; main:mcp:delegate_task; main:mcp:edit_3d; main:mcp:edit_layer_strips; main:mcp:edit_video; main:mcp:export_captions; main:mcp:export_video; main:mcp:finish_session; main:mcp:fork_builtin_extension; main:mcp:generate_captions; main:mcp:get_3d_scene; main:mcp:get_panel_layout; main:mcp:get_panel_state; main:mcp:get_project_state; main:mcp:get_timeline; main:mcp:get_workspace_state; main:mcp:import_media; main:mcp:import_media_to_timeline; main:mcp:inspect_creative_extension; main:mcp:inspect_creative_workspace; main:mcp:interact_panel; main:mcp:list_media; main:mcp:list_projects; main:mcp:manage_media; main:mcp:manage_project; main:mcp:media_contact_sheet; main:mcp:media_waveform; main:mcp:open_panel; main:mcp:open_project; main:mcp:orchestrator_capabilities; main:mcp:probe_media; main:mcp:publish_extensions; main:mcp:publish_visual_reply; main:mcp:render_frames; main:mcp:replace_media; main:mcp:rollback_changes; main:mcp:sample_media_frames; main:mcp:save_project; main:mcp:select_layers; main:mcp:set_panel_layout; main:mcp:stage_fork_rebase; main:mcp:start_session; main:mcp:store_extension; main:mcp:store_install; main:mcp:store_library; main:mcp:store_publish; main:mcp:store_publish_prepare; main:mcp:store_search; main:mcp:store_source; main:mcp:store_uninstall; main:mcp:store_update; main:mcp:task_cancel; main:mcp:task_send; main:mcp:task_status; main:mcp:thread_cancel; main:mcp:thread_launch; main:mcp:thread_list; main:mcp:thread_read; main:mcp:thread_send; main:mcp:thread_unwatch; main:mcp:thread_watch; main:mcp:transcribe_media; main:mcp:validate_effect; native-app:external-mcp-application-integration |
 | W034 | blocked-by | 0 | 0 | 1 | main:owner-browser-host-scope |
 | W035 | blocked-by | 0 | 0 | 1 | main:store-account-library-service |
 | W036 | blocked-by | 0 | 0 | 3 | main:store-remote-install-publish-service; native-app:store-remote-install-publish-service |
@@ -2892,7 +2892,7 @@ The union map preserves all 396 legacy specs and the frozen 370 roster; main add
 | W058 | blocked-by | 0 | 0 | 2 | main:decoded-source-retiming-integration; native-app:decoded-source-retiming-integration |
 | W059 | blocked-by | 0 | 0 | 4 | delta-fx:native-embedded-audio-routing; main:native-embedded-audio-routing |
 | W060 | blocked-by | 0 | 0 | 31 | main:native-keyframe-editor; native-app:native-keyframe-editor |
-| W061 | fail | 1 | 1 | 11 | main:native-graph-editor-and-curve-oracle; native-app:native-graph-editor-and-curve-oracle |
+| W061 | blocked-by | 2 | 0 | 11 | main:native-graph-editor-and-curve-oracle; native-app:native-graph-editor-and-curve-oracle |
 | W062 | blocked-by | 0 | 0 | 24 | main:native-group-parent-precompose-pixels; native-app:native-group-parent-precompose-pixels |
 | W063 | blocked-by | 0 | 0 | 14 | main:native-inspector-property-bindings; native-app:native-inspector-property-bindings |
 | W064 | blocked-by | 0 | 0 | 83 | delta-fx:native-effects-matte-controls; main:native-effects-matte-controls |

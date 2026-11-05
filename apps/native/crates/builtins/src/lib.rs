@@ -198,6 +198,21 @@ impl Builtins {
             .ok_or(Error::Closed)?
             .eval("__pmBuiltin.show()")
     }
+    /// A shell-admitted mask reveal uses the same model and persistence as M in the timeline.
+    pub fn reveal_masks(&self) -> Result<Ticket<Evaluation>> {
+        static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let millis = CLOCK
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64;
+        self.realms
+            .get("timeline")
+            .ok_or(Error::Closed)?
+            .eval(format!(
+                "__pmBuiltin.command('panel.timeline',{})",
+                json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
+            ))
+    }
     pub fn timeline_key(
         &self,
         layer: &str,

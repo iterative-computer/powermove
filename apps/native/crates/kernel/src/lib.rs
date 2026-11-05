@@ -71,6 +71,7 @@ pub mod journal;
 pub mod kernel;
 pub mod library;
 pub mod model;
+pub mod navigation;
 pub mod pro_editing;
 pub mod pro_jobs;
 pub mod pro_mcp;

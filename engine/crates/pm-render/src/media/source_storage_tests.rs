@@ -73,6 +73,7 @@ fn source(
         None,
         format,
         false,
+        None,
     );
     gpu.queue.submit([encoder.finish()]);
     target
@@ -323,6 +324,7 @@ fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
             None,
             format,
             false,
+            None,
         );
         gpu.queue.submit([encoder.finish()]);
         target
@@ -406,4 +408,140 @@ fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
     }
     assert!(actual.iter().any(|&v| v < 0.0));
     assert!(actual.iter().any(|&v| v > 1.0));
+}
+
+#[test]
+fn packed_still_fusion_matches_separate_normalization_byte_for_byte() {
+    use pm_media::frame::{PixelFormat, PlaneDesc, PlaneFormat};
+    use pm_protocol::color::{Range, SampleAlignment};
+    let gpu = pm_gpu::Gpu::new("packed source fusion").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let importer = DecodeImporter::new(&gpu.device).unwrap();
+    let color = SourceColor {
+        transfer: Transfer::DisplayE,
+        primaries: Primaries::Bt709,
+        matrix: MatrixCoefficients::Identity,
+        siting: ChromaSiting::Left,
+        alpha: AlphaMode::Straight,
+        tone_map: None,
+        chromaticities: None,
+        power: None,
+    };
+    for (plane, bits, format, bpp) in [
+        (PlaneFormat::Rgba8, 8, wgpu::TextureFormat::Rgba8Unorm, 4),
+        (PlaneFormat::Rgba16, 16, wgpu::TextureFormat::Rgba16Unorm, 8),
+        (
+            PlaneFormat::Rgba16Float,
+            16,
+            wgpu::TextureFormat::Rgba16Float,
+            8,
+        ),
+        (
+            PlaneFormat::Rgba32Float,
+            32,
+            wgpu::TextureFormat::Rgba32Float,
+            16,
+        ),
+    ] {
+        let mut bytes = Vec::new();
+        for i in 0..256u32 {
+            for code in [i, 255 - i, i * 73 % 256, i * 37 % 256] {
+                match plane {
+                    PlaneFormat::Rgba8 => bytes.push(code as u8),
+                    PlaneFormat::Rgba16 => {
+                        bytes.extend_from_slice(&((code * 257) as u16).to_le_bytes())
+                    }
+                    PlaneFormat::Rgba16Float => {
+                        bytes.extend_from_slice(&f32_to_half(code as f32 / 255.0).to_le_bytes())
+                    }
+                    PlaneFormat::Rgba32Float => {
+                        bytes.extend_from_slice(&(code as f32 / 255.0).to_le_bytes())
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let raw = Target::new(
+            &gpu.device,
+            "packed test source",
+            256,
+            1,
+            format,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        gpu.queue.write_texture(
+            raw.texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * bpp),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let pixel_format = Arc::new(PixelFormat {
+            layout: pm_media::frame::Layout::Rgba,
+            bits,
+            alignment: SampleAlignment::Lsb,
+            range: Range::Full,
+            log2_chroma_w: 0,
+            log2_chroma_h: 0,
+            alpha_bits: bits,
+            planes: vec![PlaneDesc {
+                format: plane,
+                width: 256,
+                height: 1,
+            }],
+            width: 256,
+            height: 1,
+            label: "synthetic packed source".into(),
+            rgba_premultiplied: false,
+        });
+        let imported = pm_gpu::decode_in::ImportedFrame {
+            textures: vec![raw.texture.clone()],
+            format: pixel_format.clone(),
+            aliased: false,
+            desc: None,
+        };
+        for working in [WorkingEncoding::Standard, WorkingEncoding::LinearLight] {
+            for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                let normalized = importer
+                    .normalize(&gpu.queue, &mut encoder, &imported)
+                    .unwrap();
+                let direct = Normalized::Rgb {
+                    rgba: raw.texture.clone(),
+                };
+                let mut convert = |input: &Normalized, packed| {
+                    convert_format(
+                        &gpu.device,
+                        &gpu.queue,
+                        &pipelines,
+                        &mut encoder,
+                        input,
+                        &color,
+                        working,
+                        precision,
+                        Factors { x: 1, y: 1 },
+                        None,
+                        working_format(precision),
+                        false,
+                        packed,
+                    )
+                };
+                let expected = convert(&normalized, None);
+                let actual = convert(&direct, Some(pixel_format.as_ref()));
+                gpu.queue.submit([encoder.finish()]);
+                assert_eq!(
+                    read_raw(&gpu.device, &gpu.queue, &actual.texture).unwrap(),
+                    read_raw(&gpu.device, &gpu.queue, &expected.texture).unwrap(),
+                    "{plane:?} {working:?} {precision:?}"
+                );
+            }
+        }
+    }
 }

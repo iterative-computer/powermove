@@ -339,7 +339,10 @@ impl Pipelines {
                                         pm_color::wgsl::COLOR,
                                         crate::nearest_half::NEAREST_HALF_WGSL,
                                         include_str!("shaders/scene_output.wgsl"),
-                                        include_str!("shaders/composite.wgsl"),
+                                        include_str!("shaders/composite.wgsl")
+                                            .split_once("// Solid layers:")
+                                            .expect("scene quad header")
+                                            .0,
                                         include_str!("shaders/scene_quad.wgsl")
                                     )
                                     .into(),
@@ -745,7 +748,7 @@ impl HalfModules {
             .get_or_init(|| {
                 let mut wgsl = format!(
                     "{}\n{}\n{}",
-                    pm_color::wgsl::COLOR,
+                    if matches!(entry, "fs_solid" | "fs_rect") { "" } else { pm_color::wgsl::COLOR },
                     crate::nearest_half::NEAREST_HALF_WGSL,
                     source
                 );

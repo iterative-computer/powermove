@@ -37,6 +37,7 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    maximized_panel: Option<String>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -99,6 +100,7 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            maximized_panel: None,
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -474,6 +476,13 @@ impl Editor {
                 h.borrow().select_tool(&cmd.name);
             }
         }
+        if let Some(host) = &self.host {
+            host.borrow().canvas_focus.set(
+                window.focused(cx).is_none_or(|f| {
+                    f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
+                }) && self.layout.open_panels().contains(&"viewer"),
+            );
+        }
         if self
             .integration
             .clone()
@@ -499,6 +508,22 @@ impl Editor {
             "fieldMenu" => {
                 if let Some(h) = &self.host {
                     h.borrow_mut().popup(true);
+                }
+            }
+            "maximizePanel" => {
+                if self.maximized_panel.take().is_none() {
+                    let at = window.mouse_position();
+                    self.maximized_panel = self
+                        .geometry
+                        .panels
+                        .iter()
+                        .find(|p| p.rect.contains(at.x.into(), at.y.into()))
+                        .map(|p| {
+                            self.layout.docks[p.dock].groups[p.group]
+                                .active()
+                                .to_owned()
+                        });
+                    handled = self.maximized_panel.is_some();
                 }
             }
             "toggleSidebar" | "toggleInspector" => {
@@ -821,7 +846,11 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
         };
-        self.geometry = self.layout.geometry(self.dock_bounds, &t);
+        self.geometry = self.layout.geometry_with_maximized(
+            self.dock_bounds,
+            &t,
+            self.maximized_panel.as_deref(),
+        );
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
             a.rect
@@ -856,6 +885,12 @@ impl Render for Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
+            h.canvas_focus.set(
+                viewer.is_some()
+                    && w.focused(cx).is_none_or(|f| {
+                        f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
+                    }),
+            );
             h.publish_menu_state(&self.menu_state());
             h.keyboard_control_focus.set(
                 w.focused(cx).is_some_and(|f| {

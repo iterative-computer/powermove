@@ -397,13 +397,17 @@ mod tests {
         assert_eq!(report.exit_code(), 2);
     }
     #[test]
-    fn measured_easing_failure_is_reported_as_failure() {
+    fn repaired_easing_probe_does_not_certify_the_complete_declaration() {
         let report = run(Some("easing_set_batch")).unwrap();
         assert_eq!(report.checks.len(), 1);
         assert_eq!(report.cases.len(), 1);
-        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Fail);
-        assert_eq!(report.cases[0].status, pm_acceptance::runner::Status::Fail);
-        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.checks[0].status, pm_acceptance::runner::Status::Pass);
+        assert_eq!(
+            report.cases[0].status,
+            pm_acceptance::runner::Status::BlockedBy
+        );
+        assert!(!report.cases[0].missing.is_empty());
+        assert_eq!(report.exit_code(), 2);
     }
     #[test]
     fn one_passing_parameter_variant_does_not_certify_the_declaration() {
