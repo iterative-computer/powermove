@@ -14,7 +14,7 @@ export function openFigmaConnect(PM: PMRegistry, link: FigmaLinkBridge): void {
   let handle: any;
   const view = mount(FigmaConnect, {
     target: body,
-    props: { link, api: PM.Kernel.api('figma-connect'), onDisconnect: () => handle.close() },
+    props: { link, onDisconnect: () => handle.close() },
   });
   const stop = link.onState((state) => {
     view.update(state);
@@ -24,7 +24,9 @@ export function openFigmaConnect(PM: PMRegistry, link: FigmaLinkBridge): void {
     title: 'Connect Figma',
     body,
     width: 460,
-    actions: [{ label: 'Done', pri: true }],
+    // Not primary: Allow is the one highlighted choice, and Return must never
+    // close the sheet (which declines a waiting request) by accident.
+    actions: [{ label: 'Done' }],
     onClose: () => {
       stop();
       void link.closeSetup();

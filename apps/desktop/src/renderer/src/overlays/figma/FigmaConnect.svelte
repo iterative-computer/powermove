@@ -1,9 +1,7 @@
 <script lang="ts">
-  import Section from '../../controls/Section.svelte';
-  import type { PowermoveAPI } from '../../kernel/api';
   import { FIGMA_COMMUNITY_URL, type FigmaSetupState, type FigmaLinkBridge } from '../../../../shared/figma-link';
 
-  let { link, api, onDisconnect }: { link: FigmaLinkBridge; api: PowermoveAPI; onDisconnect: () => void } = $props();
+  let { link, onDisconnect }: { link: FigmaLinkBridge; onDisconnect: () => void } = $props();
   let connection = $state<FigmaSetupState>({ running: false, paired: false, pending: null });
   let preparing = $state(true), error = $state(''), copied = $state(false), working = $state(false);
 
@@ -52,11 +50,11 @@
 </script>
 
 {#if connection.paired && !connection.pending && !connection.error}
-  <Section {api} title="Figma Connected" />
+  <h3>Figma Connected</h3>
   <p>Open a composition in Powermove. In Figma, select your layers and click Send to Powermove.</p>
   <button class="btn" onclick={disconnect}>Disconnect</button>
 {:else}
-  <Section {api} title="1 Add the Plugin" />
+  <h3>1. Add the Plugin</h3>
   {#if FIGMA_COMMUNITY_URL}
     <button class="btn" onclick={() => action('community')}>Open in Figma</button>
   {:else}
@@ -69,7 +67,7 @@
     <p>In Figma: Plugins → Development → Import plugin from manifest.</p>
     <p>In the file picker, press ⌘⇧G and paste the path. You only need to add the plugin once.</p>
   {/if}
-  <Section {api} title="2 Connect" />
+  <h3 class="next">2. Connect</h3>
   {#if connection.pending}
     <p>Figma wants to connect.</p>
     <p class="connection-code" aria-label="Connection code">{connection.pending.code}</p>
@@ -90,6 +88,8 @@
 {#if error}<p role="alert">{error}</p>{/if}
 
 <style>
+  h3 { margin: 0; padding: 0; font-size: inherit; font-weight: 600; color: var(--tx); }
+  h3.next { margin-top: 10px; }
   p { margin: 0; line-height: 1.5; color: var(--tx-2); }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .connection-code { font-family: var(--f-mono); font-size: var(--fs-lg); letter-spacing: .15em; color: var(--tx); }

@@ -240,10 +240,11 @@ export class FigmaLink {
       if (req.url === '/status') {
         if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length)
           return reply(400, { error: 'Invalid status request' });
+        const tokenValid = this.valid(token);
         return reply(200, {
           reachable: true,
-          tokenValid: this.valid(token),
-          compositionOpen: (await this.options.compositionOpen?.()) ?? false,
+          tokenValid,
+          compositionOpen: tokenValid ? ((await this.options.compositionOpen?.()) ?? false) : false,
           protocolVersion: FIGMA_PROTOCOL_VERSION,
         });
       }

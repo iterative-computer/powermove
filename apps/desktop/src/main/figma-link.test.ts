@@ -126,6 +126,7 @@ it('reports status, rejects invalid tokens/schemas/origins/hosts and bounds payl
     expect((await h.post('/status', value)).status).toBe(400);
   const token = await h.pair();
   open = true;
+  expect(await (await h.post('/status')).json()).toMatchObject({ tokenValid: false, compositionOpen: false });
   expect(await (await h.post('/status', {}, token)).json()).toMatchObject({ tokenValid: true, compositionOpen: true });
   expect((await h.post('/send', doc)).status).toBe(401);
   expect((await h.post('/send', { bad: true }, token)).status).toBe(400);
