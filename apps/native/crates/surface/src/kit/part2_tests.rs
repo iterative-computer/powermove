@@ -949,3 +949,121 @@ fn active_dark_theme_patches_survive_over_image_recipe_publication() {
     let p = panel(s, &dark);
     assert_eq!(p.components[&1].background, dark.colors.floating);
 }
+
+#[test]
+fn review_followups_use_gizmo_tokens_and_selected_tangent_colours() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        for increase_contrast in [false, true] {
+            let mut t = Tokens::new(
+                scheme,
+                Accessibility {
+                    increase_contrast,
+                    ..Default::default()
+                },
+            );
+            t.metrics.gizmo_handle = 13.;
+            t.metrics.tangent_end = 11.;
+            t.metrics.gizmo_keyline = 3.;
+            for (kind, selected, hovered, expected_size) in [
+                ("path-vertex", false, false, 13.),
+                ("path-vertex", true, true, 15.),
+                ("tangent", false, false, 11.),
+            ] {
+                let s = surface(
+                    Component::ViewerGizmo,
+                    json!({"metadata":{"pmKit":{"kind":kind,"selected":selected,"hovered":hovered,"position":{"x":-10.25,"y":21.125}}}}),
+                );
+                let p = Panel::prepare(Arc::new(s), &t, &Layout::new(), None, false);
+                let Decoration::ViewerGizmo(g) = &p.decorations[&1] else {
+                    panic!()
+                };
+                assert_eq!(g.size.value, Some(expected_size));
+                assert_eq!(g.keyline.value, Some(3.));
+                assert_eq!(g.position, Some((-10.25, 21.125)));
+                let dark = Tokens::new(Scheme::Dark, t.accessibility);
+                assert_eq!(
+                    g.stroke,
+                    if kind == "tangent" {
+                        dark.colors.secondary
+                    } else if selected {
+                        dark.colors.selected_text
+                    } else {
+                        dark.colors.accent
+                    }
+                );
+                assert_eq!(
+                    g.fill,
+                    if selected {
+                        dark.colors.accent
+                    } else {
+                        dark.colors.floating
+                    }
+                );
+            }
+        }
+    }
+}
+#[test]
+fn review_recovery_empty_symbol_uses_warning_without_changing_default_empty_states() {
+    let t = tokens();
+    for (metadata, expected) in [
+        (json!({}), t.colors.muted),
+        (json!({"pmKit":{"severity":"warning"}}), t.colors.warning),
+    ] {
+        let p = panel(
+            surface(Component::EmptyState, json!({"metadata":metadata})),
+            &t,
+        );
+        let Decoration::EmptyState { symbol_color, .. } = p.decorations[&1] else {
+            panic!()
+        };
+        assert_eq!(symbol_color, expected);
+    }
+}
+#[test]
+fn review_banner_symbols_use_severity_and_dark_palette_only_over_media() {
+    let t = tokens();
+    let dark = Tokens::new(Scheme::Dark, t.accessibility);
+    for placement in ["inline", "viewer"] {
+        for severity in ["info", "warning", "error"] {
+            let p = panel(
+                surface(
+                    Component::Banner,
+                    json!({"metadata":{"pmKit":{"placement":placement,"severity":severity}}}),
+                ),
+                &t,
+            );
+            let Decoration::Banner {
+                symbol_color,
+                symbol_size,
+                announcement,
+                ..
+            } = p.decorations[&1]
+            else {
+                panic!()
+            };
+            let c = if placement == "viewer" {
+                &dark.colors
+            } else {
+                &t.colors
+            };
+            assert_eq!(
+                symbol_color,
+                match severity {
+                    "warning" => c.warning,
+                    "error" => c.danger,
+                    _ => c.secondary,
+                }
+            );
+            assert_eq!(symbol_size, t.metrics.symbol_inline);
+            assert_eq!(
+                announcement,
+                if severity == "error" {
+                    Announcement::High
+                } else {
+                    Announcement::Medium
+                }
+            );
+        }
+    }
+}

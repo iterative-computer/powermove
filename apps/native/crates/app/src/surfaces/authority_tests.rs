@@ -1006,3 +1006,87 @@ fn reveal_completion_and_setup_host_inspection_never_expose_secret_contents() {
     host.close_sheet(&target("w"));
     assert!(host.sheet.is_none());
 }
+
+#[test]
+fn reviewed_reveal_failure_uses_safe_copy_or_requires_reentry() {
+    let mut s = setup(SavedValue::SecretSet, true);
+    s.begin_reveal("token", 1).unwrap();
+    s.reveal_failed(
+        &target("w"),
+        "token",
+        1,
+        RevealFailure::Service(ServiceCode::Unavailable),
+    )
+    .unwrap();
+    assert_eq!(
+        s.view().error.as_deref(),
+        Some(
+            "Couldn’t show API Key. Try again. If it keeps happening, choose Window ▸ Error Log for details."
+        )
+    );
+    assert_eq!(s.view().rows[1].widget, Widget::AlreadySet);
+    s.begin_reveal("token", 2).unwrap();
+    s.reveal_failed(&target("w"), "token", 2, RevealFailure::Unreadable)
+        .unwrap();
+    assert_eq!(s.view().rows[1].widget, Widget::NSSecureTextField);
+    assert_eq!(s.view().rows[1].warning, Some(REENTER));
+    assert!(!s.view().can_save);
+    assert_eq!(s.field_value("token").unwrap(), "");
+    assert_eq!(
+        s.reveal_failed(&target("other"), "token", 3, RevealFailure::Unreadable),
+        Err(Error::Stale)
+    );
+}
+#[test]
+fn reviewed_remove_failure_retains_set_state_and_has_exact_copy() {
+    let mut s = setup(SavedValue::SecretSet, true);
+    let mut service = ValueService::default();
+    s.remove("token", 1, &mut service).unwrap();
+    assert_eq!(
+        s.complete_remove(&target("w"), 1, Err(ServiceCode::PermissionDenied)),
+        Err(Error::Service(ServiceCode::PermissionDenied))
+    );
+    assert_eq!(
+        s.view().error.as_deref(),
+        Some("Couldn’t remove API Key. Check its sharing and permissions in Finder.")
+    );
+    assert_eq!(s.view().rows[1].widget, Widget::AlreadySet);
+}
+#[test]
+fn reviewed_post_uninstall_failure_is_acknowledgment_only() {
+    let a = alert(Prompt::ValuesDeletionFailed {
+        extension: "Tools".into(),
+        code: ServiceCode::DiskFull,
+    });
+    let v = a.view();
+    assert_eq!(
+        v.message,
+        "Tools was removed, but its values couldn’t be deleted."
+    );
+    assert_eq!(v.informative.expose(), "Free some space and try again.");
+    assert_eq!(v.buttons.len(), 1);
+    assert_eq!(v.buttons[0].label, "OK");
+    assert!(!v.buttons[0].destructive);
+}
+
+#[test]
+fn reveal_callbacks_are_request_fenced_and_private_success_never_enters_sheet() {
+    let mut s = setup(SavedValue::SecretSet, true);
+    s.begin_reveal("token", 1).unwrap();
+    s.begin_reveal("token", 2).unwrap();
+    assert_eq!(
+        s.reveal_failed(&target("w"), "token", 1, RevealFailure::Unreadable),
+        Err(Error::Stale)
+    );
+    assert!(s.view().error.is_none());
+    assert_eq!(s.view().rows[1].widget, Widget::AlreadySet);
+    let reveal = s
+        .revealed(&target("w"), "token", 2, private("synthetic private value"))
+        .unwrap();
+    assert!(!format!("{reveal:?}").contains("synthetic private value"));
+    assert!(!format!("{:?}", s.view()).contains("synthetic private value"));
+    assert_eq!(
+        s.reveal_failed(&target("w"), "token", 2, RevealFailure::Unreadable),
+        Err(Error::Stale)
+    );
+}

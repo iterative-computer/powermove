@@ -179,3 +179,120 @@ fn limit_summary(view: &NSView, summary: &str, lines: usize) {
         limit_summary(&child, summary, lines);
     }
 }
+
+/// S011 native setup sheet. Values are read directly into AppKit fields; neither
+/// the safe SheetView nor a v4/DOM node receives their contents. The shell owns
+/// the target/delegate and polls its worker; this factory performs no service IO.
+pub fn setup_sheet(
+    setup: &values::Setup,
+    tokens: &pm_design::Tokens,
+    mtm: MainThreadMarker,
+) -> super::sheet_layout::native::Sheet {
+    use super::sheet_layout::native::Sheet;
+    use values::Widget;
+    let view = setup.view();
+    let lines = view
+        .rows
+        .iter()
+        .map(|r| {
+            1 + usize::from(r.optional.is_some())
+                + usize::from(r.help.is_some())
+                + usize::from(r.warning.is_some())
+        })
+        .sum::<usize>()
+        + usize::from(view.explanation.is_some())
+        + usize::from(view.error.is_some())
+        + 1;
+    let mut sheet = Sheet::new(&view.title, lines, tokens, false, mtm);
+    if let Some(line) = &view.explanation {
+        sheet.line(
+            line,
+            tokens.typography.reading.into(),
+            tokens.colors.secondary,
+        );
+    }
+    for row in &view.rows {
+        if row.widget == Widget::AlreadySet {
+            let group = NSStackView::new(mtm);
+            group.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+            group.setSpacing(tokens.metrics.gap.into());
+            let marker = NSTextField::labelWithString(&NSString::from_str("••••"), mtm);
+            marker.setAccessibilityLabel(Some(&NSString::from_str(&row.accessibility_label)));
+            group.addArrangedSubview(&marker);
+            for action in &row.actions {
+                let id = format!("{}/{}", row.key, action);
+                sheet.button(&id, action, view.can_edit, false, false);
+                let button = &sheet.buttons[&id];
+                button.setBordered(false);
+                group.addArrangedSubview(button);
+            }
+            sheet.row(&row.label, &group);
+        } else {
+            sheet.text(
+                &row.key,
+                &row.label,
+                setup.field_value(&row.key).unwrap_or(""),
+                row.widget == Widget::NSSecureTextField,
+                view.can_edit,
+            );
+            if let Some(symbol) = row.eye_symbol {
+                let id = format!("{}/visibility", row.key);
+                sheet.button(&id, "", view.can_edit, false, false);
+                let button = &sheet.buttons[&id];
+                let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(symbol),
+                    None,
+                );
+                button.setImage(image.as_deref());
+                button.setBordered(false);
+                button.setToolTip(
+                    row.eye_tooltip
+                        .as_deref()
+                        .map(NSString::from_str)
+                        .as_deref(),
+                );
+                button.setAccessibilityLabel(
+                    row.eye_tooltip
+                        .as_deref()
+                        .map(NSString::from_str)
+                        .as_deref(),
+                );
+                // Place the eye inside the value column, trailing the field.
+                let field = &sheet.fields[&row.key];
+                let mut rect = field.frame();
+                rect.size.width -= f64::from(tokens.metrics.hit);
+                field.setFrame(rect);
+                button.setFrame(objc2_foundation::NSRect::new(
+                    objc2_foundation::NSPoint::new(rect.origin.x + rect.size.width, rect.origin.y),
+                    objc2_foundation::NSSize::new(
+                        tokens.metrics.hit.into(),
+                        tokens.metrics.field.into(),
+                    ),
+                ));
+                sheet.content.addSubview(button);
+            }
+        }
+        for line in [row.optional, row.help.as_deref()].into_iter().flatten() {
+            sheet.line(line, tokens.typography.minimum.into(), tokens.colors.muted);
+        }
+        if let Some(line) = row.warning {
+            sheet.line(
+                line,
+                tokens.typography.minimum.into(),
+                tokens.colors.warning,
+            );
+        }
+    }
+    sheet.line(
+        view.note,
+        tokens.typography.minimum.into(),
+        tokens.colors.muted,
+    );
+    if let Some(line) = &view.error {
+        sheet.line(line, tokens.typography.minimum.into(), tokens.colors.danger);
+    }
+    sheet.button("cancel", view.cancel_label, view.can_cancel, false, true);
+    sheet.button("save", view.save_label, view.can_save, true, false);
+    sheet.footer(&["cancel", "save"], None);
+    sheet
+}

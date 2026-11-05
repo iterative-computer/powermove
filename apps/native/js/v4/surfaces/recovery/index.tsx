@@ -79,6 +79,8 @@ export function RecoveryContentView(props: RecoveryProps) {
     : null;
   const state = EmptyState({
     label: content.title,
+    symbol: "exclamationmark.triangle",
+    metadata: { pmKit: { severity: "warning" } },
     explanation: content.line ?? "",
     action,
   });
@@ -86,21 +88,5 @@ export function RecoveryContentView(props: RecoveryProps) {
   // label. There is one group, with exactly "{Title}. {Line}" as specified.
   return cloneElement(state, {
     label: content.axLabel,
-    children: [
-      h("text", {
-        // DESIGN-TODO(opus): UI-kit has no public SF Symbol primitive. Host
-        // must bind this slot to the system symbol; no fallback glyph invented.
-        metadata: {
-          requiredSymbol: "exclamationmark.triangle",
-          provisional: true,
-        },
-        style: {
-          color: token("colors.warning"),
-          // Shared EmptyState symbol size is 2 × symbol_panel. Host must
-          // resolve this multiplier; no numeric visual value in the worker.
-        },
-      }),
-      state.props.children,
-    ],
   });
 }

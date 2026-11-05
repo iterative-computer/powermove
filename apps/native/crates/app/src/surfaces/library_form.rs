@@ -30,6 +30,8 @@ pub const NAME_ERROR: &str = "Enter a name.";
 pub const SIZE_ERROR: &str = "Enter a size from 16 to 8192 pixels.";
 pub const FPS_ERROR: &str = "Enter a frame rate from 1 to 240 fps.";
 pub const DURATION_ERROR: &str = "Enter a duration up to 1 hour.";
+pub const DROP_FRAME_ERROR: &str = "Use colons for timecode at this frame rate.";
+pub const LINK_AX: &str = "Lock aspect ratio";
 pub const SHEET_TITLE: &str = "New Project";
 pub const SHEET_BUTTONS: &[&str] = &["Cancel", "Create"];
 pub const CUSTOM_PRESET: &str = "Custom";
@@ -74,7 +76,7 @@ pub struct NewProjectForm {
     pub duration: String,
     pub background: String,
     pub preset: Option<usize>,
-    /// No invented default for the unspecified toggle. Host must resolve GAPS.
+    /// S018 review answer: inspector Link toggle, initially on.
     pub linked: Option<bool>,
     /// Stale-target guard: the originating window/project generation.
     pub owner: String,
@@ -100,7 +102,7 @@ impl NewProjectForm {
             preset: PRESETS
                 .iter()
                 .position(|(_, w, h)| *w == seed.width && *h == seed.height),
-            linked: None,
+            linked: Some(true),
             owner,
             submitting: false,
         }
@@ -141,8 +143,14 @@ impl NewProjectForm {
             size: (!size_valid).then_some(SIZE_ERROR),
             fps: fps.is_none().then_some(FPS_ERROR),
             // Avoid blaming an untouched duration for an invalid frame rate.
-            duration: (fps.is_some() && !duration.is_some_and(|n| (0.1..=3600.0).contains(&n)))
-                .then_some(DURATION_ERROR),
+            duration: if self.duration.contains(';')
+                && fps.is_some_and(|f| drop_frames(f).is_none())
+            {
+                Some(DROP_FRAME_ERROR)
+            } else {
+                (fps.is_some() && !duration.is_some_and(|n| (0.1..=3600.0).contains(&n)))
+                    .then_some(DURATION_ERROR)
+            },
         }
     }
     pub fn values(&self) -> Option<NewProject> {
@@ -180,7 +188,19 @@ pub fn parse_duration(input: &str, fps: f64) -> Option<f64> {
     if !s.contains(':') {
         return finite(s);
     }
-    let parts: Vec<_> = s.split(':').collect();
+    let drop = if s.contains(';') {
+        if s.bytes().filter(|b| *b == b';').count() != 1
+            || s.matches(':').count() != 2
+            || s.split_once(';')
+                .is_some_and(|(_, tail)| tail.contains(':'))
+        {
+            return None;
+        }
+        Some(drop_frames(fps)?)
+    } else {
+        None
+    };
+    let parts: Vec<_> = s.split([':', ';']).collect();
     if parts.len() != 4
         || parts
             .iter()
@@ -200,9 +220,73 @@ pub fn parse_duration(input: &str, fps: f64) -> Option<f64> {
     let nominal_frames = (f64::from(n[0]) * 3600.0 + f64::from(n[1]) * 60.0 + f64::from(n[2]))
         * fps.ceil()
         + f64::from(n[3]);
-    Some(nominal_frames / fps)
+    let skipped = if let Some(drop) = drop {
+        // SMPTE drop-frame skips labels at each minute except multiples of ten.
+        if !n[1].is_multiple_of(10) && n[2] == 0 && n[3] < drop {
+            return None;
+        }
+        let minutes = u64::from(n[0]) * 60 + u64::from(n[1]);
+        (minutes - minutes / 10) * u64::from(drop)
+    } else {
+        0
+    };
+    Some((nominal_frames - skipped as f64) / fps)
 }
 
+fn drop_frames(fps: f64) -> Option<u32> {
+    if (fps - 29.97).abs() < 0.0001 || (fps - 30000. / 1001.).abs() < 0.0001 {
+        Some(2)
+    } else if (fps - 59.94).abs() < 0.0001 || (fps - 60000. / 1001.).abs() < 0.0001 {
+        Some(4)
+    } else {
+        None
+    }
+}
+impl NewProjectForm {
+    pub fn buttons(&self) -> (&'static str, bool, bool) {
+        (
+            if self.submitting {
+                "Creating…"
+            } else {
+                "Create"
+            },
+            self.can_create(),
+            !self.submitting,
+        )
+    }
+    pub fn link_presentation(&self) -> (&'static str, &'static str, &'static str) {
+        if self.linked == Some(true) {
+            ("link", LINK_AX, "Unlock Aspect Ratio")
+        } else {
+            ("link.slash", LINK_AX, "Lock Aspect Ratio")
+        }
+    }
+    /// Native width/height notifications call this for the edited dimension.
+    pub fn edit_dimension(&mut self, width: bool, draft: String) -> Result<(), Failure> {
+        if self.submitting {
+            return Err(Failure::Busy);
+        }
+        let ratio = finite(&self.width)
+            .zip(finite(&self.height))
+            .filter(|(w, h)| *w > 0. && *h > 0.);
+        if self.linked == Some(true)
+            && let Some(((w, h), value)) = ratio.zip(finite(&draft))
+        {
+            if width {
+                self.height = (value * h / w).round().to_string();
+            } else {
+                self.width = (value * w / h).round().to_string();
+            }
+        }
+        if width {
+            self.width = draft;
+        } else {
+            self.height = draft;
+        }
+        self.preset = None;
+        Ok(())
+    }
+}
 pub fn unique(base: &str, names: &[String]) -> String {
     let names: std::collections::BTreeSet<_> = names.iter().map(String::as_str).collect();
     if !names.contains(base) {

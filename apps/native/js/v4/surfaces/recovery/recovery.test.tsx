@@ -145,3 +145,25 @@ test("native click returns the exact view generation and stale deliveries fail",
   expect(requests).toHaveLength(1);
   await root.dispose();
 });
+
+test("review follow-up mounts the kit symbol slot without requiredSymbol placeholders", async () => {
+  const { root, commits } = recorder();
+  await root.render(
+    <RecoveryContentView
+      content={failure}
+      view="view"
+      generation={4}
+      restart={() => {}}
+    />,
+  );
+  const nodes = [...root.host.nodes.values()];
+  const slot = nodes.find((n) => n.props["data-pm-slot"] === "symbol")!;
+  expect(slot.props.metadata).toEqual({
+    pmKit: { symbol: "exclamationmark.triangle", decorative: true },
+  });
+  const group = nodes.find(
+    (n) => n.props["data-pm-component"] === "empty-state",
+  )!;
+  expect(group.props.metadata).toEqual({ pmKit: { severity: "warning" } });
+  expect(JSON.stringify(commits)).not.toContain("requiredSymbol");
+});

@@ -153,10 +153,16 @@ impl Sequence {
             return None;
         }
         self.closed = true;
-        // DESIGN-TODO(opus): choose the exact {Object} noun in the shared stale
-        // target banner for a missing sequence asset vs a closed project.
-        object_label.map(|object| Banner {
-            text: format!("{object} was changed, so the dialog closed."),
+        // N3: the review's noun table is authoritative, including articles.
+        Some(Banner {
+            text: format!(
+                "{} was changed, so the dialog closed.",
+                if matches!(object_label, Some("The project" | "Project")) {
+                    "The project"
+                } else {
+                    "The media"
+                }
+            ),
             severity: Severity::Info,
             action: None,
         })
@@ -171,8 +177,6 @@ impl Sequence {
     pub fn fields() -> [&'static str; 2] {
         ["Frame Rate", "Duration"]
     }
-    // DESIGN-TODO(opus): m.sheet_inset and m.sheet_value_column are named in
-    // the sheet grammar but absent from pm-design. Leave unresolved, no fallback.
     pub fn tokens() -> [&'static str; 8] {
         [
             "m.sheet_width",

@@ -829,17 +829,14 @@ fn preset_state_race_refuses_overwrite() {
     );
 }
 #[test]
-fn preset_rename_missing_and_unresolved_validation() {
+fn preset_rename_missing_and_empty_validation() {
     let (_actor, h, _) = fixture();
     let p = preset_fixture(&h);
     assert!(matches!(
         p.rename("missing", "New"),
         Err(PresetError::Missing)
     ));
-    assert!(matches!(
-        p.rename("one", "  "),
-        Err(PresetError::DesignTodo)
-    ));
+    assert!(matches!(p.rename("one", "  "), Err(PresetError::EmptyName)));
 }
 #[test]
 fn all_service_codes_use_approved_informative_copy() {
@@ -1038,7 +1035,7 @@ fn expression_diagnostics_without_spans_never_fabricate_line_numbers() {
         "%",
     );
     assert!(matches!(result, Preview::SyntaxUnlocated { .. }));
-    assert!(result.line().is_none());
+    assert!(result.line().is_some_and(|line| !line.starts_with("Line ")));
     let result = c.evaluate_expression(
         &EvaluationJob {
             generation: 2,
@@ -1050,7 +1047,7 @@ fn expression_diagnostics_without_spans_never_fabricate_line_numbers() {
         "%",
     );
     assert!(matches!(result, Preview::RuntimeUnlocated { .. }));
-    assert!(result.line().is_none());
+    assert!(result.line().is_some_and(|line| !line.starts_with("Line ")));
     let mut d = ExpressionDraft::new("1 /\n0".into(), "L".into(), "Opacity".into());
     d.preview = result;
     assert!(d.surface(id(), owner()).buttons.last().unwrap().enabled);
@@ -1290,4 +1287,114 @@ fn keyframe_menu_is_disabled_when_only_locked_or_no_keys_remain() {
             .iter()
             .all(|i| i.enabled)
     );
+}
+
+#[test]
+fn reviewed_precompose_disabled_label_and_scale_errors_are_exact() {
+    let d = PrecomposeDraft {
+        name: "Pre-comp".into(),
+        layer_name: Some("Ignored".into()),
+        can_leave: false,
+        leave: false,
+        adjust_duration: false,
+        open_after: false,
+    };
+    assert_eq!(
+        d.surface(id(), owner()).fields[1].label,
+        "Leave all attributes in the layer"
+    );
+    let d = ScaleDraft {
+        time_percent: 0.,
+        value_percent: f64::NAN,
+        ..Default::default()
+    };
+    let s = d.surface(id(), owner());
+    assert_eq!(s.fields[0].error, Some(TIME_PERCENT_ERROR));
+    assert_eq!(s.fields[1].error, Some(NUMBER_ERROR));
+    assert!(!s.buttons[1].enabled);
+}
+#[test]
+fn reviewed_preview_preserves_last_line_while_pending_and_shows_unlocated_message() {
+    let mut d = ExpressionDraft::new("value".into(), "Layer".into(), "Opacity".into());
+    assert_eq!(d.surface(id(), owner()).result_line, None);
+    d.preview = Preview::Value("42 %".into());
+    d.edit("value + 1".into(), Instant::now());
+    assert_eq!(
+        d.surface(id(), owner()).result_line.as_deref(),
+        Some("At the playhead: 42 %")
+    );
+    d.edit("value + 2".into(), Instant::now());
+    assert_eq!(
+        d.surface(id(), owner()).result_line.as_deref(),
+        Some("At the playhead: 42 %")
+    );
+    assert_eq!(
+        Preview::SyntaxUnlocated {
+            message: "Unexpected token".into()
+        }
+        .line()
+        .as_deref(),
+        Some("Unexpected token")
+    );
+    assert_eq!(
+        Preview::Unavailable.line().as_deref(),
+        Some("No value at the playhead.")
+    );
+}
+#[test]
+fn reviewed_preset_rename_validation_disables_empty_duplicate_and_cancels_unchanged() {
+    for (draft, expected) in [
+        (" ", RenameValidation::Empty),
+        ("Current", RenameValidation::Unchanged),
+        ("Taken", RenameValidation::Duplicate),
+        (" New ", RenameValidation::Ready("New".into())),
+    ] {
+        let state = RenameValidation::check("Current", draft, &["Taken".into()]);
+        assert_eq!(state, expected);
+        let mut s = rename_preset(id(), owner(), DialogId("export".into()), draft);
+        state.apply(&mut s);
+        assert_eq!(
+            s.buttons[0].enabled,
+            matches!(
+                state,
+                RenameValidation::Ready(_) | RenameValidation::Unchanged
+            )
+        );
+        assert_eq!(
+            s.fields[0].error,
+            if matches!(state, RenameValidation::Duplicate) {
+                Some(PRESET_NAME_ERROR)
+            } else {
+                None
+            }
+        );
+        if state == RenameValidation::Unchanged {
+            assert_eq!(state.key_effect(), KeyEffect::Cancel);
+            assert_eq!(s.keyboard(Key::Return), KeyEffect::Cancel);
+        }
+    }
+}
+
+#[test]
+fn pending_keeps_error_semantics_and_equal_preview_does_not_reannounce() {
+    let now = Instant::now();
+    let mut d = ExpressionDraft::new("x".into(), "L".into(), "Opacity".into());
+    d.preview = Preview::RuntimeUnlocated {
+        message: "Division by zero".into(),
+    };
+    d.edit("y".into(), now);
+    let s = d.surface(id(), owner());
+    assert!(s.result_error);
+    assert_eq!(s.result_line.as_deref(), Some("Division by zero"));
+    let job = d.take_job(now + Duration::from_millis(250)).unwrap();
+    let mut host = HeadlessHost::default();
+    assert!(d.complete_with_host(
+        &job,
+        Preview::RuntimeUnlocated {
+            message: "Division by zero".into()
+        },
+        owner(),
+        &mut host
+    ));
+    assert!(host.events.is_empty());
 }

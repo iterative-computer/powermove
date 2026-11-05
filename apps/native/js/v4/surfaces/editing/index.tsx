@@ -366,3 +366,5 @@ export function TextAnimators({
     </div>
   );
 }
+
+export { PathControls, type PathControlsPlan } from "./path";

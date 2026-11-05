@@ -2,15 +2,12 @@
 //! `ValuesService` is the missing env/Keychain service boundary, not an in-memory
 //! replacement for persistent storage. Save completion must follow durable write.
 use super::{Error, PrivateValue, RequestId, ServiceCode, Target};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const LOCAL_NOTE: &str =
     "Stays on this Mac. Never included when you publish or share this extension.";
 pub const REENTER: &str = "Enter this again; the saved value can’t be read.";
-pub const DESIGN_TODOS: &[&str] = &[
-    "DESIGN-TODO(opus): pm-design has no metrics.sheet_inset or metrics.sheet_value_column; setup geometry remains unrendered until those tokens are supplied.",
-    "DESIGN-TODO(opus): authority.md does not specify copy for a failed Reveal/Remove or post-uninstall value deletion; use no invented user-visible error text.",
-];
+pub const DESIGN_TODOS: &[&str] = &[];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -88,6 +85,7 @@ pub struct SheetView {
     pub note: &'static str,
     pub cancel_label: &'static str,
     pub save_label: &'static str,
+    pub can_edit: bool,
     pub can_save: bool,
     pub can_cancel: bool,
     pub error: Option<String>,
@@ -142,6 +140,31 @@ pub trait ValuesService {
 }
 
 #[derive(Debug)]
+enum SetupFailure {
+    Save(ServiceCode),
+    Reveal(String, ServiceCode),
+    Remove(String, ServiceCode),
+}
+impl SetupFailure {
+    fn copy(&self) -> String {
+        let (message, code) = match self {
+            Self::Save(c) => ("Couldn’t save these values.".into(), c),
+            Self::Reveal(label, c) => (format!("Couldn’t show {label}."), c),
+            Self::Remove(label, c) => (format!("Couldn’t remove {label}."), c),
+        };
+        if code.informative().is_empty() {
+            message
+        } else {
+            format!("{message} {}", code.informative())
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevealFailure {
+    Unreadable,
+    Service(ServiceCode),
+}
+#[derive(Debug)]
 pub struct Setup {
     target: Target,
     extension: String,
@@ -150,7 +173,8 @@ pub struct Setup {
     saving: Option<RequestId>,
     removing: Option<(RequestId, String)>,
     last_request: RequestId,
-    error: Option<ServiceCode>,
+    revealing: BTreeMap<String, RequestId>,
+    error: Option<SetupFailure>,
     closed: bool,
 }
 impl Setup {
@@ -193,6 +217,7 @@ impl Setup {
             saving: None,
             removing: None,
             last_request: 0,
+            revealing: BTreeMap::new(),
             error: None,
             closed: false,
         })
@@ -250,7 +275,19 @@ impl Setup {
                 self.env_key.clone(),
                 key.into(),
             )
-            .map_err(Error::Service)?;
+            .map_err(|code| {
+                let label = self
+                    .rows
+                    .iter()
+                    .find(|r| r.declaration.key == key)
+                    .expect("checked")
+                    .declaration
+                    .label
+                    .clone();
+                self.error = Some(SetupFailure::Remove(label, code));
+                Error::Service(code)
+            })?;
+        self.error = None;
         self.removing = Some((request, key.into()));
         self.last_request = request;
         Ok(())
@@ -269,8 +306,18 @@ impl Setup {
         }
         let (_, key) = self.removing.take().expect("checked");
         if let Err(code) = result {
+            let label = self
+                .rows
+                .iter()
+                .find(|r| r.declaration.key == key)
+                .ok_or(Error::Stale)?
+                .declaration
+                .label
+                .clone();
+            self.error = Some(SetupFailure::Remove(label, code));
             return Err(Error::Service(code));
         }
+        self.error = None;
         let row = self
             .rows
             .iter_mut()
@@ -322,6 +369,79 @@ impl Setup {
             &row.declaration.key,
             &row.declaration.label,
         ))
+    }
+    /// Admit an explicit reveal before enqueueing bridge::Services::reveal. A
+    /// delayed callback can never answer another request for the same key.
+    pub fn begin_reveal(&mut self, key: &str, request: RequestId) -> Result<(), Error> {
+        self.reveal_key(key)?;
+        if request <= self.last_request {
+            return Err(Error::InvalidAction);
+        }
+        self.last_request = request;
+        self.revealing.insert(key.into(), request);
+        Ok(())
+    }
+    fn finish_reveal(
+        &mut self,
+        target: &Target,
+        key: &str,
+        request: RequestId,
+    ) -> Result<String, Error> {
+        if self.closed || target != &self.target || self.revealing.get(key) != Some(&request) {
+            return Err(Error::Stale);
+        }
+        self.revealing.remove(key);
+        let row = self
+            .rows
+            .iter()
+            .find(|r| r.declaration.key == key && r.already_set())
+            .ok_or(Error::Stale)?;
+        Ok(row.declaration.label.clone())
+    }
+    /// Success goes only to the explicit native Reveal alert, never SheetView.
+    pub fn revealed(
+        &mut self,
+        target: &Target,
+        key: &str,
+        request: RequestId,
+        value: PrivateValue,
+    ) -> Result<super::Prompt, Error> {
+        let label = self.finish_reveal(target, key, request)?;
+        Ok(super::Prompt::Reveal {
+            key: key.into(),
+            label,
+            value,
+        })
+    }
+    /// Worker result for an explicit Reveal. Never forwards diagnostic text or a
+    /// value into this inspectable model. Draft edits survive delayed failures.
+    pub fn reveal_failed(
+        &mut self,
+        target: &Target,
+        key: &str,
+        request: RequestId,
+        failure: RevealFailure,
+    ) -> Result<(), Error> {
+        self.finish_reveal(target, key, request)?;
+        let row = self
+            .rows
+            .iter_mut()
+            .find(|r| r.declaration.key == key)
+            .ok_or(Error::Stale)?;
+        if !row.already_set() {
+            return Err(Error::Stale);
+        }
+        match failure {
+            RevealFailure::Unreadable => {
+                row.saved = SavedValue::Unreadable;
+                row.visible = false;
+                self.error = None;
+            }
+            RevealFailure::Service(code) => {
+                self.error = Some(SetupFailure::Reveal(row.declaration.label.clone(), code))
+            }
+        }
+        Ok(())
     }
     pub fn view(&self) -> SheetView {
         SheetView {
@@ -381,20 +501,14 @@ impl Setup {
             } else {
                 "Save"
             },
+            can_edit: self.editable().is_ok(),
             can_save: self.editable().is_ok()
                 && self
                     .rows
                     .iter()
                     .all(|r| !r.declaration.required || r.present()),
             can_cancel: !self.closed,
-            error: self.error.map(|code| {
-                let detail = code.informative();
-                if detail.is_empty() {
-                    "Couldn’t save these values.".into()
-                } else {
-                    format!("Couldn’t save these values. {detail}")
-                }
-            }),
+            error: self.error.as_ref().map(SetupFailure::copy),
             focus_first_field_and_select: true,
             return_saves: true,
             escape_cancels: true,
@@ -431,7 +545,7 @@ impl Setup {
             writes,
         };
         if let Err((code, _)) = service.enqueue_save(save) {
-            self.error = Some(code);
+            self.error = Some(SetupFailure::Save(code));
             return Err(Error::Service(code));
         }
         self.saving = Some(request);
@@ -455,7 +569,7 @@ impl Setup {
                 self.closed = true;
                 self.rows.clear();
             }
-            Err(code) => self.error = Some(code),
+            Err(code) => self.error = Some(SetupFailure::Save(code)),
         }
         Ok(())
     }
@@ -465,6 +579,7 @@ impl Setup {
         }
         self.closed = true;
         self.rows.clear();
+        self.revealing.clear();
         self.saving = None;
         self.removing = None;
         Ok(())
@@ -474,6 +589,7 @@ impl Setup {
     pub fn invalidate(&mut self) -> String {
         self.closed = true;
         self.rows.clear();
+        self.revealing.clear();
         self.saving = None;
         self.removing = None;
         "Extension was changed, so the dialog closed.".into()

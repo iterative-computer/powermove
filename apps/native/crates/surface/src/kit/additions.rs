@@ -143,6 +143,8 @@ pub enum Decoration {
         bottom_inset: f32,
     },
     Banner {
+        symbol_size: f32,
+        symbol_color: u32,
         dismiss_after: Option<std::time::Duration>,
         announcement: Announcement,
     },
@@ -218,7 +220,11 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
     Some(match Component::of(node)? {
         Component::EmptyState => Decoration::EmptyState {
             symbol_size: t.metrics.symbol_panel + t.metrics.symbol_panel,
-            symbol_color: t.colors.muted,
+            symbol_color: if str_option(node, "severity") == Some("warning") {
+                t.colors.warning
+            } else {
+                t.colors.muted
+            },
         },
         Component::PopUpButton => Decoration::PopUpButton {
             menu: options(node)
@@ -335,7 +341,7 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
                 Some("tangent") => (
                     GizmoKind::Tangent,
                     "metrics.tangent_end",
-                    t.colors.secondary,
+                    t.colors.floating,
                     None,
                 ),
                 _ => (
@@ -347,7 +353,13 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
             };
             Decoration::ViewerGizmo(GizmoRecipe {
                 kind,
-                size: metric(size),
+                size: {
+                    let mut size = metric(size);
+                    if kind == GizmoKind::PathVertex && bool_option(node, "hovered") {
+                        size.value = size.value.map(|v| v + 2.);
+                    }
+                    size
+                },
                 keyline: {
                     let mut line = metric("metrics.gizmo_keyline");
                     line.value = line.value.map(|v| v.max(f64::from(t.metrics.border)));
@@ -361,6 +373,10 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
                 fill,
                 stroke: if kind == GizmoKind::Transform {
                     t.colors.viewer
+                } else if kind == GizmoKind::Tangent {
+                    t.colors.secondary
+                } else if kind == GizmoKind::PathVertex && selected {
+                    t.colors.selected_text
                 } else {
                     t.colors.accent
                 },
@@ -393,6 +409,12 @@ pub(crate) fn decorate(node: &Node, t: &Tokens, table: &DesignTokenTable) -> Opt
             bottom_inset: t.metrics.inset,
         },
         Component::Banner => Decoration::Banner {
+            symbol_size: t.metrics.symbol_inline,
+            symbol_color: match str_option(node, "severity") {
+                Some("warning") => t.colors.warning,
+                Some("error") => t.colors.danger,
+                _ => t.colors.secondary,
+            },
             // Interaction deadline specified in viewer-chrome.md, not a visual duration.
             dismiss_after: (!bool_option(node, "hasAction"))
                 .then_some(std::time::Duration::from_secs(4)),
