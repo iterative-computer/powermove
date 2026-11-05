@@ -86,7 +86,7 @@ fn upgrade_comp(
             }
             match schema::layer_data(role, input) {
                 Ok(data) => {
-                    if data != l["d"]["data"] {
+                    if data != l["d"]["data"] || l["threeD"] != true {
                         let prior = l.clone();
                         l["d"]["data"] = data;
                         archive(&mut l, &prior);

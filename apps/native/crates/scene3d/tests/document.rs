@@ -207,3 +207,17 @@ fn every_material_preset_is_valid() {
         schema::material(json!({"p":p["p"]})).unwrap();
     }
 }
+
+#[test]
+fn standalone_upgrade_archives_original_three_d_flag() {
+    let data = pm_scene3d::schema::layer_data(
+        pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"box"}}}),
+    )
+    .unwrap();
+    let original = json!({"id":"object","type":"extension","threeD":false,"d":{"definition":"powermove.3d.object","data":data}});
+    let mut project = json!({"layers":[original.clone()]});
+    pm_scene3d::migration::upgrade_project(&mut project).unwrap();
+    assert_eq!(project["layers"][0]["threeD"], true);
+    assert_eq!(project["layers"][0]["native3dArchive"]["source"], original);
+}
