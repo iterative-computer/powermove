@@ -199,6 +199,8 @@ pub struct Published {
     pub workspace: Value,
     pub ui_state: crate::state::UiState,
     pub dirty: bool,
+    /// Independent note publication sequence; does not change composition revision.
+    pub metadata_revision: u64,
     pub saving: bool,
     pub session: Option<crate::session::SessionMetadata>,
     pub media: crate::project_io::MediaTable,
@@ -705,6 +707,7 @@ fn publish_timed(
         workspace: p.workspace().clone(),
         ui_state: kernel.state().ui.get(project).cloned().unwrap_or_default(),
         dirty: store.is_dirty(),
+        metadata_revision: store.metadata_revision(),
         saving: store.is_saving(),
         session: kernel.session_metadata(project),
         media: store.media().clone(),
@@ -1124,6 +1127,7 @@ pub struct QueryMirror {
     queries: QueryContext,
     doc_id: u64,
     revision: u64,
+    metadata_revision: u64,
 }
 
 impl QueryMirror {
@@ -1132,6 +1136,7 @@ impl QueryMirror {
             queries: QueryContext::new(&published.snapshot.document),
             doc_id: published.snapshot.doc_id,
             revision: published.revision(),
+            metadata_revision: published.metadata_revision,
         }
     }
 
@@ -1139,7 +1144,9 @@ impl QueryMirror {
     /// adopting its snapshot when they no longer reach back). Returns the
     /// mirror's revision.
     pub fn sync(&mut self, published: &Published) -> u64 {
-        if published.snapshot.doc_id != self.doc_id {
+        if published.snapshot.doc_id != self.doc_id
+            || published.metadata_revision != self.metadata_revision
+        {
             *self = QueryMirror::new(published);
             return self.revision;
         }

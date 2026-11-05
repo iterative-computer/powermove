@@ -931,35 +931,56 @@ fn viewer_repeated_publications_keep_usable_native_tickets_until_model_changes()
 }
 
 #[test]
-fn media_completion_reaches_actor_without_fabricating_readiness_and_relink_undo_keeps_data() {
-    let actor = actor();
+fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(dir.path().join("journals")),
+        ..Default::default()
+    });
     let kernel = actor.handle();
+    let profile = dir.path().join("profile");
+    kernel
+        .shell(pm_kernel::session::ShellCall::AttachLibrary {
+            profile: profile.clone(),
+            format: pm_kernel::persistence::DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let project=pm_model::json::parse(r#"{"id":"synthetic","name":"Synthetic","w":640,"h":360,"fps":30,"dur":5,"layers":[],"comps":{},"assets":{}}"#).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let archive = pm_kernel::media_archive::Archive::open(&profile).unwrap();
+    let original = |name: &str, bytes: &[u8]| {
+        let source = dir.path().join(name);
+        std::fs::write(&source, bytes).unwrap();
+        archive
+            .retain_path(
+                &source,
+                "application/octet-stream",
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap()
+    };
     let panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
     let catalog =
         pm_panel_media::Catalog::published(&kernel.published("synthetic").unwrap()).unwrap();
-    let stored = pm_panel_media::StoredAsset {
-        id: "imported-image".into(),
-        original_version: "archived-original-v1".into(),
-        metadata: data::model(
-            &json!({"name":"Synthetic.png","kind":"image","w":80,"h":40,"future":{"keep":true}}),
-        )
-        .unwrap(),
-    };
+    let first = original("first.bin", b"first complete original");
+    let stored_version = first.version().to_owned();
+    let stored=RetainedAsset{id:"imported-image".into(),metadata:data::model(&json!({"name":"Synthetic.bin","kind":"image","mimeType":"application/octet-stream","w":80,"h":40,"future":{"keep":true}})).unwrap(),original:first,previous:None};
     let ack = panels
-        .admit_media(
-            &catalog.stamp,
-            vec![stored.clone()],
-            None,
-            None,
-            Caller::native(),
-        )
+        .admit_media(&catalog.stamp, vec![stored], None, None, Caller::native())
         .unwrap()
         .wait()
         .unwrap()
         .unwrap();
-    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
+    assert!(ack.notice.is_none(), "{ack:?}");
     let imported = kernel.published("synthetic").unwrap();
-    let imported_root = imported.snapshot.root().unwrap().to_value();
     let catalog = pm_panel_media::Catalog::published(&imported).unwrap();
     use pm_panel_media::MediaRuntime;
     let unknown = pm_panel_media::readiness::ObservedRuntime::default();
@@ -967,25 +988,14 @@ fn media_completion_reaches_actor_without_fabricating_readiness_and_relink_undo_
         unknown.state(&catalog.stamp, "imported-image").availability,
         pm_panel_media::Availability::Unknown
     );
-    let replacement = pm_panel_media::StoredAsset {
-        id: "worker-temp-id".into(),
-        original_version: "archived-original-v2".into(),
-        metadata: data::model(&json!({"name":"Relinked.png","kind":"image","w":100,"h":50}))
-            .unwrap(),
-    };
-    let ack = panels
-        .admit_media(
-            &catalog.stamp,
-            vec![replacement],
-            None,
-            Some("imported-image".into()),
-            Caller::native(),
-        )
-        .unwrap()
-        .wait()
-        .unwrap()
+    let prior = archive
+        .retain_entry(imported.media.get("imported-image").unwrap())
         .unwrap();
-    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let replacement = original("replacement.bin", b"replacement complete original");
+    let replacement_version = replacement.version().to_owned();
+    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),Caller::native()).unwrap().wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
+    assert!(ack.notice.is_none(), "{ack:?}");
     let relinked = kernel.published("synthetic").unwrap();
     let meta = relinked
         .snapshot
@@ -999,34 +1009,42 @@ fn media_completion_reaches_actor_without_fabricating_readiness_and_relink_undo_
     assert_eq!(
         meta.get("originalVersion")
             .and_then(pm_model::Value::as_str),
-        Some("archived-original-v2")
+        Some(replacement_version.as_str())
     );
     assert_eq!(
-        meta.get("future")
-            .unwrap()
-            .get("keep")
-            .and_then(pm_model::Value::as_bool),
-        Some(true)
+        meta.get("future").unwrap().get("keep"),
+        Some(&pm_model::Value::Bool(true))
     );
-    // Stale and foreign completions never reach the actor; stored versions remain the service's archives.
+    let copied = dir.path().join("new-copy");
+    relinked
+        .media
+        .get("imported-image")
+        .unwrap()
+        .copy_to(&copied)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(copied).unwrap(),
+        b"replacement complete original"
+    );
+    let stale = original("stale.bin", b"stale original");
+    let retained_path = stale.path();
     assert!(
         panels
             .admit_media(
                 &catalog.stamp,
-                vec![stored.clone()],
+                vec![RetainedAsset {
+                    id: "stale".into(),
+                    metadata: data::model(&json!({"name":"Stale.bin","kind":"image"})).unwrap(),
+                    original: stale,
+                    previous: None
+                }],
                 None,
                 None,
                 Caller::native()
             )
             .is_err()
     );
-    let mut foreign = catalog.stamp.clone();
-    foreign.project = "other".into();
-    assert!(
-        panels
-            .admit_media(&foreign, vec![stored], None, None, Caller::native())
-            .is_err()
-    );
+    assert_eq!(std::fs::read(retained_path).unwrap(), b"stale original");
     kernel
         .call(
             "synthetic",
@@ -1035,15 +1053,38 @@ fn media_completion_reaches_actor_without_fabricating_readiness_and_relink_undo_
         .wait()
         .unwrap()
         .unwrap();
+    let undone = kernel.published("synthetic").unwrap();
+    let copied = dir.path().join("old-copy");
+    undone
+        .media
+        .get("imported-image")
+        .unwrap()
+        .copy_to(&copied)
+        .unwrap();
+    assert_eq!(std::fs::read(copied).unwrap(), b"first complete original");
     assert_eq!(
-        kernel
-            .published("synthetic")
-            .unwrap()
+        undone
             .snapshot
             .root()
             .unwrap()
-            .to_value(),
-        imported_root
+            .get("assets")
+            .unwrap()
+            .get("imported-image")
+            .unwrap()
+            .get("originalVersion")
+            .and_then(|n| match n.kind() {
+                pm_model::NodeKind::String(s) => s.as_str(),
+                _ => None,
+            }),
+        Some(stored_version.as_str())
+    );
+    assert!(
+        undone
+            .snapshot
+            .root()
+            .unwrap()
+            .get("nativeMediaVersions")
+            .is_some()
     );
 }
 
@@ -1165,4 +1206,118 @@ fn collapsed_properties_dispose_native_binding_capabilities() {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(kernel.published("synthetic").unwrap().revision(), before);
+}
+
+#[test]
+fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(dir.path().join("journals")),
+        ..Default::default()
+    });
+    let kernel = actor.handle();
+    let project=pm_model::json::parse(r#"{"id":"P","name":"Synthetic","w":320,"h":180,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{},"future":"\ud800"}"#).unwrap();
+    kernel
+        .open("P", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings-memory".into(),
+        generation: 1,
+        project: "P".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "settings", false).unwrap();
+    let initial = backend.settings_snapshot().unwrap();
+    let before = kernel.published("P").unwrap();
+    let ack = kernel
+        .call(
+            "P",
+            Request::new(
+                Caller::realm(7, 1, pm_kernel::Origin::Mcp),
+                pm_kernel::MemoryCall::Mutate {
+                    expected: None,
+                    operation: pm_model::memory::Operation::Add {
+                        kind: "decision".into(),
+                        text: "Synthetic intent".into(),
+                        why: Some("Synthetic reason".into()),
+                        resolved: true,
+                    },
+                    now: 1000.,
+                    id: "note".into(),
+                },
+            )
+            .with_document(before.snapshot.doc_id),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(ack.reply, pm_kernel::Reply::Memory { .. }),
+        "{ack:?}"
+    );
+    let noted = backend.settings_snapshot().unwrap();
+    assert!(noted["revision"].as_u64().unwrap() > initial["revision"].as_u64().unwrap());
+    assert_eq!(noted["memory"]["entries"][0]["text"], "Synthetic intent");
+    assert_eq!(noted["memory"]["entries"][0]["why"], "Synthetic reason");
+    assert_eq!(noted["memory"]["entries"][0]["resolved"], true);
+    assert!(backend.native_command("panel.settings", &json!({"revision":initial["revision"],"action":{"type":"write","id":"memory.enabled","value":false}})).is_err());
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":noted["revision"],"action":{"type":"write","id":"memory.enabled","value":false}})).unwrap() else { panic!("metadata request") };
+    assert_eq!(request.expected_document, Some(before.snapshot.doc_id));
+    let ack = kernel.call("P", request).wait().unwrap().unwrap();
+    assert!(
+        matches!(ack.reply, pm_kernel::Reply::Memory { .. }),
+        "{ack:?}"
+    );
+    assert!(ack.notice.is_none(), "{ack:?}");
+    let disabled = backend.settings_snapshot().unwrap();
+    assert_eq!(disabled["memory"]["enabled"], false);
+    assert_eq!(disabled["memory"]["entries"], noted["memory"]["entries"]);
+    let after = kernel.published("P").unwrap();
+    assert_eq!(after.revision(), before.revision());
+    assert_eq!(after.history.entries, before.history.entries);
+    assert_eq!(after.dirty, before.dirty);
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":disabled["revision"],"action":{"type":"write","id":"memory.enabled","value":true}})).unwrap() else { panic!("metadata request") };
+    let ack = kernel.call("P", request).wait().unwrap().unwrap();
+    assert!(
+        matches!(ack.reply, pm_kernel::Reply::Memory { .. }),
+        "{ack:?}"
+    );
+    assert!(
+        kernel
+            .published("P")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .get("memoryEnabled")
+            .is_none()
+    );
+    let mut panels = Builtins::new(kernel.clone(), "P", || {}).unwrap();
+    finish(panels.mount("settings").unwrap());
+    finish(panels.show("settings").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    assert!(
+        publication
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Synthetic intent")
+    );
+    assert!(
+        publication
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Synthetic reason")
+    );
+    assert!(
+        publication
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.text.contains("Resolved"))
+    );
+    assert!(panels.take_errors().is_empty());
+    actor.shutdown();
 }

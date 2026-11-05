@@ -209,6 +209,33 @@ impl Automation {
             });
         Ok(json!({"projectId": id, "name": name}))
     }
+    pub fn project_memory(
+        &mut self,
+        id: &str,
+        args: &Value,
+        writer: u32,
+    ) -> Result<pm_model::Value> {
+        let store = self.store(id)?;
+        let document = store.doc_id();
+        let prepared = crate::memory_admission::prepare(
+            store
+                .root()
+                .ok_or_else(|| Error::invalid("Missing document"))?,
+            args,
+        )?;
+        match prepared {
+            crate::memory_admission::Prepared::Read(value) => Ok(value),
+            crate::memory_admission::Prepared::Write(call) => {
+                let ack = self.call(
+                    id,
+                    Request::new(Caller::realm(writer, 1, Origin::Mcp), call)
+                        .with_document(document),
+                )?;
+                crate::memory_admission::result(ack)
+            }
+        }
+    }
+
     pub fn read_document(&self, id: &str) -> Result<Value> {
         let store = self.store(id)?;
         let mut project = json_value(&pm_model::canonical::realize_project(

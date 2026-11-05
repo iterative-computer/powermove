@@ -135,9 +135,10 @@ impl Backend {
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{:?}",
             published.snapshot.doc_id,
             published.revision(),
+            published.metadata_revision,
             self.kernel.state().revision,
             published.selection.primary()
         );
@@ -384,6 +385,11 @@ impl Backend {
             let result = result.map_err(|e| format!("{e:?}")).and_then(|ack| {
                 if let Reply::Throw(error) = &ack.reply {
                     return Err(format!("{error:?}"));
+                }
+                if matches!(&ack.reply, Reply::Memory { .. })
+                    && let Some(pm_kernel::Notice::NotDurable { message }) = &ack.notice
+                {
+                    return Err(format!("Notes remain applied but could not be saved: {message}. Read the latest notes before retrying."));
                 }
                 if let Some(plan) = item.plan {
                     self.panel

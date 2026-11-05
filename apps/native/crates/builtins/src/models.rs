@@ -508,6 +508,24 @@ impl Backend {
         if let Some(project) = project {
             publication["project"] = project;
             publication["rows"] = json!(self.settings_rows()?);
+            let p = self.published().ok_or("Project closed")?;
+            let root = p.snapshot.root().ok_or("Project closed")?;
+            let mut notes = pm_model::Map::new();
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(node) = root.get(key) {
+                    notes.insert(key, node.to_value());
+                }
+            }
+            let root = pm_model::Value::Object(notes);
+            let entries = pm_model::memory::list(&root, None, 100).iter().map(|note| {
+                let text = |key| note.get(key).and_then(pm_model::Value::as_js_string)
+                    .map(pm_model::JsString::to_string_lossy).unwrap_or_default();
+                json!({"id":text("id"),"kind":text("kind"),"text":text("text"),"why":text("why"),
+                    "author":text("author"),"updatedAt":note.get("updatedAt").and_then(pm_model::Value::as_f64),
+                    "resolved":note.get("resolved")==Some(&pm_model::Value::Bool(true))})
+            }).collect::<Vec<_>>();
+            publication["memory"] =
+                json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
         }
         Ok(publication)
     }

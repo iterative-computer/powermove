@@ -406,6 +406,103 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
     </>
   );
 }
+const memoryGroups = [
+  ["goal", "Goal"],
+  ["constraint", "Rules"],
+  ["open", "Open Items"],
+  ["decision", "Decisions"],
+  ["rejected", "Rejected Ideas"],
+  ["feedback", "Feedback"],
+] as const;
+function MemoryNotes({ model }: { model: SettingsModel }) {
+  const memory = model.publication.memory;
+  if (!memory) return null;
+  const query = model.query.trim().toLocaleLowerCase();
+  const matches = memory.entries.filter(
+    (note) =>
+      !query ||
+      `${note.text} ${note.why ?? ""} ${note.kind}`
+        .toLocaleLowerCase()
+        .includes(query),
+  );
+  if (!memory.entries.length)
+    return (
+      <div role="group" label="No Notes Yet" style={column}>
+        <Copy>No Notes Yet</Copy>
+        <Copy secondary>
+          When an agent records a goal, rule or decision for this project, it
+          will show up here.
+        </Copy>
+      </div>
+    );
+  return (
+    <>
+      {memoryGroups.map(([kind, title]) => {
+        const notes = matches
+          .filter((note) => note.kind === kind)
+          .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+        if (!notes.length) return null;
+        return (
+          <UI.FormGroup key={kind} title={title} muted={!memory.enabled}>
+            {notes.map((note, index) => {
+              const date =
+                typeof note.updatedAt === "number" &&
+                Number.isFinite(note.updatedAt)
+                  ? new Date(note.updatedAt).toLocaleDateString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    })
+                  : "";
+              const meta = `${note.author === "user" ? "You" : "Agent"}${date ? ` · ${date}` : ""}${note.resolved ? " · Resolved" : ""}`;
+              return (
+                <div
+                  key={`${kind}.${index}`}
+                  role="group"
+                  label={note.text}
+                  style={{
+                    ...column,
+                    minHeight: t("metrics.form_row"),
+                    padding: t("metrics.inset"),
+                  }}
+                >
+                  <text
+                    style={{
+                      fontSize: t("typography.body"),
+                      color: t(memory.enabled ? "colors.text" : "colors.muted"),
+                    }}
+                  >
+                    {note.text}
+                  </text>
+                  {note.why && (
+                    <text
+                      style={{
+                        fontSize: t("typography.reading"),
+                        color: t(
+                          memory.enabled ? "colors.secondary" : "colors.muted",
+                        ),
+                      }}
+                    >
+                      {note.why}
+                    </text>
+                  )}
+                  <text
+                    metadata={
+                      note.resolved ? { symbol: "checkmark.circle" } : {}
+                    }
+                    style={help}
+                  >
+                    {meta}
+                  </text>
+                </div>
+              );
+            })}
+          </UI.FormGroup>
+        );
+      })}
+    </>
+  );
+}
 function SectionContent({
   section,
   model,
@@ -450,6 +547,7 @@ function SectionContent({
             ))}
         </UI.FormGroup>
       ))}
+      {section === "memory" && <MemoryNotes model={model} />}
       {section === "transcription" &&
         model.publication.speech
           .filter(
@@ -512,22 +610,38 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
           preventDefault={{ keydown: ["ArrowUp", "ArrowDown", "Home", "End"] }}
           onKeyDown={(event) => model.navigate(event.key ?? "")}
         >
-          {model.availableSections.map((section) => (
-            <UI.ListItem
-              key={section}
-              id={`settings.nav.${section}`}
-              label={sectionCopy[section].title}
-              selected={model.active === section}
-              tabIndex={-1}
-              metadata={{ symbol: sectionCopy[section].symbol }}
-              style={
-                model.query.trim() && !model.matches.sections.has(section)
-                  ? { color: t("colors.muted") }
-                  : {}
-              }
-              onSelect={() => model.select(section)}
-            />
-          ))}
+          {(["Project", "App"] as const)
+            .filter((group) => group === "App" || !!model.publication.project)
+            .map((group) => (
+              <div key={group} role="group" label={group}>
+                {(group !== "Project" || !!model.publication.project) && (
+                  <text style={help}>{group}</text>
+                )}
+                {model.availableSections
+                  .filter(
+                    (section) =>
+                      ["project", "memory"].includes(section) ===
+                      (group === "Project"),
+                  )
+                  .map((section) => (
+                    <UI.ListItem
+                      key={section}
+                      id={`settings.nav.${section}`}
+                      label={sectionCopy[section].title}
+                      selected={model.active === section}
+                      tabIndex={-1}
+                      metadata={{ symbol: sectionCopy[section].symbol }}
+                      style={
+                        model.query.trim() &&
+                        !model.matches.sections.has(section)
+                          ? { color: t("colors.muted") }
+                          : {}
+                      }
+                      onSelect={() => model.select(section)}
+                    />
+                  ))}
+              </div>
+            ))}
         </UI.List>
       </div>
       <scroll

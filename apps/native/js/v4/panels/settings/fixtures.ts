@@ -28,6 +28,7 @@ export const publication = (patch: Partial<Publication> = {}): Publication => ({
   extensions: [],
   extensionsState: "ready",
   speech: [],
+  ...(patch.project ? { memory: { enabled: true, entries: [] } } : {}),
   ...patch,
 });
 /** Synthetic profile authority for the test host only. Not a production grant. */

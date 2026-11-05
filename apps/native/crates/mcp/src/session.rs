@@ -51,6 +51,12 @@ impl McpSession {
         json!(catalog::tools())
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
+        if name == "project_memory" {
+            return match self.project_memory(&args) {
+                Ok(value) => crate::success_model(&value),
+                Err(error) => failure(error),
+            };
+        }
         match self.dispatch(name, &args) {
             Ok(v)
                 if [
@@ -68,7 +74,42 @@ impl McpSession {
             Err(e) => failure(e),
         }
     }
+    fn project_memory(&mut self, args: &Value) -> Result<pm_model::Value> {
+        if self.closed {
+            return Err(Error::invalid("This MCP connection is closed."));
+        }
+        self.retire_replaced_document()?;
+        let session = self
+            .active
+            .as_ref()
+            .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
+        if session.access == "editor" && !catalog::permits("inspection", "project_memory") {
+            return Err(Error::invalid(
+                "This planning run can only inspect the project.",
+            ));
+        }
+        if session.context == "app" && !catalog::permits("app", "project_memory") {
+            return Err(Error::invalid(
+                "This agent has no project attached. Open a project to use composition tools.",
+            ));
+        }
+        let id = session
+            .project
+            .as_deref()
+            .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+        let mut host = self
+            .host
+            .lock()
+            .map_err(|_| Error::unavailable("headless host stopped"))?;
+        assert_project(session, &host, id)?;
+        host.project_memory(id, args, self.writer)
+    }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
+        if name == "project_memory" {
+            return self
+                .project_memory(args)
+                .and_then(crate::memory_admission::unicode);
+        }
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
@@ -191,45 +232,6 @@ impl McpSession {
                 "store_extension" => crate::store::detail(store, args),
                 _ => crate::store::source(store, args),
             };
-        }
-        if name == "project_memory" {
-            let id = session
-                .project
-                .as_deref()
-                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
-            assert_project(session, &host, id)?;
-            let project = host.read_document(id)?;
-            if !crate::memory::enabled(&project) {
-                return Err(Error::invalid(crate::memory::DISABLED));
-            }
-            if args["operation"] == "list" {
-                return crate::memory::list(&project, args);
-            }
-            if !["add", "update", "remove"]
-                .iter()
-                .any(|op| args["operation"] == *op)
-            {
-                return Err(Error::invalid(
-                    "operation must be list, add, update or remove.",
-                ));
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(Error::kernel)?
-                .as_millis() as f64;
-            crate::memory::apply(
-                project["memory"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                args,
-                now,
-                &pm_kernel::new_id("mem"),
-                "agent",
-            )?;
-            return Err(Error::unavailable(
-                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback",
-            ));
         }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
@@ -587,13 +589,13 @@ impl McpSession {
                 std::fs::create_dir_all(root.join(name))?;
             }
             let input = if let Some(ref id) = project {
-                crate::memory::agent_snapshot(&host.read_document(id)?)
+                crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
             } else {
-                json!({})
+                pm_model::Value::Object(pm_model::Map::new())
             };
             std::fs::write(
                 root.join("inputs/powermove-project.json"),
-                input.to_string(),
+                pm_model::json::to_canonical_string(&input),
             )?;
             std::fs::write(
                 root.join("api/mcp-tools.json"),

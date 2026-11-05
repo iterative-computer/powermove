@@ -606,7 +606,10 @@ impl Kernel {
         // Newer edits remain dirty, journalled against the older base. Recovery
         // offers a copy if the file and journal bases differ.
         let store = self.project(&session.project).unwrap().store();
-        if store.revision() == pending.revision && !store.is_dirty() {
+        if store.revision() == pending.revision
+            && !store.is_dirty()
+            && !store.has_pending_metadata()
+        {
             self.rebase_journal(&session.project)?;
         }
         self.flush_project(&session.project)?;

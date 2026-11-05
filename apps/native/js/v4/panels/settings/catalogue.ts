@@ -3,6 +3,7 @@ import type { Option } from "../../src/components";
 
 export const sections = [
   "project",
+  "memory",
   "general",
   "accounts",
   "transcription",
@@ -14,6 +15,12 @@ export const sectionCopy: Record<
   { title: string; description: string; symbol: string }
 > = {
   project: { title: "Project", description: "", symbol: "doc.richtext" },
+  memory: {
+    title: "Memory",
+    description:
+      "Notes agents keep about this project: what the video is for, and why it looks the way it does.",
+    symbol: "list.bullet",
+  },
   general: {
     title: "General",
     description: "How Powermove looks and works on this Mac.",

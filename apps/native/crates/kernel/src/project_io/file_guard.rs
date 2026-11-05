@@ -127,6 +127,9 @@ fn layer_needs_native<T: JsonTree>(layer: &T) -> bool {
     {
         return true;
     }
+    if kind == Some("captions") && present(field(content, "nativeCaptionArchive")) {
+        return true;
+    }
     if kind != Some("extension") {
         return false;
     }
@@ -166,6 +169,7 @@ fn project_needs_native<T: JsonTree>(root: &T) -> bool {
                 _ => true,
             });
         if present(field(project, MARKER))
+            || present(field(project, "nativeMediaVersions"))
             || newer_reader
             || any_array(field(project, "layers"), layer_needs_native)
         {

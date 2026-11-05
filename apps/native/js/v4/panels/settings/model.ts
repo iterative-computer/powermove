@@ -33,10 +33,20 @@ export interface SpeechModel {
   progress?: number;
   error?: string;
 }
+export interface MemoryNote {
+  id: string;
+  kind: "goal" | "constraint" | "open" | "decision" | "rejected" | "feedback";
+  text: string;
+  why?: string;
+  author: string;
+  updatedAt?: number;
+  resolved: boolean;
+}
 export interface Publication {
   revision: number;
   project?: { id: string; name: string };
   multiWindow: boolean;
+  memory?: { enabled: boolean; entries: readonly MemoryNote[] };
   rows?: Row[];
   extensions: readonly Extension[];
   extensionsState: "ready" | "loading" | "error" | "unavailable";
@@ -154,7 +164,11 @@ export class SettingsModel {
     for (const row of this.publication.rows ?? [])
       if (!base.some((r) => r.id === row.id)) rows.push(row);
     return rows
-      .filter((r) => r.section !== "project" || !!this.publication.project)
+      .filter(
+        (r) =>
+          !["project", "memory"].includes(r.section) ||
+          !!this.publication.project,
+      )
       .map((r) => ({
         ...r,
         ...(this.failures.has(r.id) && r.profileKey
@@ -173,7 +187,7 @@ export class SettingsModel {
   }
   get availableSections() {
     return sections.filter(
-      (s) => s !== "project" || !!this.publication.project,
+      (s) => !["project", "memory"].includes(s) || !!this.publication.project,
     );
   }
   get visibleSections() {
@@ -328,6 +342,17 @@ export class SettingsModel {
         matches.sections.add(row.section);
         matches.count++;
       }
+    for (const note of this.publication.memory?.entries ?? []) {
+      if (
+        !query ||
+        `${note.text} ${note.why ?? ""} ${note.kind}`
+          .toLocaleLowerCase()
+          .includes(query)
+      ) {
+        matches.sections.add("memory");
+        matches.count++;
+      }
+    }
     for (const extension of this.publication.extensions) {
       const text = [
         extension.name,

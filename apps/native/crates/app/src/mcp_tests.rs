@@ -488,3 +488,202 @@ fn live_app_named_mcp_save_is_in_place_and_stale_document_saves_are_refused() {
         .dispatch("finish_session", &json!({"commit":true}))
         .unwrap();
 }
+
+#[test]
+fn app_memory_uses_durable_metadata_and_survives_agent_rollback_and_reopen() {
+    let f = Fixture::new();
+    let before = f.host.kernel.published("test").unwrap();
+    let mut c = f.connection();
+    start(&mut c);
+    let added = c.dispatch("project_memory", &json!({"operation":"add", "kind":"decision", "text":"Synthetic intent", "why":"Synthetic reason"})).unwrap();
+    let noted = f.host.kernel.published("test").unwrap();
+    assert_eq!(noted.revision(), before.revision());
+    assert_eq!(noted.history.entries, before.history.entries);
+    assert_eq!(noted.dirty, before.dirty);
+    assert!(noted.metadata_revision > before.metadata_revision);
+    assert_eq!(added["entry"]["author"], "agent");
+    add(&mut c, "temporary");
+    c.dispatch("project_memory", &json!({"operation":"update", "id":added["entry"]["id"], "text":"Retained intent", "resolved":true})).unwrap();
+    c.dispatch("rollback_changes", &json!({})).unwrap();
+    let listed = c
+        .dispatch("project_memory", &json!({"operation":"list"}))
+        .unwrap();
+    assert_eq!(listed["memory"][0]["text"], "Retained intent");
+    assert_eq!(layers(&f), 0);
+    c.dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    let session = f.host.current().unwrap();
+    f.host.shell(ShellCall::Close(session)).unwrap();
+    f.host.bind(None);
+    f.host
+        .open(
+            "test".into(),
+            SessionSource::Library {
+                profile: f.host.profile.clone(),
+                project: "test".into(),
+            },
+        )
+        .unwrap();
+    let mut reopened = f.connection();
+    start(&mut reopened);
+    assert_eq!(
+        reopened
+            .dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap()["memory"],
+        listed["memory"]
+    );
+}
+
+#[test]
+fn app_agent_inputs_hide_disabled_active_and_retired_notes_without_deleting_them() {
+    let f = Fixture::new();
+    let mut c = f.connection();
+    start(&mut c);
+    let first = c
+        .dispatch(
+            "project_memory",
+            &json!({"operation":"add","kind":"decision","text":"Synthetic retired intent"}),
+        )
+        .unwrap();
+    c.dispatch(
+        "project_memory",
+        &json!({"operation":"remove","id":first["entry"]["id"]}),
+    )
+    .unwrap();
+    c.dispatch(
+        "project_memory",
+        &json!({"operation":"add","kind":"goal","text":"Synthetic active intent"}),
+    )
+    .unwrap();
+    c.dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    let before = f.host.kernel.published("test").unwrap();
+    let ack = f
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                pm_kernel::MemoryCall::SetEnabled {
+                    expected: None,
+                    enabled: false,
+                },
+            )
+            .with_document(before.snapshot.doc_id),
+        )
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Memory { .. }), "{ack:?}");
+    let mut next = f.connection();
+    let started = next
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Synthetic disabled notes"}),
+        )
+        .unwrap();
+    let input: Value = serde_json::from_slice(
+        &std::fs::read(
+            PathBuf::from(started["workspace"].as_str().unwrap())
+                .join("inputs/powermove-project.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(input.get("memory").is_none());
+    assert!(input.get("nativeMemoryArchive").is_none());
+    assert_eq!(
+        next.dispatch("project_memory", &json!({"operation":"list"}))
+            .unwrap_err()
+            .message,
+        pm_mcp::memory::DISABLED
+    );
+    assert_eq!(
+        next.dispatch("get_project_state", &json!({"indexOnly":true}))
+            .unwrap()["memory"],
+        json!({"enabled":false})
+    );
+    let after = f.host.kernel.published("test").unwrap();
+    assert_eq!(
+        after.snapshot.root().unwrap().get("memory"),
+        before.snapshot.root().unwrap().get("memory")
+    );
+    assert_eq!(
+        after.snapshot.root().unwrap().get("nativeMemoryArchive"),
+        before.snapshot.root().unwrap().get("nativeMemoryArchive")
+    );
+    assert_eq!(after.revision(), before.revision());
+}
+
+#[test]
+fn app_memory_wire_keeps_split_utf16_emoji_through_reads_and_updates() {
+    let f = Fixture::new();
+    let mut c = f.connection();
+    start(&mut c);
+    let decode = |wire: Value| {
+        let wire: Value = serde_json::from_str(&wire.to_string()).unwrap();
+        assert_eq!(wire["isError"], false, "{wire}");
+        pm_model::json::parse(wire["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    // The app enforces the public input schema. Existing project notes and
+    // native note admission can still carry a JavaScript slice's lone unit.
+    let too_long = c
+        .invoke(
+            "project_memory",
+            json!({"operation":"add","kind":"decision","text":format!("{}😀", "x".repeat(599))}),
+        )
+        .unwrap();
+    assert_eq!(too_long["isError"], true);
+    let published = f.host.kernel.published("test").unwrap();
+    let ack = f
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                pm_kernel::MemoryCall::Mutate {
+                    expected: None,
+                    operation: pm_model::memory::Operation::Add {
+                        kind: "decision".into(),
+                        text: format!("{}😀", "x".repeat(599)).as_str().into(),
+                        why: None,
+                        resolved: false,
+                    },
+                    now: 1000.,
+                    id: "utf16-note".into(),
+                },
+            )
+            .with_document(published.snapshot.doc_id),
+        )
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Memory { .. }), "{ack:?}");
+    let added = decode(
+        c.invoke("project_memory", json!({"operation":"list"}))
+            .unwrap(),
+    );
+    let entry = &added.get("memory").unwrap().as_array().unwrap()[0];
+    let text = entry.get("text").unwrap().as_js_string().unwrap();
+    assert_eq!(text.utf16_units().count(), 600);
+    assert_eq!(text.utf16_units().last(), Some(0xd83d));
+    let id = entry.get("id").unwrap().as_str().unwrap();
+    let updated = decode(
+        c.invoke(
+            "project_memory",
+            json!({"operation":"update","id":id,"resolved":true}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(updated.get("entry").unwrap().get("text"), entry.get("text"));
+    let listed = decode(
+        c.invoke("project_memory", json!({"operation":"list"}))
+            .unwrap(),
+    );
+    assert_eq!(
+        listed.get("memory").unwrap().as_array().unwrap()[0],
+        *updated.get("entry").unwrap()
+    );
+    assert_eq!(
+        f.host.kernel.published("test").unwrap().revision(),
+        published.revision()
+    );
+}

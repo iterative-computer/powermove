@@ -86,6 +86,12 @@ impl Backend {
             "options":[{"v":8,"label":"8-bit"},{"v":16,"label":"16-bit"},{"v":32,"label":"32-bit float"}],
             "detail":"Precision per color channel. Applies to every composition in this project.",
             "binding":fields["project.colorDepth"],"disabled":false}));
+        let memory = self.fields(&json!(["memory.enabled"]))?;
+        rows.push(json!({"id":"memory.enabled","section":"memory","group":"Project Memory",
+            "label":"Use Project Memory","control":"switch", "disabled":false,
+            "value":root.get("memoryEnabled").map(pm_model::Node::to_value) != Some(pm_model::Value::Bool(false)),
+            "detail":"Agents read these notes before they edit, and add to them as they work. Turning it off keeps the notes but hides them from agents.",
+            "binding":memory["memory.enabled"]}));
         Ok(rows)
     }
     pub(crate) fn settings_action(&mut self, args: &Value) -> Result<NativeCommand, String> {
@@ -97,6 +103,23 @@ impl Backend {
         match action["type"].as_str() {
             Some("write") => {
                 let value = &action["value"];
+                if action["id"] == "memory.enabled" {
+                    let enabled = value
+                        .as_bool()
+                        .ok_or("Project memory access must be on or off")?;
+                    let p = self.published().ok_or("No open project")?;
+                    let root = p.snapshot.root().ok_or("Project closed")?;
+                    return Ok(NativeCommand::Kernel(
+                        Request::new(
+                            self.caller,
+                            pm_kernel::MemoryCall::SetEnabled {
+                                expected: root.get("memoryEnabled").map(pm_model::Node::to_value),
+                                enabled,
+                            },
+                        )
+                        .with_document(p.snapshot.doc_id),
+                    ));
+                }
                 let mut patch = CompPatch::default();
                 match action["id"].as_str() {
                     Some("project.name") => {
@@ -127,19 +150,22 @@ impl Backend {
                     _ => return Err("Settings service is unavailable for this row".into()),
                 }
                 let p = self.published().ok_or("No open project")?;
-                Ok(NativeCommand::Kernel(Request::new(
-                    self.caller,
-                    Call::Transact {
-                        label: Some("Composition Settings".into()),
-                        expected_revision: Some(p.revision()),
-                        body: WriteBody::Commands(vec![
-                            CompCommand::Set {
-                                patch: Box::new(patch),
-                            }
-                            .into(),
-                        ]),
-                    },
-                )))
+                Ok(NativeCommand::Kernel(
+                    Request::new(
+                        self.caller,
+                        Call::Transact {
+                            label: Some("Composition Settings".into()),
+                            expected_revision: Some(p.revision()),
+                            body: WriteBody::Commands(vec![
+                                CompCommand::Set {
+                                    patch: Box::new(patch),
+                                }
+                                .into(),
+                            ]),
+                        },
+                    )
+                    .with_document(p.snapshot.doc_id),
+                ))
             }
             Some("extensions.retry") => Ok(NativeCommand::Value(self.settings_snapshot()?)),
             // Enabling needs runtime activation as well as a registry flag.
