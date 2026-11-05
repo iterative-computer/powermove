@@ -119,6 +119,9 @@ pub enum CompCommand {
         comp_id: String,
         fallback: Option<String>,
     },
+    /// Release a pre-comp into a group retaining its id, rig and attributes.
+    /// Cloned children keep their picture and are clipped to its time span.
+    ReleasePrecomp { layer_id: String },
     /// Pre-compose (Cmd+Shift+C): moves the layers into a new composition
     /// `new_comp_id` and replaces them with one pre-comp layer
     /// `precomp_layer_id`, keeping every rendered pixel. Not ported (needs
@@ -144,6 +147,7 @@ impl CompCommand {
             CompCommand::Create { .. } => "New Composition",
             CompCommand::Duplicate { .. } => "Duplicate Composition",
             CompCommand::Delete { .. } => "Delete Composition",
+            CompCommand::ReleasePrecomp { .. } => "Release Pre-comp",
             CompCommand::Precompose { .. } => "Pre-compose",
         }
         .to_owned()
@@ -178,6 +182,9 @@ impl CompCommand {
             CompCommand::Create { comp_id, settings } => create(cx, comp_id, settings),
             CompCommand::Duplicate { comp_id, new_id } => duplicate(cx, comp_id, new_id),
             CompCommand::Delete { comp_id, fallback } => delete(cx, comp_id, fallback.as_deref()),
+            CompCommand::ReleasePrecomp { .. } => {
+                Err(CommandError::NotImplemented("release precomp"))
+            }
             CompCommand::Precompose { .. } => Err(CommandError::NotImplemented("precompose")),
         }
     }
