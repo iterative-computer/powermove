@@ -362,20 +362,22 @@ fn create_save_reopen_library_and_pmv() {
     let path = PathBuf::from(saved["path"].as_str().unwrap());
     assert!(path.exists());
     assert!(
-        pm_kernel::locks::FileLock::acquire(&pm_kernel::locks::project_lock_path(&path)).is_err(),
-        "the session must own the exported file lock"
+        pm_kernel::locks::FileLock::acquire(&pm_kernel::locks::project_lock_path(&path)).is_ok(),
+        "an independent export must not become the live document's lock"
     );
     value(s.call(
         "apply_commands",
         json!({"commands":[{"type":"set_layer","target":"L-a","patch":{"name":"Second save"}}]}),
     ));
-    assert_eq!(
-        value(s.call("save_project", json!({})))["path"],
-        saved["path"]
-    );
+    let second = value(s.call("save_project", json!({})));
+    assert_ne!(second["path"], saved["path"]);
     let opened = pm_kernel::open_project(&path, pm_kernel::OpenOptions::default()).unwrap();
     let store = pm_kernel::DocumentStore::open(opened);
     assert_eq!(store.layers()[0].id, "L-a");
+    assert_eq!(store.layers()[0].name, "Synthetic solid");
+    let second = PathBuf::from(second["path"].as_str().unwrap());
+    let opened = pm_kernel::open_project(&second, pm_kernel::OpenOptions::default()).unwrap();
+    let store = pm_kernel::DocumentStore::open(opened);
     assert_eq!(store.layers()[0].name, "Second save");
     value(s.call("finish_session", json!({"commit":true})));
     f.host.lock().unwrap().save_library(&id).unwrap();
