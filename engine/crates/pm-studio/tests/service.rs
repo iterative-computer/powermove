@@ -297,3 +297,71 @@ fn final_can_use_the_optional_oidn_device() {
             .all(|image| image.chunks_exact(4).any(|p| p[3] > 0 && p[0] > 0))
     );
 }
+
+struct GreyScreen {
+    source: Source,
+    textured: bool,
+}
+impl SceneSource for GreyScreen {
+    fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+        let mut input = self.source.scene(request)?;
+        input.scene.lights.clear();
+        input.scene.extra_lights.clear();
+        input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+        // Independent sRGB EOTF for the authored 8-bit mid-grey source.
+        let linear = ((128f32 / 255. + 0.055) / 1.055).powf(2.4);
+        let mut display = Material::dielectric(Vec3::ZERO, 1.);
+        display.specular = 0.;
+        display.emission = Vec3::splat(if self.textured { 0.5 } else { 0.5 * linear });
+        input.scene.materials = vec![display];
+        if self.textured {
+            let mut materials = input.scene.gpu_materials();
+            materials[0].maps[1] = 0.;
+            input.materials = Some(materials);
+            input.maps = Some(pm_studio::extract::TextureMaps {
+                width: 1,
+                height: 1,
+                layers: vec![vec![128, 128, 128, 255]],
+            });
+        }
+        Ok(input)
+    }
+}
+#[test]
+fn srgb_screens_are_decoded_exactly_once() {
+    let mut service = StudioService::default();
+    let tier = Tier::Final {
+        samples: 4,
+        salt: 29,
+        denoise: Denoise::None,
+    };
+    let encoded = GreyScreen {
+        source: Source::new(),
+        textured: true,
+    };
+    let linear = GreyScreen {
+        source: Source::new(),
+        textured: false,
+    };
+    let frame = service.render(&encoded, request(), tier).unwrap();
+    let textured = pixels(&service, &frame);
+    let frame = service.render(&linear, request(), tier).unwrap();
+    let explicit = pixels(&service, &frame);
+    assert!(
+        explicit
+            .iter()
+            .all(|p| p.chunks_exact(4).any(|p| p[0] > 20 && p[3] > 0))
+    );
+    for (layer, (actual, expected)) in textured.iter().zip(&explicit).enumerate() {
+        for (pixel, (actual, expected)) in actual
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(
+                actual, expected,
+                "mapped sRGB must match explicitly decoded emission: layer {layer}, pixel {pixel}"
+            );
+        }
+    }
+}

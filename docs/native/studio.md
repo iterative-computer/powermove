@@ -172,9 +172,8 @@ both-architecture, no-Homebrew launch and denoised-export checks pass.
 
 Merged base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`. Backend: Vulkan
 llvmpipe, LLVM 19.1.7. Rust: **1.96.1**. OIDN: **2.5.1**. Default suite:
-**27 passed / 0 failed / 0 ignored**. OIDN-enabled suite:
-**30 passed / 0 failed / 0 ignored** (the same 27 plus three OIDN checks,
-not 57 independent tests). Both include the headless host's two export/CLI tests.
+**28 passed / 0 failed / 0 ignored**. OIDN-enabled suite:
+**31 passed / 0 failed / 0 ignored** (the same 28 plus three OIDN checks). Both include the headless host's two export/CLI tests.
 Default and OIDN all-target Clippy pass with `-D warnings`; engine packages and
 the touched engine-service package pass formatting checks. Both workspace
 lockfiles contain only the needed additive resolution changes; no bulk update.
@@ -217,3 +216,18 @@ is not evidence of native-app composition or encoded video delivery.
 the core/resource adapter. This branch deliberately does not emit a MERGE-READY
 finish signal for an unfinished production integration. Read the concrete
 remaining-delivery list above before resuming.
+
+### Colour correctness repair — 2026-11-04
+
+Review found that the earlier Rust import uploaded the map array as
+`Rgba8UnormSrgb`, although `trace.wgsl` explicitly decodes color/emission maps.
+That double-decoded mid-tones and incorrectly decoded data maps (normals/ORM).
+The source's `core/studio/gpu.ts` uses raw `rgba8unorm`. All native map-array
+uploads now use `Rgba8Unorm`, leaving the single intended sRGB decode in WGSL
+and leaving normal/ORM values raw. N3 selects authored color/data semantics;
+N2 rejects retaining the older import's darkening bug.
+
+A new real-GPU regression renders an authored 8-bit grey screen and the same
+scene with its independently calculated linear emission. It failed before the
+repair and now requires **identical RGBA bytes for every pixel in every layer**.
+No tolerance was introduced. The qualification counts above include this test.
