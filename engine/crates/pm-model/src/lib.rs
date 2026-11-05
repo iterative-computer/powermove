@@ -23,6 +23,7 @@ pub mod doc;
 pub mod hash;
 pub mod ingest;
 pub mod json;
+pub mod memory;
 pub mod ops;
 pub mod parallel;
 pub mod patch;
