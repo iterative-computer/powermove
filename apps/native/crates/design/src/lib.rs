@@ -449,7 +449,11 @@ impl Tokens {
                 pasteboard_opacity: 0.35,
                 status_dot: 6.,
                 text_padding: 8.,
-                drop_stroke: if accessibility.increase_contrast { 2. } else { 1.5 },
+                drop_stroke: if accessibility.increase_contrast {
+                    2.
+                } else {
+                    1.5
+                },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
             },
@@ -524,6 +528,10 @@ impl Tokens {
         typography.minimum: size, typography.body: size, typography.label: size,
         typography.title: size, typography.reading: size, typography.heading: size,
         typography.display: size,
+        colors.media_badge: color,
+        metrics.kind_badge: size,
+        metrics.thumbnail_min: size,
+        metrics.status_dot: size,
     }
     /// Apply a translated theme's `nativePatch` (field name → number). Fields are
     /// applied in order; accessibility overrides are re-applied afterwards, so a
@@ -556,4 +564,10 @@ pub mod workspace {
     pub const DEFAULT_RIGHT: f32 = 300.;
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
+}
+
+/// Compatibility name used by the merged timeline/media renderer.
+/// The live token is metrics.media_badge_opacity (Opus panels §6).
+pub mod panels {
+    pub const MEDIA_BADGE_ALPHA: f64 = 0.55;
 }

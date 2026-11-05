@@ -14,10 +14,6 @@ pub enum Component {
     Segment,
     Checkbox,
     Toggle,
-    Switch,
-    PushButton,
-    FormGroup,
-    FormRow,
     ColourWell,
     DisclosureGroup,
     DisclosureButton,
@@ -52,10 +48,6 @@ impl Component {
         Self::Segment,
         Self::Checkbox,
         Self::Toggle,
-        Self::Switch,
-        Self::PushButton,
-        Self::FormGroup,
-        Self::FormRow,
         Self::ColourWell,
         Self::DisclosureGroup,
         Self::DisclosureButton,
@@ -95,8 +87,6 @@ impl Component {
                 | Self::Segment
                 | Self::Checkbox
                 | Self::Toggle
-                | Self::Switch
-                | Self::PushButton
                 | Self::ColourWell
                 | Self::DisclosureButton
                 | Self::ListItem
@@ -129,9 +119,6 @@ pub enum Widget {
     Segment,
     Checkbox,
     Switch,
-    PushButton,
-    FormGroup,
-    FormRow,
     ColourWell,
     DisclosureGroup,
     DisclosureButton,
@@ -214,10 +201,6 @@ impl Recipe {
             // Design review 2026-11-01 (panels/README.md §5.5): panels and
             // inspector rows use checkboxes; switches belong to Settings only.
             Toggle => Widget::Checkbox,
-            Switch => Widget::Switch,
-            PushButton => Widget::PushButton,
-            FormGroup => Widget::FormGroup,
-            FormRow => Widget::FormRow,
             ColourWell => Widget::ColourWell,
             DisclosureGroup => Widget::DisclosureGroup,
             DisclosureButton => Widget::DisclosureButton,
