@@ -252,13 +252,23 @@ pub struct SvgLayer {
     pub layer: String,
 }
 
+/// A composition-space lease also depends on the raster frame it was
+/// produced for; the same child composition can be displayed at two densities.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InputPlanKey {
+    composition: String,
+    request: pm_fx_defs::inputs::Request,
+    size: [u32; 2],
+    scale: [u64; 2],
+    origin: [u64; 2],
+}
+
 /// Inputs and outputs of a build.
 pub struct Build<'r> {
+    source_bytes: u64,
+    source_raster: Option<(String, String, composite::effects::SourceRaster)>,
     input_active: std::collections::BTreeSet<(String, pm_fx_defs::inputs::Request)>,
-    input_cache: std::collections::BTreeMap<
-        (String, pm_fx_defs::inputs::Request),
-        crate::effects::resources::Producer,
-    >,
+    input_cache: std::collections::BTreeMap<InputPlanKey, crate::effects::resources::Producer>,
     pub assets: &'r dyn AssetResolver,
     pub failures: Vec<LayerFailure>,
     /// SVG image layers whose document has a feature the float painter
@@ -316,6 +326,21 @@ pub struct Build<'r> {
 use crate::pass_facts::PassFacts;
 
 impl Build<'_> {
+    fn world<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        scale: (f64, f64),
+    ) -> JsResult<Mat2d> {
+        if let Some((comp, id, raster)) = &self.source_raster
+            && *comp == scope.comp.id().to_string_lossy()
+            && *id == js::layer_id(layer)
+        {
+            return Ok(raster.world());
+        }
+        scaled_world(scope, layer, time, scale, self.origin)
+    }
     fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
         let key = (layers.as_ptr() as usize, layers.len());
         if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
@@ -472,6 +497,8 @@ pub(crate) fn build_reusing<'r>(
         );
     }
     let mut b = Build {
+        source_raster: None,
+        source_bytes: 0,
         assets,
         failures: Vec::new(),
         svg_layers: Vec::new(),
@@ -697,11 +724,12 @@ fn draw_layer<'d>(
         b.unsupported.push(Unsupported::layer(&comp_id, layer, f));
     };
     let has_fx = scope.has_renderable_effects(layer, time)?;
+    let source_owner = has_fx && node::is_str(node::member(Some(layer), "effectSpace"), "source");
     let has_masks = composite::build::has_masks(scope, layer, time)?;
     let blend = composite::build::blend_mode(scope, layer, time)?;
     // Effects prepared by the host (the effects lane); without one, a layer
     // with renderable effects is routed.
-    let effects = if has_fx {
+    let effects = if has_fx && !source_owner {
         let frame = composite::effects::EffectFrame {
             width,
             height,
@@ -814,7 +842,14 @@ fn draw_layer<'d>(
                 composite_alpha: f64|
      -> JsResult<Option<Vec<Draw>>> {
         let masks = layer_masks(
-            scope, layer, time, scale, b.origin, width, height, has_masks,
+            scope,
+            layer,
+            time,
+            scale,
+            b.origin,
+            width,
+            height,
+            has_masks && !source_owner,
         )?;
         let matte = if matted {
             layer_matte(scope, b, layer, time, width, height, scale)?
@@ -834,6 +869,70 @@ fn draw_layer<'d>(
             },
         ))]))
     };
+    if source_owner {
+        let n = blur.map_or(1, |b| b.samples.max(1));
+        let mut draws = Vec::new();
+        for sample in 0..n {
+            let at = blur.map_or(time, |blur| {
+                time + crate::motion::sample_offset(
+                    sample,
+                    n,
+                    blur.shutter_frames,
+                    crate::motion::level_fps(scope.comp),
+                )
+            });
+            let (plan, raster) = match source_plan(
+                scope,
+                b,
+                layer,
+                at,
+                width,
+                height,
+                scale,
+                pm_fx_defs::inputs::Stage::Effects,
+                None,
+                true,
+            )? {
+                Ok(p) => p,
+                Err(f) => {
+                    refuse(b, f);
+                    return Ok(None);
+                }
+            };
+            let e = raster.extent;
+            let world = scaled_world(scope, layer, at, scale, b.origin)?;
+            let opacity = js::clamp(scope.num(layer, "opacity", at)? / 100., 0., 1.) / n as f64;
+            draws.push(Draw {
+                layer: id.clone(),
+                matrix: mul(&world, &[e.width, 0., 0., e.height, e.x, e.y]),
+                content: Content::Texture {
+                    source: Source::Comp(Box::new(plan)),
+                    uv: [0., 0., 1., 1.],
+                    alpha: opacity,
+                },
+            });
+        }
+        if n > 1 {
+            draws = vec![Draw {
+                layer: id.clone(),
+                matrix: full,
+                content: Content::Texture {
+                    source: Source::Accumulate(Box::new(CompPlan {
+                        composition: comp_id.clone(),
+                        group: true,
+                        width,
+                        height,
+                        background: Background::Transparent,
+                        draws,
+                        view: level_view(scope, b.origin, width, height, scale),
+                    })),
+                    uv: [0., 0., 1., 1.],
+                    alpha: 1.,
+                },
+            }];
+        }
+        return wrap(scope, b, draws, 1.);
+    }
     if ty == "group" {
         if b.forced_on.is_some_and(|p| std::ptr::eq(p, layer)) {
             // Today's matte pass of a group renders the group inside itself
@@ -912,7 +1011,17 @@ pub(crate) fn layer_draw<'d>(
     let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
-    let world = scaled_world(scope, layer, time, scale, b.origin)?;
+    if matches!(quad, Quad::Screen { .. })
+        && b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
+            *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
+        })
+    {
+        return Err(pm_eval::JsThrow {
+            kind: "EffectInputError",
+            message: "Screen-space content cannot supply an unclipped source raster".into(),
+        });
+    }
+    let world = b.world(scope, layer, time, scale)?;
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
@@ -1250,7 +1359,15 @@ fn native_content_quad<'d>(
     if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
         return Ok(quad);
     }
-    let (wf, hf) = (f64::from(width), f64::from(height));
+    let (wf, hf) = b
+        .source_raster
+        .as_ref()
+        .filter(|(comp, id, _)| {
+            *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
+        })
+        .map_or((f64::from(width), f64::from(height)), |(_, _, raster)| {
+            (raster.bounds.width, raster.bounds.height)
+        });
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
@@ -1268,7 +1385,7 @@ fn native_content_quad<'d>(
                     &mut plan,
                 );
             }
-            let world = vector_world(scope, layer, time, scale, b.origin)?;
+            let world = vector_world(scope, b, layer, time, scale)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
             Ok(quad.map(device_quad))
@@ -1358,7 +1475,7 @@ fn native_content_quad<'d>(
                 if scope.is_3d_layer(layer)? {
                     return local_level2(scope, layer, time, scale, b.origin, target, &mut plan);
                 }
-                let world = vector_world(scope, layer, time, scale, b.origin)?;
+                let world = vector_world(scope, b, layer, time, scale)?;
                 return match crate::vector::svg::plan_svg(
                     &path, bw, bh, uv, &world, target, playback,
                 ) {
@@ -1457,7 +1574,13 @@ fn native_content_quad<'d>(
             {
                 // Continuous rasterization (section 8): the child renders
                 // at the density it is drawn at, never below its own size.
-                let density = crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?;
+                let density = if b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
+                    *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
+                }) {
+                    scale
+                } else {
+                    crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?
+                };
                 (
                     js::max(2.0, js::round(w * js::max(scale.0, density.0))),
                     js::max(2.0, js::round(hh * js::max(scale.1, density.1))),
@@ -1529,7 +1652,7 @@ fn native_content_quad<'d>(
                 layer,
                 &d,
                 time,
-                (width, height),
+                (wf.ceil() as u32, hf.ceil() as u32),
                 scale,
                 b.shader_fallback,
             )?;
@@ -1693,7 +1816,7 @@ fn compat_quad<'d>(
     if ty == "captions" && b.text.as_deref().is_some_and(|t| t.captions_hidden()) {
         return Ok(Some(None));
     }
-    let world = scaled_world(scope, layer, time, scale, b.origin)?;
+    let world = b.world(scope, layer, time, scale)?;
     let raster_scale = crate::text::continuous_raster_scale(&world);
     // Today's preview source clipping: the window the compositor passes to
     // `PM.raster` in a viewer frame, or no raster call at all.
@@ -1791,7 +1914,7 @@ fn preview_crop<'d>(
     if scope.is_3d_layer(layer)? {
         return Ok(CropPlan::Full);
     }
-    let mut visible = vector_world(scope, layer, time, scale, b.origin)?;
+    let mut visible = vector_world(scope, b, layer, time, scale)?;
     visible[4] -= window.x;
     visible[5] -= window.y;
     if ty == "shape" {
@@ -1881,12 +2004,12 @@ fn shader_quad(
 /// anchor offset `contentQuad` applies to its quad.
 fn vector_world<'d>(
     scope: &mut Scope<'_, 'd>,
+    b: &Build<'_>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
-    origin: (f64, f64),
 ) -> JsResult<Mat2d> {
-    let world = scaled_world(scope, layer, time, scale, origin)?;
+    let world = b.world(scope, layer, time, scale)?;
     let offset = scope.size_anchor_offset(layer, time)?;
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
@@ -1987,6 +2110,7 @@ fn text_quad<'d>(
     scale: (f64, f64),
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
+    let world = b.world(scope, layer, time, scale)?;
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         b.unsupported.push(Unsupported::layer(
             &comp_id,
@@ -1998,7 +2122,6 @@ fn text_quad<'d>(
     if ty == "captions" && text.captions_hidden() {
         return Ok(None);
     }
-    let world = scaled_world(scope, layer, time, scale, b.origin)?;
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
     if scope.is_3d_layer(layer)? {
         // A plane with no perspective is an affine output transform. Cover
@@ -2294,6 +2417,198 @@ pub fn normalize_fill(value: Option<&Node>, bg: Option<&Node>) -> Fill {
     }
 }
 
+/// Build an unclipped local owner at the exact requested time. Only final
+/// placement sees the parent transform and opacity; input leases retain this plan.
+#[allow(clippy::too_many_arguments)]
+fn source_plan<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    stage: pm_fx_defs::inputs::Stage,
+    prefix: Option<usize>,
+    grow: bool,
+) -> JsResult<Result<(CompPlan, composite::effects::SourceRaster), Feature>> {
+    use pm_fx_defs::spatial::Extent;
+    let refuse = |s: &str| Feature::Definition(s.into());
+    if matches!(
+        js::layer_type(layer).as_str(),
+        "group" | "adjustment" | "null" | "audio"
+    ) || scope.is_3d_layer(layer)?
+        || pm_eval::parenting::Role3d::of(layer).is_some()
+    {
+        return Ok(Err(refuse("Source raster requires a 2D content owner")));
+    }
+    // renderInputSource takes the complete content raster box, including
+    // shape/path raster margins, rather than the selection's size bounds.
+    let bounds = if js::layer_type(layer) == "shape" {
+        if node::array(node::member(node::member(Some(layer), "d"), "paths"))
+            .is_some_and(|a| !a.is_empty())
+        {
+            let (_, _, paths) = scope.path_geometry(layer, time)?;
+            let r = paths.bounds;
+            Some(Extent {
+                x: r.x0,
+                y: r.y0,
+                width: r.w,
+                height: r.h,
+            })
+        } else {
+            let content = scope.ev.resolve_content(scope.comp, layer, time)?;
+            let (shape, _) = crate::vector::shape_content(&content);
+            let r = pm_vector::ShapeRaster::new(&shape, 1.);
+            Some(Extent {
+                x: -r.w / 2.,
+                y: -r.h / 2.,
+                width: r.w,
+                height: r.h,
+            })
+        }
+    } else {
+        scope.size_bounds(layer, time)?.map(|r| Extent {
+            x: r.x0,
+            y: r.y0,
+            width: r.x1 - r.x0,
+            height: r.y1 - r.y0,
+        })
+    };
+    let Some(mut bounds) = bounds else {
+        return Ok(Err(refuse("Source raster bounds unavailable")));
+    };
+    let offset = scope.size_anchor_offset(layer, time)?;
+    bounds.x += offset.x;
+    bounds.y += offset.y;
+    let mut raster = composite::effects::SourceRaster {
+        bounds,
+        extent: bounds,
+    };
+    if let Err(f) = raster.size() {
+        return Ok(Err(f));
+    }
+    let active = scope.active_forced_on(layer, time)?;
+    let effects = if active && stage == pm_fx_defs::inputs::Stage::Effects {
+        let Some(host) = b.effects else {
+            return Ok(Err(Feature::Effects));
+        };
+        let prepared = host.prepare_source(
+            scope,
+            layer,
+            composite::effects::EffectFrame {
+                width,
+                height,
+                scale,
+                time,
+            },
+            prefix,
+            raster,
+            grow,
+        )?;
+        let (effects, grown) = match prepared {
+            Ok(e) => e,
+            Err(f) => return Ok(Err(f)),
+        };
+        raster = grown;
+        match effects {
+            Some(e) => match effect_inputs(scope, b, layer, e, width, height, scale, time)? {
+                Ok(e) => Some(e),
+                Err(f) => return Ok(Err(f)),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    let (w, h) = match raster.size() {
+        Ok(s) => {
+            if active {
+                s
+            } else {
+                (1, 1)
+            }
+        }
+        Err(f) => return Ok(Err(f)),
+    };
+    // Main's default framebuffer allowance, with its six-surface reserve.
+    // Charge at float32 (the largest working format) before allocating any GPU target.
+    let charge = u64::from(w) * u64::from(h) * 16 * 6;
+    let total = b.source_bytes.checked_add(charge);
+    if total.is_none_or(|n| n > 384 * 1024 * 1024) {
+        return Ok(Err(refuse(
+            "Source rasters exceed framebuffer memory budget",
+        )));
+    }
+    b.source_bytes = total.unwrap();
+    let old_raster = b.source_raster.replace((
+        scope.comp.id().to_string_lossy(),
+        js::layer_id(layer),
+        raster,
+    ));
+    let old_origin = std::mem::replace(&mut b.origin, (0., 0.));
+    let old_preview = b.preview.take();
+    // Typed source requests and source-owner shutter samples select their exact
+    // time, rather than the ordinary motion path's held center video frame.
+    let old_video_center = b.video_center.take();
+    let result = (|| -> JsResult<Result<CompPlan, Feature>> {
+        let content = if active {
+            layer_draw(
+                scope,
+                b,
+                layer,
+                time,
+                w,
+                h,
+                (raster.world()[0], raster.world()[3]),
+                1.,
+            )?
+            .into_iter()
+            .collect()
+        } else {
+            vec![]
+        };
+        let masks = if active && stage != pm_fx_defs::inputs::Stage::Source {
+            match composite::build::masks(scope, layer, time, raster.world(), None, w, h)? {
+                composite::build::MaskRoute::Unmasked => None,
+                composite::build::MaskRoute::Parametric(m)
+                | composite::build::MaskRoute::Path(m) => Some(m),
+            }
+        } else {
+            None
+        };
+        Ok(Ok(CompPlan {
+            composition: scope.comp.id().to_string_lossy(),
+            group: false,
+            width: w,
+            height: h,
+            background: Background::Transparent,
+            view: None,
+            draws: vec![Draw {
+                layer: js::layer_id(layer),
+                matrix: [w as f64, 0., 0., h as f64, 0., 0.],
+                content: Content::Composite(Box::new(composite::Node::Layer(
+                    composite::LayerNode {
+                        layer: js::layer_id(layer),
+                        content,
+                        masks,
+                        effects,
+                        matte: None,
+                        blend: BlendMode::Normal,
+                        alpha: 1.,
+                        transition: None,
+                    },
+                ))),
+            }],
+        }))
+    })();
+    b.source_raster = old_raster;
+    b.origin = old_origin;
+    b.preview = old_preview;
+    b.video_center = old_video_center;
+    Ok(result?.map(|p| (p, raster)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn effect_inputs<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2313,17 +2628,19 @@ fn effect_inputs<'d>(
     let mut producers = vec![];
     for reference in requests {
         let request = reference.request;
-        let cache_key = (scope.comp.id().to_string_lossy(), request.clone());
-        if request.space == Space::Source {
-            return Ok(Err(Feature::Definition(
-                "source-space input raster adapter unavailable".into(),
-            )));
-        }
+        let active_key = (scope.comp.id().to_string_lossy(), request.clone());
+        let cache_key = InputPlanKey {
+            composition: active_key.0.clone(),
+            request: request.clone(),
+            size: [width, height],
+            scale: [scale.0.to_bits(), scale.1.to_bits()],
+            origin: [b.origin.0.to_bits(), b.origin.1.to_bits()],
+        };
         if let Some(producer) = b.input_cache.get(&cache_key) {
             producers.push(producer.clone());
             continue;
         }
-        if b.input_active.contains(&cache_key) {
+        if b.input_active.contains(&active_key) {
             return Ok(Err(Feature::Definition(format!(
                 "Effect input cycle at {}",
                 request.layer_id
@@ -2353,26 +2670,88 @@ fn effect_inputs<'d>(
             )));
         }
         let at = request.time().unwrap_or(time);
+        if request.space == Space::Source {
+            b.input_active.insert(active_key.clone());
+            let result = source_plan(
+                scope,
+                b,
+                source,
+                at,
+                width,
+                height,
+                scale,
+                request.stage,
+                request.prefix,
+                node::is_str(node::member(Some(source), "effectSpace"), "source"),
+            );
+            b.input_active.remove(&active_key);
+            let (plan, raster) = match result? {
+                Ok(p) => p,
+                Err(f) => return Ok(Err(f)),
+            };
+            let producer = crate::effects::resources::Producer {
+                source_extent: Some(raster.extent),
+                request: request.clone(),
+                plan: std::sync::Arc::new(plan),
+                owner: raster.owner(),
+            };
+            b.input_cache.insert(cache_key, producer.clone());
+            producers.push(producer);
+            continue;
+        }
         let owner_binding = match crate::effects::plan::owner(scope, source, at, scale)? {
             Ok(o) => o,
             Err(f) => return Ok(Err(f)),
         };
-        b.input_active.insert(cache_key.clone());
+        b.input_active.insert(active_key.clone());
         let result = (|| -> JsResult<Result<crate::effects::resources::Producer, Feature>> {
             let mut content = vec![];
             let active = scope.active_forced_on(source, at)?;
+            let source_owner = request.stage == Stage::Effects
+                && node::is_str(node::member(Some(source), "effectSpace"), "source");
+            if active && source_owner {
+                let (plan, raster) = match source_plan(
+                    scope,
+                    b,
+                    source,
+                    at,
+                    width,
+                    height,
+                    scale,
+                    Stage::Effects,
+                    request.prefix,
+                    true,
+                )? {
+                    Ok(p) => p,
+                    Err(f) => return Ok(Err(f)),
+                };
+                let e = raster.extent;
+                content.push(Draw {
+                    layer: js::layer_id(source),
+                    matrix: mul(
+                        &scaled_world(scope, source, at, scale, b.origin)?,
+                        &[e.width, 0., 0., e.height, e.x, e.y],
+                    ),
+                    content: Content::Texture {
+                        source: Source::Comp(Box::new(plan)),
+                        uv: [0., 0., 1., 1.],
+                        alpha: 1.,
+                    },
+                });
+            }
             if active
+                && !source_owner
                 && let Some(draw) = layer_draw(scope, b, source, at, width, height, scale, 1.)?
             {
                 content.push(draw);
             }
-            let masks = if request.stage != Stage::Source {
+            let masks = if request.stage != Stage::Source && !source_owner {
                 let has = composite::build::has_masks(scope, source, at)?;
                 layer_masks(scope, source, at, scale, b.origin, width, height, has)?
             } else {
                 None
             };
-            let nested = if request.stage == Stage::Effects && active {
+            let nested = if request.stage == Stage::Effects && active && !source_owner {
                 let Some(host) = b.effects else {
                     return Ok(Err(Feature::Effects));
                 };
@@ -2421,6 +2800,7 @@ fn effect_inputs<'d>(
                 ))),
             }];
             Ok(Ok(crate::effects::resources::Producer {
+                source_extent: None,
                 request: request.clone(),
                 owner: owner_binding,
                 plan: std::sync::Arc::new(CompPlan {
@@ -2434,7 +2814,7 @@ fn effect_inputs<'d>(
                 }),
             }))
         })();
-        b.input_active.remove(&cache_key);
+        b.input_active.remove(&active_key);
         let producer = match result? {
             Ok(p) => p,
             Err(f) => return Ok(Err(f)),

@@ -65,6 +65,55 @@ pub struct EffectFrame {
     pub time: f64,
 }
 
+/// Local content and padded effect extent, before the layer transform/opacity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SourceRaster {
+    pub bounds: pm_fx_defs::spatial::Extent,
+    pub extent: pm_fx_defs::spatial::Extent,
+}
+impl SourceRaster {
+    pub fn size(self) -> Result<(u32, u32), Feature> {
+        let e = self.extent;
+        if ![e.x, e.y, e.width, e.height].iter().all(|v| v.is_finite())
+            || e.width <= 0.
+            || e.height <= 0.
+            || e.width.ceil() > 16384.
+            || e.height.ceil() > 16384.
+        {
+            return Err(Feature::Definition(
+                "Source raster exceeds GPU dimensions".into(),
+            ));
+        }
+        Ok((e.width.ceil() as u32, e.height.ceil() as u32))
+    }
+    pub fn world(self) -> pm_eval::transform::Mat2d {
+        let (w, h) = self.size().expect("validated source raster");
+        let sx = w as f64 / self.extent.width;
+        let sy = h as f64 / self.extent.height;
+        [sx, 0., 0., sy, -self.extent.x * sx, -self.extent.y * sy]
+    }
+    pub fn owner(self) -> crate::effects::plan::Owner {
+        let m = self.world();
+        let b = self.bounds;
+        crate::effects::plan::Owner {
+            uv: [
+                (1. / (m[0] * b.width)) as f32,
+                0.,
+                0.,
+                0.,
+                (1. / (m[3] * b.height)) as f32,
+                0.,
+                ((self.extent.x - b.x) / b.width) as f32,
+                ((self.extent.y - b.y) / b.height) as f32,
+                1.,
+            ],
+            size: [b.width, b.height],
+            bounds: [b.x, b.y, b.width, b.height],
+            pixel_scale: [m[0], m[3]],
+        }
+    }
+}
+
 /// A layer's effects, prepared at plan time.
 #[derive(Clone)]
 pub struct PreparedEffects {
@@ -211,6 +260,22 @@ pub trait EffectHost: Send + Sync {
         layer: &'d Node,
         frame: EffectFrame,
     ) -> JsResult<Result<Option<PreparedEffects>, Feature>>;
+
+    /// A chain evaluated on an unclipped local source. Hosts must opt in;
+    /// composition-space passes cannot silently stand in for this contract.
+    fn prepare_source<'d>(
+        &self,
+        _scope: &mut Scope<'_, 'd>,
+        _layer: &'d Node,
+        _frame: EffectFrame,
+        _prefix: Option<usize>,
+        _raster: SourceRaster,
+        _grow: bool,
+    ) -> JsResult<Result<(Option<PreparedEffects>, SourceRaster), Feature>> {
+        Ok(Err(Feature::Definition(
+            "Effect host has no source raster adapter".into(),
+        )))
+    }
 
     fn prepare_prefix<'d>(
         &self,

@@ -156,12 +156,14 @@ pub struct Reference {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Producer {
+    pub source_extent: Option<pm_fx_defs::spatial::Extent>,
     pub request: pm_fx_defs::inputs::Request,
     pub plan: Arc<crate::plan::CompPlan>,
     pub owner: super::plan::Owner,
 }
 #[derive(Clone)]
 pub(crate) struct Ready {
+    pub source_extent: Option<pm_fx_defs::spatial::Extent>,
     pub request: pm_fx_defs::inputs::Request,
     pub target: pm_gpu::Target,
     pub owner: super::plan::Owner,

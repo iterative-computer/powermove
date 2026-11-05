@@ -516,6 +516,11 @@ impl<'c> Gpu<'c> {
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
             if let Some(owner) = &step.owner {
+                calls.push(("u_ownerValid".into(), f(&[1.])));
+                calls.push((
+                    "u_ownerFromUV".into(),
+                    Call::M3(super::resources::from_uv(owner)),
+                ));
                 calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                 calls.push(("u_layerRes".into(), f(&owner.size)));
                 calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
@@ -576,8 +581,31 @@ impl<'c> Gpu<'c> {
                 let name = &reference.name;
                 calls.push((format!("u_{name}"), Call::I(units.len() as i32)));
                 calls.push((format!("u_has_{name}"), f(&[1.])));
-                calls.push((format!("u_{name}Res"), f(&resource.owner.size)));
-                calls.push((format!("u_{name}UV"), Call::M3(resource.owner.uv)));
+                let source_space = reference.request.space == pm_fx_defs::inputs::Space::Source;
+                calls.push((
+                    format!("u_{name}Res"),
+                    f(&if source_space {
+                        [
+                            resource
+                                .source_extent
+                                .map_or(resource.target.width() as f64, |e| e.width),
+                            resource
+                                .source_extent
+                                .map_or(resource.target.height() as f64, |e| e.height),
+                        ]
+                    } else {
+                        resource.owner.size
+                    }),
+                ));
+                calls.push((format!("u_{name}Midpoint"), f(&[0.5])));
+                calls.push((
+                    format!("u_{name}UV"),
+                    Call::M3(if source_space {
+                        [1. / w as f32, 0., 0., 0., 1. / h as f32, 0., 0., 0., 1.]
+                    } else {
+                        resource.owner.uv
+                    }),
+                ));
                 let mut mapping = super::resources::from_uv(&resource.owner);
                 mapping[6] -= resource.origin[0] as f32;
                 mapping[7] -= resource.origin[1] as f32;
@@ -588,6 +616,9 @@ impl<'c> Gpu<'c> {
                 for column in 0..3 {
                     mapping[column * 3] *= ratio[0];
                     mapping[column * 3 + 1] *= ratio[1];
+                }
+                if source_space {
+                    mapping = [w as f32, 0., 0., 0., h as f32, 0., 0., 0., 1.];
                 }
                 calls.push((format!("u_{name}FromUV"), Call::M3(mapping)));
                 if step.temporal {
@@ -636,12 +667,26 @@ impl<'c> Gpu<'c> {
                 units.push(Some(target));
             }
             let out = self.take(ow, oh);
-            self.legacy_pass(
+            let clip = step.source_domain.map(|(d, e)| {
+                let sx = ow as f64 / e.width;
+                let sy = oh as f64 / e.height;
+                let x = ((d.x - e.x) * sx).floor().max(0.) as u32;
+                // Working targets keep GL row order: row zero is the bottom.
+                let y = ((e.y + e.height - d.y - d.height) * sy).floor().max(0.) as u32;
+                (
+                    x,
+                    y,
+                    (d.width * sx).ceil().min((ow - x) as f64) as u32,
+                    (d.height * sy).ceil().min((oh - y) as f64) as u32,
+                )
+            });
+            self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
                 &calls,
                 &units,
                 &out,
+                clip,
             );
             outputs.push(out);
         }
@@ -1085,6 +1130,18 @@ impl<'c> Gpu<'c> {
         units: &[Option<&Target>],
         out: &Target,
     ) {
+        self.legacy_pass_clipped(kind, definition, calls, units, out, None);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn legacy_pass_clipped(
+        &mut self,
+        kind: DefinitionKind,
+        definition: &str,
+        calls: &[(String, Call)],
+        units: &[Option<&Target>],
+        out: &Target,
+        clip: Option<(u32, u32, u32, u32)>,
+    ) {
         let device = self.device;
         let queue = self.queue;
         let format = out.format();
@@ -1162,6 +1219,12 @@ impl<'c> Gpu<'c> {
             "pm legacy glsl",
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
+        if let Some((x, y, w, h)) = clip {
+            if w == 0 || h == 0 {
+                return;
+            }
+            pass.set_scissor_rect(x, y, w, h);
+        }
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &fragment, &[]);
         pass.set_bind_group(1, &vertex, &[]);
