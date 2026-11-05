@@ -1,7 +1,7 @@
 # Extension comparisons — cloud handoff, 2026-11-04
 
 Branch: `feat/na-cloud-extcheck3`, from `feat/na-extcheck2` at `9253bc087`.
-Merged integration base: `711f44ba0667f81ce8388c4ec57565d1d0378630`.
+Merged integration base: `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`.
 **BLOCKED / P2 OPEN: 0 accepted matches, 0 measured mismatches, 58 can't run.**
 The work is a tested continuation, not completion of handoff item 5.
 
@@ -257,3 +257,13 @@ and fmt checks were rerun cleanly after the reference change. Both native
 lockfiles remain unchanged. Main-reference preparation/build succeeds; actual
 Electron and WebKit execution, complete authored scenarios, preview-frame
 feedback and the production endpoint/Store work are still unverified/incomplete.
+
+
+Final integration refresh: merged
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9` (design/delta documentation) without
+conflicts. Repeated the locked runner/host/Store suites: **24 / 20 / 90 pass**;
+Python **40 pass**; preparation/startup/reference Node tests **11 pass**; actual
+V8 clock tests **3 pass**. Runner and host all-target Clippy and fmt remain
+clean. This refresh does not resolve the previously observed intermittent
+profile lock failure or any full-capture/Store/presentation/scenario blocker.
+The branch is **BLOCKED**, with the current-main oracle selected correctly.

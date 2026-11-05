@@ -399,3 +399,10 @@ this runner. Keep this E18/transport integration boundary explicit; do not
 substitute clock time for an acknowledged preview or advertise that it passes
 (**N3**, authored displayed-frame intent). The presentation/engine lane needs
 to supply that feedback before full-script acceptance.
+
+
+Final refresh merges `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9` without
+conflicts. Post-refresh counts: locked native runner **24**, portable host
+**20**, Store host **90**, Python **40**, preparation/startup/reference Node
+**11**, real V8 clock **3**, all passing. Clippy/fmt remain clean. The prior
+intermittent profile-reopen failure stays recorded, and P2 remains OPEN.
