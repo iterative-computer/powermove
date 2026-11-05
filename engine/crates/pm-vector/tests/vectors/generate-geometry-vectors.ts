@@ -36,6 +36,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { pointsDigest } from './point-digest.mts';
 import * as corner from '../../../../../apps/desktop/src/renderer/src/legacy/gl/corner-geometry';
 import { shapeRasterGeometry } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/shape-raster-window';
 import { groupMatrix, pathPoints, pathValues, rasterPaths, tracePath } from '../../../../../apps/desktop/src/renderer/src/legacy/core/vector-paths';
@@ -245,14 +246,6 @@ function vectorPath(index: number, count: number): any {
   };
   const parent = chance(0.5) ? null : chance(0.1) ? 'missing' : `path${int(0, count - 1)}`;
   return { id: `path${index}`, name: 'Path', parent, vertices, p };
-}
-
-/** FNV-1a 64 over the little-endian IEEE bits of each coordinate. */
-function pointsDigest(points: Array<[number, number]>): string {
-  const bytes = new Uint8Array(new Float64Array(points.flat()).buffer);
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
-  return hash.toString(16).padStart(16, '0');
 }
 
 const sameOps = (a: any[], b: any[]) => JSON.stringify(encode(a)) === JSON.stringify(encode(b));

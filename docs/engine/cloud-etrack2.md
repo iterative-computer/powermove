@@ -110,3 +110,41 @@ previous successful early return was not corpus proof. Numeric bounds, font
 exclusion pins, semantics and capture selection are unchanged. **N3/N7 and the
 honesty rule** select this behavior; there is no substitute font or skipped
 case. The moved fixture include remains inside the owned engine tree.
+
+## 2026-11-04 — portable geometry witness repair
+
+The unfiltered CPU replay exposed `paths_match_vector_paths_ts`: actual digest
+`2735fae539268e85` versus stored `93f367b1fabb1185` for `path1`. The readable
+coordinate comparison immediately before the digest already passed with its
+existing exact finite-bit comparison and NaN-class equivalence. The remaining
+difference was the sign/payload of NaNs from non-finite cubic inputs, which the
+JSON witness stores only as `"NaN"`. That payload is not authored geometry.
+
+The Rust witness digest and the generator now explicitly encode every NaN as
+IEEE `0x7ff8000000000000`, with little-endian storage. Finite values (including
+one-ULP differences), signed zero and signed infinities remain bit-exact and
+have regressions on both sides. The generator helper is independently runnable
+with Node 22.18+; its tests check every readable frozen coordinate digest.
+All existing fixture hashes, fixture bytes, geometry code and numerical bounds
+remain unchanged. **N3 and the quirk policy** select a portable fingerprint of
+the recorded numeric value instead of reproducing a hardware NaN sign in the
+renderer. This is separate from the native/WASM production conformance digest,
+which was not changed. Formatting-only changes keep the touched crate clean.
+
+## 2026-11-04 — newer integration base
+
+The final base fetch advanced native-engine to
+`711f44ba0667f81ce8388c4ec57565d1d0378630`, merged cleanly as `38f32c453`.
+The incoming update is documentation only. It records the owner's latest-main
+reference (`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`) and the separate new-3D
+port requirement; see [main-delta.md](../native/main-delta.md), especially E01–E18.
+The existing v1.2 witnesses and pending ratchets remain intact and required.
+No latest-main effect-version/resource, 3D or output qualification follows from
+this Linux replay, and no existing witness is silently relabelled as the new
+reference. Those requirements add to the remaining integration work.
+
+Process exception: this second merge auto-committed before the staged secret
+scan. A direct first-parent merge-commit scan subsequently inspected one commit
+and 269,758 bytes with zero findings. Subsequent merges use `--no-commit` so
+the staged scan precedes the commit. This exception does not represent the
+required pre-commit scan having run retroactively.

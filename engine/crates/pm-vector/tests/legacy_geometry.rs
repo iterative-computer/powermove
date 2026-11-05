@@ -431,17 +431,51 @@ fn path_values(v: &Value) -> PathValues {
     }
 }
 
-/// FNV-1a 64 over the little-endian bits of every coordinate, as the generator computes it.
+/// FNV-1a 64 over coordinate bits, as the generator computes it. The JSON
+/// witness records NaN as a string, without a sign or payload. Canonicalize
+/// only those unrecorded bits; finite values and signed zero stay bit-exact.
 fn points_digest(points: &[Point]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for p in points {
         for c in [p.x, p.y] {
-            for byte in c.to_bits().to_le_bytes() {
+            let bits = if c.is_nan() {
+                0x7ff8_0000_0000_0000
+            } else {
+                c.to_bits()
+            };
+            for byte in bits.to_le_bytes() {
                 hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
     }
     format!("{hash:016x}")
+}
+
+#[test]
+fn coordinate_digest_retains_recorded_bits_and_canonicalizes_only_nan() {
+    let canonical = points_digest(&[Point::new(f64::NAN, 1.0)]);
+    for bits in [
+        0x7ff8_0000_0000_0001,
+        0xfff8_0000_0000_0000,
+        0x7ff0_0000_0000_0001,
+    ] {
+        assert_eq!(
+            canonical,
+            points_digest(&[Point::new(f64::from_bits(bits), 1.0)])
+        );
+    }
+    assert_ne!(
+        points_digest(&[Point::new(0.0, 1.0)]),
+        points_digest(&[Point::new(-0.0, 1.0)])
+    );
+    assert_ne!(
+        points_digest(&[Point::new(1.0, 1.0)]),
+        points_digest(&[Point::new(f64::from_bits(1.0f64.to_bits() + 1), 1.0)])
+    );
+    assert_ne!(
+        points_digest(&[Point::new(f64::INFINITY, 1.0)]),
+        points_digest(&[Point::new(f64::NEG_INFINITY, 1.0)])
+    );
 }
 
 #[test]
