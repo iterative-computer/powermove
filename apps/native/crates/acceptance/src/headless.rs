@@ -200,24 +200,59 @@ pub fn packed_save() -> Check {
     let repeated = f.call("save_project", json!({}))?;
     assert_eq!(f.revision(), revision);
     assert_eq!(without_revision(f.document()?), before);
-    // Pinned main promises an independent, uniquely named host export. A
-    // normal document Save in place must remain a visible product failure.
-    let exported = std::path::Path::new(saved["path"].as_str().ok_or("saved path missing")?);
-    if exported.parent() != Some(f.scratch.0.join("exports").as_path()) {
-        return Err("save_project must export a separate packed project; the opened working file was saved in place".into());
-    }
-    if repeated["path"] == saved["path"] {
-        return Err("save_project must use a unique export filename on every call".into());
-    }
-    assert_eq!(
+    // c7f46a056 legacy/assistant/mcp-project-tools.ts checks filePath first:
+    // named files use PM.saveProject; only library projects call PM.Export.run.
+    assert_eq!(saved_path, working);
+    assert_eq!(repeated["path"], saved["path"]);
+    assert_ne!(
         std::fs::read(&working).map_err(|e| e.to_string())?,
         bytes,
-        "export must not overwrite the source document"
+        "the named working file must receive the committed edit"
     );
-    // Untitled SaveAs follows the same production session path.
+    assert!(!f.scratch.0.join("exports").exists());
+    // A library project instead exports independent, uniquely named files.
     let mut untitled = Fixture::new()?;
     untitled.add("untitled-save")?;
+    let revision = untitled.revision();
+    let dirty = untitled
+        .host
+        .lock()
+        .unwrap()
+        .store(&untitled.id)
+        .unwrap()
+        .is_dirty();
+    let first = untitled.call("save_project", json!({}))?;
+    let first_path = std::path::Path::new(first["path"].as_str().ok_or("export path missing")?);
+    let first_bytes = std::fs::read(first_path).map_err(|e| e.to_string())?;
+    let second = untitled.call("save_project", json!({}))?;
+    assert_ne!(first["path"], second["path"]);
+    for exported in [&first, &second] {
+        let path = std::path::Path::new(exported["path"].as_str().ok_or("export path missing")?);
+        assert_eq!(
+            path.parent(),
+            Some(untitled.scratch.0.join("exports").as_path())
+        );
+        let opened = pm_kernel::project_io::open_project(path, Default::default())
+            .map_err(|e| e.to_string())?;
+        let store = pm_kernel::DocumentStore::open(opened);
+        assert!(
+            store
+                .layers()
+                .iter()
+                .any(|layer| layer.id == "untitled-save")
+        );
+    }
+    assert_eq!(
+        std::fs::read(first_path).map_err(|e| e.to_string())?,
+        first_bytes
+    );
     untitled.verify_saved()?;
+    assert_eq!(untitled.revision(), revision);
+    let host = untitled.host.lock().unwrap();
+    let store = host.store(&untitled.id).map_err(|e| e.to_string())?;
+    assert!(store.path().is_none());
+    assert_eq!(store.is_dirty(), dirty);
+    drop(host);
     tool_error(
         &mut untitled.session,
         "open_project",
