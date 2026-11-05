@@ -96,9 +96,9 @@ with tempfile.TemporaryDirectory(prefix='pm-corpus-synthetic-') as directory:
                     raise SystemExit('Effect produced no measured pixel change: '+name)
                 if name.endswith('.json'):
                     pixels = json.loads(a)
-                    if not pixels or not any(max(p)>0.5 for p in pixels):
+                    if not pixels or not any(max(p)>0.5 for p in pixels) or len(set(map(tuple,pixels))) < 2:
                         raise SystemExit('Blank effect preview')
-                elif len(set(a)) < 2:
+                elif len(set(zip(a[0::3],a[1::3],a[2::3]))) < 2:
                     raise SystemExit('Blank effect export: '+name)
         if args.offline or args.expect_refusal:
             expected='GLSL fallback runner' if args.effect else 'rotated video' if args.rotated else 'offline_originals'
