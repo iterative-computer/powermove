@@ -184,3 +184,67 @@ all consumer/color revisions and working depths, brush conformance for every
 animated/trim/repeater case, durable import/Undo/export of every typed resource,
 full delivery/backend fallback and physical HDR/UI gates still require their
 specific acceptance. No capability flag or baseline is promoted by this work.
+
+## Source-owner raster contract
+
+Source processing has a separate local plan. It evaluates content at the exact
+requested time, applies masks and the saved effect prefix, then places the
+result through the owner's inherited transform and opacity. Shape rasters retain
+their complete content margins and strokes; editable paths retain evaluated path
+bounds. Source references can read hidden, off-composition or singularly
+transformed providers. Inactive inputs retain their source extent metadata and
+use a transparent one-pixel target without decoding video.
+
+Each effect's `sourceProcessing` contract grows the local domain. Each pass is
+clipped to its own prefix domain, including intermediate cell-atlas passes, so a
+later spatial effect cannot expose pixels created outside an earlier domain.
+Source targets have an independent coordinate system, including during cropped
+preview rendering. Exact source video requests do not inherit the ordinary
+motion path's held center frame. Source-owner shutter samples accumulate
+additively after each sample's local effects and opacity.
+
+The implementation checks dimensions and charges the default 384 MiB framebuffer
+allowance, conservatively at float32 with six surfaces, before allocating source
+targets. Plans retain producer extents and exact resource identity. Typed Stroke
+geometry is evaluated on its provider and placed through the consuming owner,
+matching `referenceImage` in the pinned reference.
+
+This is still **partial E02/E03/E04/E06/E07/E08/E09/E11 coverage**. Source temporal
+and brush-domain expansion, source text/captions and arbitrary extension rasters,
+general group/matte/backdrop and 3D policy, complete cancellation/memory admission,
+and every revision/depth/export comparison remain required. No complete E row or
+capability flag follows from this contract. The original frozen references are
+still required for their gates; synthetic local witnesses do not replace them.
+
+### Implementation checkpoint and remaining row requirements
+
+Implementation: `23ea75d89`. `advanced_effects` provides focused Metal witnesses;
+`effect_versions` retains the tagged saved-version pixel checks. These are
+synthetic/headless proofs with explicit required media, not substitutes for the
+unavailable original frozen reference set. No E01–E18 row is fully closed by this
+checkpoint and Gate E's verification flags remain conservative.
+
+| Row | Remaining requirement for complete closure |
+| --- | --- |
+| E01 | Winning extension history publication and complete saved-project/revision rendering, including provenance. |
+| E02 | General group/matte/backdrop/3D producer policy, every consumer and four-source DAG, copy/delete/Undo and lifecycle acceptance. |
+| E03 | Source temporal/brush domains, text/captions and arbitrary extension/3D rasters, complete cancellation/lease failure and full-project reference evidence. |
+| E04 | Every advertised capability, contextual defaults and undoable actions through the actual application. |
+| E05 | Every current/historical color family at all working depths, signed HDR and alpha, plus swap action acceptance. |
+| E06 | Every spatial revision at crop/zoom/source/depth boundaries and decoded export. |
+| E07 | Complete shadow revisions, contextual defaults, ramp reset/swap and saved-project coverage. |
+| E08 | Every consumer family and revision, four-source composition/source sampling and general producer policy. |
+| E09 | Complete animated path/mask/trim/repeater/brush conformance, source expansion and durable LUT import/Undo/export. |
+| E10 | Complete saved-depth/Channel Combiner and decoded output comparisons. |
+| E11 | Source Echo domains, convolution, historical references, cancellation, admission and full lease lifecycle. |
+| E12 | Picture/rig-preserving Release Pre-comp, Undo and actual switch/UI acceptance. |
+| E13 | Complete helper/fallback import qualification and physical EDR/SDR grading/output evidence; headless tests cannot supply physical display evidence. |
+| E14 | Complete bounded encode/cancellation/VideoToolbox probe/fallback and same-source delivery acceptance. |
+| E15 | Resumable long-export jobs, progress/wait/cancel/disconnect and complete stage-specific result/error acceptance. |
+| E16 | Complete native recorder/resource/async-readback lifetime and codec/alpha output comparisons, including GPU loss and stale acknowledgements. |
+| E17 | Application pressure/eviction/seek/hidden-source recovery, measured memory and physical playback. |
+| E18 | Actual hidden-panel/pacing/CPU/allocation/edit-to-glass qualification; physical presentation cannot run in headless-only validation. |
+
+The original corpus, missing external references and physical presentation gates
+remain blocked by their actual prerequisites. Implementation gaps above remain
+implementation work; they are not relabelled as display or reference blockers.

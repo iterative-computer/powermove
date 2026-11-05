@@ -25,7 +25,10 @@
       "condition": "Requires the definition set or EffectHost; absent renderer configuration is a named error.",
       "evidence": [
         "pm-render/tests/headless.rs::capability_check_lists_what_the_renderer_cannot_draw",
-        "pm-render/tests/headless.rs::every_feature_is_supported_and_frames_are_deterministic"
+        "pm-render/tests/headless.rs::every_feature_is_supported_and_frames_are_deterministic",
+        "pm-render/tests/advanced_effects.rs::metal_source_owner_effects_precede_opacity_and_transform",
+        "pm-render/tests/advanced_effects.rs::metal_source_padding_clips_each_prefix_before_later_spatial_passes",
+        "pm-render/tests/advanced_effects.rs::metal_source_raster_budget_and_dimensions_fail_before_allocation"
       ],
       "verified": false
     },
@@ -52,7 +55,8 @@
       "condition": "Every shipped visual type is in the sampled-type list; unknown layer types remain explicit.",
       "evidence": [
         "pm-render/tests/headless.rs::capability_check_lists_what_the_renderer_cannot_draw",
-        "pm-render/tests/headless.rs::every_feature_is_supported_and_frames_are_deterministic"
+        "pm-render/tests/headless.rs::every_feature_is_supported_and_frames_are_deterministic",
+        "pm-render/tests/advanced_effects.rs::metal_source_owner_shutter_samples_accumulate_after_effects_and_opacity"
       ],
       "verified": false
     },
@@ -119,7 +123,9 @@
         "pm-render/tests/stills.rs::native_exr_dpx_and_png_metadata_are_supported",
         "pm-render/tests/stills.rs::h273_log_png_tags_decode_in_float_at_every_sample",
         "pm-render/tests/footage.rs",
-        "pm-render/tests/video_reading.rs"
+        "pm-render/tests/video_reading.rs",
+        "pm-render/tests/advanced_effects.rs::metal_source_video_subframes_keep_native_frame_selection_and_seek_identity",
+        "pm-render/tests/advanced_effects.rs::metal_inactive_source_video_needs_no_decode_or_full_size_target"
       ],
       "verified": false
     },
@@ -139,7 +145,8 @@
         "pm-render/tests/effects.rs",
         "pm-render/tests/shader_layers.rs",
         "pm-render/src/effects/plan.rs",
-        "pm-render/src/shader_layers/plan.rs"
+        "pm-render/src/shader_layers/plan.rs",
+        "pm-render/tests/advanced_effects.rs::metal_source_reference_retains_hidden_offscreen_singular_content_and_stages"
       ],
       "verified": false
     },
@@ -216,18 +223,20 @@
     "LayerType": [
       "engine/crates/pm-render/src/capability.rs:98",
       "engine/crates/pm-render/src/capability.rs:388",
-      "engine/crates/pm-render/src/plan.rs:1614"
+      "engine/crates/pm-render/src/plan.rs:1780"
     ],
     "ExtensionDefinition": [
       "engine/crates/pm-render/src/capability.rs:99",
       "engine/crates/pm-render/src/capability.rs:365",
-      "engine/crates/pm-render/src/plan.rs:1601",
+      "engine/crates/pm-render/src/plan.rs:1767",
       "engine/crates/pm-render/src/shader_layers/plan.rs:524"
     ],
     "Effects": [
       "engine/crates/pm-render/src/capability.rs:100",
       "engine/crates/pm-render/src/capability.rs:393",
-      "engine/crates/pm-render/src/plan.rs:709"
+      "engine/crates/pm-render/src/plan.rs:746",
+      "engine/crates/pm-render/src/plan.rs:2494",
+      "engine/crates/pm-render/src/plan.rs:2756"
     ],
     "Masks": [
       "engine/crates/pm-render/src/capability.rs:101"
@@ -235,8 +244,8 @@
     "Transition": [
       "engine/crates/pm-render/src/capability.rs:102",
       "engine/crates/pm-render/src/capability.rs:408",
-      "engine/crates/pm-render/src/composite/effects.rs:216",
-      "engine/crates/pm-render/src/plan.rs:732"
+      "engine/crates/pm-render/src/composite/effects.rs:312",
+      "engine/crates/pm-render/src/plan.rs:780"
     ],
     "MotionBlur": [
       "engine/crates/pm-render/src/capability.rs:103",
@@ -251,7 +260,7 @@
     "Adjustment": [
       "engine/crates/pm-render/src/capability.rs:105",
       "engine/crates/pm-render/src/capability.rs:379",
-      "engine/crates/pm-render/src/plan.rs:707"
+      "engine/crates/pm-render/src/plan.rs:744"
     ],
     "CompatLevel2": [
       "engine/crates/pm-render/src/capability.rs:106"
@@ -269,7 +278,7 @@
       "engine/crates/pm-render/src/capability.rs:643",
       "engine/crates/pm-render/src/capability.rs:650",
       "engine/crates/pm-render/src/media.rs:328",
-      "engine/crates/pm-render/src/plan.rs:1364"
+      "engine/crates/pm-render/src/plan.rs:1501"
     ],
     "Media": [
       "engine/crates/pm-render/src/capability.rs:110",
@@ -279,16 +288,43 @@
       "engine/crates/pm-render/src/media.rs:540",
       "engine/crates/pm-render/src/media.rs:549",
       "engine/crates/pm-render/src/media.rs:570",
-      "engine/crates/pm-render/src/media.rs:1349",
-      "engine/crates/pm-render/src/media.rs:1392",
+      "engine/crates/pm-render/src/media.rs:1357",
+      "engine/crates/pm-render/src/media.rs:1400",
       "engine/crates/pm-render/src/stills.rs:30",
       "engine/crates/pm-render/src/stills.rs:34"
     ],
     "Definition": [
       "engine/crates/pm-render/src/capability.rs:112",
-      "engine/crates/pm-render/src/effects/mod.rs:867",
-      "engine/crates/pm-render/src/effects/plan.rs:265",
-      "engine/crates/pm-render/src/effects/plan.rs:318",
+      "engine/crates/pm-render/src/composite/effects.rs:83",
+      "engine/crates/pm-render/src/composite/effects.rs:275",
+      "engine/crates/pm-render/src/composite/effects.rs:288",
+      "engine/crates/pm-render/src/effects/mod.rs:804",
+      "engine/crates/pm-render/src/effects/mod.rs:1030",
+      "engine/crates/pm-render/src/effects/plan.rs:328",
+      "engine/crates/pm-render/src/effects/plan.rs:334",
+      "engine/crates/pm-render/src/effects/plan.rs:366",
+      "engine/crates/pm-render/src/effects/plan.rs:376",
+      "engine/crates/pm-render/src/effects/plan.rs:406",
+      "engine/crates/pm-render/src/effects/plan.rs:420",
+      "engine/crates/pm-render/src/effects/plan.rs:438",
+      "engine/crates/pm-render/src/effects/plan.rs:442",
+      "engine/crates/pm-render/src/effects/plan.rs:487",
+      "engine/crates/pm-render/src/effects/plan.rs:492",
+      "engine/crates/pm-render/src/effects/plan.rs:570",
+      "engine/crates/pm-render/src/effects/plan.rs:614",
+      "engine/crates/pm-render/src/effects/plan.rs:667",
+      "engine/crates/pm-render/src/effects/plan.rs:682",
+      "engine/crates/pm-render/src/effects/plan.rs:687",
+      "engine/crates/pm-render/src/effects/plan.rs:692",
+      "engine/crates/pm-render/src/effects/plan.rs:698",
+      "engine/crates/pm-render/src/effects/plan.rs:724",
+      "engine/crates/pm-render/src/plan.rs:2436",
+      "engine/crates/pm-render/src/plan.rs:2644",
+      "engine/crates/pm-render/src/plan.rs:2650",
+      "engine/crates/pm-render/src/plan.rs:2659",
+      "engine/crates/pm-render/src/plan.rs:2668",
+      "engine/crates/pm-render/src/plan.rs:2771",
+      "engine/crates/pm-render/src/plan.rs:2829",
       "engine/crates/pm-render/src/shader_layers/plan.rs:396",
       "engine/crates/pm-render/src/shader_layers/plan.rs:470",
       "engine/crates/pm-render/src/shader_layers/plan.rs:510",
@@ -296,10 +332,10 @@
     ],
     "ShaderFallback": [
       "engine/crates/pm-render/src/capability.rs:113",
-      "engine/crates/pm-render/src/effects/exec.rs:382",
-      "engine/crates/pm-render/src/effects/mod.rs:870",
-      "engine/crates/pm-render/src/effects/plan.rs:275",
-      "engine/crates/pm-render/src/effects/plan.rs:322",
+      "engine/crates/pm-render/src/effects/exec.rs:390",
+      "engine/crates/pm-render/src/effects/mod.rs:1033",
+      "engine/crates/pm-render/src/effects/plan.rs:344",
+      "engine/crates/pm-render/src/effects/plan.rs:618",
       "engine/crates/pm-render/src/exec.rs:595",
       "engine/crates/pm-render/src/shader_layers/plan.rs:270",
       "engine/crates/pm-render/src/shader_layers/plan.rs:452",
@@ -309,12 +345,12 @@
     "Text": [
       "engine/crates/pm-render/src/capability.rs:114",
       "engine/crates/pm-render/src/capability.rs:458",
-      "engine/crates/pm-render/src/plan.rs:1951",
-      "engine/crates/pm-render/src/plan.rs:1990",
-      "engine/crates/pm-render/src/plan.rs:2013",
-      "engine/crates/pm-render/src/plan.rs:2032",
-      "engine/crates/pm-render/src/plan.rs:2077",
-      "engine/crates/pm-render/src/plan.rs:2098",
+      "engine/crates/pm-render/src/plan.rs:2118",
+      "engine/crates/pm-render/src/plan.rs:2156",
+      "engine/crates/pm-render/src/plan.rs:2179",
+      "engine/crates/pm-render/src/plan.rs:2198",
+      "engine/crates/pm-render/src/plan.rs:2243",
+      "engine/crates/pm-render/src/plan.rs:2264",
       "engine/crates/pm-render/src/renderer/layer_raster.rs:137"
     ]
   },
