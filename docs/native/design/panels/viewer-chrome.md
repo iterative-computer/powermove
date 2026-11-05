@@ -153,6 +153,7 @@ has an action; never stacks. Dark scheme in both appearances.
 | ⌘0, ⇧/ | fit; ⌘1, / actual size; ., ⌘= zoom in; ,, ⌘− zoom out |
 | Double-click text layer | edit text in place (W049); Esc or ⌘Return commits |
 | Drag layer (Select tool) | move; snapping on both axes, ⌘ bypasses (B062) |
+| Press with the Anchor Point tool | selects the layer under the pointer, narrowing a multi-selection to it. Dragging past `m.drag_threshold` in the same gesture moves that layer's anchor to the pointer, one undo `Move Anchor Point`; Esc restores. A click with no drag only selects, so it never moves an anchor (main `5458b5449`) |
 | Pop-ups | open `NSMenu`; arrow keys, Return, Esc, type-ahead (system) |
 
 ## 5. Keyboard and focus

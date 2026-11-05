@@ -17,6 +17,7 @@ are those of panels/README §1.
 | [easing.md](easing.md) | Easing panel, preset library and dialogs | S094 S095 |
 | [shader-lab.md](shader-lab.md) | Shader Lab source editor and compile states | S096 |
 | [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; S098 points to 3d-studio.md | S097 S098 |
+| [main-delta-ui.md](main-delta-ui.md) | Main's UI changes: docking, Layers column, per-axis keying, tooltips, menus, Memory, Storage, Version History | U01–U16, UI parts of P, E, A |
 | [3d-studio.md](3d-studio.md) | New 3D system: viewer toolbar, preview tiers, navigation, gizmos, light tool, inspector, import, materials, upgrade, failure | S098 |
 | [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
 | [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
@@ -135,11 +136,12 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | **Answered:** the new system ships with the rewrite, old projects upgrade automatically, no compat mode | S098 |
 | 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | **Answered:** inside the window; the overlay is not ported | S107 |
 | 6 | Reverse migration isn't built. What do beta users get promised about going back? | **Answered:** no reverse migration; the original app refuses a native file it can't read, and the copy says so | N003 |
-
 | 7 | Exploded views, place-on and other 3D gestures exist for agents through `edit_3d`, but the 3D source gives people no control for them. Add human controls in the first native release? | Agent-only, as source; [3d-studio.md §12](3d-studio.md#12-not-in-the-source-so-not-in-native-yet) lists them | S098 |
 | 8 | Old 3D projects upgrade in memory on open and save in the new format. After that save, the original app refuses the file. Should the first save of an upgraded project warn about that? | No warning; the upgrade banner and N003 say what's needed | S098, N003 |
+| 9 | Main's Storage cleanup deletes old backups; native archives them, so on a Mac with one disk `Free Up Space…` frees little. Keep archive-only? | Archive-only (N4). Only rebuildable caches are removed | P06 |
+| 10 | `Link Layers` in main reads as linked audio and video in Tracks mode. Native keeps `Parent`. Acceptable? | `Parent` everywhere | U04 |
 
-Answers to Q2–Q6 are from the owner, 2026-11-04 (see p0-decisions.md), and the family files now state them. Q1, Q7 and Q8 are open.
+Answers to Q2–Q6 are from the owner, 2026-11-04 (see p0-decisions.md), and the family files now state them. Q1 and Q7–Q10 are open.
 
 ## 7. New tokens requested by these specs
 
@@ -159,3 +161,5 @@ on the token; it does not substitute a literal.
 | `metrics.sync_badge` | 16 | [pro-edit.md](pro-edit.md) |
 | `metrics.viewer_3d_labels` | 860 | [3d-studio.md](3d-studio.md) |
 | `metrics.viewer_3d_collapse` | 560 | [3d-studio.md](3d-studio.md) |
+| `motion.tooltip_delay` | 0.38 | [main-delta-ui.md](main-delta-ui.md) |
+| `motion.tooltip_warm` | 0.6 | [main-delta-ui.md](main-delta-ui.md) |

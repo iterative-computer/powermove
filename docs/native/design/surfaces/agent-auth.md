@@ -320,12 +320,10 @@ settings.md *Subscriptions*. One row per service, `{name}` = `ChatGPT` or
 `Disconnect` asks nothing; it is reconnectable. Status text is a polite live
 region. Never show the browser-delivered token or a raw URL.
 
-**External clients** — new group `External Clients`, shown only when a
-supported client is installed. Today the only supported client is the Claude
-desktop app. v1.2.0 adds Powermove to that app's settings silently at launch.
-Native never does (owner decision, 2026-11-04): nothing writes to Claude's settings
-until the person has said yes, either in the consent alert below or with the
-Settings switch. The launch path has no registration call at all.
+**External clients.** v1.2.0 adds Powermove to the Claude desktop app's settings silently
+at launch. Native never does (owner decision, 2026-11-04): nothing writes to Claude's
+settings until the person has said yes, either in the consent alert below or with the
+button in *Other Agent Apps*. The launch path has no registration call at all.
 
 ### Consent alert
 
@@ -336,7 +334,7 @@ profile skips onboarding (S107) and still needs the question.
 | Rule | Spec |
 |---|---|
 | When | The first time an editor window is key after the first-launch gate (N001–N003) and onboarding (S107–S110) have finished, with no sheet or alert open, playback stopped and no text field being edited. If those aren't true yet, it waits; it never interrupts |
-| Present | Same check as v1.2.0's `claudeInstalled`. If Claude isn't installed the question isn't used up: it's asked on a later launch that finds Claude. The `External Clients` group is absent until then |
+| Present | Same check as v1.2.0's `claudeInstalled`. If Claude isn't installed the question isn't used up: it's asked on a later launch that finds Claude |
 | Never shown | While Powermove runs as a hidden MCP host (no editor window), or when the table below says skip |
 | Recorded | The answer is written before any change to Claude's settings, so a crash can't repeat the question. Quitting with the alert open records nothing, and it's asked next launch. Key `externalClients.claudeDesktop` = `added` \| `declined` \| `skipped`; absent means not asked |
 
@@ -363,7 +361,7 @@ v1.2.0's `registerClaudeDesktopMcp`, read without writing:
 | Entry `powermove` that already points at this app | Skip, record `skipped` | Added |
 | Receipt says added, entry gone (person removed it) | Skip, record `skipped`. A removal is a decision and is never asked about again | Not added |
 | Entry changed by hand (`customized`) | Skip, record `skipped` | Set up by hand |
-| Claude's settings file unreadable or not an object | Skip for this launch, record nothing | Failed |
+| Claude's settings file unreadable or not an object | Skip for this launch, record nothing | Settings unreadable |
 
 Variant alert, for an entry the original app added:
 
@@ -373,38 +371,73 @@ Variant alert, for an entry the original app added:
 | Informative | `Claude is set up to use the original Powermove app. Switching changes that one entry in Claude’s settings, and you can change it anytime in Settings ▸ Accounts.` |
 | Buttons | `Keep Original` (default, Esc) · `Switch to Powermove Native` |
 
-### Settings row
+### Other Agent Apps
 
-| State | Row | Detail | Control |
+Group `Other Agent Apps` in Settings ▸ Accounts, after Subscriptions. It's main's agent-app
+list (`main/agent-clients.ts`, A02) with the consent above in front of `Claude`. Only clients
+found on this Mac appear, in this order, plus the last row, which is always there:
+
+| Row | Detail |
+|---|---|
+| `Claude Code` | `Your Claude plan, in the terminal or your editor.` |
+| `Codex` | `Your ChatGPT plan, in the Codex app or CLI.` |
+| `Claude` | `Your Claude plan, in the Claude app.` |
+| `Gemini CLI` | `Your Google account or Gemini plan.` |
+| `Cursor` | `Your Cursor plan.` |
+| `VS Code` | `GitHub Copilot’s agent mode.` |
+| `Windsurf` | `Your Windsurf plan.` |
+| `LM Studio` | `Models on this Mac, in LM Studio’s chat.` |
+| `OpenCode` | `Any provider you use in OpenCode.` |
+| `Any Other Agent` | `Paste into any app that supports MCP servers. It runs on that app’s own plan.` Button `Copy Setup`, which reads `Copied` for `mo.overlay_idle` |
+
+Row grammar matches Subscriptions: name, detail, status, one trailing button.
+
+| State | Status | Button | Detail |
 |---|---|---|---|
-| Not added (declined, removed, or never asked) | `Claude Desktop` | `Let Claude use Powermove tools on this Mac.` | switch off |
-| Added | same | `Claude can use Powermove tools on this Mac.` | switch on |
-| Added, Claude open | same | `Quit and reopen Claude to finish.` Returns to the row above once Claude has relaunched | switch on |
-| Uses the original app | same | `Claude is using the original Powermove app.` | switch off |
-| Set up by hand | same | `Claude has its own Powermove setup, so Powermove leaves it alone.` | switch off, disabled |
-| Writing | same | detail unchanged | spinner in place of the switch |
-| Failed | same | Error state: `Couldn’t update Claude’s settings. Check that Claude is installed, then try again.` | switch at its previous position + `Retry` |
+| Not added | none | `Add Powermove` | The client's line |
+| Adding, Removing | spinner | `Adding…`, `Removing…` disabled; other rows' buttons disabled too | unchanged |
+| Added | `checkmark.circle.fill` `c.success` `Added` | `Remove` | The client's line |
+| Added, app open (`Claude`) | same | `Remove` | `Quit and reopen Claude to finish.` until Claude relaunches |
+| Uses the original app (`Claude`) | none | `Add Powermove` | `Claude is using the original Powermove app.` |
+| Set up by hand | `checkmark.circle.fill` `c.success` `Added` | none | `Powermove is set up in this app.` |
+| Settings unreadable | `exclamationmark.triangle.fill` `c.warning` | none | `Its settings can’t be edited automatically. Use Copy Setup below.` |
+| Failed | Error state | the same button again | `Couldn’t change this app’s settings. Try again.` For `Claude`: `Couldn’t update Claude’s settings. Check that Claude is installed, then try again.` |
 
-The switch is the only way to change the answer later, and it acts at once with no second
-alert, because the person is already looking at the control and its detail line.
-Turning it on when `Uses the original app` switches the entry to this app. Turning it off
-removes only the `powermove` entry. It also writes `declined`, so the alert can't return.
-A failed write from the alert shows the same Failed row; the alert isn't repeated, and
-`Don’t Add` writes nothing at all.
+The button is the only way to change the answer later, and it acts at once with no second
+alert: pressing it is the consent. That's why the eight other clients need no alert, since
+nothing happens to them without a click. For `Claude`, `Add Powermove` on `Uses the original
+app` switches the entry to this app, `Remove` removes only the `powermove` entry and writes
+`declined`, so the alert can't return. A failed write from the alert shows the Failed row;
+the alert isn't repeated, and `Don’t Add` writes nothing at all.
 
 Writes to Claude's settings stay atomic, preserve every other entry and never read or
 touch Claude's sign-in, and the one private `.before-powermove` backup and the
 registration receipt work as in v1.2.0. The migrated profile doesn't carry a consent
 answer across: the question is new in native, so the entry found at ask time decides.
 
-VoiceOver: the alert is system-owned. The switch reads `Claude Desktop, {detail}`, and the
-detail line is a polite live region.
+Each client's existing settings survive a write, including hand-written and commented
+ones; a file Powermove can't safely edit is the unreadable state, never a partial write.
+
+VoiceOver: the alert is system-owned. Rows read `{name}, {status}, {detail}`, and the detail
+line is a polite live region.
 
 ## S071 API or local model
 
 Ports `R/legacy/ui/compatible-settings.ts`. Completes settings.md *API or Local
 Model*: row order and copy there stand; v1.2.0's lower-case labels are
 Title Case as listed there. Presets fill the URL and leave the key alone.
+
+**Added by main (A01).** `Connection Type` is one pop-up with two section headers. `On This
+Mac`: `Ollama`, `LM Studio`, `llama.cpp Server`, `Jan`. `Online`: `OpenRouter`, `OpenAI`,
+`Anthropic`, `Google Gemini`, `Groq`, `DeepSeek`, `xAI`, `Mistral`. Then a separator and `Other
+Compatible Service`. Keys are saved per address, so switching presets brings back that
+address's key. A local preset with no server found adds borderless `Get {name}`; an online preset
+without a key adds borderless `Get a Key`. Both open the provider's page in the browser.
+
+`Model Name` becomes a combo box once models are discovered, listing only models that can
+use tools; typing stays allowed. While discovering, a local server's models load on selecting
+the preset and a remote's after a key is entered. A server running with too little context
+shows `c.warning` with the provider's warning line under `Status`, and connecting stays allowed.
 
 | State | `Status` row | Button |
 |---|---|---|
