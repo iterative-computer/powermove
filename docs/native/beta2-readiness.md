@@ -459,3 +459,68 @@ intent before dispatch and retain every interrupted transaction (N4/N7); require
 full identity and normal-quit evidence without an optimistic recovery fallback
 (N1/N4). Item 13 remains blocked on real application bindings and signed Mac proof.
 No new `DESIGN-TODO(opus)` or visual output was introduced.
+
+
+## 2026-11-05 — beta3 post-merge evidence and blocked finish
+
+Fetched and merged integration base
+`52150807d58e33f5227ad186d6cc9ca46b0fd6d1` without conflicts, then reran the
+checks below. A final fetch confirmed the same integration head. The native
+workspace lock adds only existing `url`/`cc` dependency edges. The isolated
+services lock also reconciles incoming kernel scene3d/captions/effect-definition
+edges and JSON feature dependencies; no existing package version changes.
+Engine lock changes are solely from the required integration merge.
+
+Synthetic Linux results: **439 Rust pass / 0 fail / 0 ignored**, plus **297 pass**
+in the isolated services replay (the same service tests, not 297 distinct new
+claims), and **43 Python pass** (23 bundle/signed-proof, 20 packaging). Strict
+Clippy for touched crates, scoped rustfmt, shell syntax, Python 3.9 syntax parsing,
+whitespace checks and staged gitleaks pass. Every Rust test command uses `--locked`.
+The process-kill migration tests retain their real stale-lock grace interval.
+
+Commands from repository root, after the prescribed activation:
+
+```sh
+cargo test --locked --manifest-path apps/native/Cargo.toml \
+  -p pm-first-launch -p pm-native-migrate -p pm-update-policy -p pm-services \
+  -p pm-distribution --no-fail-fast
+cargo test --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml -p pm-services
+cargo clippy --locked --manifest-path apps/native/Cargo.toml \
+  -p pm-first-launch -p pm-native-migrate -p pm-update-policy -p pm-services \
+  --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml \
+  -p pm-first-launch -p pm-native-migrate -p pm-update-policy -p pm-services --check
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s apps/native/scripts/tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s apps/native/packaging/tests -v
+sh -n apps/native/scripts/check-sparkle-binding.sh
+gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow
+```
+
+**Item 13 and the beta3 finish signal remain BLOCKED**, despite mergeable tested
+preparation. Concrete remaining work outside this lane's owned application paths:
+
+- Enable/retain the asynchronous Sparkle session from the real shell worker;
+  wire the existing approved update surfaces and every normal termination path to
+  live journal/export/secret/import barriers. Actual signed identity and persisted
+  installer recovery evidence are still absent. Keep release config disabled.
+- Wire `FileMedia` admission/resolution into the application's import actor and
+  engine media capability; keep security-scoped leases with admitted resources.
+  The first-launch importer is connected, but this adapter alone does not supply
+  a new application actor command. Kernel registration of main `storageSettings`
+  is also still missing; its source file remains archived, not an active setting.
+- Run `check-sparkle-binding.sh` against the pinned framework on Mac; its actual
+  Objective-C boundary is not compiled or linked by Linux default-feature tests.
+  Run the read-only signed-build proof on each delivered architecture. Test exact
+  full-enclosure callbacks, expiry/cancellation, ordinary save/export/quit refusal,
+  extraction/replacement/relaunch interruption and actual native recovery.
+- Qualify Darwin cloud residency/security-scoped access, signed two-DR Keychain
+  allow/deny/locked/missing paths, APFS/full-sync/low-space interruption, native
+  prolonged-edit/reopen/media closure, installed identities, Gatekeeper/stapling,
+  V8/helper confinement and isolated beta identity on macOS 14+.
+
+There is no reverse migration or archive Restore UI, per the owner decision. Old
+app refusal of unsupported native files remains the separate fileguard owner's
+responsibility. No signing, notarization, installation, publishing, workflow
+dispatch, tag or release action occurred. No acceptance-blocker count or Mac
+capability was changed into a pass. No new design placeholder was necessary;
+existing Opus TODOs and visual-review requirements remain unchanged.

@@ -1015,6 +1015,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-fx-defs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-geom3d"
 version = "0.1.0"
 dependencies = [
@@ -1031,9 +1039,11 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "libc",
+ "pm-captions",
  "pm-edit",
  "pm-eval",
  "pm-expr",
+ "pm-fx-defs",
  "pm-model",
  "pm-scene3d",
  "pm-text",
