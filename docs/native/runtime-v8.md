@@ -439,3 +439,32 @@ resizable/shared/Wasm growth, transfer/clone, native pixel buffers, allocator
 free/retirement, concurrent allocation and process-level fatal limits must all
 be tested before claiming a hard cap. This patch does not replace that gate
 with a post-allocation check or a Linux-only allocator implementation.
+
+## 2026-11-04 — runtime2 confinement probes and remaining gates
+
+The helper integration probe now runs on Linux **and macOS**. It proves access
+before confinement, then requires EPERM/EACCES for synthetic file read/write,
+loopback networking and spawn, followed by actual TurboFan optimization/value
+checks under the production sandbox policy. Existing helper IPC/restart and
+fatal heap-OOM parent/sibling-survival tests remain enabled. The tests canonicalize
+their fresh temp root, including macOS system temp symlinks; there is no private
+profile or hard-coded Linux fixture path. Linux passes all eight helper tests.
+
+[`runtime-v8/VERIFICATION.md`](../../apps/native/crates/runtime-v8/VERIFICATION.md)
+contains exact locked build/sign/run steps and the unclosed assertion ledger.
+The owned `scripts/verify-macos.sh` validates the S1 artifact/binding hashes,
+signs private copies of the production helper and integration test executable,
+verifies hardened runtime/exact allow-jit entitlements, then runs the probes.
+It reports BLOCKED (exit 2) off macOS/ARM64, never a skipped pass. Python uses
+3.9-compatible syntax. This script has shell/Python syntax checks on Linux;
+**no macOS codesign, seatbelt or shipping-bundle result is claimed**.
+
+Remaining item-5 work is explicitly blocked, not complete: sandbox-aware hard
+external allocation and complete native attribution; real reconciler/cluster
+budgets; full synchronous Canvas/text/paint/encoding; real media/resource and
+remote-DOM/application bindings. The production recorder dispatcher and engine/
+application adapters that must consume these primitives are outside this lane's
+owned paths. Preserve every fail/unsupported case and the extension denominator.
+No visual/UX changes, DESIGN-TODO placeholders or consumer deletions were made.
+Selecting rules: N1/N3 evidence before confinement/performance claims; N4/N6
+preserve synchronous extension intent; N7 inspectable ids; N8 owner-only JS.
