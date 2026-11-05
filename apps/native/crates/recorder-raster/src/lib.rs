@@ -59,30 +59,9 @@ impl Rasterizer {
             return self.surface.image_data();
         }
         let mut out = ImageData::new(sw.unsigned_abs(), sh.unsigned_abs())?;
-        if self.width == 0 || self.height == 0 {
-            return Ok(out);
-        }
         let x0 = i64::from(sx) + i64::from(sw.min(0));
         let y0 = i64::from(sy) + i64::from(sh.min(0));
-        let width = out.width() as usize;
-        let start = x0.max(0);
-        let end = (x0 + i64::from(out.width())).min(i64::from(self.width));
-        if end <= start || y0 >= i64::from(self.height) || y0 + i64::from(out.height()) <= 0 {
-            return Ok(out);
-        }
-        // The existing public backend exposes full output only. This copy can
-        // become a direct tile read once recorder exports read_into (see docs).
-        let src = self.surface.image_data()?;
-        for row in 0..out.height() {
-            let y = y0 + i64::from(row);
-            if y < 0 || y >= i64::from(self.height) {
-                continue;
-            }
-            let si = (y as usize * self.width as usize + start as usize) * 4;
-            let di = (row as usize * width + (start - x0) as usize) * 4;
-            let n = (end - start) as usize * 4;
-            out.bytes_mut()[di..di + n].copy_from_slice(&src.bytes()[si..si + n]);
-        }
+        self.surface.read_into(x0, y0, &mut out);
         Ok(out)
     }
     pub fn image_data(&self) -> Result<ImageData> {

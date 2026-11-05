@@ -281,7 +281,7 @@ fn unwrap_value(
         let b = external.get(index).context("invalid wrapper Blob index")?;
         ensure!(b.size == size as u64, "wrapper Blob size mismatch");
         let path = snapshot
-            .blob_path(database, b.number)?
+            .wrapper_blob(database, b.number)?
             .context("missing wrapper Blob in snapshot")?;
         let mut content = Vec::new();
         open_regular(&path)?

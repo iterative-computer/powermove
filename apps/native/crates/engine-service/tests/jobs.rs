@@ -129,3 +129,48 @@ fn interactive_activity_defers_export_and_cancel_wakes_the_gate() {
     assert_eq!(child.wait().unwrap().state, JobState::Cancelled);
     assert!(!dir.path().join("cancel-deferred").exists());
 }
+
+#[test]
+fn child_export_services_font_requests_for_visible_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("text");
+    let mut request = request(destination.clone(), 1);
+    let mut doc: serde_json::Value = serde_json::from_str(&request.document).unwrap();
+    let comp = doc["compId"].as_str().unwrap().to_owned();
+    doc["comps"][&comp]["layers"] = serde_json::json!([{
+        "id":"synthetic-title","type":"text","name":"Synthetic title","from":0,"dur":1,"on":true,
+        "d":{"text":"Synthetic font request","font":"Helvetica","size":32,"color":"#FFFFFF"},
+        "p":{"position.x":{"v":160,"kf":[],"expr":null},"position.y":{"v":90,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},"fx":[],"masks":[]
+    }]);
+    doc["comps"][&comp]["bg"] = serde_json::json!("#000000");
+    doc["comps"][&comp]["backgroundFill"] =
+        serde_json::json!({"type":"solid","stops":[{"id":"black","color":"#000000","position":0}]});
+    request.document = doc.to_string();
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    let mut frames = std::fs::read_dir(&destination)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect::<Vec<_>>();
+    frames.sort();
+    let decoded = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&frames[0])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap();
+    assert!(decoded.status.success());
+    let white = decoded
+        .stdout
+        .chunks_exact(3)
+        .filter(|p| p.iter().all(|c| *c > 200))
+        .count();
+    assert!(
+        white > 20,
+        "text export silently lost its glyphs: {white} bright pixels"
+    );
+    assert_eq!(std::fs::read_dir(destination).unwrap().count(), 30);
+}

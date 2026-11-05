@@ -249,6 +249,9 @@ pub fn run_child() -> Result<()> {
     // broker, never on GPUI or a Node event loop.
     let mut font_service = pm_node::fonts::FontService::new().map_err(anyhow::Error::msg)?;
     let broker = pm_node::fonts::render::FontBroker::new();
+    // This windowless host pumps the broker below. A registered wake admits
+    // requests; without it layout fails immediately and can lose text glyphs.
+    broker.set_wake(Arc::new(|| {}));
     broker.set_generation(font_service.generation());
     let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();

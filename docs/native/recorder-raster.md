@@ -269,3 +269,22 @@ presentation. Exercise the extension corpus, including the shipped timeline's
 blurred shadows, on supported Macs. Measure JS recording ≤1 ms p95 per changed
 layer and the complete EXT-RASTER-1 frame ≤4 ms p95. Linux has no AppKit, GPUI,
 WebKit, Metal or display proof and cannot close these gates.
+
+## 2026-11-04 — runtime2 direct regional conversion
+
+The recorder now exposes `CpuRasterizer::read_into`, and signed regional reads
+call it directly. This closes item 2 in the older "Needed changes outside this
+lane" list above. An in-bounds one-pixel read no longer requires a full-frame
+RGBA allocation or conversion. Existing signed-extent, transparent-border,
+float-alpha and independent numeric/golden assertions remain unchanged.
+The native workspace command now passes with its existing lockfile: **130 tests**
+across recorder/raster, including two new readback contract tests. Strict package
+Clippy passes. Decisions: N1/N2 bound native read cost; N3/N6 preserve pixel
+semantics. The earlier whole-path/macOS performance gates remain open.
+
+The existing release `ops` benchmark on this shared Linux runner reports median /
+p95 **71 / 177 ns** for one-pixel reads from dense 1080p. The same run's dense
+full-frame read remains **21.445 / 44.732 ms**, and copy-base full output is
+**0.897 / 1.106 ms**. These are native-only diagnostics under build contention,
+not quiet-window/paired Electron timings or a complete EXT-RASTER-1 pass; the
+dense full-frame cost still exceeds the 4-ms whole-path target.

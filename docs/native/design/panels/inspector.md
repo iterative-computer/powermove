@@ -49,6 +49,8 @@ Effects are **not** in this panel: they live in
 | Section heading | `t.title` `t.semibold_weight` `c.text`; padding top `m.inset`, bottom `m.gap`; inset `m.inset`. Disclosure chevron (`chevron.down`, rotates to `chevron.right` collapsed) at the **trailing** inset, `m.symbol_inline` `c.muted`, shown on heading hover, on keyboard focus, and always while collapsed. Click anywhere on the heading toggles. Collapsed state persists per project per section id. Contributed sections use the same heading. Optional trailing heading button (Masks `+` `Add Mask`, Text animators `+` `Add Text Animator`) sits before the chevron. |
 | Row | README/language §9 inspector row: keyframe diamond column (`m.keyframe` glyph in an `m.hit` square starting at `m.inset − (m.hit − m.keyframe) ÷ 2`), label (flexible, `t.label` `c.secondary`, truncating, tooltip), value column `m.value_column` wide ending at `m.inset` from the panel edge. One value column for the whole panel. Row height `m.row`; fields `m.field`, centred. |
 | Number well | `c.field`, `m.control_radius`, padding `m.gap` each side, value `t.body` tabular `c.text` **left-aligned**, unit `c.muted` after a space, trailing in the well. Two axes: two equal wells, `m.gap − 2` (4 pt) between. |
+| Axis diamond (`Anchor Point`, `Position`, `Scale`, `Orientation`, `Rotation`) | Custom `diamond` at `m.keyframe − 2`, in the well's trailing unit slot. It replaces the unit on well hover, on keyboard focus and whenever that axis is animated; otherwise the unit shows. The value never moves. States as the row diamond; only animated axes take `c.accent`. Hit `m.hit` square centred on the glyph; the rest of the well scrubs. Tooltip `Add {label} {axis} Keyframe` / `Remove {label} {axis} Keyframe`. The row's own diamond keys every axis together. |
+| Three axes (X, Y, Z) | Three stacked rows, each with a full-width well in the value column. First row's label is `{name}`; the next two are `Y` and `Z`, `t.label` `c.muted`, with no row diamond. |
 | Link toggle (Scale) | `link` / custom `link.slash`, `m.symbol_inline`, `c.secondary` / `c.muted`. The value column never moves: the glyph is centred in the `m.inset` margin to the right of the column (centre `m.inset ÷ 2` from the panel edge) and its `m.hit` square overlaps the column's last pixels; the second Scale well is shortened by `m.hit − m.inset` so the two never collide. Tooltip `Lock Aspect Ratio` / `Unlock Aspect Ratio`. |
 | Choice | GPUI pop-up well (`c.field`, value `t.body` `c.text`, `chevron.up.chevron.down` at `m.symbol_inline` `c.muted` trailing) opening a real `NSMenu` positioned so the current item sits over the well (system pop-up behaviour). |
 | Font | Choice well whose menu is the **field menu** (glass child panel, `m.field_menu_width` × ≤ `m.field_menu_height`): search field on top (`Search fonts`), families in their own face at `t.body`, current family checked; Refresh at the bottom (`Refresh Fonts`). Weight is a separate Choice row. |
@@ -80,8 +82,8 @@ Property names (exact, Title Case): Content — `Text`, `Font`, `Weight`,
 `Stroke`, `Stroke Color`, `Points`, `Fit`, `Source`, `Speed`, `Trim Start`,
 `Gain`, `Fade In`, `Fade Out`, `Mute Audio`. Transform — `Anchor Point`,
 `Position`, `Scale`, `Rotation`, `Skew`, `Opacity` (3-D layers add
-`Orientation`, `X Rotation`, `Y Rotation`, `Perspective` — hidden while 3D is
-unshipped). Layer — `Blend Mode`, `Motion Blur`, `Track Matte`, `Matte Mode`,
+`Orientation`, `X Rotation`, `Y Rotation`, `Perspective`; everything else about 3D
+layers is the `3D` section in [3d-studio.md §8](../surfaces/3d-studio.md#8-3d-section-in-properties)). Layer — `Blend Mode`, `Motion Blur`, `Track Matte`, `Matte Mode`,
 `Parent`, `Visible`, `Solo`, `Label Color`. Time — `Time Remap`, `Source
 Time`, `Reverse`, `Freeze Frame`. Masks — `Mask Shape`, `Mode`, `Enabled`.
 
@@ -122,8 +124,9 @@ more; two decimals for unitless).
 | ↑/↓ while editing (⇧ ×10) | step |
 | Scroll wheel on a rested well | README §5.2 |
 | Click diamond | static → set animated and add key at playhead; animated → toggle key at playhead only (B365) |
+| Click axis diamond | as the row diamond, for that axis alone; reveals that axis in the timeline. Undo `Add Keyframe for {label} {axis}` |
 | ⌥-click diamond | remove animation (all keys) — v1.2.0 stopwatch semantics; keeps the current value |
-| Right-click row | `NSMenu`: `Add Keyframe at Playhead`, `Remove Animation`, separator, `Add Expression…` / `Edit Expression…`, `Remove Expression`, separator, `Reset`, `Show in Graph Editor`, and for Scale `Link Scale Axes` ✓ |
+| Right-click row | `NSMenu`: `Add Keyframe at Playhead`, `Remove Animation`, separator, `Add Expression…` / `Edit Expression…`, `Remove Expression`, separator, `Reset`, `Show in Graph Editor`, for Scale `Link Scale Axes` ✓, and for Position `Separate Dimensions` ✓ |
 | Click link | toggle aspect lock (shared with the timeline, B143) |
 | Click heading | collapse/expand |
 | Click swatch | colour popover |

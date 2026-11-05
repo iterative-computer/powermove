@@ -131,7 +131,7 @@ Save and Cancel go away).
 `Delete` and `Delete Group` apply immediately, then the status line reads
 `Deleted “{name}”` with a borderless `Undo` for as long as the panel stays open.
 The removed items are archived in the library file (N4). There's no restore UI after
-that; see [README §6](README.md#6-owner-questions-raised-by-these-specs).
+that, by owner decision (2026-11-04): once the status line is gone, `Undo` is too.
 
 **Move and reorder**: drag a tile within a grid (insertion line) or onto a group tab
 (Drop target).
