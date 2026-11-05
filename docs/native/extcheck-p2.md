@@ -279,3 +279,69 @@ sources, reports, traces, screenshots and selectors stay under disposable paths;
 the installed profile is read-only. The final gate still requires completed
 repeatable captures for every source, complete interaction coverage, and fixes
 or explicit `can't run` evidence for every remaining case.
+
+## 2026-11-04 — cloud continuation, shared fixture and portable checks
+
+**P2 remains OPEN. No new accepted cross-host match.** The cloud lane starts
+from `9253bc087` (`feat/na-extcheck2`) and merges `ed5482622`
+(`feat/native-engine`); the final refresh also merges `ce36cb6fc` and `711f44ba0`. Linux cannot
+establish Electron/macOS/WebKit behavior.
+The owner installations and their reviewed scenario/project inputs are absent
+from this container. No private names, source bytes or identifiers are tracked.
+
+The native worker transport now builds and its seek/frame/play/pause/loop
+regressions execute. A rejected seek with an invalid running-clock argument
+previously changed `time` before returning an error; command admission now
+publishes only a fully validated candidate. This preserves the prior playback
+state on refusal (**N3**, correctness of authored state). No media-backend
+capability is invented; playback with unattached media still fails explicitly.
+
+Both capture preparations now use **identical source bytes**, seed and a SHA-256
+fixture identity. `prepare-reference.mjs` inserts the fixture before the frozen
+renderer module and adapts only its disposable generated startup helper. The
+native CLI evaluates it before the compat bundle/extension. It covers Date,
+performance, Math.random, UUIDs, integer-array entropy, timers and explicit
+animation frames. V8's frozen performance object is handled without modifying
+production runtime snapshots. Native remote-DOM scheduling retains the installed
+fixture; timer/frame callbacks still enter the realm task boundary. The
+reference driver rejects a stale/missing fixture, exposes boot-clock state as a
+behavioral row, and supports explicit `advance` steps and actual host-paint
+checkpoints. Neither boot state nor behavioral values/pixels are reset, masked
+or normalized. **N3/N6:** control the test input; preserve observed differences.
+Node and Bun's `Function.toString()` differ: hashing the original fixture source,
+rather than function serialization, prevents silently installing different code.
+
+The runner exposes optional DOM-batch inspection for the headless probe; queue
+admission is still not WebKit paint. The new `probe.py` makes three independent
+native recordings per executable public case and compares their complete JSON,
+including activation, document/transport/clock, reported errors, disposal and
+DOM batches. It does not declare a full trace/PNG capture or a P2 match.
+
+The comparison runner requires at least **three** recordings per role and
+collects all three before classifying instability. Repeat diagnostics now also
+inspect interactions and use the gate's exact visible premultiplied-RGBA rule.
+Population accounting preserves **44 + 10 + 4 = 58** even when input discovery
+or catalog reads fail; it records expected, observed and unavailable counts.
+Additional discovered cases remain visible and population drift prevents gate
+acceptance. **N4/N6:** missing inputs and adapters never shrink compatibility
+scope. Full captures on Linux return `macos-capture-unavailable` before touching
+a GUI lease. macOS-only dependencies/probes are gated; portable host contracts
+run on Linux. **N7/N8:** inspect workers headlessly and retain the main-thread
+rendering boundary. No visual design was introduced; no new DESIGN-TODO(opus).
+
+The native script/behavior-trace/PNG endpoint, recorder-to-DOM presentation,
+Store installer provenance/resource/view/callback dispatch, and human-reviewed
+per-extension projects/scenarios **remain unfinished**. Public archive hashes
+are not the signed-release envelope required by the native installer, and no
+preserved installation provenance is present here. No Store code is run with
+the trusted Compat facade (**N4/N6/N8**). Completing those adapters requires
+further implementation; a Mac rerun alone cannot close them. Exact continuation
+commands and final verification counts are in
+[handoff/extcheck-p2.md](handoff/extcheck-p2.md).
+
+
+The final integration refresh records the owner's move of overall parity to
+latest `main` (`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`). This report and its
+frozen driver remain **v1.2.0 legacy-input evidence**, still required by that
+decision and N4. They do not cover the newly required main deltas or establish
+current-target parity. See the handoff for this additional open boundary.

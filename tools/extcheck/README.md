@@ -23,7 +23,7 @@ exact byte count and pauses below 5,000,000,000 bytes. The recorder must be enab
 ```sh
 mkdir -p /tmp/pm-extcheck
 git worktree add --detach /tmp/pm-extcheck/reference v1.2.0
-bun tools/trace-recorder/apply.ts /tmp/pm-extcheck/reference
+node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference
 (cd /tmp/pm-extcheck/reference && bun install --frozen-lockfile)
 (cd /tmp/pm-extcheck/reference && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
 bun install --frozen-lockfile --cwd apps/native/js/compat
@@ -51,6 +51,10 @@ The native runner is a workspace package, `pm-compat-runner`. Its tests
 execute the production compat bundle inside `pm-runtime-v8`, including actual
 remote-DOM event closures and native recorder pixels. Bun is a build/test tool;
 the executable does not load Node, Electron or a JS test double.
+On Linux, the wrapper uses upstream V8 prebuilt bytes and the caller's target
+directory (default `work/target`); macOS still verifies the S1 sandbox archive
+and bindings. WebKit examples now require the `macos-probes` feature; the
+wrapper adds it for `build pm-compat-host remote-dom-smoke`.
 
 The standalone WebKit component probe uses the production page applier and a
 bounded routing worker. It opens and closes its own synthetic window, and must
@@ -125,6 +129,9 @@ sorted snapshot; keep the snapshot fixed when authoring scripts. A script is:
 The reference driver additionally supports `panel`/`command` with `id`, `click`
 with `selector`, `fill` with `selector`/`value`, `key` with a Playwright key,
 and `assert` with `selector`, `property` (`value` or text) and `equals`.
+`advance` with `ms` progresses fixture-owned timers/animation frames explicitly
+(0 through 60,000 ms per step). Repeat diagnostics accept the same `--scripts`,
+`--owner-root` and `--corpus-root` as paired runs.
 Scripts that contain private selectors/strings belong outside Git. `complete`
 means a human has reviewed that extension's coverage; the default smoke script
 is incomplete and cannot pass P2. Full corpus proof also needs extension-specific
@@ -160,7 +167,7 @@ and stop their owned capture if it appears during a run.
 Electron uses a disposable profile, clears `ELECTRON_RUN_AS_NODE`, checks recorder
 instrumentation, and closes on every exit path. The installed app is untouched.
 
-Before accepting a match the harness requires two equal captures per role,
+Before accepting a match the harness requires at least three equal captures per role,
 valid balanced/completed traces, exact ordered/type-preserving behavioral rows,
 complete interaction results and successful reference assertions. Headers retain
 host provenance but are not behavioral rows. PNGs are decoded and compared in
@@ -195,3 +202,56 @@ Pillow is needed for the visual comparator (`python3 -m pip install Pillow` in
 an appropriate environment). Only copy reviewed aggregate counts into
 `docs/native/extcheck-p2.md`; delete owned temporary inputs and artifacts when
 finished. Never remove another lane's target files, profiles or GUI session.
+
+## 2026-11-04 continuation: clock identity and Linux evidence
+
+Prepare and **rebuild** the disposable reference with `prepare-reference.mjs`.
+It keeps the frozen CSP: the shared fixture is an external local classic script
+that precedes trusted renderer and Store runtime/view modules. The script asset
+is built from the same exact source bytes as native `clock.js`; serializing a
+function with Node/Bun is not equivalent. The reference checks the fixture hash
+in its live realms and never treats a stale build as a capture. The startup
+helper/driver progresses virtual work while boot/lifecycle operations are
+pending. Boot-clock state remains observable; it is not reset to make repeats
+agree. Actual Electron startup, Store CSP and paint behavior still require a Mac.
+
+The optional native runner `clock_fixture` request path is evaluated before any
+bundle code. `inspect_dom: true` includes queued DOM batches in the reply. The
+confined `StoreCompatRunner::with_prelude` has the same pre-code ordering; its
+synthetic helper regression passes. Public Store admission is still unavailable.
+
+Linux can collect native **component** evidence without acquiring a GUI lease:
+
+```sh
+bash tools/extcheck/build.sh test
+bash tools/extcheck/build.sh test pm-compat-host
+bash tools/extcheck/build.sh test pm-store-host
+bash tools/extcheck/build.sh build
+python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
+node tools/extcheck/test_clock_fixture.mjs
+node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs
+PM_EXTCHECK_RUNNER="$CARGO_TARGET_DIR/debug/pm-compat-runner" node --test tools/extcheck/test_clock_v8.mjs
+python3 tools/extcheck/probe.py --reference-root /tmp/pm-extcheck/reference \
+  --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" \
+  --output /tmp/pm-extcheck/native-component-probes.json
+```
+
+`probe.py` records and inspects three independent native executions per available
+public case, including complete JSON/DOM batches, then removes its disposable
+inputs/recordings. Its private report contains only ordinal cases and fixed
+codes/digests. It labels the result `native-component-only`, never a trace/PNG
+oracle or extension match. Exit 2 retains cases that cannot compile or execute;
+a repeatable refusal cannot become a successful probe.
+
+`run.py` on Linux instead records `macos-capture-unavailable` for both full
+capture roles. Missing owner inputs/catalog failure never remove the expected
+44 owner, 10 local and 4 Store cases. Reports distinguish expected/observed/
+unavailable; extra observed cases and population drift stay visible. A smaller
+or absent population cannot close the gate. See
+[the handoff](../../docs/native/handoff/extcheck-p2.md) for exact Mac commands,
+observed test instability and unfinished implementation work.
+
+The owner decision merged at `711f44ba0` moves overall parity to latest `main`.
+This pinned harness remains the required **v1.2.0 legacy-input** check; it does
+not implement or certify that additional current-main oracle. Keep its compiler
+and reference revision paired and audit a new pairing separately.
