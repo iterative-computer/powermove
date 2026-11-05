@@ -12,7 +12,7 @@
   ],
   "recorder": {
     "file": "apps/native/crates/agents/scripts/capture-main-claude-launch.cjs",
-    "sha256": "991c7ed685c605ed115a222f74a597f111970f64555aee1aec2d38025b696f70"
+    "sha256": "ebf607297f743120dcb6433c3f0d100d2210dbaeffa472440f32a8fe663024a4"
   },
   "cases": [
     {
@@ -1166,6 +1166,223 @@
             {
               "type": "text",
               "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "editor",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object"
+        },
+        "prompt": "Synthetic standalone check",
+        "imagePaths": [],
+        "model": null,
+        "reasoningEffort": null,
+        "sessionId": null,
+        "access": "editor",
+        "approval": "auto",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "",
+        "nativeTools": null,
+        "externalMcpServers": {
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": null,
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--json-schema",
+        "{\"type\":\"object\"}",
+        "--no-session-persistence",
+        "--permission-mode",
+        "default",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":false,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Skill,Agent,Task",
+        "--disallowedTools",
+        "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema."
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Synthetic standalone check"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "project",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object"
+        },
+        "prompt": "Synthetic standalone check",
+        "imagePaths": [],
+        "model": null,
+        "reasoningEffort": null,
+        "sessionId": null,
+        "access": "project",
+        "approval": "auto",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "",
+        "nativeTools": null,
+        "externalMcpServers": {
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": null,
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--json-schema",
+        "{\"type\":\"object\"}",
+        "--permission-mode",
+        "auto",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[\"*\"],\"allowLocalBinding\":true}}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Bash,WebSearch,WebFetch,Skill,Agent,Task",
+        "--system-prompt",
+        "Synthetic original instructions\n\nSHELL NETWORK\nShell commands have full internet access.\n\nReturn the final answer only through the requested JSON schema."
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Synthetic standalone check"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "computer",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object"
+        },
+        "prompt": "Synthetic standalone check",
+        "imagePaths": [],
+        "model": null,
+        "reasoningEffort": null,
+        "sessionId": null,
+        "access": "computer",
+        "approval": "auto",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "",
+        "nativeTools": null,
+        "externalMcpServers": {
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": null,
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--json-schema",
+        "{\"type\":\"object\"}",
+        "--dangerously-skip-permissions",
+        "--tools",
+        "default",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema."
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Synthetic standalone check"
             }
           ]
         }

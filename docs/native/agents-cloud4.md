@@ -128,3 +128,37 @@ cargo run --locked -p pm-agents --example live-provider-check
 No credentials are configured here and neither probe was run. Native UI,
 GPUI/WebKit, AX/IME, media playback, foreground/background timing and Opus visual
 review remain unverified on this Linux container.
+
+## Final portable verification — 2026-11-05
+
+Implementation commits: `4b29920e5` (Claude launch), `0511f3daf` (process/panel/
+actor path), `7f57fd07a` (native CLI registration). Merged base:
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66`; merge reported already up to date.
+The launch oracle was then expanded from 12 to **15** current-main executions,
+adding descriptor/model/resume-free standalone runs used by the live probe.
+All previous cases remain. This supersedes the earlier 12-case count.
+
+After standard activation and `cd apps/native`:
+
+```sh
+cargo test --locked -p pm-agents -p pm-mcp -p pm-panel-agentpanel
+# 401 passed: 132 agents, 137 MCP, 132 panel; 0 failed, 0 ignored.
+cargo clippy --locked -p pm-agents -p pm-mcp -p pm-panel-agentpanel --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-agents -p pm-mcp -p pm-panel-agentpanel --check
+PM_REPLAY_REQUIRE_IDENTICAL=1 cargo test --locked -p pm-agents --test replay replay_all_surfaces_and_check_every_difference
+# Separate strict result: 1 failed assertion, 9 filtered; not counted as a pass.
+```
+
+From the repository root:
+`node apps/native/crates/agents/scripts/capture-main-claude-launch.cjs --check`
+reproduces all 15 source cases. Rust 1.96.1, strict Clippy and formatting pass.
+No dependency was added or resolved differently, so neither workspace lockfile
+requires an update. Every Cargo test/build used the existing `--locked` graph.
+
+The original strict report has **359 exact leaf differences**: 28 retained native
+lifecycle additions and 331 pinned main/Studio catalog deltas relative to the
+legacy recording. `mcp-tool-errors` has no difference. The regression suite
+continues to require those exact deltas and the separate provider-callback
+assertion remains strict. None is waived or erased. Full P4/A01–A10 completion
+is still blocked on the concrete outside-owned bindings/metadata/view operations
+above; the final branch signal must say BLOCKED, not imply application acceptance.

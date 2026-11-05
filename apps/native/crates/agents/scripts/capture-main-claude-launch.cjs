@@ -36,6 +36,15 @@ for (const access of ['editor','project','computer']) for (const approval of ['a
   cases.push({access,approval,options:{...options,effort:'high',toolNames:tools,inspectionToolNames:inspection,shellNetworkInstructions:'Shell commands have full internet access.'},
     argv:adapter.buildClaudeArgv(options),message:JSON.parse(adapter.claudeUserMessage(options.prompt,options.imagePaths))});
 }
+// The standalone live probe has no native tools, selected model or resume id.
+for (const access of ['editor','project','computer']) {
+  const options = {schema:{type:'object'},prompt:'Synthetic standalone check',imagePaths:[],model:null,
+    reasoningEffort:null,sessionId:null,access,approval:'auto',instructions:'Synthetic original instructions',
+    additionalInstructions:'',nativeTools:null,externalMcpServers:{powermove:{command:'/must-not-be-used'}},askOutsideSandbox:false};
+  cases.push({access,approval:'auto',options:{...options,effort:null,toolNames:tools,inspectionToolNames:inspection,
+    shellNetworkInstructions:'Shell commands have full internet access.'},argv:adapter.buildClaudeArgv(options),
+    message:JSON.parse(adapter.claudeUserMessage(options.prompt,options.imagePaths))});
+}
 const recorderFile = 'apps/native/crates/agents/scripts/capture-main-claude-launch.cjs';
 const recorder = {file:recorderFile,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(root,recorderFile))).digest('hex')};
 const result = {reference,sources,recorder,cases};

@@ -9,7 +9,7 @@ fn all_native_claude_permission_profiles_match_executed_main_arguments() {
         "c7f46a05641b23944d3692c9d80f9677c7e1ef1d"
     );
     let cases = fixture["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 15);
     for case in cases {
         let options: Options = serde_json::from_value(case["options"].clone()).unwrap();
         let access: Access = serde_json::from_value(case["access"].clone()).unwrap();
