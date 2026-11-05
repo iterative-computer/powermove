@@ -407,4 +407,10 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn canvas_boolean_direction_and_invalid_winding_preserve_authored_geometry() {
+        let runner = runner();
+        let value=runner.json("(()=>{const draw=ccw=>{const x=__extcheck.realm.createCanvas(8,8).getContext('2d');x.arc(4,4,3,0,Math.PI/2,ccw);x.lineTo(4,4);x.fill();return JSON.stringify(x.getImageData(0,0,8,8).data)};const x=__extcheck.realm.createCanvas(1,1).getContext('2d');x.rect(0,0,1,1);let refused=false;try{x.fill('invalid-rule')}catch{refused=true}return [draw(1)===draw(true),draw(1)!==draw(false),refused,x.getImageData(0,0,1,1).data]})()").unwrap();
+        assert_eq!(value, json!([true, true, true, [0, 0, 0, 0]]));
+    }
 }

@@ -38,6 +38,23 @@ fn dimension(value: Option<&Value>) -> Result<u32> {
         .and_then(|n| n.try_into().ok())
         .ok_or(Error::Invalid("canvas dimension"))
 }
+fn boolean(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|n| n != 0.),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
+    }
+}
+fn fill_rule(value: Option<&Value>) -> Result<FillRule> {
+    match value.and_then(Value::as_str) {
+        None if value.is_none() => Ok(FillRule::NonZero),
+        Some("nonzero") => Ok(FillRule::NonZero),
+        Some("evenodd") => Ok(FillRule::EvenOdd),
+        _ => Err(Error::Invalid("canvas winding rule")),
+    }
+}
 fn numbers(value: &Value) -> Result<Vec<f64>> {
     value
         .as_array()
@@ -360,7 +377,7 @@ impl NativeHost {
                         num(values, 2)?,
                         num(values, 3)?,
                         num(values, 4)?,
-                        values.get(5).and_then(Value::as_bool).unwrap_or(false),
+                        boolean(values.get(5)),
                     )
                     .map_err(host_error)?;
                 Value::Null
@@ -383,7 +400,7 @@ impl NativeHost {
                         num(values, 4)?,
                         num(values, 5)?,
                         num(values, 6)?,
-                        values.get(7).and_then(Value::as_bool).unwrap_or(false),
+                        boolean(values.get(7)),
                     )
                     .map_err(host_error)?;
                 Value::Null
@@ -411,14 +428,7 @@ impl NativeHost {
             ("recorder.read", "isPointInPath" | "isPointInStroke") => {
                 let point = Point::new(num(values, 0)?, num(values, 1)?);
                 json!(if name == "isPointInPath" {
-                    canvas.is_point_in_path(
-                        point,
-                        if values.get(2).and_then(Value::as_str) == Some("evenodd") {
-                            FillRule::EvenOdd
-                        } else {
-                            FillRule::NonZero
-                        },
-                    )
+                    canvas.is_point_in_path(point, fill_rule(values.get(2))?)
                 } else {
                     canvas.is_point_in_stroke(point)
                 })
@@ -485,11 +495,7 @@ impl NativeHost {
             ("recorder.command", "fill" | "stroke" | "clip")
                 if values.len() <= 1 && values.first().is_none_or(Value::is_string) =>
             {
-                let rule = if values.first().and_then(Value::as_str) == Some("evenodd") {
-                    FillRule::EvenOdd
-                } else {
-                    FillRule::NonZero
-                };
+                let rule = fill_rule(values.first())?;
                 match name {
                     "fill" => canvas.fill(rule),
                     "stroke" => canvas.stroke(),
