@@ -16,7 +16,7 @@ cd ..
 python3 tools/corpus/run.py
 ```
 
-Requires macOS/APFS for database metadata, `rg`, FFmpeg and at least **6 GiB free throughout each batch**.
+Requires macOS/APFS for database metadata, `rg`, FFmpeg and at least **8 GiB of APFS container free space throughout each batch**.
 Run Cargo from `apps/native` to select the pinned toolchain. All builds/tests must
 also hold `/tmp/pm-build.lock`. Do not delete another lane's build artifacts.
 
@@ -51,6 +51,9 @@ A changed source, copy timeout, missing original or oversized project is recorde
 explicitly. Capture limitations block dependent stages; they are not proof of an
 engine defect. Exact captured IndexedDB identities are preferred over stale host paths; host
 records remain available when the snapshot has no matching record.
+Source-link copies must match the full checksum recorded at import. A mismatch
+blocks that media key and its captured fallback paths, including paths shared by
+other assets.
 macOS dataless placeholders are refused before payload reads, so the runner does
 not ask a system daemon to hydrate originals outside the batch's disk controls.
 Their dependency status remains unknown until a local source is available.
@@ -82,7 +85,7 @@ For every eligible project the worker attempts:
    enabled, followed by complete FFmpeg decoding with errors fatal.
 
 Every completed batch is deleted immediately after recording results, including errors.
-Admission stops below the 6 GiB floor; active headless children are checked each
+Admission stops below the 8 GiB floor; active headless children are checked each
 second and stopped if available space drops below it. A refused payload reserve
 blocks that capture while space remains above the floor; it is not a source-copy
 defect. Whole-worker timeouts kill the process group

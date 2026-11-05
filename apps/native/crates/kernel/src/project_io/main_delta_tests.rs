@@ -27,6 +27,71 @@ impl Drop for Scratch {
 fn fixture() -> Value {
     parse(include_str!("fixtures/main-document.json")).unwrap()
 }
+
+#[test]
+fn backup_budgets_archive_every_old_generation_without_replacing_archived_bytes() {
+    let dir = Scratch::new();
+    let policy = BackupPolicy {
+        directory: dir.path("backups"),
+        max_versions: 1,
+        max_bytes: 1,
+        min_versions: 1,
+    };
+    std::fs::create_dir(&policy.directory).unwrap();
+    let old = policy.directory.join("2026-10-31T23-38-05-123Z.pmv");
+    let newest = policy.directory.join("2026-11-01T23-38-05-123Z.pmv");
+    std::fs::write(&old, b"older authored generation").unwrap();
+    std::fs::write(&newest, b"newer authored generation").unwrap();
+    let archive = policy.directory.join("archived");
+    std::fs::create_dir(&archive).unwrap();
+    let collision = archive.join(old.file_name().unwrap());
+    std::fs::write(&collision, b"previously archived generation").unwrap();
+    durable::retain(&policy).unwrap();
+    assert_eq!(
+        durable::list_backups(&policy).unwrap(),
+        vec![newest.clone()]
+    );
+    assert_eq!(std::fs::read(newest).unwrap(), b"newer authored generation");
+    assert_eq!(
+        std::fs::read(collision).unwrap(),
+        b"previously archived generation"
+    );
+    let mut archived: Vec<_> = std::fs::read_dir(&archive)
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    archived.sort();
+    assert_eq!(
+        archived,
+        vec![
+            b"older authored generation".to_vec(),
+            b"previously archived generation".to_vec()
+        ]
+    );
+    durable::retain(&policy).unwrap();
+    assert_eq!(std::fs::read_dir(archive).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_retention_refuses_linked_archive_and_keeps_the_original_generation() {
+    let dir = Scratch::new();
+    let policy = BackupPolicy {
+        directory: dir.path("backups"),
+        max_versions: 0,
+        max_bytes: 0,
+        min_versions: 0,
+    };
+    std::fs::create_dir(&policy.directory).unwrap();
+    let old = policy.directory.join("2026-10-31T23-38-05-123Z.pmv");
+    std::fs::write(&old, b"authored generation").unwrap();
+    let other = dir.path("other");
+    std::fs::create_dir(&other).unwrap();
+    std::os::unix::fs::symlink(&other, policy.directory.join("archived")).unwrap();
+    assert!(durable::retain(&policy).is_err());
+    assert_eq!(std::fs::read(old).unwrap(), b"authored generation");
+    assert_eq!(std::fs::read_dir(other).unwrap().count(), 0);
+}
 fn save(store: &mut DocumentStore, path: &Path, options: SaveOptions) -> Value {
     let receipt = store
         .prepare_save(

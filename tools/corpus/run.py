@@ -14,13 +14,14 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import re
 import subprocess
 import sys
 import time
 from uuid import uuid4
 
 ROOT = Path('/tmp/pm-corpus')
-FLOOR = 6 * 1024**3
+FLOOR = 8 * 1024**3
 PAUSE = Path('/tmp/pm-shots/PAUSE_LOCAL')
 
 class LocalPause(RuntimeError):
@@ -33,10 +34,21 @@ class ShaderCompilerUnavailable(RuntimeError):
     pass
 STAGES = ('open', 'render', 'play', 'scrub', 'audio', 'edit', 'save', 'mp4', 'prores')
 
+def free_bytes():
+    if sys.platform != 'darwin':
+        return shutil.disk_usage('/tmp').free
+    # APFS volume statistics can disagree with the shared container reserve.
+    info = subprocess.run(['diskutil', 'info', '/'], capture_output=True, text=True,
+                          check=True, timeout=10).stdout
+    match = re.search(r'Container Free Space:.*?\((\d+) Bytes\)', info)
+    if not match:
+        raise RuntimeError('container_free_space_unavailable')
+    return int(match[1])
+
 def space():
     if PAUSE.exists():
         raise LocalPause('local_pause')
-    if shutil.disk_usage('/tmp').free < FLOOR:
+    if free_bytes() < FLOOR:
         raise DiskFloor('disk_floor')
 
 def digest(path):
@@ -57,7 +69,7 @@ def inventory(path):
                 raise RuntimeError('symlink_source')
         for name in files:
             p = Path(base) / name
-            s = p.stat()
+            s = source_stat(p)
             out[str(p.relative_to(path))] = (s.st_size, s.st_mtime_ns, digest(p))
     return out
 
@@ -74,7 +86,7 @@ def clone(src, dst):
     if src.is_symlink() or not src.is_file():
         raise RuntimeError('not_regular')
     before = source_stat(src)
-    if shutil.disk_usage('/tmp').free - before.st_size < FLOOR:
+    if free_bytes() - before.st_size < FLOOR:
         raise DiskFloor('disk_floor_payload_reserve')
     dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     libc = ctypes.CDLL(None, use_errno=True)
@@ -91,7 +103,7 @@ def clone(src, dst):
             with os.fdopen(fd, 'rb') as source, dst.open('xb') as target:
                 created = True
                 for data in iter(lambda: source.read(4 * 1024 * 1024), b''):
-                    if shutil.disk_usage('/tmp').free - len(data) < FLOOR:
+                    if free_bytes() - len(data) < FLOOR:
                         raise DiskFloor('disk_floor_stream')
                     target.write(data)
                 target.flush()
@@ -166,6 +178,18 @@ def select_records(asset_id, asset, records, profile):
                  'source': str(profile / 'Media Store/objects' / content_hash[:2] / content_hash),
                  'blake3': content_hash}]
     return []
+
+def captured_record(record, path):
+    """A stable copy must also match the imported original's recorded bytes."""
+    actual = digest(Path(path))
+    metadata = record.get('value')
+    if isinstance(metadata, dict) and 'sha256' in metadata:
+        expected = metadata['sha256']
+        if (not isinstance(expected, str) or len(expected) != 64
+                or any(c not in '0123456789abcdef' for c in expected)
+                or expected != actual):
+            raise BatchLimit('media_record_checksum_mismatch')
+    return {**record, 'path': path, 'sha256': actual}
 
 def call(binary, args, log, timeout=180, compiler=None):
     space()
@@ -403,6 +427,7 @@ def run(args):
             public = {'id': row['id'], 'stages': {s: 'blocked' for s in STAGES}, 'failures': []}
             used = 0
             linked, selected, copied = {}, [], {}
+            rejected_keys, rejected_paths = set(), set()
             capture_errors = []
             def capture(src, size=None, record=None):
                 nonlocal used
@@ -457,7 +482,7 @@ def run(args):
                         info = json.loads((batch / 'info.private.json').read_text())
                         row.update(info)
                     except BatchLimit as e:
-                        public['stages']['open'] = 'blocked' if str(e) in ('batch_disk_capacity','batch_media_over_budget') else 'fail'
+                        public['stages']['open'] = 'blocked' if str(e) in ('batch_disk_capacity','batch_media_over_budget','source_not_local') else 'fail'
                         public['failures'].append({'stage': 'open', 'category': 'open', 'class': str(e)})
                         summary['projects'].append(public)
                         report()
@@ -480,9 +505,14 @@ def run(args):
                     for r in matches:
                         try:
                             path = capture(r.get('source'), r.get('size'), r)
-                            selected.append({**r, 'path': path, 'sha256': digest(Path(path))})
+                            selected.append(captured_record(r, path))
                         except BatchLimit as e:
                             capture_errors.append(str(e))
+                            if str(e) == 'media_record_checksum_mismatch':
+                                rejected_keys.add(r['key'])
+                                rejected_paths.update(src for src in (
+                                    r.get('source'), a.get('sourcePath'), a.get('path'),
+                                    (a.get('link') or {}).get('path')) if isinstance(src, str))
                     if len(selected) > selected_before and a.get('storage') != 'linked' and not a.get('link'):
                         continue
                     for src in (a.get('sourcePath'), a.get('path'), (a.get('link') or {}).get('path')):
@@ -492,7 +522,12 @@ def run(args):
                             except BatchLimit as e:
                                 capture_errors.append(str(e))
                 # Detached file associations cannot cause writes to original PMVs.
-                (ROOT / 'media.json').write_text(json.dumps({'records': selected, 'linked': linked}))
+                # A failed recorded identity cannot be bypassed by another
+                # asset's direct-path mapping or a second origin with this key.
+                (ROOT / 'media.json').write_text(json.dumps({
+                    'records': [r for r in selected if r['key'] not in rejected_keys],
+                    'linked': {src: path for src, path in linked.items() if src not in rejected_paths},
+                }))
                 (batch / 'spec.private.json').write_text(json.dumps(row))
                 code = call(args.binary, ['project', ROOT, batch / 'spec.private.json', batch], batch / 'worker.private.log', timeout=args.timeout,compiler=args.compiler)
                 state = json.loads((batch / 'result.json').read_text()) if (batch / 'result.json').exists() else {}
@@ -550,7 +585,7 @@ def run(args):
     except Exception as error:
         if isinstance(error,(LocalPause,DiskFloor)):
             args.retain_for_debug=True
-        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'shader_compiler_unavailable' if isinstance(error,ShaderCompilerUnavailable) else 'disk_floor' if isinstance(error,DiskFloor) or shutil.disk_usage('/tmp').free < FLOOR else str(error) if str(error) in ('shader_preflight_failed','synthetic_pixel_preflight_failed','frozen_tool_changed','worker_unavailable') else 'runner_setup_failed'})
+        summary['setup_failures'].append({'stage': 'setup', 'class': 'local_pause' if isinstance(error,LocalPause) else 'shader_compiler_unavailable' if isinstance(error,ShaderCompilerUnavailable) else 'disk_floor' if isinstance(error,DiskFloor) or free_bytes() < FLOOR else str(error) if str(error) in ('shader_preflight_failed','synthetic_pixel_preflight_failed','frozen_tool_changed','worker_unavailable') else 'runner_setup_failed'})
         report()
         raise
     finally:
