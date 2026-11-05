@@ -8,15 +8,15 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1421, 0, 3177));
-    assert_eq!(r.exit_code(false), 0);
-    assert_eq!(r.exit_code(true), 2);
+    assert_eq!(r.counts(), (1423, 1, 3179));
+    assert_eq!(r.exit_code(false), 1);
+    assert_eq!(r.exit_code(true), 1);
     assert_eq!(
         r.workflows
             .iter()
             .filter(|w| w.status == Status::BlockedBy)
             .count(),
-        83
+        82
     );
     assert_eq!(
         r.workflows.iter().find(|w| w.id == "W071").unwrap().status,
@@ -27,7 +27,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             .iter()
             .filter(|x| x.kind == "original" && x.status == Status::Pass)
             .count(),
-        20
+        21
     );
     assert_eq!(
         r.cases
@@ -63,27 +63,14 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             "{} triage acceptance drift",
             spec.legacy.file
         );
-        assert_eq!(
-            spec.supporting_probe_ids, spec.legacy.native_triage.supporting_probe_ids,
-            "{} triage probe drift",
-            spec.legacy.file
+        assert!(
+            spec.legacy
+                .native_triage
+                .supporting_probe_ids
+                .iter()
+                .all(|id| spec.supporting_probe_ids.contains(id)),
+            "historical triage links must be retained"
         );
-        let targeted = r
-            .cases
-            .iter()
-            .filter(|c| spec.acceptance_ids.contains(&c.id))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            spec.legacy.native_triage.needs_macos,
-            targeted.iter().any(|c| c.needs_macos)
-        );
-        let blockers = targeted
-            .iter()
-            .filter_map(|c| c.blocked_by.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        assert_eq!(spec.legacy.native_triage.blocked_by, blockers);
         assert!(
             spec.acceptance_ids
                 .iter()
@@ -108,7 +95,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1421 pass / 0 fail / 3177 blocked-by")
+            .contains("1423 pass / 1 fail / 3179 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
@@ -173,18 +160,26 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         eprintln!("counts {:?}", report.counts());
         return;
     }
-    assert_eq!(report.counts(), (1439, 0, 3159));
+    assert_eq!(report.counts(), (1466, 1, 3136));
     assert_eq!(
         report.blockers_csv(),
         include_str!("../data/remaining-blockers.csv")
     );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
-    assert_eq!(rows.len(), 3160);
+    assert_eq!(rows.len(), 3137);
     assert!(rows.iter().all(|r| r.len() == 6));
     for workflow in &report.workflows {
         let row = format!(
-            "| {} | blocked-by | {} | {} | {} |",
-            workflow.id, workflow.passed, workflow.failed, workflow.blocked
+            "| {} | {} | {} | {} | {} |",
+            workflow.id,
+            if workflow.failed > 0 {
+                "fail"
+            } else {
+                "blocked-by"
+            },
+            workflow.passed,
+            workflow.failed,
+            workflow.blocked
         );
         assert!(
             pm_acceptance::catalog::WORKFLOWS.contains(&row),
@@ -328,4 +323,79 @@ fn explicit_corpus_cli_uses_copies_and_reports_faults_without_source_paths() {
             .contains(scratch.0.to_str().unwrap())
     );
     assert_eq!(std::fs::read(path).unwrap(), b"invalid synthetic input");
+}
+
+#[test]
+fn backing_groups_partition_every_blocker_without_hiding_failures() {
+    let catalog = Catalog::embedded().unwrap();
+    let report = run(&catalog, &Filter::default(), &[]).unwrap();
+    let blocked = report
+        .cases
+        .iter()
+        .filter(|c| c.status == Status::BlockedBy)
+        .map(|c| c.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let grouped = report
+        .blocker_groups
+        .iter()
+        .flat_map(|g| &g.case_ids)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(grouped.len(), blocked.len());
+    assert_eq!(
+        grouped
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        blocked
+    );
+    for w in &catalog.workflows {
+        let case = report
+            .cases
+            .iter()
+            .find(|c| c.id == format!("{}.contract", w.id))
+            .unwrap();
+        assert_eq!(case.status, Status::BlockedBy);
+        assert!(case.reason.contains("**Expected:**"), "{}", w.id);
+        assert!(
+            !["shell-integration", "media-service", "compat-runtime"]
+                .contains(&case.blocked_by.as_deref().unwrap())
+        );
+    }
+    let failed = report
+        .cases
+        .iter()
+        .find(|c| c.id == "W061.frozen-set-easing")
+        .unwrap();
+    assert_eq!(failed.status, Status::Fail);
+    assert!(failed.reason.contains("104.94929544957891"));
+}
+
+#[test]
+fn post_tag_memory_claim_is_reconciled_without_erasing_its_original_ids() {
+    let report = run(
+        &Catalog::embedded().unwrap(),
+        &Filter {
+            workflow: Some("W030".into()),
+            case: None,
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(pm_mcp::catalog::tools().len(), 67);
+    assert!(pm_mcp::catalog::spec("project_memory").is_none());
+    assert!(
+        !pm_mcp::catalog::spec("get_project_state").unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("memory")
+    );
+    for id in ["A511", "A512"] {
+        let case = report.cases.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(case.status, Status::BlockedBy);
+        assert_eq!(
+            case.blocked_by.as_deref(),
+            Some("memory-post-tag-requirement")
+        );
+        assert!(case.reason.contains("W1 misattributes"));
+    }
 }

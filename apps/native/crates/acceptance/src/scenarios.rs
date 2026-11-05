@@ -20,6 +20,24 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "W061.frozen-set-easing",
+            workflow: "W061",
+            title: "Frozen sequential set_property Glide retains both complete authored handles",
+            run: crate::curve_oracle::set,
+        },
+        Scenario {
+            id: "W061.frozen-replace-easing",
+            workflow: "W061",
+            title: "Frozen replace_keyframes Glide matches independent complete-curve oracle",
+            run: crate::curve_oracle::replace,
+        },
+        Scenario {
+            id: "A532",
+            workflow: "W037",
+            title: "MCP actual effect validator: frozen acceptance, exact diagnostic order and no project edits",
+            run: crate::mcp_cases::validate_effect,
+        },
+        Scenario {
             id: "A539",
             workflow: "W031",
             title: "MCP evaluated structural lint, source bounds and measured audio peaks",

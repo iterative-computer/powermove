@@ -44,12 +44,41 @@ pub struct SpecMapping {
     pub reason: String,
 }
 #[derive(Debug, Serialize)]
+pub struct BlockerGroup {
+    pub backing: String,
+    pub needs_macos: bool,
+    pub workflows: BTreeSet<String>,
+    pub case_ids: Vec<String>,
+}
+fn grouped_blockers(cases: &[CaseResult]) -> Vec<BlockerGroup> {
+    let mut groups = std::collections::BTreeMap::<String, BlockerGroup>::new();
+    for case in cases.iter().filter(|c| c.status == Status::BlockedBy) {
+        let backing = case
+            .blocked_by
+            .as_ref()
+            .expect("blocked case needs backing");
+        let group = groups
+            .entry(backing.clone())
+            .or_insert_with(|| BlockerGroup {
+                backing: backing.clone(),
+                needs_macos: false,
+                workflows: BTreeSet::new(),
+                case_ids: vec![],
+            });
+        group.needs_macos |= case.needs_macos;
+        group.workflows.insert(case.workflow.clone());
+        group.case_ids.push(case.id.clone());
+    }
+    groups.into_values().collect()
+}
+#[derive(Debug, Serialize)]
 pub struct Report {
     pub format: String,
     pub version: u32,
     pub platform: String,
     pub scope: String,
     pub cases: Vec<CaseResult>,
+    pub blocker_groups: Vec<BlockerGroup>,
     pub workflows: Vec<WorkflowResult>,
     pub specs: Vec<SpecMapping>,
 }
@@ -64,89 +93,23 @@ impl Filter {
             && self.case.as_deref().is_none_or(|c| c == id)
     }
 }
+#[derive(serde::Deserialize)]
+struct Backing {
+    id: String,
+    missing: String,
+    needs_macos: bool,
+}
+fn backings() -> &'static std::collections::BTreeMap<String, Backing> {
+    static BACKINGS: std::sync::OnceLock<std::collections::BTreeMap<String, Backing>> =
+        std::sync::OnceLock::new();
+    BACKINGS.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/backings.json"))
+            .expect("acceptance backing inventory")
+    })
+}
 fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
-    match workflow {
-        "W004" | "W007" | "W008" => (
-            "project-lifecycle-integration",
-            "Kernel slices run; complete corpus/media closure, recovery and shell lifecycle acceptance remains",
-            true,
-        ),
-        "W019" | "W020" | "W021" | "W022" | "W023" | "W031" => (
-            "media-service",
-            "MCP metadata/list/manage/check and portable services/promedia run; durable import/relink byte-version coordination, native picker/source-preview wiring and real decoded media remain open",
-            true,
-        ),
-        "W024" | "W025" | "W026" | "W027" | "W028" | "W029" => (
-            "agent-runtime",
-            "Provider/thread/approval/composer integration is pending; use synthetic providers only",
-            true,
-        ),
-        "W030" | "W033" => (
-            "mcp-integration",
-            "Implemented MCP cases run; remaining tool bodies, complete external entry/agent/render integration are pending",
-            false,
-        ),
-        "W034" => (
-            "owner-scope",
-            "Existing browser/serve workflows have an explicit out-of-scope native boundary in W1; retain evidence",
-            false,
-        ),
-        "W035" | "W036" => (
-            "store-service",
-            "Store-host admission/identity/recovery models exist; remote Store catalog/releases/account APIs, install-to-kernel/runtime wiring and real permission/action UI remain open",
-            false,
-        ),
-        "W037" | "W038" | "W039" | "W040" => (
-            "compat-runtime",
-            "V8 lifecycle, compat services/recorder and portable native raster/router/Store-view probes run; full PM-to-kernel/canvas binding, WebKit page adapter and unchanged v1–3 corpus remain open",
-            true,
-        ),
-        "W041" => (
-            "transcription-service",
-            "No native transcription service/model-download/inference crate is merged; kernel caption mutation commands still return NotImplemented; model picker and actual word timing remain open",
-            false,
-        ),
-        "W057" | "W058" => (
-            "video-domain-adapter",
-            "All nine MCP edit_video operations and source-handle/persisted-history probes run; native trim/speed interaction, remapped source evaluation and decoded start/end frame oracles remain open",
-            true,
-        ),
-        "W059" | "W068" => (
-            "audio-service",
-            "Real audio routing, levels and speaker synchronization need the macOS engine",
-            true,
-        ),
-        "W069" | "W070" | "W071" => (
-            "export-service",
-            "MCP export_video adapter exists; actual ExportChild codec worker, cancellation/resource release, queued exports and exact encoded timestamps/audio/frame-rate output remain open",
-            true,
-        ),
-        "W072" => (
-            "owner-scope",
-            "Owner removed standalone web-animation export from cutover requirements (2026-10-29); retain traceability, never claim pass",
-            false,
-        ),
-        "W076" | "W077" | "W078" => (
-            "engine-macos",
-            "needs macOS: real Metal pixels, shader/text/colour standards oracles and physical performance evidence",
-            true,
-        ),
-        "W079" => (
-            "transport-integration",
-            "needs macOS: J/K/L engine transport plus shipped command fallthrough/decline integration",
-            true,
-        ),
-        "W080" | "W081" | "W082" | "W083" => (
-            "pro-edit-integration",
-            "Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS",
-            true,
-        ),
-        _ => (
-            "shell-integration",
-            "needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration",
-            true,
-        ),
-    }
+    let backing = &backings()[workflow];
+    (&backing.id, &backing.missing, backing.needs_macos)
 }
 fn blocked(id: &str, workflow: &str, kind: &str) -> CaseResult {
     let (backing, reason, mac) = blocker(workflow);
@@ -166,13 +129,77 @@ fn blocked(id: &str, workflow: &str, kind: &str) -> CaseResult {
 fn blocked_original(c: &crate::catalog::Contract, workflow: &str) -> CaseResult {
     let mut result = blocked(&c.id, workflow, "original");
     if matches!(c.id.as_str(), "A511" | "A512") {
-        result.blocked_by = Some("project-memory-contract".into());
+        result.blocked_by = Some("memory-post-tag-requirement".into());
         result.needs_macos = false;
         result.reason = format!(
-            "W1 requires a project memory index/details, but the frozen v1.2.0 get_project_state specification and 67-tool union contain no project_memory tool; the native digest has no memory index. Reconcile the inventory/contract before claiming closure; unverified case: {}",
+            "Frozen-source reconciliation (2026-11-04): tag 07ed5fa17 has no project_memory reference in agent-tools or renderer; its 67-tool union and get_project_state description have no memory index. W1 misattributes this later requirement to the tag. Preserve the original ID/claim as an explicit additional native requirement: no memory index/body is implemented. Missing backing: kernel memory storage/index plus versioned tool admission; retained unverified claim: {}",
             c.expected
         );
         return result;
+    }
+    if workflow == "W040" {
+        let capability = match c.id.as_str() {
+            "A658" | "A697" | "A699" => Some("compat:panel-render-mount"),
+            "A664" => Some("compat:scene3d-backend"),
+            "A665" => Some("compat:asset-byte-import"),
+            "A667" => Some("compat:palette-host"),
+            "A670" => Some("compat:project-kernel"),
+            "A671" => Some("compat:animation-evaluator"),
+            "A672" => Some("compat:model-constructors"),
+            "A673" => Some("compat:selection-kernel"),
+            "A674" => Some("compat:group-query-edit"),
+            "A675" => Some("compat:transport-engine"),
+            "A676" => Some("compat:history-selection-adapter"),
+            "A677" => Some("compat:structural-mutation-lease-adapter"),
+            "A679" => Some("compat:media-registry"),
+            "A680" => Some("compat:complete-canvas-engine-resources"),
+            "A681" => Some("compat:ui-state-kernel"),
+            "A682" => Some("compat:remote-dom-controls"),
+            "A683" | "A694" | "A701" => Some("compat:native-host-actions"),
+            "A684" => Some("compat:native-drag-drop"),
+            "A685" => Some("compat:workspace-kernel"),
+            "A686" => Some("compat:legacy-util-backend"),
+            "A687" => Some("compat:ease-query-backend"),
+            "A688" => Some("compat:space3d-backend"),
+            "A690" => Some("compat:storage-kernel-persistence"),
+            "A692" => Some("compat:extension-lifecycle"),
+            "A700" => Some("compat:store-namespaced-events"),
+            _ => None,
+        };
+        if let Some(capability) = capability {
+            result.blocked_by = Some(capability.into());
+            result.needs_macos = !matches!(
+                c.id.as_str(),
+                "A670"
+                    | "A671"
+                    | "A672"
+                    | "A673"
+                    | "A674"
+                    | "A676"
+                    | "A677"
+                    | "A681"
+                    | "A685"
+                    | "A686"
+                    | "A687"
+                    | "A688"
+                    | "A690"
+                    | "A700"
+            );
+            result.reason = format!(
+                "Missing connected {capability}; existing facade/registry or component probes do not execute every listed member against the real backend; unverified case: {}",
+                c.expected
+            );
+            if c.id == "A676" {
+                result.reason.push_str("; native V8/kernel begin/do/cancel/undo/redo/external paths execute, but KernelAdapter has no history.selection dispatch arm");
+            }
+            if c.id == "A677" {
+                result.reason.push_str("; native V8/kernel apply/begin/dispatch/commit/cancel paths execute, but KernelAdapter lacks edit.mutateStart, edit.mutateFinish and edit.mutateAbort");
+            }
+            if c.id == "A680" {
+                result.reason.push_str("; real JS recorder/native CPU fill/drawImage/readback now executes; complete text, paint, encoding and engine frame resources remain required");
+            }
+            return result;
+        }
     }
     if let Some(name) = c
         .expected
@@ -304,6 +331,14 @@ pub fn run_with_runtime(
     runtime: Option<&dyn crate::runtime::RuntimeHook>,
 ) -> Result<Report, String> {
     catalog.validate()?;
+    if backings().len() != catalog.workflows.len()
+        || catalog
+            .workflows
+            .iter()
+            .any(|w| !backings().contains_key(&w.id))
+    {
+        return Err("workflow/backing inventory drift".into());
+    }
     let scenarios = scenarios::all();
     validate_scenarios(catalog)?;
     let mut known = BTreeSet::new();
@@ -312,7 +347,16 @@ pub fn run_with_runtime(
         let id = format!("{}.contract", w.id);
         known.insert(id.clone());
         if filter.accepts(&id, &w.id) {
-            cases.push(blocked(&id, &w.id, "workflow-contract"));
+            let mut result = blocked(&id, &w.id, "workflow-contract");
+            result.reason.push_str("; full W1 contract: ");
+            result.reason.push_str(
+                w.contract
+                    .split("| Case |")
+                    .next()
+                    .unwrap_or(&w.contract)
+                    .trim(),
+            );
+            cases.push(result);
         }
         for c in &w.cases {
             known.insert(c.id.clone());
@@ -485,6 +529,7 @@ pub fn run_with_runtime(
         } else {
             "full-inventory".into()
         },
+        blocker_groups: grouped_blockers(&cases),
         cases,
         workflows,
         specs,
