@@ -1,0 +1,146 @@
+# Native first launch, consent and outcomes
+
+Rows N001 N002 N003. Grammar: [README](README.md) §1–5. Contract:
+[first-launch.md](../../first-launch.md), model `pm-first-launch::{run, Event, Outcome,
+Step, secrets}`. These surfaces exist only in native. Everything here is written for a
+person who is anxious about their work, so every screen says what's safe.
+
+Naming: the existing app is **the original app** or `Powermove`; the beta is `Powermove
+Native`.
+
+No new tokens. Reuses the Welcome window frame (S107).
+
+## The gate
+
+The first-launch gate is the Welcome window frame, shown before any library opens,
+because the shell keeps the library closed until the coordinator returns. Layout: mark,
+`t.display` title, `t.reading` `c.secondary` line, status block, footer buttons trailing,
+with a leading `Quit Powermove Native` wherever waiting is possible. Closing the window
+quits the app. Quitting at any point is safe, and the next launch resumes.
+
+## N001 Waiting and copying
+
+| `Event` / state | Title | Line | Status block | Buttons |
+|---|---|---|---|---|
+| `WaitingForElectron`, local | `Quit Powermove to Continue` | `Powermove Native copies your library while the original app is closed. Save your work there and quit it.` | spinner + `Waiting for Powermove to quit…` | none; continues by itself |
+| Owner unknown or on another Mac | `Powermove Might Still Be Open` | `It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.` | | `Check Again` (default) |
+| Checkpoint | `Copying Your Library` | `Your original app stays unchanged, and this copy never replaces it.` | step + `ProgressRow` | `Pause` |
+| Interrupted, resumed | same | same | `Picking up where it stopped…` then the step | `Pause` |
+| Paused | `Copying Is Paused` | `It picks up where it stopped. You can quit and come back.` | step, frozen `ProgressRow` | `Resume` (default) |
+| Low disk | `Not Enough Space` | `Powermove Native needs {needed} free to copy your library, and this Mac has {available}. Nothing was deleted.` | | `Check Again` (default) |
+| Failed | `Copying Stopped` | `Your original app and library weren’t changed. {ServiceErrorCode informative}` | `Details` disclosure | `Try Again` (default) |
+| Profile refused | `Powermove Native Can’t Start` | `Its library folder isn’t usable. Your original app wasn’t changed.` | `Details` disclosure | `Quit Powermove Native` |
+
+**Steps**, from `Event::Started` and `Progress`. Counts come straight from the event, so
+no percentage is invented, and a step with no total is indeterminate:
+
+| `Step` | Status |
+|---|---|
+| `Checkpoint` | `Taking a snapshot of your library…` |
+| `Bootstrap` | `Preparing your library…` |
+| `Library` | `Copying projects · {done} of {total}` |
+| `Media` | `Copying media · {done} of {total}` |
+| `LocalStorage` | `Copying settings…` |
+| `Extensions` | `Copying extensions…` |
+| `Secrets` | N002 |
+
+Names and paths never appear here: the event carries counts only.
+
+`Details` shows selectable `MONO_FONT` text and goes to the Error Log. No secret or user
+path is included.
+
+**Later launches.** A completed profile only brings in new media. No gate: Background
+Tasks row `Bringing in new media`, and the library opens normally. If the original app is
+running, the delta waits silently for a later launch.
+
+VoiceOver: the status block is a polite live region, throttled to one update per 5 s.
+Title gets focus on each state change. Return activates the default.
+
+## N002 Keychain consent
+
+Appears only when encrypted values exist. The app never touches Keychain before the
+person chooses to.
+
+| State | Title | Line | Buttons |
+|---|---|---|---|
+| `NeedsSecretConsent{interrupted: false}` | `Keep Your Sign-Ins` | `secrets::PROMPT` verbatim: `Powermove Native can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| Waiting for the system | same | same; status `Waiting for macOS…` | disabled |
+| Denied or cancelled | `Keychain Access Wasn’t Allowed` | `Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.` | `Continue Without Them` (default), `Try Again` |
+| `interrupted: true` | `The Keychain Request Didn’t Finish` | `Powermove Native stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.` | `Not Now`, `Continue` (default) |
+| Partly imported | no extra screen; N003 lists the rest | | |
+
+`Continue` here is deliberately the default: it opens a system prompt, which is the
+real decision, and the person answers there. The macOS Keychain alert is system-owned
+and must not be imitated. Retries are always a fresh click, never automatic. `Not Now`
+and `Continue Without Them` finish migration without secrets: S070 and S083 then show
+signed-out states, and S011 shows *Needs re-entry*.
+
+**Model gap for the lane:** `pm-first-launch` has `resume_with_secret_consent` but no
+explicit decline. A lane needs one (`skip_secret_consent`) so `Not Now` can reach
+`Complete`, and a later retry entry, Settings ▸ Accounts row `Bring Sign-Ins from the
+Original App…`. Until it lands the lane stops at `DESIGN-TODO(opus)`: it may not hide
+`Not Now`.
+
+Never show a decrypted value, an item name beyond the prompt, or a count of secrets.
+
+## N003 Outcomes
+
+From `Outcome::Complete{projects, history_refusals, missing_projects, blocked_owners,
+proxy_only, already_offline}`.
+
+**Summary** — last gate screen. Title `Your Library Is Ready`, line `{n} projects were
+copied. Your original app stays unchanged.` If all counts but `projects` are zero there
+are no rows. Otherwise a grouped card with one row per non-zero count, omitting others:
+
+| Count | Symbol | Row |
+|---|---|---|
+| `history_refusals` | `exclamationmark.triangle.fill` `c.warning` | `{n} projects came across without their Undo history. Their current state is complete.` |
+| `missing_projects` | `c.warning` | `{n} projects couldn’t be read. They’re kept safely and weren’t changed.` |
+| `blocked_owners` | `xmark.octagon.fill` `c.danger` | `{n} projects need media that went missing. They’ll ask you to find it.` |
+| `proxy_only` | `info.circle` `c.secondary` | `{n} media files came across as proxies only. Exports using them show a warning until you relink the originals.` |
+| `already_offline` | `info.circle` `c.secondary` | `{n} media files were already offline.` |
+
+Buttons: `Show Report…` (with rows), `Open Powermove Native` (default). Onboarding is
+skipped if the source completed it.
+
+**Migration Report** — `Window ▸ Migration Report`, a standard window like the Error Log
+(S053), available any time after migration.
+
+| Section | Rows | Action |
+|---|---|---|
+| `Projects Without Undo History` | project name | `Open` |
+| `Projects That Couldn’t Be Read` | project name | `Show in Finder` |
+| `Waiting for Media` | project, count | `Relink…` |
+| `Proxy-Only Media` | file, project | `Relink…` |
+| `Kept Aside` | quarantined item, reason `Powermove couldn’t recognise this.` | `Show in Finder` |
+| `Conflicts` | key or file; `Both versions were kept.` | `Show in Finder` |
+| `Sign-Ins Not Copied` | account or extension display name only | `Set Up…` |
+
+Footer: `Copy Report` (no paths beyond the Mac's own, no secrets), `Show Library in
+Finder`. Empty section: omitted. Everything empty: `EmptyState` `checkmark.circle`,
+`Nothing to Review`, `Everything came across.`
+
+**Opening a blocked project** — alert: `Media for “{project}” is missing.` / `Powermove
+Native can’t open this copy until the media is found. The original project wasn’t
+changed.` / `Relink…` (default) · `Cancel`. Offline projects aren't blocked: they open
+with S006's offline treatment.
+
+**Proxy-only export** — Export sheet warning line, `c.warning` with symbol: `This uses
+proxy-only media, so quality may be lower. Relink the originals for full quality.` Export
+stays enabled.
+
+**Conflict review.** Three-way merge isn't built, so conflicts are reported and both
+sides kept. No merge UI ships. The row's action stays `Show in Finder`.
+
+**Going back.** Native keeps rollback-compatible saves and never touches the original
+library. Report footer adds `How to Go Back…`, an alert: `Your original app still has
+everything from before.` / `Work you did in Powermove Native stays here. Save a project
+as a .pmv file to open it in the original app.` / `OK`. Reverse migration isn't designed:
+see [README §6](README.md#6-owner-questions-raised-by-these-specs).
+
+## Don't
+
+- Don't use a percentage the model doesn't report.
+- Don't imitate the Keychain alert, or read Keychain without a fresh click.
+- Don't show names or paths on the gate.
+- Don't describe the copy as a move.
