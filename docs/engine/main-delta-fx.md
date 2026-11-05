@@ -101,3 +101,54 @@ cargo +1.96.1 fmt -p pm-fx-defs -p pm-color -p pm-glsl --check
 The assembled-program gate tests validation/translation only. It neither draws
 pixels nor certifies Metal pipelines. Do not relabel a portable contract or
 shader compilation pass as completion of these rows.
+
+### Post-merge validation — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`; remerged
+`origin/feat/na-cloud-etrack2` at
+`38f32c453b2e09535f77460a14e39b4eca2f180f` (already contained).
+No merge conflicts. Upstream design changes are imported by that merge;
+this lane makes no design edits of its own.
+
+Environment: Linux x86_64, Rust **1.96.1**, Node **24.19.0** for the development
+oracle. Final commands and outcomes:
+
+```sh
+# Repository root: exact regeneration, 43 current + 10 historical definitions,
+# 53 assembled programs and 1,245 source-executed value cases.
+node --experimental-vm-modules engine/crates/pm-fx-defs/tools/generate-main.mjs --check
+cd engine
+# 171 passed / 0 failed / 0 ignored:
+# pm-fx-defs 32; pm-color 67; pm-glsl 72.
+cargo +1.96.1 test --locked -p pm-fx-defs -p pm-color -p pm-glsl
+# PASS, no warnings:
+cargo +1.96.1 clippy --locked -p pm-fx-defs -p pm-color -p pm-glsl --all-targets -- -D warnings
+# PASS:
+cargo +1.96.1 fmt -p pm-fx-defs -p pm-color -p pm-glsl --check
+```
+
+All 53 main effect implementations pass native GLSL validation and translation.
+The pre-existing 394-probe verdict sweep, compiler process/lifetime regressions,
+uniform-type suite and source WGSL validation remain green. No pixel or native
+media cases were skipped to obtain these counts: those are separate **unrun,
+open gates**, not passing tests in this suite. The only lockfile change is
+pm-color's test-only serde_json dependency edge; no package versions changed.
+Secret scanning ran before every lane commit.
+
+**Status: BLOCKED for E01–E14 completion.** The portable implementation has not
+been connected to the application's winning-definition publication path or the
+renderer. In particular, the native kernel's effect registration/snapshot and
+project provenance wiring require coordinated changes outside this lane's owned
+paths. The renderer still needs implementation of the resource bindings and
+evaluator expansion listed above. A source-policy answer for unversioned Gradient
+without provenance is pending; both original definitions stay preserved. There
+is no synthetic or inferred answer for an ambiguous saved project.
+
+Mac follow-up must exercise real Metal compile/draw and every revision's output,
+source/owner coordinates and validity, mip/atlas sampling, typed provider leases,
+Stroke/LUT, Echo historical prefixes/reverse seeks/cancellation, continuous-raster
+precomps and Undo, HDR/log import/fallback, sequential B-frame/edit-list MP4 decode,
+VideoToolbox/backpressure, and decoded viewer/export comparisons. Re-run the
+portable suites on Mac as well. No full-project or physical/display acceptance
+is implied by the Linux results. No DESIGN-TODO(opus) items were introduced.
