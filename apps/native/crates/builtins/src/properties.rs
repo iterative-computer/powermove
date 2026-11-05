@@ -1,4 +1,4 @@
-//! Read-only Properties presentation using model-issued, selection-fenced leases.
+//! Properties presentation using model-issued, selection-fenced leases.
 use pm_kernel::{Caller, Request};
 use pm_panel_inspector::{
     Binding, FieldType, Inspector, PropertyId,
@@ -74,6 +74,8 @@ impl Properties {
                     Binding::Content { field, .. } => match field.as_str() {
                         "text" => ("content.text", "Text", ""),
                         "font" => ("content.font", "Font", ""),
+                        "weight" => ("content.weight", "Weight", ""),
+                        "align" => ("content.align", "Align", ""),
                         "size" => ("content.size", "Size", "px"),
                         "tracking" => ("content.tracking", "Tracking", "px"),
                         "leading" => ("content.leading", "Leading", ""),
@@ -90,6 +92,10 @@ impl Properties {
                         "h" => ("content.h", "Height", "px"),
                         "shape" => ("content.shape", "Shape", ""),
                         "radius" => ("content.radius", "Corner Radius", "px"),
+                        "radiusTL" => ("content.radiusTL", "Top Left", "px"),
+                        "radiusTR" => ("content.radiusTR", "Top Right", "px"),
+                        "radiusBL" => ("content.radiusBL", "Bottom Left", "px"),
+                        "radiusBR" => ("content.radiusBR", "Bottom Right", "px"),
                         "smoothing" => ("content.smoothing", "Corner Smoothing", "%"),
                         "independentCorners" => {
                             ("content.independentCorners", "Independent Corners", "")
@@ -111,16 +117,27 @@ impl Properties {
                         _ => continue,
                     },
                     Binding::Layer { field, .. } => match field.as_str() {
+                        "parent" => ("layer.parent", "Parent", ""),
+                        "matteSource" => ("layer.matteSource", "Track Matte", ""),
+                        "threeD" => ("layer.threeD", "3D", ""),
                         "solo" => ("layer.solo", "Solo", ""),
                         "visible" => ("layer.visible", "Visible", ""),
                         "color" => ("layer.color", "Label Color", ""),
                         _ => continue,
                     },
+                    Binding::Property(id) => match id.path.as_str() {
+                        "l.blend" => ("layer.blend", "Blend Mode", ""),
+                        "l.mblur" => ("layer.mblur", "Motion Blur", ""),
+                        "l.matteMode" => ("layer.matteMode", "Matte Mode", ""),
+                        _ => continue,
+                    },
                     _ => continue,
                 };
-                let state = model
-                    .binding_state(&field.binding, time)
-                    .map_err(|e| e.to_string())?;
+                let state = match model.binding_state(&field.binding, time) {
+                    Ok(state) => state,
+                    Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
                 let lease = self.lease(model, id, field.binding.clone())?;
                 let value = super::data::wire(&state.value);
                 let control = match (&field.kind, &value) {
@@ -146,8 +163,57 @@ impl Properties {
                     (FieldType::Font, Value::String(_)) => {
                         json!({"kind":"font","binding":lease,"value":value,"options":[],"disabled":true,"mixed":state.mixed})
                     }
-                    (FieldType::Choice, _) if matches!(id, "content.shape" | "content.fit") => {
-                        json!({"kind":"choice","binding":lease,"value":value,"options":if id=="content.shape" { vec!["rect","ellipse","polygon","star","line"] } else { vec!["cover","contain","stretch"] },"mixed":state.mixed})
+                    (FieldType::Choice, _) => {
+                        let options = match id {
+                            "content.shape" => {
+                                json!(["rect", "ellipse", "polygon", "star", "line"])
+                            }
+                            "content.fit" => json!(["cover", "contain", "stretch"]),
+                            "content.weight" => {
+                                let mut options = vec![
+                                    json!({"v":100,"label":"Thin"}),
+                                    json!({"v":200,"label":"Extra Light"}),
+                                    json!({"v":300,"label":"Light"}),
+                                    json!({"v":400,"label":"Regular"}),
+                                    json!({"v":500,"label":"Medium"}),
+                                    json!({"v":600,"label":"Semi Bold"}),
+                                    json!({"v":700,"label":"Bold"}),
+                                    json!({"v":800,"label":"Extra Bold"}),
+                                    json!({"v":900,"label":"Black"}),
+                                ];
+                                if let Some(weight) = value.as_f64()
+                                    && !options.iter().any(|o| o["v"] == value)
+                                {
+                                    options.push(json!({"v":weight,"label":weight.to_string()}));
+                                    options.sort_by(|a, b| {
+                                        a["v"]
+                                            .as_f64()
+                                            .unwrap()
+                                            .total_cmp(&b["v"].as_f64().unwrap())
+                                    });
+                                }
+                                json!(options)
+                            }
+                            "content.align" => json!(["left", "center", "right"]),
+                            "layer.parent" | "layer.matteSource" => {
+                                let ids = if id == "layer.parent" {
+                                    model.parent_candidates(&layer)
+                                } else {
+                                    model.matte_candidates(&layer)
+                                }
+                                .map_err(|e| e.to_string())?;
+                                let mut options = vec![json!({"v":null,"label":"None"})];
+                                for id in ids {
+                                    let candidate = model.layer(&id).map_err(|e| e.to_string())?;
+                                    options.push(json!({"v":id,"label":candidate.get("name").and_then(pm_model::Value::as_str).unwrap_or(&id)}));
+                                }
+                                json!(options)
+                            }
+                            // The registry/spec owns choice labels and order.
+                            // DESIGN-TODO(opus): supply blend/matte menu descriptors.
+                            _ => continue,
+                        };
+                        json!({"kind":"choice","binding":lease,"value":value,"options":options,"mixed":state.mixed})
                     }
                     _ => continue,
                 };
@@ -184,6 +250,7 @@ impl Properties {
                     ),
                     ("scale", "Scale", vec!["scale.x", "scale.y"], "%", 1.),
                     ("rotation", "Rotation", vec!["rotation"], "°", 1.),
+                    ("skew", "Skew", vec!["skew"], "°", 1.),
                     (
                         "anchor",
                         "Anchor Point",
@@ -211,7 +278,7 @@ impl Properties {
                         } else if state.animated {
                             animation = "animated";
                         }
-                        let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed});
+                        let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
                         if paths.len() > 1 {
                             axis["axis"] = json!(if index == 0 { "X" } else { "Y" });
                         }
@@ -222,7 +289,18 @@ impl Properties {
                         axes.push(axis);
                     }
                     if !axes.is_empty() {
-                        rows.push(json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
+                        let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                        if id == "scale" {
+                            row["linked"] = json!(
+                                model
+                                    .layer(&layer)
+                                    .map_err(|e| e.to_string())?
+                                    .get("scaleLinked")
+                                    .and_then(pm_model::Value::as_bool)
+                                    .unwrap_or(true)
+                            );
+                        }
+                        rows.push(row);
                     }
                 }
                 sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
@@ -265,6 +343,25 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
+        if self
+            .handles
+            .get("content.independentCorners")
+            .is_some_and(|h| h == handle)
+        {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            // Verify the selection/document lease before the multi-field command.
+            self.adapter
+                .read(model, handle, time)
+                .map_err(|e| e.to_string())?;
+            return model
+                .independent_corners(
+                    caller,
+                    &layer,
+                    value.as_bool().ok_or("Expected toggle")?,
+                    time,
+                )
+                .map_err(|e| e.to_string());
+        }
         self.adapter
             .set(model, caller, handle, &[value], time)
             .map_err(|e| e.to_string())
@@ -276,6 +373,17 @@ impl Properties {
         intent: &Value,
         time: f64,
     ) -> Result<Option<Request>, String> {
+        if intent["type"] == "drop-effect" {
+            let target = intent["target"].as_str().ok_or("Effect target")?;
+            if model.primary() != Some(target) {
+                return Err("Effect target selection changed".into());
+            }
+            let definition = intent["effect"].as_str().ok_or("Effect definition")?;
+            return model
+                .add_effect(caller, target, definition)
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
         if intent["type"] == "align" {
             use pm_kernel::commands::transform::{AlignMode, TransformCommand};
             let mode = match intent["alignment"].as_str() {

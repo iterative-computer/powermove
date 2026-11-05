@@ -188,7 +188,36 @@ export class InspectorSession {
     }
   }
   nativeRequest(request: NativeRequest) {
-    if (this.alive) void this.native.request(request).catch(this.onError);
+    if (!this.alive) return;
+    // A menu can outlive its document/selection. Keep the originating lease,
+    // and never apply its result to the next publication's similarly named row.
+    const target = this.snapshot.target;
+    const key = "key" in target ? target.key : undefined;
+    void this.native
+      .request(request)
+      .then(async (choice) => {
+        if (!this.alive || typeof choice !== "string") return;
+        const current = this.snapshot.target;
+        if (!("key" in current) || current.key !== key) return;
+        if (request.type === "add-effect-menu" && current.kind === "layers") {
+          await this.dispatch({
+            type: "drop-effect",
+            effect: choice,
+            target: request.target,
+          });
+        } else if (request.type === "row-menu") {
+          const item = request.items.find(
+            (item) => item.action === choice && item.enabled,
+          );
+          if (item)
+            await this.dispatch({
+              type: "row-action",
+              row: request.row,
+              action: item.action,
+            });
+        }
+      })
+      .catch(this.onError);
   }
   async settled() {
     await this.serial;
