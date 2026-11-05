@@ -61,7 +61,6 @@ mcp:publish_visual_reply,1,false,W029,A502
 mcp:render_frames,1,true,W033,A528
 mcp:replace_media,1,false,W031,A514
 mcp:sample_media_frames,1,true,W031,A535
-mcp:save_project,1,false,W031,A506
 mcp:set_panel_layout,1,false,W032,A519
 mcp:stage_fork_rebase,1,false,W033,A533
 mcp:store_extension,1,false,W036,A541
