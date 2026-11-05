@@ -1,7 +1,7 @@
 // Execute the actual frozen reader against an isolated synthetic filesystem.
 // The only path seam maps Adobe's fixed system CEP root into the test root;
 // paths outside that root are never read on the machine running this oracle.
-import {tag,evaluate} from './tag-oracle.mjs';
+import {tag,evaluate} from './main-oracle.mjs';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';

@@ -1,5 +1,5 @@
 // Result-shape oracle: execute tagged bodies on synthetic data only.
-import { tag,evaluate } from './tag-oracle.mjs';
+import { tag,evaluate } from './main-oracle.mjs';
 import fs from 'node:fs';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
 const PM={proj:input.project,time:0,touch:()=>{},bus:{emit:()=>{}},TYPE_META:{solid:{},group:{}},BLENDS:['normal'],clamp:(n,a,b)=>Math.min(b,Math.max(a,n))};

@@ -33,10 +33,12 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn all_tool_session_gates_and_parser_precedence_match_209_tagged_refusals() {
-    let oracle: Value =
-        serde_json::from_str(include_str!("../fixtures/error-precedence-v1.2.0.json")).unwrap();
-    assert_eq!(oracle["tag"], "v1.2.0");
+fn all_tool_session_gates_and_parser_precedence_match_213_main_refusals() {
+    let oracle: Value = serde_json::from_str(include_str!(
+        "../fixtures/error-precedence-main-c7f46a056.json"
+    ))
+    .unwrap();
+    assert_eq!(oracle["tag"], "main");
     let f = Fixture::new();
     let mut covered = std::collections::HashSet::new();
     for test in oracle["cases"].as_array().unwrap() {
@@ -87,7 +89,7 @@ fn rpc_preserves_plain_error_content_and_transport_argument_precedence() {
 }
 
 #[test]
-fn project_memory_inventory_is_not_the_frozen_tool_contract() {
+fn project_memory_inventory_matches_pinned_main_and_retains_legacy_evidence() {
     // A511/A512 remain named cutover requirements. A false tagged attribution
     // must neither silently grow the frozen catalog nor erase project data.
     let actual = std::process::Command::new("node")
@@ -100,11 +102,13 @@ fn project_memory_inventory_is_not_the_frozen_tool_contract() {
         String::from_utf8_lossy(&actual.stderr)
     );
     let evidence: Value = serde_json::from_slice(&actual.stdout).unwrap();
-    assert_eq!(evidence["toolCount"], 67);
-    assert_eq!(evidence["projectMemoryTool"], false);
-    assert_eq!(evidence["projectStateMentionsMemory"], false);
-    assert_eq!(evidence["projectStateReturnsMemory"], false);
-    assert!(catalog::spec("project_memory").is_none());
+    assert_eq!(evidence["toolCount"], 68);
+    assert_eq!(evidence["legacyToolCount"], 67);
+    assert_eq!(evidence["legacyProjectMemoryTool"], false);
+    assert_eq!(evidence["projectMemoryTool"], true);
+    assert_eq!(evidence["projectStateMentionsMemory"], true);
+    assert_eq!(evidence["projectStateReturnsMemory"], true);
+    assert!(catalog::spec("project_memory").is_some());
     assert!(!catalog::permits("inspection", "project_memory"));
 }
 
@@ -383,7 +387,7 @@ fn selection_body_errors_deduplication_and_extra_fields_match_tag() {
 }
 
 #[test]
-fn remaining_34_bodies_remain_explicit_blockers_without_mutating_the_project() {
+fn remaining_35_bodies_remain_explicit_blockers_without_mutating_the_project() {
     let evidence: Value =
         serde_json::from_str(include_str!("../fixtures/unavailable-wave4.json")).unwrap();
     let pending: std::collections::HashSet<_> = catalog::tools()
@@ -391,7 +395,7 @@ fn remaining_34_bodies_remain_explicit_blockers_without_mutating_the_project() {
         .map(|t| t["name"].as_str().unwrap())
         .filter(|n| !catalog::IMPLEMENTED.contains(n))
         .collect();
-    assert_eq!(pending.len(), 34);
+    assert_eq!(pending.len(), 35);
     let cases = evidence["cases"].as_array().unwrap();
     assert_eq!(cases.len(), pending.len());
     let f = Fixture::new();
@@ -426,4 +430,59 @@ fn remaining_34_bodies_remain_explicit_blockers_without_mutating_the_project() {
         assert_eq!(host.read_document(&id).unwrap(), before, "{name}");
         assert_eq!(host.store(&id).unwrap().history().len(), history, "{name}");
     }
+}
+
+#[test]
+fn replaced_document_retires_run_archives_authored_stage_and_allows_new_session() {
+    let f = Fixture::new();
+    let mut s = f.session();
+    let opened = s
+        .dispatch("start_session", &json!({"prompt":"Old document"}))
+        .unwrap();
+    let workspace = PathBuf::from(opened["workspace"].as_str().unwrap());
+    std::fs::write(
+        workspace.join("extensions/authored.js"),
+        b"Synthetic authored source",
+    )
+    .unwrap();
+    s.dispatch(
+        "apply_commands",
+        &json!({"commands":[{"type":"add_layer","id":"retained","layerType":"solid"}]}),
+    )
+    .unwrap();
+    let old = f.host.lock().unwrap().active.clone().unwrap();
+    f.host
+        .lock()
+        .unwrap()
+        .create_project(&json!({"name":"Replacement document"}))
+        .unwrap();
+    assert_eq!(
+        s.call("get_project_state", json!({}))["content"][0]["text"],
+        "Call start_session before using Powermove tools."
+    );
+    let archive = f
+        .root
+        .join("mcp-archives")
+        .join(workspace.file_name().unwrap())
+        .join("workspace/extensions/authored.js");
+    assert_eq!(
+        std::fs::read(archive).unwrap(),
+        b"Synthetic authored source"
+    );
+    s.dispatch(
+        "start_session",
+        &json!({"prompt":"Recovered on same external connection"}),
+    )
+    .unwrap();
+    assert_eq!(
+        s.dispatch("get_project_state", &json!({})).unwrap()["composition"]["name"],
+        "Replacement document"
+    );
+    s.dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    f.host.lock().unwrap().open_project(&old).unwrap();
+    assert_eq!(
+        f.host.lock().unwrap().read_document(&old).unwrap()["layers"][0]["id"],
+        "retained"
+    );
 }

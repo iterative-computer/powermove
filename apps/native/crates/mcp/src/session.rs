@@ -72,6 +72,7 @@ impl McpSession {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
+        self.retire_replaced_document()?;
         if name == "start_session" {
             return self.start(args);
         }
@@ -190,6 +191,45 @@ impl McpSession {
                 "store_extension" => crate::store::detail(store, args),
                 _ => crate::store::source(store, args),
             };
+        }
+        if name == "project_memory" {
+            let id = session
+                .project
+                .as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let project = host.read_document(id)?;
+            if !crate::memory::enabled(&project) {
+                return Err(Error::invalid(crate::memory::DISABLED));
+            }
+            if args["operation"] == "list" {
+                return crate::memory::list(&project, args);
+            }
+            if !["add", "update", "remove"]
+                .iter()
+                .any(|op| args["operation"] == *op)
+            {
+                return Err(Error::invalid(
+                    "operation must be list, add, update or remove.",
+                ));
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(Error::kernel)?
+                .as_millis() as f64;
+            crate::memory::apply(
+                project["memory"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                args,
+                now,
+                &pm_kernel::new_id("mem"),
+                "agent",
+            )?;
+            return Err(Error::unavailable(
+                "kernel durable project-memory metadata admission without edit revision/Undo; preserve memory across rollback",
+            ));
         }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
@@ -424,6 +464,36 @@ impl McpSession {
             _ => Err(Error::unavailable(catalog::backing(name))),
         }
     }
+    /// Renderer/document replacement ends the run, not the external connection.
+    /// Never restore an old snapshot into a replacement document. Preserve staged
+    /// files even when archival fails; cleanup cannot replace the primary loss.
+    fn retire_replaced_document(&mut self) -> Result<()> {
+        let replaced = if let Some(session) = self.active.as_ref() {
+            if let Some(id) = session.project.as_deref() {
+                let host = self
+                    .host
+                    .lock()
+                    .map_err(|_| Error::unavailable("headless host stopped"))?;
+                host.active.as_deref() != Some(id)
+                    || host.store(id).ok().map(|s| s.doc_id()) != session.document
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if replaced {
+            let session = self.active.take().expect("live replaced session");
+            if let Some(root) = session.workspace
+                && let Err(error) = archive_workspace(&root, false)
+            {
+                eprintln!(
+                    "MCP replaced-document workspace retained after archive failure: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
     fn start(&mut self, args: &Value) -> Result<Value> {
         if self.active.is_some() {
             return Err(Error::invalid("Finish the current MCP session first."));
@@ -466,7 +536,7 @@ impl McpSession {
                 std::fs::create_dir_all(root.join(name))?;
             }
             let input = if let Some(ref id) = project {
-                host.read_document(id)?
+                crate::memory::agent_snapshot(&host.read_document(id)?)
             } else {
                 json!({})
             };

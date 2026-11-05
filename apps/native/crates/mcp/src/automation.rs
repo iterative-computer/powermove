@@ -323,7 +323,25 @@ impl Automation {
             other => Err(Error::kernel(other)),
         }
     }
-    pub fn restore(&mut self, id: &str, value: Value, expected: u64, writer: u32) -> Result<u64> {
+    pub fn restore(
+        &mut self,
+        id: &str,
+        mut value: Value,
+        expected: u64,
+        writer: u32,
+    ) -> Result<u64> {
+        // Main treats notes and their agent-access setting as durable metadata,
+        // not video content. Composition rollback must preserve current notes.
+        let current = self.read_document(id)?;
+        if let Some(target) = value.as_object_mut() {
+            for key in ["memory", "memoryEnabled"] {
+                if let Some(current) = current.get(key) {
+                    target.insert(key.into(), current.clone());
+                } else {
+                    target.remove(key);
+                }
+            }
+        }
         let document = self.store(id)?.doc_id();
         let ack = self
             .call(

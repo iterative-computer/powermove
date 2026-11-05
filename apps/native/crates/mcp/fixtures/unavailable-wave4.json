@@ -212,6 +212,14 @@
     {
       "tool": "generate_captions",
       "arguments": {}
+    },
+    {
+      "tool": "project_memory",
+      "arguments": {
+        "operation": "add",
+        "kind": "goal",
+        "text": "Synthetic memory"
+      }
     }
   ]
 }
