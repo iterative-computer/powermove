@@ -6,6 +6,17 @@ fn cases() -> Vec<(&'static str, u32, Value)> {
     vec![
         ("blur", 1, json!({"amount":4})),
         ("blur", 2, json!({"amount":4,"repeatEdgePixels":false})),
+        (
+            "blur",
+            2,
+            json!({"amount":4,"dimensions":1,"repeatEdgePixels":true}),
+        ),
+        (
+            "blur",
+            2,
+            json!({"amount":4,"dimensions":2,"repeatEdgePixels":true}),
+        ),
+        ("blur", 2, json!({"amount":0,"repeatEdgePixels":false})),
         ("pixelate", 1, json!({"size":8})),
         (
             "pixelate",
@@ -13,14 +24,39 @@ fn cases() -> Vec<(&'static str, u32, Value)> {
             json!({"horizontalBlocks":4,"verticalBlocks":4,"sharpColors":false}),
         ),
         (
+            "pixelate",
+            2,
+            json!({"horizontalBlocks":4,"verticalBlocks":4,"sharpColors":true}),
+        ),
+        (
             "unsharpMask",
             1,
             json!({"amount":50,"radius":1,"threshold":0}),
         ),
         (
+            "unsharpMask",
+            1,
+            json!({"amount":50,"radius":1,"threshold":255}),
+        ),
+        (
+            "unsharpMask",
+            1,
+            json!({"amount":0,"radius":1,"threshold":0}),
+        ),
+        (
+            "unsharpMask",
+            1,
+            json!({"amount":50,"radius":0,"threshold":0}),
+        ),
+        (
             "findEdges",
             1,
             json!({"invert":false,"blendWithOriginal":0}),
+        ),
+        (
+            "findEdges",
+            1,
+            json!({"invert":true,"blendWithOriginal":50}),
         ),
     ]
 }
@@ -36,9 +72,15 @@ fn image() -> Vec<[f64; 4]> {
         })
         .collect()
 }
-fn blur(input: &[[f64; 4]], sigma: f64, transparent: bool) -> Vec<[f64; 4]> {
+fn blur(input: &[[f64; 4]], sigma: f64, transparent: bool, dimensions: u64) -> Vec<[f64; 4]> {
     let mut input = input.to_vec();
-    for axis in [0, 1] {
+    if sigma < 0.01 {
+        return input;
+    }
+    for axis in [0, 1]
+        .into_iter()
+        .filter(|&axis| dimensions == 0 || dimensions == axis + 1)
+    {
         input = (0..1024)
             .map(|i| {
                 let mut sum = [0.; 4];
@@ -93,10 +135,18 @@ fn e06_all_saved_spatial_revisions_match_independent_hdr_alpha_edge_pixels() {
                         .map(|p| p.try_into().unwrap())
                         .collect()
                 }
-                ("blur", 2) => blur(&original, 2., true),
+                ("blur", 2) => blur(
+                    &original,
+                    params["amount"].as_f64().unwrap() / 2.,
+                    params["repeatEdgePixels"] != true,
+                    params["dimensions"].as_u64().unwrap_or(0),
+                ),
                 ("pixelate", 2) => original.clone(), // Each 8x8 cell lies wholly within a constant patch.
                 ("unsharpMask", 1) => {
-                    let blurred = blur(&original, 1., true);
+                    let radius = params["radius"].as_f64().unwrap();
+                    let amount = params["amount"].as_f64().unwrap() / 100.;
+                    let threshold = params["threshold"].as_f64().unwrap() / 255.;
+                    let blurred = blur(&original, radius, true, 0);
                     original
                         .iter()
                         .zip(blurred)
@@ -107,7 +157,12 @@ fn e06_all_saved_spatial_revisions_match_independent_hdr_alpha_edge_pixels() {
                                 } else {
                                     let rgb = o[i] / o[3];
                                     let soft = if b[3] > 0. { b[i] / b[3] } else { 0. };
-                                    (rgb + (rgb - soft) * 0.5) * o[3]
+                                    let delta = rgb - soft;
+                                    (rgb + if delta.abs() >= threshold {
+                                        delta * amount
+                                    } else {
+                                        0.
+                                    }) * o[3]
                                 }
                             })
                         })
@@ -140,7 +195,14 @@ fn e06_all_saved_spatial_revisions_match_independent_hdr_alpha_edge_pixels() {
                             } else {
                                 let gx = -a[k] + d[k] - 2. * e[k] + 2. * f[k] - g[k] + i[k];
                                 let gy = -a[k] - 2. * b[k] - d[k] + g[k] + 2. * h[k] + i[k];
-                                (1. - (gx.hypot(gy) * 0.25).clamp(0., 1.)) * alpha
+                                let edge = (gx.hypot(gy) * 0.25).clamp(0., 1.);
+                                let mapped = if params["invert"] == true {
+                                    edge
+                                } else {
+                                    1. - edge
+                                };
+                                let blend = params["blendWithOriginal"].as_f64().unwrap() / 100.;
+                                (mapped + (original[index][k] / alpha - mapped) * blend) * alpha
                             }
                         })
                     })
@@ -176,6 +238,7 @@ fn e06_all_saved_spatial_revisions_depth_crop_zoom_and_source_contracts() {
         for depth in [8, 16, 32] {
             for source in [false, true] {
                 let mut value = fixture(id, version, params.clone(), json!({}), Some(CODE));
+                value["colorDepth"] = json!(depth);
                 if source {
                     value["layers"][0]["effectSpace"] = json!("source");
                 }
@@ -257,6 +320,71 @@ fn e06_all_saved_spatial_revisions_viewer_final_and_decoded_exports() {
                 depth,
                 &format!("{id} v{version}"),
             );
+        }
+    }
+}
+
+#[test]
+fn e06_wide_saved_gaussian_and_mosaic_kernels_keep_hdr_alpha_and_crop_zoom() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = [-0.125, 0.25, 1., 0.5];
+    let mut variants = vec![
+        ("blur", 1, json!({"amount":96})),
+        ("pixelate", 1, json!({"size":96})),
+    ];
+    for dimensions in 0..3 {
+        variants.push((
+            "blur",
+            2,
+            json!({"amount":96,"dimensions":dimensions,"repeatEdgePixels":true}),
+        ));
+    }
+    for sharp in [false, true] {
+        variants.push((
+            "pixelate",
+            2,
+            json!({"horizontalBlocks":3,"verticalBlocks":5,"sharpColors":sharp}),
+        ));
+    }
+    for (id, version, params) in variants {
+        for depth in [8, 16, 32] {
+            let value = super::color_contract::pixel_fixture(id, version, params.clone(), input);
+            let actual = draw(&mut renderer, &value, &MapResolver::default(), depth);
+            super::color_contract::assert_pixels(
+                &actual,
+                input,
+                &format!("wide {id} v{version},depth {depth},params {params}"),
+            );
+            if depth == 32 {
+                check_float_viewport(&mut renderer, &value, &actual);
+            } else {
+                check_viewport(&mut renderer, &value, &actual);
+            }
+            let mut value = value;
+            value["colorDepth"] = json!(depth);
+            let mut document = load(&value);
+            document.set_saving_app_version(Some("1.3.0".into()));
+            let mut request = RenderRequest::sized(Size::new(24, 16), Precision::Float32);
+            request.scale = Some((2., 2.));
+            request.origin = Some((16., 16.));
+            let frame = renderer
+                .render(
+                    &document,
+                    "Ptest-root",
+                    Ticks::ZERO,
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            for p in renderer.read_rgba(&frame).unwrap().chunks_exact(4) {
+                for channel in 0..4 {
+                    assert!(
+                        (f64::from(p[channel]) - input[channel]).abs() <= 1. / 1024.,
+                        "wide cropped zoom {id} v{version},depth {depth},channel {channel}"
+                    );
+                }
+            }
         }
     }
 }

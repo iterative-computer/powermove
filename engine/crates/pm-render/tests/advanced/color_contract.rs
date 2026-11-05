@@ -4,7 +4,7 @@
 use super::*;
 use pm_color::effect_transforms::{Profile, ProfileTransform};
 
-fn quantize(pixel: [f64; 4], depth: u32) -> [f64; 4] {
+pub(super) fn quantize(pixel: [f64; 4], depth: u32) -> [f64; 4] {
     pixel.map(|v| {
         if depth == 32 {
             v as f32 as f64
@@ -13,7 +13,7 @@ fn quantize(pixel: [f64; 4], depth: u32) -> [f64; 4] {
         }
     })
 }
-fn assert_pixels(pixels: &[f32], expected: [f64; 4], context: &str) {
+pub(super) fn assert_pixels(pixels: &[f32], expected: [f64; 4], context: &str) {
     assert_eq!(pixels.len(), 32 * 32 * 4, "{context}: complete frame");
     for p in pixels.chunks_exact(4) {
         for i in 0..4 {
@@ -26,7 +26,7 @@ fn assert_pixels(pixels: &[f32], expected: [f64; 4], context: &str) {
         }
     }
 }
-fn pixel_fixture(id: &str, version: u32, params: Value, pixel: [f64; 4]) -> Value {
+pub(super) fn pixel_fixture(id: &str, version: u32, params: Value, pixel: [f64; 4]) -> Value {
     fixture(
         id,
         version,
@@ -159,7 +159,7 @@ fn e10_saved_compander_signed_hdr_zero_alpha_identity_and_all_depths() {
         }
     }
 }
-fn hls(c: [f64; 3]) -> [f64; 3] {
+pub(super) fn hls(c: [f64; 3]) -> [f64; 3] {
     let hi = c.into_iter().fold(f64::NEG_INFINITY, f64::max);
     let lo = c.into_iter().fold(f64::INFINITY, f64::min);
     let d = hi - lo;
@@ -180,7 +180,7 @@ fn hls(c: [f64; 3]) -> [f64; 3] {
         (d / (2. * l.min(1. - l)).max(1e-30)).clamp(0., 1.),
     ]
 }
-fn from_hls(c: [f64; 3]) -> [f64; 3] {
+pub(super) fn from_hls(c: [f64; 3]) -> [f64; 3] {
     [0., 4., 2.].map(|offset| {
         let hue = (((c[0] * 6. + offset).rem_euclid(6.) - 3.).abs() - 1.).clamp(0., 1.);
         c[1] + (hue - 0.5) * (2. * c[1].min(1. - c[1])) * c[2]
@@ -392,6 +392,7 @@ pub(super) fn decoded_png(renderer: &mut Renderer, value: &Value, depth: u32, la
     renderer.set_main_effects_for_document(&document).unwrap();
     let mut request = RenderRequest::sized(Size::new(32, 32), Precision::Float32);
     request.output_kind = pm_render::OutputKind::Final;
+    request.export = true;
     let frame = renderer
         .render(
             &document,
