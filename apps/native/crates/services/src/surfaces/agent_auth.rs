@@ -285,7 +285,22 @@ pub fn otp(raw: &str) -> String {
 
 /// Exact shared providerUrl normalization; plaintext HTTP is local-only.
 pub fn provider_url(raw: &str) -> Option<String> {
-    let mut url = Url::parse(raw.trim()).ok()?;
+    let text = raw.trim();
+    let lower = text.to_ascii_lowercase();
+    let bare_local = ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| {
+        lower
+            .strip_prefix(host)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+    });
+    // Owner's c7f46a main reference accepts copied bare server addresses.
+    let qualified = if text.contains("://") {
+        text.to_owned()
+    } else if bare_local {
+        format!("http://{text}")
+    } else {
+        format!("https://{text}")
+    };
+    let mut url = Url::parse(&qualified).ok()?;
     let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if url.host_str().is_none()
         || !(url.scheme() == "https" || local && url.scheme() == "http")

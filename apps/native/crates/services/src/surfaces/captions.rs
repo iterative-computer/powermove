@@ -12,6 +12,11 @@ pub struct Layer {
     pub locked: bool,
     pub cues: Vec<CaptionCue>,
 }
+/// Pinned main restricts the Timeline Import Captions contribution to an empty
+/// context (older callers omit kind). Never add it to key/layer/cue menus.
+pub fn offers_timeline_import(kind: Option<&str>) -> bool {
+    kind.is_none_or(|kind| kind.is_empty() || kind == "empty")
+}
 pub fn choose_layer<'a>(
     layers: &'a [Layer],
     selected: &[String],
@@ -435,5 +440,14 @@ mod tests {
         assert_eq!(follow(&l, "", 12., true, false, false), Some(1));
         assert_eq!(follow(&l, "", 12., true, false, true), None);
         assert_eq!(follow(&l, "second", 12., true, false, false), None);
+    }
+    #[test]
+    fn main_timeline_import_only_appears_for_empty_context() {
+        for kind in [None, Some(""), Some("empty")] {
+            assert!(offers_timeline_import(kind));
+        }
+        for kind in ["layer", "keyframe", "cue", "ruler"] {
+            assert!(!offers_timeline_import(Some(kind)));
+        }
     }
 }

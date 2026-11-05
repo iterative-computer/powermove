@@ -1394,3 +1394,40 @@ shader/caption host wiring remain integration work. The traits and plans expose
 these requirements; they do not claim working production services. Existing
 agent panels/runtime/store-host/engine consumers continue to own their behavior.
 No macOS UI or phase gate is accepted by this backing-only change.
+
+### Part A pinned-main delta backing — 2026-11-04
+
+The owner's reference change supersedes the earlier v1.2.0-only provenance in
+this lane: current behavior target is **main
+`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`**; the tag remains a required compatible
+input. Merged integration base
+`711f44ba0667f81ce8388c4ec57565d1d0378630`, including `main-delta.md`, the owner
+decisions and README §6's updated consent decision. No historical source or test
+oracle was rewritten. `surfaces::{BEHAVIOR_REFERENCE,LEGACY_REFERENCE}` makes the
+pair inspectable by headless consumers.
+
+| Delta | Part A backing and precise boundary |
+| --- | --- |
+| A01 provider discovery/keys/context | New `providers` module: 13 pinned preset address/kind records, copied bare-address normalization, per-address key references, legacy single-address import via the same normalizer, retained overflow/replaced key archives with explicit-clear tombstones, bounded/deduplicated model projection, explicit tool-capability exclusion, unknown capabilities retained as unknown, Ollama capabilities/context facts and native discovery/configuration worker adapters. Configure offers the unused `powermove_check` tool, verifies a real chat message, tolerates optional model-list failure, then requires secure atomic config/key publication. No failed test/key save replaces the active connection. Fixed-preset local-server records require actual returned model data. HTTP failures are bounded, inert diagnostic facts; no new visible error wording is invented. Concrete transport/Keychain and locale collation remain host capabilities. |
+| A02 nine external clients | New `agent_clients` module: all nine config paths/shapes and native `--powermove-mcp` argv, Copy Setup payloads, strict JSON/manual fallback for comments, TOML document edits preserving other tables/comments, exact managed-entry receipts, handwritten-entry refusal, changed-file CAS and archive-required worker boundary. Claude Code uses its own CLI with literal argument arrays. Explicit consent is required for Connect, including Claude Desktop; there is **no launch-time registration**. Intentional removal is retained in receipts. No actual user/client config is opened by tests. Host must implement durable no-follow file/receipt publication and the verified CLI adapter. |
+| A03 Claude Project Auto | `providers::claude_project_permission_mode` records main's omitted-approval→Auto behavior and supervised→acceptEdits rule; Auto remains unavailable without observed classifier support. This is a required **policy projection, not provider execution acceptance**. `pm-agents/src/claude.rs` still chooses acceptEdits and needs the owning agent-worker lane's argument/instruction integration and pinned-runtime proof; that crate is outside this lane's owned paths. Computer consent and Editor permission behavior are untouched. |
+| A04/A05 conversation/media backing | New `agent_reply`: exact completed-turn grouping/trailing trace-prose split, steering in the original turn, max stored duration and a timer keyed to the root run; all unknown messages/steps retained. Local image/video/audio MIME/path projection, bounded media byte-range plans, inert CSP fact, safe links and explicitly requested, document-fenced HTTPS media loads. This is not a new Markdown renderer or file-serving entitlement. The richer Markdown block/inline parser, native media-file grants/streaming and panel mounting remain the agent panel/host owners' integration work; no visual layout is chosen here. |
+| A06/A07 | Rust MCP/tool/schema/provider execution is outside this services backing lane. A07 overlaps P02 and must consume the delta-data owner's project-memory authority, without a second writer or local substitute. No catalog is edited or capability advertised here. |
+| A08–A10 | Pinned source comparison found no changes to `main/extensions/{rebase,update-fork}.ts` or Store publishing versus the tag. Existing consumers and every archived source remain. Application/provider lifetime, authorization/publication/capture fences and frame-review execution still require the kernel/MCP/agent owners' concrete binding; this lane's ticket/document fences do not claim that global queue proof. |
+| Captions / Easing / Shader Lab | In these owned source families the production diff is two Captions menu/copy changes and Shader Lab CSS height; Easing has a test-only change. `captions::offers_timeline_import` now restricts the contribution to empty/unspecified contexts. Whole Composition/Work Area already follow Opus's Title Case spec. Shader CSS is presentation evidence only: no literal/token substitution. Store/cloud auth/publish/transcription and Easing algorithms compared byte-identically to the tag in the inspected paths. No Store sort, remembered-install list, thread rename or S066 was added. U-row presentation continues with the later UI lane. |
+
+Source comparisons use the immutable main hash, not a moving checkout. Main's
+provider address/metadata/key behavior selects **N3**; preserving retired key
+references, handwritten/commented configuration and every message selects **N4**.
+Native executable/worker-only IO selects **N7/N8**; unknown runtime capabilities
+stay unavailable under **N1/N3**. The owner's **ask first** decision overrides the
+previous Claude Desktop auto-registration default. Existing v1–3 consumers remain
+under **N4/N6/prune**. TOML support adds `toml_edit` to pm-services and the existing
+isolated manifest; only its required dependency closure is added to the owned
+lockfiles via `cargo update -p pm-services`, with no bulk upgrades.
+
+**DESIGN-TODO(opus):** main-delta.md marks provider discovery/context warnings
+and the nine-client setup surface **spec pending**. The new APIs expose neutral
+model facts and manual payloads only. Their views/copy are not built. The earlier
+statement of no new placeholders applies to the pre-delta spec pass, not these
+new rows. These two items remain for Opus; no substitute design is chosen.
