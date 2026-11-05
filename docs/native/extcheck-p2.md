@@ -509,3 +509,61 @@ real native input, complete recorder/engine/Store dispatch, authentic release or
 preserved installer provenance, and the kernel lock correction above. The existing
 single-command extcheck driver still refuses its unattached native full capture;
 these component endpoints must not change that status to `captured`.
+
+### ext4 final integration refresh and exact validation
+
+Merged/refreshed base: **`5bcd425ddc158cbd891ee4b515cf9993fad29a66`**.
+The final explicit remote-tracking fetch and merge reported already up to date,
+with no conflicts. No other branch was written. Final source verification follows
+`f9ddff52d` (the Canvas direction/winding contract correction).
+
+The current-main source audit also selects two command details: programmatic
+`runKernelCommand` directly invokes `run`, independently of eligibility `when`;
+the guarded command reports callback failures and returns undefined. The real
+confined-helper regression covers both. Canvas direction conversion and invalid
+winding rejection are separately tested against actual pixels (**N3/N6**).
+
+| Exact command from checkout root | Final result |
+| --- | --- |
+| `cargo build --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner -p pm-runtime-v8 --bins` | Pass; includes the real confined helper |
+| `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner -p pm-compat-host -p pm-store-host -p pm-recorder -p pm-recorder-raster -p pm-remote-dom` | **295 pass / 0 fail / 0 ignored**: runner 30, host 23, Store 90, recorder 94, raster 36, remote DOM 22 |
+| `bun test apps/native/crates/compat-host/tests/canvas-page.test.ts` | **2 pass / 11 assertions** |
+| `python3 -m unittest discover -s tools/extcheck -p 'test_*.py'` | **40 pass** |
+| `node --test tools/extcheck/test_clock_preparation.mjs tools/extcheck/test_startup_clock.mjs tools/extcheck/test_references.mjs` | **11 pass / 0 skipped** |
+| `PM_EXTCHECK_RUNNER="$CARGO_TARGET_DIR/debug/pm-compat-runner" node --test tools/extcheck/test_clock_v8.mjs` | **3 pass / 0 skipped**, real V8/DOM/transport recordings |
+| `node tools/extcheck/test_clock_fixture.mjs` | Pass; shared time/entropy/scheduler fixture |
+| `cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner -p pm-compat-host --all-targets --no-deps -- -D warnings` | Clean |
+| `cargo clippy --locked --manifest-path apps/native/Cargo.toml -p pm-compat-host --target aarch64-apple-darwin --all-targets --features macos-probes --no-deps -- -D warnings` | Clean cross-target typing, including actual capture endpoints and probes; no macOS runtime claim |
+| `cargo fmt --manifest-path apps/native/Cargo.toml -p pm-compat-runner -p pm-compat-host -- --check` | Clean |
+| `cargo run --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner --example lock-inheritance` | **FAIL / exit 1 / WouldBlock / PID 0** again; production kernel defect remains |
+
+The ordinary suite's successful reopen is retained alongside the earlier failed
+sweep and this deterministic failure. It is not evidence of a kernel fix.
+Gitleaks staged scans (with the repository's `--ignore-gitleaks-allow` requirement)
+pass before each commit. No failure, ignored case, acceptance denominator or
+pixel tolerance was relaxed.
+
+New Mac component smoke, after installing the remote-DOM package's frozen
+build dependencies (no V8 artifact is needed for this particular host-only probe):
+
+```sh
+bun build apps/native/crates/compat-host/tests/page-entry.ts --target=browser --format=iife --outfile=/private/tmp/pm-ext4-page.js
+cargo +1.96.1 run --locked --manifest-path apps/native/Cargo.toml -p pm-compat-host --features macos-probes --example remote-dom-smoke -- /private/tmp/pm-ext4-page.js /private/tmp/pm-ext4-smoke.png
+```
+
+A real Mac must run that smoke and verify native PNG resource decode, transparent
+pixels, scaling/orientation, repaint/reset/disconnect, resource pressure and stale
+generation rejection in the actual WebKit process; verify snapshot failure and
+host-close/recovery completion; and wire/present real extension frames through
+the app shell. The complete gate still needs full-window geometry/fonts/theme,
+actual keyboard/IME/pointer/AX interactions, complete behavioral instrumentation,
+reviewed per-extension scripts/projects and three full recordings per role for
+all 58. Cross-target Clippy proves none of those runtime properties.
+
+**Finish status: BLOCKED, P2 OPEN.** Required changes outside ownership are the
+explicit kernel lock release and app-shell/full-driver integration (including
+`tools/extcheck/native.mjs`). Within the extension area, non-command Store
+registration/view/resource dispatch (including GLSL effects), missing recorder
+capabilities and real archive provenance remain open. The existing driver must
+continue reporting the unavailable full adapter; no component probe may be
+substituted for an accepted comparison. No new DESIGN-TODO(opus) was required.
