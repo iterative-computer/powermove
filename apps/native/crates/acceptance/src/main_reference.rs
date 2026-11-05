@@ -579,7 +579,10 @@ pub fn run(
                 .iter()
                 .filter(|case| {
                     case.kind == "corpus-copy"
-                        || case.id == "W007.portable"
+                        || matches!(
+                            case.id.as_str(),
+                            "W007.portable" | "W007.mcp-utf16-ingress" | "A506"
+                        )
                         || (matches!(case.workflow.as_str(), "W037" | "W038" | "W040")
                             && crate::runtime::CASES.iter().any(|entry| entry.0 == case.id))
                 })

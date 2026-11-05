@@ -105,6 +105,24 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         );
     }
     assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1424, 2, 3178));
+    for id in ["A506", "W007.mcp-utf16-ingress"] {
+        assert!(
+            r.compatibility_required_ids
+                .iter()
+                .any(|required| required == id)
+        );
+        assert_eq!(
+            r.compatibility
+                .as_ref()
+                .unwrap()
+                .cases
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .status,
+            Status::Fail
+        );
+    }
     let blocked = r
         .cases
         .iter()

@@ -1221,3 +1221,34 @@ because of the measured ingress/export defects; the other 81 aggregates remain
 blocked. All 83 complete-workflow contract rows remain blocked and no workflow
 passes. Earlier dated shared W1 tables retain their original evidence instead
 of being rewritten to match this new execution.
+
+### Final merge replay — 2026-11-05
+
+Fetched and merged `origin/feat/native-engine` at
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66` (already contained; no conflict).
+The final locked replay has **106 acceptance + 17 optional-worker + 37 retained-e2e
+Rust tests = 160 passed, 0 failed, 0 ignored**, plus **15 Python tests passed**.
+All three crate-local formatting and Clippy `-D warnings` checks pass. No package
+or workspace member was added, so neither native/engine nor nested lockfiles
+needed any dependency update; every Cargo command uses `--locked`.
+
+Exact suite commands, also executed by `verify.sh --strict`:
+
+```sh
+cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance
+cargo test --locked --manifest-path apps/native/crates/acceptance/runtime/Cargo.toml
+cargo test --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml
+python3 -m unittest discover -s apps/native/crates/acceptance/scripts -p 'test_*.py'
+```
+
+The final configured acceptance remains **1,700 / 2 / 2,643 main** and
+**1,467 / 2 / 3,135 legacy**; `verify.sh --strict` exits **1**, preserving both
+measured product defects. All 5,798 checked-in census verdicts byte-match a fresh
+reconciliation. Both new file probes are explicit required compatibility-input
+gates in main, alongside their current-main verdicts. Earlier passing file/extension
+checks remain and no historical UI gate reinstates the old UI reference.
+
+Only the owned acceptance subtree and this append-only document differ from the
+integration base. Secret scanning with the repository's staged gitleaks policy
+passes. macOS/application/Opus qualification and the owning production fixes
+listed above remain open; this lane is mergeable, not full product acceptance.
