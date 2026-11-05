@@ -163,3 +163,29 @@ fn unknown_history_is_preserved_and_archiving_keeps_complete_receipts() {
     );
     assert_eq!(threads.raw(), &before);
 }
+
+#[test]
+fn candidate_append_refuses_malformed_records_and_partial_batches_atomically() {
+    for mut record in [
+        Value::Null,
+        json!([]),
+        json!({"nativeRunEvents":"future-shape"}),
+    ] {
+        let before = record.clone();
+        assert!(history::append(&mut record, &[receipt(0, Event::Ready)]).is_err());
+        assert_eq!(record, before);
+    }
+    let mut record = json!({"future":{"keep":true}});
+    let before = record.clone();
+    assert!(
+        history::append(
+            &mut record,
+            &[
+                receipt(1, Event::Ready),
+                receipt(0, Event::Warning("reordered".into()))
+            ]
+        )
+        .is_err()
+    );
+    assert_eq!(record, before);
+}
