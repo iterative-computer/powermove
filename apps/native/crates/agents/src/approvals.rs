@@ -26,7 +26,8 @@ impl Authority {
     pub fn computer_allowed(&self) -> bool {
         self.access == Access::Computer && self.computer_consent
     }
-    /// Claude has no auto-reviewer; both project approval modes ask the user.
+    /// Project permission requests reaching stdio still ask the user. In Auto,
+    /// Claude Code's classifier may settle them before they reach this client.
     pub fn claude_asks(&self) -> bool {
         self.access == Access::Project
     }

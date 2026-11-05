@@ -194,3 +194,51 @@ fn stalled_stdin_cannot_prevent_cancellation() {
     }
     assert!(cancelled && stopped);
 }
+
+#[test]
+fn checked_delivery_distinguishes_mailbox_admission_from_held_question_acceptance() {
+    let t = Temp::new();
+    let handle = transport::spawn(
+        spec(&t, "claude-control"),
+        Machine::Claude(claude::Client::new(
+            "oracle-run".into(),
+            Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+            0,
+        )),
+        vec![],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(handle.try_event(), Ok(Event::Trace {value,..}) if value["kind"] == "question")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let missing = handle
+        .send_checked(Action::Answer {
+            run: "oracle-run".into(),
+            item: "withdrawn".into(),
+            answers: BTreeMap::new(),
+        })
+        .ok()
+        .unwrap();
+    assert!(!missing.recv_timeout(Duration::from_secs(2)).unwrap());
+    let answer = Action::Answer {
+        run: "oracle-run".into(),
+        item: "ask-1".into(),
+        answers: BTreeMap::from([("ask-1-0".into(), vec!["Blue".into(), "Green".into()])]),
+    };
+    let accepted = handle.send_checked(answer).ok().unwrap();
+    assert!(accepted.recv_timeout(Duration::from_secs(2)).unwrap());
+    let repeated = handle
+        .send_checked(Action::Answer {
+            run: "oracle-run".into(),
+            item: "ask-1".into(),
+            answers: BTreeMap::new(),
+        })
+        .ok()
+        .unwrap();
+    assert!(!repeated.recv_timeout(Duration::from_secs(2)).unwrap());
+}

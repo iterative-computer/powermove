@@ -414,7 +414,7 @@ pub fn scene() -> Check {
     // Expected results are generated from the owner-selected Studio source,
     // independent of native code; tagged fixtures remain retained as evidence.
     let fixtures: Value =
-        serde_json::from_str(include_str!("../../mcp/fixtures/scene3d-source-read.json"))
+        serde_json::from_str(include_str!("../data/fixtures/scene3d-source-read.json"))
             .map_err(|e| e.to_string())?;
     for fixture in fixtures["fixtures"].as_array().unwrap() {
         let mut f = Fixture::new()?;

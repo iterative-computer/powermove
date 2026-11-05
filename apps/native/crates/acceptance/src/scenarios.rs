@@ -20,6 +20,18 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "W007.mcp-utf16-ingress",
+            workflow: "W007",
+            title: "MCP must open kernel-valid authored UTF-16 without data loss",
+            run: crate::headless::utf16_ingress,
+        },
+        Scenario {
+            id: "A506",
+            workflow: "W031",
+            title: "MCP file ingress, edited packed-media save, exact embedded bytes and persisted history",
+            run: crate::headless::packed_save,
+        },
+        Scenario {
             id: "W061.frozen-set-easing",
             workflow: "W061",
             title: "Frozen sequential set_property Glide retains both complete authored handles",

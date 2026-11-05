@@ -2,6 +2,7 @@
 //! OAuth homes are opaque runtime-owned paths, never read or modified here.
 pub mod approvals;
 pub mod claude;
+pub mod claude_launch;
 pub mod codex;
 pub mod codex_exec;
 pub mod conversation;

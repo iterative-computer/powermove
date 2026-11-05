@@ -54,6 +54,9 @@ with blockers.open('w', newline='') as output:
         if case['status'] == 'blocked-by':
             writer.writerow([case['id'],case['workflow'],case['kind'],str(case['needs_macos']).lower(),case['blocked_by'],case['reason']])
 print(f"Remaining case blockers: {blockers}")
+if report.get('format') == 'powermove.acceptance.main' and report.get('scope') == 'full-inventory':
+    import subprocess
+    subprocess.run([sys.executable, 'apps/native/crates/acceptance/scripts/census.py', sys.argv[1]], check=True)
 PY
 fi
 exit "$acceptance_exit"

@@ -320,10 +320,21 @@ fn changes_during_consent_refuse_stale_publication() {
 }
 #[test]
 fn cli_registration_uses_native_adapter_and_exact_scope_argv() {
-    struct Cli(Mutex<Vec<Vec<String>>>);
+    struct Cli(Mutex<Vec<Vec<String>>>, PathBuf);
     impl ClaudeCli for Cli {
         fn run_mcp(&self, args: &[String]) -> Result<()> {
             self.0.lock().unwrap().push(args.to_vec());
+            let mut value: Value = serde_json::from_slice(&fs::read(&self.1)?).unwrap();
+            if args[0] == "add" {
+                if !value["mcpServers"].is_object() {
+                    value["mcpServers"] = json!({});
+                }
+                value["mcpServers"]["powermove"] =
+                    json!({"type":"stdio","command":args[5],"args":[args[6]]});
+            } else if let Some(servers) = value["mcpServers"].as_object_mut() {
+                servers.remove("powermove");
+            }
+            fs::write(&self.1, value.to_string())?;
             Ok(())
         }
     }
@@ -337,7 +348,7 @@ fn cli_registration_uses_native_adapter_and_exact_scope_argv() {
             )
             .is_err()
     );
-    let cli = Arc::new(Cli(Mutex::new(vec![])));
+    let cli = Arc::new(Cli(Mutex::new(vec![]), f.path("claude-code")));
     f.service.claude_cli = Some(cli.clone());
     let expected = f.oracle("connect", "claude-code");
     f.service

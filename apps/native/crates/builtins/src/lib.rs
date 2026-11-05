@@ -6,6 +6,7 @@ pub mod delivery;
 mod models;
 mod properties;
 mod settings;
+mod timeline_easing;
 pub mod timeline_scene;
 pub mod virtualization;
 use data::Backend;
@@ -72,6 +73,7 @@ struct Broker {
     errors: Mutex<Vec<String>>,
     facts: Mutex<Value>,
     platform_replies: Mutex<BTreeMap<u64, Value>>,
+    timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -106,6 +108,7 @@ impl Builtins {
             errors: Default::default(),
             facts: Mutex::new(json!({})),
             platform_replies: Default::default(),
+            timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
             wake: Arc::new(wake),
         });
@@ -171,10 +174,42 @@ impl Builtins {
             backend.native.media_runtime = observed.clone();
         }
     }
+    /// Worker-side completion of an import/Locate File/Replace File operation.
+    /// The media service must first durably retain the original bytes (including
+    /// old versions for relink). This method admits metadata through the actor;
+    /// it does not declare decoder readiness or substitute a proxy for originals.
+    /// Keep the returned pending receipt and publish success only after it passes.
+    pub fn admit_media(
+        &self,
+        owner: &pm_panel_media::Stamp,
+        items: Vec<pm_panel_media::StoredAsset>,
+        folder: Option<String>,
+        replace: Option<String>,
+        caller: pm_kernel::Caller,
+    ) -> std::result::Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+        String,
+    > {
+        if self.broker.application || owner.project != self.broker.project {
+            return Err("Media completion belongs to a different project".into());
+        }
+        let published = self
+            .broker
+            .kernel
+            .published(&owner.project)
+            .ok_or("Project closed")?;
+        let catalog =
+            pm_panel_media::Catalog::published(&published).map_err(|e| format!("{e:?}"))?;
+        let edit = catalog
+            .prepare_import(owner, items, folder, replace)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(edit.submit(&self.broker.kernel, caller))
+    }
+
     pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {
         if id == 0 {
             return;
-        } // One-way native model effect, without a JS waiter.
+        }
         self.broker.platform_replies.lock().unwrap().insert(
             id,
             match result {
@@ -220,7 +255,24 @@ impl Builtins {
         key: &str,
         additive: bool,
     ) -> Result<Ticket<Evaluation>> {
-        self.realms.get("timeline").ok_or(Error::Closed)?.eval(format!("__pmBuiltin.command('panel.timeline',{})",json!({"type":"native.select-key","layer":layer,"channel":channel,"key":key,"additive":additive})))
+        self.timeline_action(json!({"type":"selectKeys","layer":layer,"path":channel,"ids":[key],"additive":additive}))
+    }
+    /// Enqueue on the existing v4 worker. The ticket covers actor receipts and
+    /// platform acknowledgements; the main thread only polls it. Drivers can
+    /// include decimal document/revision stamps from the inspected frame.
+    pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
+        self.realms
+            .get("timeline")
+            .ok_or(Error::Closed)?
+            .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+    }
+
+    /// Inspect exact library source and CAS revision on the panel worker.
+    pub fn timeline_easing_library(&self) -> Result<Ticket<Evaluation>> {
+        self.realms
+            .get("timeline")
+            .ok_or(Error::Closed)?
+            .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
         self.realms.get(panel).ok_or(Error::Closed)?.eval(format!(
@@ -382,13 +434,50 @@ impl EngineProxy for Broker {
             "host.poll" => {
                 {
                     let mut backend = entry.backend.lock().unwrap();
+                    // Drain effect receipts on the panel worker. Main only
+                    // deposits replies; it never locks a worker-owned backend.
+                    {
+                        let mut pending = self.timeline_requests.lock().unwrap();
+                        let mut replies = self.platform_replies.lock().unwrap();
+                        let ids = pending
+                            .iter()
+                            .filter(|(_, owner)| owner.0 == panel && owner.1 == generation.number)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>();
+                        for id in ids {
+                            if let Some(reply) = replies.remove(&id) {
+                                pending.remove(&id);
+                                backend.native.timeline_effect_pending =
+                                    backend.native.timeline_effect_pending.saturating_sub(1);
+                                if reply["accepted"] != true {
+                                    backend.native.timeline_effect_result =
+                                        Some(Err(reply["error"]
+                                            .as_str()
+                                            .unwrap_or("Native timeline effect rejected")
+                                            .into()));
+                                }
+                            }
+                        }
+                    }
                     backend.tick().map_err(Error::Host)?;
                     let requests = std::mem::take(&mut backend.native.platform);
                     if !requests.is_empty() {
                         let mut queue = self.platform.lock().unwrap();
                         for (operation, input) in requests {
+                            let id = if operation == "timeline.effect" {
+                                let id = self
+                                    .platform_ids
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                self.timeline_requests
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id, (panel.into(), generation.number));
+                                id
+                            } else {
+                                0
+                            };
                             queue.push(PlatformRequest {
-                                id: 0,
+                                id,
                                 panel: panel.into(),
                                 generation: generation.number,
                                 operation,
@@ -463,6 +552,7 @@ impl EngineProxy for Broker {
                 .unwrap()
                 .inspector_snapshot()
                 .map_err(Error::Host),
+            "timeline.easing.library" => Ok(timeline_easing::inspect(&self.kernel)),
             "timeline.frame" => entry
                 .backend
                 .lock()
@@ -492,15 +582,13 @@ impl EngineProxy for Broker {
                 let id = self
                     .platform_ids
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (operation, platform_input) = inspector_platform(panel, input)?;
                 requests.push(PlatformRequest {
                     id,
                     panel: panel.into(),
                     generation: generation.number,
-                    operation: input["operation"]
-                        .as_str()
-                        .ok_or(Error::Invalid("platform operation"))?
-                        .into(),
-                    input: input["input"].clone(),
+                    operation: operation.into(),
+                    input: platform_input,
                 });
                 (self.wake)();
                 Ok(json!(id))
@@ -545,6 +633,35 @@ impl EngineProxy for Broker {
         }
     }
 }
+/// Normalize owned panel requests to the existing asynchronous AppKit routes.
+fn inspector_platform<'a>(panel: &str, request: &'a Value) -> Result<(&'a str, Value)> {
+    let operation = request["operation"]
+        .as_str()
+        .ok_or(Error::Invalid("platform operation"))?;
+    let input = &request["input"];
+    if panel == "inspector" && operation == "inspector" {
+        match input["type"].as_str() {
+            Some("add-effect-menu") => return Ok(("effectMenu", input.clone())),
+            Some("row-menu") => {
+                let items = input["items"]
+                    .as_array()
+                    .ok_or(Error::Invalid("row menu"))?;
+                let mut options = Vec::new();
+                for item in items {
+                    if item["separatorBefore"] == true {
+                        options.push(Value::Null);
+                    }
+                    options.push(json!({"id":item["action"],"label":item["label"],
+                        "disabled":item["enabled"] != true,"checked":item["checked"]}));
+                }
+                return Ok(("contextMenu", json!(options)));
+            }
+            _ => {}
+        }
+    }
+    Ok((operation, input.clone()))
+}
+
 impl KernelHooks for Broker {
     fn load_storage(&self, _: &str) -> Result<Value> {
         Ok(json!({}))

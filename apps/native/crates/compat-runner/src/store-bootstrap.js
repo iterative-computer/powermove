@@ -9,6 +9,21 @@ globalThis.__storeCheck = {
     const call = async (method, ...args) => {
       if (closed) throw Error("Store RPC is closed");
       const reply = runtime.engine("store.rpc", { method, args });
+      if (reply.callback) {
+        // Pinned runKernelCommand invokes run directly. `when` belongs to
+        // eligibility polling; it never gates a programmatic commands.run.
+        const { run, args } = reply.callback;
+        try {
+          return await rpc.invokeHandle(run, ...args);
+        } catch (error) {
+          if (!closed)
+            await call("runtime-error", {
+              name: error.name,
+              message: error.message,
+            });
+          return undefined; // The pinned host's guarded command fallback.
+        }
+      }
       return reply.value;
     };
     const rpc = {
