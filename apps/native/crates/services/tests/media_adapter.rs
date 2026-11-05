@@ -39,7 +39,14 @@ fn flat_and_linked_ranges_keep_unknown_metadata_and_refuse_changed_or_unsafe_sou
             .read_range("media:linked", 0, 8 * 1024 * 1024 + 1)
             .is_err()
     );
+    let old_mtime = fs::metadata(&source).unwrap().modified().unwrap();
     fs::write(&source, b"change").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old_mtime))
+        .unwrap();
     assert!(adapter.read_range("media:linked", 0, 1).is_err());
     fs::remove_file(&source).unwrap();
     assert_eq!(

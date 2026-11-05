@@ -7,8 +7,32 @@ use std::{
     path::Path,
 };
 
+type Identity = (u64, u64, u64, i64, i64, i64, i64, u32);
+fn identity(m: &std::fs::Metadata) -> Identity {
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(target_os = "macos")]
+    let flags = {
+        use std::os::macos::fs::MetadataExt;
+        m.st_flags()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let flags = 0;
+    (
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+        flags,
+    )
+}
+/// Worker-owned adapter. Retain at most 64 verified descriptors for playback;
+/// a cache hit needs the full device/inode/length/mtime/ctime/flags identity.
 pub struct FileMedia {
     records: std::collections::BTreeMap<String, DiskMediaRecord>,
+    verified: std::cell::RefCell<std::collections::BTreeMap<String, (Identity, std::fs::File)>>,
 }
 impl FileMedia {
     pub fn open(root: &Path) -> Result<Self> {
@@ -17,6 +41,7 @@ impl FileMedia {
                 .into_iter()
                 .map(|r| (r.key.clone(), r))
                 .collect(),
+            verified: Default::default(),
         })
     }
     /// Metadata access never dereferences source links. Complete unknown fields,
@@ -45,7 +70,6 @@ impl FileMedia {
                 "Invalid media range",
             ));
         }
-        use std::os::unix::fs::MetadataExt;
         let path = r
             .owned_path
             .as_ref()
@@ -53,24 +77,28 @@ impl FileMedia {
             .ok_or_else(|| {
                 ServiceError::message(ServiceErrorCode::InvalidData, "Missing payload")
             })?;
-        let stamp = |m: &std::fs::Metadata| {
-            (
-                m.dev(),
-                m.ino(),
-                m.len(),
-                m.mtime(),
-                m.mtime_nsec(),
-                m.ctime(),
-                m.ctime_nsec(),
-            )
-        };
-        let before = stamp(&std::fs::symlink_metadata(path)?);
-        let mut file = r.open_verified()?;
+        let before = identity(&std::fs::symlink_metadata(path)?);
+        let mut cache = self.verified.borrow_mut();
+        if cache.get(key).is_some_and(|(stamp, file)| {
+            *stamp != before || file.metadata().map_or(true, |m| identity(&m) != before)
+        }) {
+            cache.remove(key);
+        }
+        if !cache.contains_key(key) {
+            let file = r.open_verified()?;
+            if cache.len() >= 64 {
+                cache.pop_first();
+            }
+            cache.insert(key.into(), (before, file));
+        }
+        let (_, file) = cache.get_mut(key).expect("verified media descriptor");
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; length];
         file.read_exact(&mut bytes)?;
-        if before != stamp(&file.metadata()?) || before != stamp(&std::fs::symlink_metadata(path)?)
+        if before != identity(&file.metadata()?)
+            || before != identity(&std::fs::symlink_metadata(path)?)
         {
+            cache.remove(key);
             return Err(ServiceError::message(
                 ServiceErrorCode::InvalidData,
                 "Media changed during range read",
