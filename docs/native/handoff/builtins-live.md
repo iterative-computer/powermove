@@ -420,6 +420,31 @@ The changed TS/TSX files also pass Prettier. Every commit is staged-diff reviewe
 and scanned by gitleaks. No new workspace crate, fixture from another lane, user
 profile, credential, screenshot or build artifact was committed.
 
+### Broader v4 verification — 2026-11-05
+
+The complete `bun test --cwd apps/native/js/v4` run has **679 passes and 1
+failure**, 178 matched snapshots and 4506 assertions across 52 files. The scoped
+panel run above remains 459/459. The additional failure is deliberately retained:
+`src/components/part2.test.tsx`, `Switch outside Settings is diagnosed without
+changing the old Toggle checkbox` receives both `switchRequiresSettings` and
+`switchOutsideSettings`, while its exact contract requires only the latter.
+
+This is a renderer-merge overlap in **unowned**
+`apps/native/crates/surface/src/kit/validation.rs`: the timeline input's added
+ancestor scan sits alongside native-engine's existing, stricter top-level
+`settings_host` guard. The surface owner should remove the obsolete ancestor-scan
+block (from `if component == Some(Component::Switch) { let mut parent...` through
+its closing brace) and retain the later `settings_host` check. Do not widen the
+JS assertion to accept duplicate diagnostics, or remove the stricter guard. No
+owned panel uses Switch outside a Settings root; their validation remains green.
+
+Together with the design-token-table mismatch above, these are **two visible
+shared-owner failures**, not skipped cases. The next integration needs these
+precise surface/design reconciliations, plus the unfinished services already
+listed, before a MERGE-READY finish signal is honest. This lane's final tracked
+worktree is clean, and the native-engine base is an ancestor, but those facts do
+not establish semantic or product readiness.
+
 ### Exact Mac on-screen acceptance checklist
 
 Run the existing surface main-thread probe (`work/followups-check macos`) and a
