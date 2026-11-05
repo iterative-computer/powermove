@@ -41,10 +41,7 @@ fn value(result: Value) -> Value {
     assert_eq!(result["isError"], false, "{result}");
     serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
 }
-fn error(result: Value) -> Value {
-    assert_eq!(result["isError"], true, "{result}");
-    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
-}
+
 fn start(s: &mut McpSession) {
     value(s.call("start_session", json!({"prompt":"Synthetic test"})));
 }
@@ -228,12 +225,12 @@ fn interleaved_edits_refuse_rollback_and_do_not_squash() {
         .unwrap();
     }
     assert_eq!(
-        error(s.call("rollback_changes", json!({})))["code"],
+        diagnostic(&mut s, "rollback_changes", json!({}))["code"],
         "revision_conflict"
     );
     value(s.call("get_project_state", json!({"indexOnly":true})));
     assert_eq!(
-        error(s.call("rollback_changes", json!({})))["code"],
+        diagnostic(&mut s, "rollback_changes", json!({}))["code"],
         "revision_conflict"
     );
     let finish = value(s.call("finish_session", json!({"commit":true})));
@@ -249,7 +246,11 @@ fn batches_are_atomic_and_use_revision_guards() {
     let mut s = f.session();
     start(&mut s);
     let revision = f.host.lock().unwrap().revision(&id).unwrap();
-    error(s.call("apply_commands",json!({"commands":[{"type":"add_layer","id":"L-a","layerType":"solid"},{"type":"set_property","target":"missing","path":"opacity","value":0}]})));
+    diagnostic(
+        &mut s,
+        "apply_commands",
+        json!({"commands":[{"type":"add_layer","id":"L-a","layerType":"solid"},{"type":"set_property","target":"missing","path":"opacity","value":0}]}),
+    );
     let h = f.host.lock().unwrap();
     assert_eq!(h.revision(&id).unwrap(), revision);
     assert_eq!(h.read_document(&id).unwrap()["layers"], json!([]));
@@ -278,19 +279,20 @@ fn planning_and_app_context_access_is_enforced() {
     ));
     assert!(opened.get("workspace").is_none());
     assert_eq!(
-        error(s.call("apply_commands", json!({"commands":["{}"]})))["code"],
+        diagnostic(&mut s, "apply_commands", json!({"commands":["{}"]}))["code"],
         "invalid_arguments"
     );
     value(s.call("get_timeline", json!({})));
     value(s.call("finish_session", json!({"commit":false})));
-    error(s.call(
+    diagnostic(
+        &mut s,
         "start_session",
         json!({"prompt":"Bad","access":"editor","context":"app"}),
-    ));
+    );
     value(s.call("start_session", json!({"prompt":"App","context":"app"})));
-    error(s.call("get_project_state", json!({})));
+    diagnostic(&mut s, "get_project_state", json!({}));
     assert_eq!(
-        error(s.call("store_search", json!({"query":"test"})))["code"],
+        diagnostic(&mut s, "store_search", json!({"query":"test"}))["code"],
         "not_available_in_this_build"
     );
 }
@@ -301,7 +303,11 @@ fn selection_errors_never_change_selection() {
     let mut s = f.session();
     start(&mut s);
     add(&mut s, "L-a");
-    error(s.call("select_layers", json!({"layerIds":["L-a","missing"]})));
+    diagnostic(
+        &mut s,
+        "select_layers",
+        json!({"layerIds":["L-a","missing"]}),
+    );
     assert_eq!(
         value(s.call("select_layers", json!({"layerIds":["L-a"]})))["selection"]["layers"],
         json!(["L-a"])
@@ -450,11 +456,11 @@ fn reopening_same_project_fences_the_old_run() {
         host.open_project(&id).unwrap();
     }
     assert_eq!(
-        error(s.call("get_project_state", json!({})))["code"],
+        diagnostic(&mut s, "get_project_state", json!({}))["code"],
         "revision_conflict"
     );
     assert_eq!(
-        error(s.call("finish_session", json!({"commit":false})))["code"],
+        diagnostic(&mut s, "finish_session", json!({"commit":false}))["code"],
         "revision_conflict"
     );
     assert_eq!(
@@ -555,13 +561,13 @@ fn unknown_pending_and_malformed_arguments_are_structured() {
     let mut s = f.session();
     start(&mut s);
     assert_eq!(
-        error(s.call("render_frames", json!({})))["code"],
+        diagnostic(&mut s, "render_frames", json!({}))["code"],
         "not_available_in_this_build"
     );
-    error(s.call("invented_tool", json!({})));
-    error(s.call("get_timeline", json!({"limit":0})));
-    error(s.call("get_timeline", json!({"extra":1})));
-    error(s.call("select_layers", json!({"layerIds":["a","a"]})));
+    diagnostic(&mut s, "invented_tool", json!({}));
+    diagnostic(&mut s, "get_timeline", json!({"limit":0}));
+    diagnostic(&mut s, "get_timeline", json!({"extra":1}));
+    diagnostic(&mut s, "select_layers", json!({"layerIds":["a","a"]}));
 }
 #[test]
 fn automation_events_and_unwired_hooks_are_truthful() {
@@ -720,10 +726,11 @@ fn strip_operations_use_atomic_history_and_keep_input_order() {
     );
     drop(h);
     let before = f.host.lock().unwrap().revision(&id).unwrap();
-    error(s.call(
+    diagnostic(
+        &mut s,
         "edit_layer_strips",
         json!({"operation":"move","layerIds":["L-a","L-b"],"at":9}),
-    ));
+    );
     assert_eq!(f.host.lock().unwrap().revision(&id).unwrap(), before);
     let copy = value(s.call(
         "edit_layer_strips",
@@ -863,4 +870,14 @@ fn registry_definitions_back_effect_and_transition_commands() {
         h.read_document(&id).unwrap()["layers"][0]["fx"][0]["type"],
         "synthetic-fx"
     );
+}
+
+// Internal diagnostics retain codes/backing; MCP wire errors expose the tagged message.
+fn diagnostic(session: &mut McpSession, name: &str, args: Value) -> Value {
+    serde_json::to_value(
+        session
+            .dispatch(name, &args)
+            .expect_err("expected tool refusal"),
+    )
+    .unwrap()
 }
