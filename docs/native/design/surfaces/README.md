@@ -135,6 +135,8 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | Inside the window; the overlay is not ported | S107 |
 | 6 | Reverse migration isn't built. What do beta users get promised about going back? | Original app stays untouched; work done in Native leaves only as `.pmv` files | N003 |
 
+**Answered by the owner, 2026-11-04** (see p0-decisions.md; these override the defaults above): Q2 no restore UI. Q3 ask first, no silent registration. Q4 the new 3D system ships with the rewrite and replaces the old controls. Q5 inside the window. Q6 the old app refuses a native file it can't read. Q1 is still open.
+
 ## 7. New tokens requested by these specs
 
 Added by the pm-design lane through tokens.md *How to change a token*. A lane blocks
