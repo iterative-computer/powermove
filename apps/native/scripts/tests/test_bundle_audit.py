@@ -38,6 +38,9 @@ class BundleAudit(unittest.TestCase):
     def runner(self, args):
         if args[0] == 'lipo':
             return self.arches
+        if '-hv' in args:
+            kind = 'DYLIB' if args[-1].endswith('.dylib') else 'EXECUTE'
+            return 'Mach header\n magic cputype cpusubtype caps filetype ncmds sizeofcmds flags\n MH_MAGIC_64 ARM64 ALL 0x00 ' + kind + ' 10 1000 DYLDLINK\n'
         return self.loads[pathlib.Path(args[-1]).relative_to(self.root).as_posix()]
 
     def result(self):
@@ -111,6 +114,10 @@ class BundleAudit(unittest.TestCase):
         self.assertEqual(self.result()['status'], 'blocked')
         self.assertTrue(any('missing owner disposition' in issue for issue in self.result()['issues']))
 
+
+    def test_dylib_cannot_be_a_declared_executable(self):
+        self.manifest['executable'] = self.lib
+        self.assertTrue(any('entry point is not executable' in issue for issue in self.result()['issues']))
 
     def test_bundled_role_requires_explicit_resource(self):
         self.manifest['roles']['fonts']['kind'] = 'bundled'

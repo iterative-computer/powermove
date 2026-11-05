@@ -175,3 +175,20 @@ python3 apps/native/scripts/audit-native-bundle.py \
 
 N001–N007 native presentation still needs Opus specs and later Mac review. No UI
 acceptance, whole-profile Restore, signed installer or beta release gate is closed.
+
+## Merge preparation and Linux verification
+
+2026-11-04 (America/Chicago). Tests use canonical temporary roots, synthetic data
+and injected native capabilities. The two workspace lockfile additions are only
+`pm-first-launch` dependency edges to existing locked `pm-distribution` and `sha2`;
+no package versions were upgraded. Tests use `--locked`. New Restore preparation
+also owns an exclusive sibling lease; it refuses unrelated stages and linked
+paths instead of moving another producer's work. The bundle audit verifies Mach-O
+header kinds for every executable/helper slice and refuses silent traversal errors.
+
+Item 13 remains **blocked**, despite mergeable preparation code: no production
+asynchronous Sparkle adapter is connected, no shell evidence/import lease wiring
+is available inside the owned paths, and complete current-state profile/media/
+secret Restore cannot be certified by the store-preparation tests. The signed Mac
+steps above remain open. The final branch signal must report BLOCKED, not convert
+these missing integrations into beta readiness.

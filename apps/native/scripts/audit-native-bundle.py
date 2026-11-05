@@ -89,6 +89,25 @@ def commands(text):
     return result
 
 
+def header(text):
+    lines = text.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        fields = line.split()
+        if 'filetype' in fields:
+            values = lines[index + 1].split()
+            if len(values) != len(fields):
+                break
+            kind = values[fields.index('filetype')]
+            if kind in ('EXECUTE', 'DYLIB', 'BUNDLE', '2', '6', '8'):
+                return {'2': 'EXECUTE', '6': 'DYLIB', '8': 'BUNDLE'}.get(kind, kind)
+            break
+    raise ValueError('unsupported or malformed Mach-O header')
+
+
+def fail_walk(error):
+    raise error
+
+
 def audit(bundle, manifest, runner=run):
     root = Path(bundle).resolve(strict=True)
     issues = []
@@ -106,7 +125,7 @@ def audit(bundle, manifest, runner=run):
         if not isinstance(disposition, dict) or disposition.get('kind') not in ('bundled', 'linked', 'not_required') or not disposition.get('evidence'):
             issues.append('missing resource disposition/evidence: ' + role)
     files, binaries = {}, {}
-    for directory, dirs, names in os.walk(root, followlinks=False):
+    for directory, dirs, names in os.walk(root, followlinks=False, onerror=fail_walk):
         for name in sorted(dirs + names):
             path = Path(directory) / name
             rel = path.relative_to(root).as_posix()
@@ -129,6 +148,7 @@ def audit(bundle, manifest, runner=run):
                         if arch not in {'arm64', 'x86_64'}:
                             issues.append('unsupported delivered architecture: ' + rel + ':' + arch)
                         info[arch] = commands(runner(['otool', '-arch', arch, '-l', str(path)]))
+                        info[arch]['kind'] = header(runner(['otool', '-arch', arch, '-hv', str(path)]))
                         if version(info[arch]['minimum']) > floor:
                             issues.append('deployment target exceeds floor: ' + rel + ':' + arch)
                     binaries[rel] = info
@@ -208,7 +228,9 @@ def audit(bundle, manifest, runner=run):
     for entry in entrypoints:
         if entry not in binaries:
             issues.append('missing Mach-O entry point: ' + entry)
-        for arch in binaries.get(entry, {}):
+        for arch, data in binaries.get(entry, {}).items():
+            if data['kind'] != 'EXECUTE':
+                issues.append('entry point is not executable Mach-O: ' + entry + ':' + arch)
             walk(entry, arch, root / entry, [], set())
     for rel, slices in binaries.items():
         for arch in slices:

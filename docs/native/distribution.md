@@ -301,3 +301,12 @@ sh -n apps/native/packaging/build-dmg.sh
 
 Counts: 33 distribution/handoff + 75 existing services + 20 packaging = **128 tests**.
 The macOS checks above remain required; Linux doubles do not certify them.
+
+## 2026-11-04 — beta2 resource audit and Sparkle API blocker
+
+See [beta2 readiness](beta2-readiness.md) for the source-based resource/rpath
+inventory, read-only per-slice bundle auditor and signed Mac checklist. The tested
+Sparkle policy bridge is not a linked production installer: Sparkle 2.10.1 has no
+public external-archive adoption method matching the current synchronous
+`Installer::stage` contract. The report specifies the required asynchronous
+application/distribution change. No signing or distribution action was performed.

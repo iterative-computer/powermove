@@ -204,3 +204,11 @@ Signed Keychain consent/ACL, APFS behavior, quarantine/Gatekeeper, updater/TR an
 physical power-loss verification require macOS. These tests do not close those
 rows or authorize cutover. The kernel's headless journal/old-reader/FPS rows and
 soak reproduction are recorded in [kernel.md](kernel.md).
+
+## 2026-11-04 — beta2 worker integration and retained attempts
+
+See [beta2 readiness](beta2-readiness.md) for the real-coordinator first-run/final-
+delta bridge, direct/skipped-TR and consent-denial tests, current-store forward/
+reverse Restore preparation, retained failed/duplicate attempts and exact remaining
+application bindings. This is Linux preparation; N001–N007 await Opus specs and
+signed full-profile/secret Restore remains open.

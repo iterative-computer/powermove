@@ -3,7 +3,8 @@
 //! projects/history and secret tombstones under its save/quit/import leases first.
 //! This API deliberately cannot certify media/Keychain/whole-app Restore proof.
 use crate::disk;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use fs2::FileExt;
 use pm_kernel::{
     library::parse_key,
     persistence::{DiskFormat, LibraryWriter},
@@ -12,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
 };
 
@@ -121,11 +123,43 @@ pub fn prepare_store(
         "Restore destination already exists or is inaccessible"
     );
     let destination = disk::resolved(destination)?;
-    let stage = destination.with_extension("preparing");
+    let name = destination
+        .file_name()
+        .context("Restore destination has no name")?
+        .to_str()
+        .context("Restore name is not UTF-8")?;
+    let parent = destination
+        .parent()
+        .context("Restore destination has no parent")?;
+    // Keep the lease outside the directory we may archive, so a concurrent
+    // retry cannot move a live producer's stage before acquiring its writer.
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(parent.join(format!(".{name}.restore.lock")))?;
+    lease
+        .try_lock_exclusive()
+        .context("Restore preparation already running")?;
+    ensure!(
+        fs::symlink_metadata(&destination).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+        "Restore destination was published concurrently"
+    );
+    let stage = parent.join(format!("{name}.preparing"));
     if fs::symlink_metadata(&stage).is_ok() {
+        let owner: std::path::PathBuf = disk::json(&stage.join("restore-destination.json"))
+            .context("unidentified Restore stage retained; select a new destination")?;
+        ensure!(
+            owner == destination,
+            "Restore stage belongs to a different destination"
+        );
         disk::archive(&stage)?;
     }
     disk::private_dir(&stage)?;
+    disk::atomic(&stage.join("restore-destination.json"), &destination)?;
     let plan = merge(base, current, incoming);
     disk::atomic(
         &stage.join("restore-inputs.json"),

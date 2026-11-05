@@ -372,3 +372,68 @@ fn repeated_delta_and_failed_capture_archive_every_attempt() {
         b"retained"
     );
 }
+
+#[test]
+fn concurrent_restore_retry_and_foreign_stage_are_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let destination = root.join("Restore.beta");
+    let values: Store = serde_json::from_value(json!({"theme":"current"})).unwrap();
+    restore::prepare_store(&destination, &Store::new(), &values, &Store::new(), |_| {
+        let error =
+            restore::prepare_store(&destination, &Store::new(), &values, &Store::new(), |_| {
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("already running"));
+        Ok(())
+    })
+    .unwrap();
+    let foreign = root.join("Other.preparing");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("opaque"), b"foreign").unwrap();
+    assert!(
+        restore::prepare_store(
+            &root.join("Other"),
+            &Store::new(),
+            &values,
+            &Store::new(),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(foreign.join("opaque")).unwrap(), b"foreign");
+    assert!(!root.join("Other").exists());
+}
+
+#[test]
+fn restore_and_sparkle_refuse_symlink_destinations_and_archives() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let destination = root.join("Restore");
+    std::os::unix::fs::symlink(root.join("missing"), &destination).unwrap();
+    assert!(
+        restore::prepare_store(
+            &destination,
+            &Store::new(),
+            &Store::new(),
+            &Store::new(),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let archive = root.join("original.zip");
+    fs::write(&archive, b"synthetic").unwrap();
+    let link = root.join("linked.zip");
+    std::os::unix::fs::symlink(&archive, &link).unwrap();
+    let release = release();
+    let mut driver = driver(&release);
+    assert!(driver.stage(&"a".repeat(64), &link, &release).is_err());
+    assert_eq!(driver.sparkle.staged, 0);
+}
