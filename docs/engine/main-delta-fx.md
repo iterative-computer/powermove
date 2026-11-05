@@ -294,6 +294,45 @@ HLS, Brightness & Contrast and Black & White. No old program is replaced.
 | `color_family::e05_saved_color_channels_survive_document_serialization_and_reverse_seek` | Actual Document serialization/reopen preserves authored channels; evaluated saved keys render identically through reverse seeks at all depths. |
 | `pm-builtins::tests::effect_delta::e07_e05_application_declared_color_swaps_are_real_actions_and_undo_atomically` | Real registered Tint metadata exposes Swap Colors in the v4 panel; its native event swaps both evaluated values in one actor transaction, and one Undo/Redo restores both. |
 
-The renderer target currently has three separate crop failures under E06/E07;
-those rows remain open. E05/E10 completion does not promote provider, source,
-media-delivery, physical-display or whole-application capability flags.
+These row completions do not promote provider, general source, media-delivery,
+physical-display or whole-application capability flags.
+
+
+## E06 saved spatial family qualification
+
+Closed by `a5c080839`. All six saved programs retain their own definitions:
+Gaussian Blur v1/v2, Mosaic v1/v2, Unsharp Mask and Find Edges. Cropped
+composition-space neighbor effects keep a logical canvas and a padded ROI;
+fixed support, padding factors and output/layer scale follow the saved metadata.
+Private multi-level sampling views never enter the single-level attachment pool.
+The existing bounded output dimensions still apply to logical canvases; local
+source chains and per-pixel effects keep their separate bounded viewport paths.
+
+| Named `spatial_contract` test | Clause proved |
+| --- | --- |
+| `e06_all_saved_spatial_revisions_match_independent_hdr_alpha_edge_pixels` | Every saved program at 8/16/32 depths against independent equations/reference pixels, with signed HDR, partial alpha, image boundaries, directional/identity blur, edge repeat, sharp Mosaic cells, Unsharp threshold/identity and Find Edges invert/blend. |
+| `e06_all_saved_spatial_revisions_depth_crop_zoom_and_source_contracts` | Exact cropped pixels and zoomed crops at every depth and source boundary; historical Blur/Mosaic without a source-processing declaration refuse that unsupported request instead of substituting a later revision. |
+| `e06_all_saved_spatial_revisions_viewer_final_and_decoded_exports` | Every saved program and depth through JSON reload, viewer/final-export equality and exact independently decoded PNG8/PNG16 output. |
+| `e06_wide_saved_gaussian_and_mosaic_kernels_keep_hdr_alpha_and_crop_zoom` | Both Gaussian revisions at wide radius, all current directional modes, both Mosaic revisions and non-square current grids/sharp mode retain HDR/alpha through exact crops and zoom. |
+
+## E07 saved shadow and ramp qualification
+
+Closed by renderer `a5c080839` and application `b1bb0d036`. No historical
+shader or source-processing contract is upgraded implicitly. Main Gradient v1
+uses explicit main-file provenance; tagged Gradient retains its separate program.
+
+| Named test | Clause proved |
+| --- | --- |
+| `shadow_ramp::e07_saved_shadow_revisions_offset_softness_only_alpha_hdr_and_crop` | Independent offset/softness/alpha/HDR equations for both saved shadow revisions, every working depth, source boundaries and exact cropped output. Historical source processing without a declaration remains an explicit refusal. |
+| `shadow_ramp::e07_shadow_layer_local_offsets_inherit_parent_rotation_scale_and_source_space` | Local offset and Shadow Only through inherited parent rotation, scale and source space; original/overlap/shadow-only pixels and complete alpha area at every depth. |
+| `shadow_ramp::e07_saved_current_ramp_source_dimensions_linear_radial_blend_and_reset_points` | Current source-sized start/end defaults, linear/radial coordinates, blend and HDR/alpha at all depths, with exact cropped source/composition output. |
+| `shadow_ramp::e07_saved_main_ramp_v1_owner_coordinates_radial_midpoint_shade_scatter_and_depths` | Main historical owner coordinates, rotation, angle, radial, midpoint, declared dither range, shade and amount at every depth. |
+| `pm-builtins::tests::effect_delta::e07_application_add_ramp_resolves_source_dimensions_and_keeps_defaults_on_undo_redo` | Actual actor creation resolves the owner's dimensions, and one Undo/Redo restores the whole effect. |
+| `pm-builtins::tests::effect_delta::e07_e05_application_declared_color_swaps_are_real_actions_and_undo_atomically` | Actual Gradient/Tint panel events swap both evaluated colors in one transaction with Undo/Redo. |
+| `pm-builtins::tests::effect_delta::e07_application_reset_at_playhead_keeps_animation_and_is_one_undo_step` | Reset uses contextual defaults at the playhead, preserves existing keys and restores every channel with one Undo/Redo. |
+| `pm-builtins::tests::effect_delta::e07_application_saved_ramp_v1_keeps_legacy_controls_and_reset_defaults` | Absent/null/explicit saved v1 keeps historical controls/defaults and version fields across Reset and Undo. |
+| `pm-builtins::tests::effect_delta::e07_application_ramp_swap_and_undo_render_the_published_project_offscreen` | The actual published project renders through the native export path after the panel action; Undo restores every rendered pixel exactly. |
+
+The first four closed rows are E10, E07, E06 and E05. All other rows retain
+their stated implementation or external-evidence boundaries; no capability,
+tolerance or performance baseline is promoted by these closures.
