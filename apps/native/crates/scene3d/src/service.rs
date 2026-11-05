@@ -53,6 +53,21 @@ pub fn new_layer(
     ] {
         p[k] = schema::channel(json!(v));
     }
+    for (key, value) in properties
+        .as_object()
+        .ok_or_else(|| Error("Invalid native properties".into()))?
+    {
+        if !p.as_object().unwrap().contains_key(key) {
+            return fail(format!("Unknown native 3D property: {key}"));
+        }
+        if !schema::TRANSFORMS.iter().any(|(_, path)| *path == key) {
+            p[key] = if value.is_object() {
+                value.clone()
+            } else {
+                schema::channel(value.clone())
+            };
+        }
+    }
     let fps = comp["fps"]
         .as_f64()
         .filter(|x| x.is_finite() && *x > 0.)
@@ -258,14 +273,6 @@ fn union(boxes: impl Iterator<Item = Result<Bounds>>) -> Result<Bounds> {
     }
     out.ok_or_else(|| Error("Add a model first".into()))
 }
-fn unparented(l: &Value) -> Result<()> {
-    if !l["parent"].is_null() {
-        return fail(
-            "Geometry placement requires evaluated parent-space conversion; parented placement is unavailable",
-        );
-    }
-    Ok(())
-}
 pub(crate) fn studio_plan(
     comp: &Value,
     args: &Value,
@@ -367,7 +374,7 @@ pub(crate) fn studio_plan(
             let l = layer
                 .filter(|l| schema::role(l) == Some(Role::Object))
                 .ok_or_else(|| Error("Choose a model to place".into()))?;
-            unparented(l)?;
+
             let b = box_for(comp, l["id"].as_str().unwrap())?;
             let mut p = pos(l);
             let mut top = 0.;
@@ -382,13 +389,18 @@ pub(crate) fn studio_plan(
                 p[0] += b2.center()[0] - b.center()[0];
                 p[2] += b2.center()[2] - b.center()[2];
             }
-            p[1] += top - b.min[1];
+            let delta = crate::geometry::parent_delta(
+                comp,
+                l,
+                [p[0] - pos(l)[0], top - b.min[1], p[2] - pos(l)[2]],
+            )?;
+            p = add(pos(l), delta);
             edit(
                 json!({"operation":"update_object","target":selected,"patch":{"p":{"x":p[0],"y":p[1],"z":p[2]}}}),
             )
         }
         "shot" => {
-            let start = scalar(args, "start", 0.)?;
+            let start = scalar(args, "start", comp["_scene3dTime"].as_f64().unwrap_or(0.))?;
             let duration = scalar(args, "duration", 4.)?.max(0.1);
             if start < 0. || start + duration > 100000. {
                 return fail("Shot outside supported time range");
@@ -537,9 +549,59 @@ pub(crate) fn studio_plan(
             }
             Ok(result)
         }
-        "explode" => fail(
-            "Exploded views require evaluated group/parent-space bounds; adapter not yet supplied",
-        ),
+        "explode" => {
+            let group = layer
+                .filter(|l| l["type"] == "group")
+                .ok_or_else(|| Error("Explode needs a group of models".into()))?;
+            let group_id = group["id"].as_str().unwrap();
+            let members = layers
+                .iter()
+                .filter(|l| {
+                    schema::role(l) == Some(Role::Object)
+                        && crate::geometry::descendants(l, group_id, layers)
+                })
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                return fail("Explode needs a group of models");
+            }
+            let b = union(
+                members
+                    .iter()
+                    .map(|l| box_for(comp, l["id"].as_str().unwrap())),
+            )?;
+            let center = b.center();
+            let size = length(sub(b.max, b.min)).max(1e-12);
+            let amount = scalar(args, "amount", 0.5)? * size;
+            let start = scalar(args, "start", comp["_scene3dTime"].as_f64().unwrap_or(0.))?;
+            let end = start + scalar(args, "duration", 2.)?.max(0.1);
+            if start < 0. || end > 100000. {
+                return fail("Shot outside supported time range");
+            }
+            let mut actions = vec![];
+            for l in members {
+                let id = l["id"].as_str().unwrap();
+                let own = box_for(comp, id)?.center();
+                let offset = sub(own, center);
+                let dir = if dot(offset, offset) < 1e-12 {
+                    [0., 1., 0.]
+                } else {
+                    normalize(offset)
+                };
+                let delta = crate::geometry::parent_delta(comp, l, mul(dir, amount))?;
+                let from = pos(l);
+                let local_start = l["from"].as_f64().unwrap_or(0.);
+                for (a, path) in ["position.x", "position.y", "position.z"]
+                    .iter()
+                    .enumerate()
+                {
+                    actions.push(Action::Channel{id:id.into(),path:(*path).into(),value:json!({"v":from[a],"kf":[{"t":(start-local_start).max(0.),"v":from[a],"ease":"ease-in-out"},{"t":(end-local_start).max(0.),"v":from[a]+delta[a],"ease":"ease-in-out"}],"expr":null})});
+                }
+            }
+            Ok(Plan {
+                actions,
+                id: Some(group_id.into()),
+            })
+        }
         _ => fail("Unknown Studio operation"),
     }
 }
@@ -548,4 +610,212 @@ fn rotate(v: Vec3, axis: Vec3, a: f64) -> Vec3 {
         add(mul(v, a.cos()), mul(cross(axis, v), a.sin())),
         mul(axis, dot(axis, v) * (1. - a.cos())),
     )
+}
+/// Evaluated world data is supplied by the same native evaluator that owns
+/// normal layer transforms. The renderer must not apply scene parents again.
+pub trait WorldEvaluator: Evaluator {
+    fn world(&mut self, layer: &Value, time: f64) -> Result<[f64; 16]>;
+    fn parent(&mut self, layer: &Value, time: f64) -> Result<[f64; 16]>;
+    fn opacity(&mut self, layer: &Value, time: f64) -> Result<f64>;
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ResolvedScene {
+    pub scene: Value,
+    pub model_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub light_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub targets: std::collections::BTreeMap<String, Vec3>,
+    pub opacities: std::collections::BTreeMap<String, f64>,
+    pub occludes: std::collections::BTreeMap<String, bool>,
+    pub camera_id: Option<String>,
+    pub camera_position: Option<Vec3>,
+    pub camera_up: Option<Vec3>,
+}
+pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<ResolvedScene> {
+    use pm_geom3d::gltf::math;
+    let scene = composition(comp, time, ev)?;
+    let mut result = ResolvedScene {
+        scene,
+        model_worlds: Default::default(),
+        light_worlds: Default::default(),
+        targets: Default::default(),
+        opacities: Default::default(),
+        occludes: Default::default(),
+        camera_id: None,
+        camera_position: None,
+        camera_up: None,
+    };
+    for l in comp["layers"]
+        .as_array()
+        .ok_or_else(|| Error("No composition layers".into()))?
+    {
+        let Some(role) = schema::role(l) else {
+            continue;
+        };
+        if !ev.active(l, time)? {
+            continue;
+        }
+        let id = l["id"]
+            .as_str()
+            .ok_or_else(|| Error("Missing 3D layer ID".into()))?
+            .to_string();
+        let world = ev.world(l, time)?;
+        if !world.iter().all(|v| v.is_finite()) {
+            return fail("Invalid 3D world matrix");
+        }
+        match role {
+            Role::Object => {
+                result.model_worlds.insert(id.clone(), world);
+                let opacity = ev.opacity(l, time)?;
+                if !opacity.is_finite() {
+                    return fail("Invalid world opacity");
+                }
+                result.opacities.insert(id.clone(), opacity);
+                let mut occludes = true;
+                for mask in l["masks"].as_array().into_iter().flatten() {
+                    let on = &mask["on"];
+                    let value = if on.is_object() {
+                        ev.value(
+                            l,
+                            &format!("m.{}.on", mask["id"].as_str().unwrap_or("")),
+                            on,
+                            time,
+                        )?
+                    } else {
+                        on.clone()
+                    };
+                    if value != false {
+                        occludes = false;
+                        break;
+                    }
+                }
+                result.occludes.insert(id, occludes);
+            }
+            Role::Light | Role::Camera => {
+                let parent = ev.parent(l, time)?;
+                if !parent.iter().all(|v| v.is_finite()) {
+                    return fail("Invalid 3D parent matrix");
+                }
+                let mut aim = [0.; 3];
+                for (a, k) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
+                    aim[a] = ev
+                        .value(
+                            l,
+                            &format!("{}.{k}", role.key()),
+                            &l["d"]["data"][role.key()]["p"][k],
+                            time,
+                        )?
+                        .as_f64()
+                        .ok_or_else(|| Error("Invalid target channel".into()))?;
+                }
+                if role == Role::Light {
+                    result.light_worlds.insert(id.clone(), world);
+                    result.targets.insert(id, math::apply(&parent, aim));
+                } else if result.camera_id.is_none() {
+                    result.camera_position = Some(math::apply(&world, [0.; 3]));
+                    result.camera_up = Some(normalize([world[4], world[5], world[6]]));
+                    result.targets.insert(id.clone(), math::apply(&parent, aim));
+                    result.camera_id = Some(id);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+/// Depth sharing is bounded by active 2D/styled-group barriers in the supplied
+/// render order. Plain organizational group headers should be omitted by the
+/// renderer, as in the source. Fractional nonzero opacity remains authored data.
+pub fn depth_ids(
+    comp: &Value,
+    render_order: &[Value],
+    layer_id: &str,
+    time: f64,
+    ev: &mut impl WorldEvaluator,
+) -> Result<std::collections::BTreeSet<String>> {
+    let Some(index) = render_order.iter().position(|l| l["id"] == layer_id) else {
+        return fail("3D depth layer is not in the render pass");
+    };
+    let source = comp["layers"]
+        .as_array()
+        .ok_or_else(|| Error("No composition layers".into()))?;
+    let solo = source.iter().any(|l| l["solo"] == true);
+    let mut ids = std::collections::BTreeSet::new();
+    let mut visit = |l: &Value| -> Result<bool> {
+        if !ev.active(l, time)? {
+            return Ok(true);
+        }
+        let Some(role) = schema::role(l) else {
+            return Ok(false);
+        };
+        if role == Role::Object {
+            let selected = !solo
+                || l["solo"] == true
+                || source.iter().any(|g| {
+                    g["solo"] == true
+                        && crate::geometry::descendants(l, g["id"].as_str().unwrap_or(""), source)
+                });
+            if selected && ev.opacity(l, time)? > 0. {
+                ids.insert(
+                    l["id"]
+                        .as_str()
+                        .ok_or_else(|| Error("Missing 3D ID".into()))?
+                        .into(),
+                );
+            }
+        }
+        Ok(true)
+    };
+    for l in render_order[..=index].iter().rev() {
+        if !visit(l)? {
+            break;
+        }
+    }
+    for l in &render_order[index + 1..] {
+        if !visit(l)? {
+            break;
+        }
+    }
+    Ok(ids)
+}
+/// Stack ordering for transparent 3D blocks; 2D blocks are left to the normal
+/// compositor's own depth/order policy. Stable ties retain authored layer order.
+pub fn ordered_layers(
+    layers: &[Value],
+    worlds: &std::collections::BTreeMap<String, [f64; 16]>,
+    view: [f64; 16],
+) -> Result<Vec<Value>> {
+    if !view.iter().all(|v| v.is_finite()) {
+        return fail("Invalid view matrix");
+    }
+    let mut out = vec![];
+    let mut start = 0;
+    while start < layers.len() {
+        let model = schema::role(&layers[start]).is_some();
+        let mut end = start + 1;
+        while end < layers.len() && schema::role(&layers[end]).is_some() == model {
+            end += 1;
+        }
+        let mut block = layers[start..end].to_vec();
+        if model {
+            let depth = |l: &Value| -> Result<f64> {
+                let id = l["id"].as_str().unwrap_or("");
+                let Some(m) = worlds.get(id) else {
+                    return Ok(0.);
+                };
+                let p = pm_geom3d::gltf::math::apply(&view, [m[12], m[13], m[14]]);
+                if !p[2].is_finite() {
+                    return fail("Invalid object depth");
+                }
+                Ok(p[2])
+            };
+            let mut keyed = block
+                .into_iter()
+                .map(|l| depth(&l).map(|z| (l, z)))
+                .collect::<Result<Vec<_>>>()?;
+            keyed.sort_by(|a, b| b.1.total_cmp(&a.1));
+            block = keyed.into_iter().map(|v| v.0).collect();
+        }
+        out.extend(block);
+        start = end;
+    }
+    Ok(out)
 }

@@ -5009,6 +5009,7 @@ dependencies = [
  "libc",
  "pm-kernel",
  "pm-model",
+ "pm-scene3d",
  "regex",
  "serde",
  "serde_json",
@@ -5407,10 +5408,12 @@ dependencies = [
 name = "pm-scene3d"
 version = "0.1.0"
 dependencies = [
+ "image",
  "pm-geom3d",
  "pm-model",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

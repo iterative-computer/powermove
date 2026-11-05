@@ -634,6 +634,20 @@ fn unavailable() -> Check {
         }
         let args = pending_arguments(&spec["inputSchema"])?;
         pm_mcp::catalog::validate(name, &args).map_err(|e| format!("{name}: {e}"))?;
+        if name == "project_memory" {
+            let before = f.document()?;
+            assert_eq!(f.call(name, args)?, json!({"memory":[],"total":0}));
+            // Reading is available; actor-owned writes are still an explicit blocker.
+            assert_eq!(f.document()?, before);
+            let error = tool_error(
+                &mut f.session,
+                name,
+                json!({"operation":"add","kind":"goal","text":"Synthetic goal"}),
+            )?;
+            assert_eq!(error["code"], "not_available_in_this_build");
+            assert_eq!(f.document()?, before);
+            continue;
+        }
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(
             error["code"], "not_available_in_this_build",

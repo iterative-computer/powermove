@@ -401,10 +401,29 @@ fn post_tag_memory_claim_is_reconciled_without_erasing_its_original_ids() {
         &[],
     )
     .unwrap();
-    assert_eq!(pm_mcp::catalog::tools().len(), 67);
-    assert!(pm_mcp::catalog::spec("project_memory").is_none());
+    assert_eq!(
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        67
+    );
+    assert_eq!(pm_mcp::catalog::tools().len(), 68);
+    assert!(pm_mcp::catalog::spec("project_memory").is_some());
     assert!(
-        !pm_mcp::catalog::spec("get_project_state").unwrap()["description"]
+        pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != "project_memory")
+    );
+    assert!(
+        !pm_mcp::catalog::legacy_catalog()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_project_state")
+            .unwrap()["description"]
             .as_str()
             .unwrap()
             .contains("memory")

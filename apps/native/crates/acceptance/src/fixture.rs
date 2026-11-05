@@ -129,16 +129,19 @@ pub fn tool(session: &mut McpSession, name: &str, args: Value) -> Result<Value, 
     serde_json::from_str(text).map_err(|e| e.to_string())
 }
 pub fn tool_error(session: &mut McpSession, name: &str, args: Value) -> Result<Value, String> {
-    let response = session.call(name, args);
-    if response["isError"] != true {
-        return Err(format!("{name} unexpectedly succeeded"));
+    let error = session
+        .dispatch(name, &args)
+        .err()
+        .ok_or_else(|| format!("{name} unexpectedly succeeded"))?;
+    // Internal diagnostics retain typed codes. The actual MCP transport exposes
+    // precisely Error.message; it must never serialize those codes into text.
+    let response = pm_mcp::failure(error.clone());
+    if response
+        != serde_json::json!({"content":[{"type":"text","text":error.message}],"isError":true})
+    {
+        return Err(format!("{name}: transport changed plain error message"));
     }
-    serde_json::from_str(
-        response["content"][0]["text"]
-            .as_str()
-            .ok_or("missing error content")?,
-    )
-    .map_err(|e| e.to_string())
+    serde_json::to_value(error).map_err(|e| e.to_string())
 }
 pub fn layer<'a>(doc: &'a Value, id: &str) -> &'a Value {
     doc["layers"]

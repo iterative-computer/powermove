@@ -123,6 +123,9 @@ fn set_content(
     match layer_type.as_str() {
         "audio" => audio_content(&mut layer, &patch)?,
         "extension" => {
+            if super::scene3d::is_known_layer(&layer) {
+                return super::scene3d::set_known_content(cx, layer_id, &patch);
+            }
             return Err(CommandError::NotImplemented(
                 "set_content (extension layers)",
             ));

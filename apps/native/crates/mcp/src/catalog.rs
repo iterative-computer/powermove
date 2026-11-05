@@ -1,5 +1,5 @@
-//! Public names, descriptions and schemas come from owner-pinned main.
-//! The v1.2.0 catalog remains available as compatibility evidence.
+//! Owner-pinned main catalog with the two owner-selected Studio 3D contracts.
+//! Tagged data stays available as compatibility evidence.
 use crate::{Error, Result};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -7,8 +7,22 @@ use std::sync::OnceLock;
 pub fn catalog() -> &'static Value {
     static VALUE: OnceLock<Value> = OnceLock::new();
     VALUE.get_or_init(|| {
-        serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
-            .expect("frozen catalog")
+        let mut value: Value =
+            serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json"))
+                .expect("frozen catalog");
+        let studio: Value =
+            serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                .expect("3D source catalog");
+        for replacement in studio["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing 3D tool");
+            *tool = replacement.clone();
+        }
+        value
     })
 }
 pub fn legacy_catalog() -> &'static Value {
@@ -148,6 +162,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "inspect_creative_workspace",
     "inspect_creative_extension",
     "get_3d_scene",
+    "edit_3d",
     "check_project",
     "list_media",
     "manage_media",
@@ -228,7 +243,8 @@ pub fn backing(name: &str) -> &'static str {
         }
         "edit_video" => "pm-kernel guarded id-keyed layer edits and source-aware timing adapter",
         "export_captions" => "native caption text exporter",
-        "edit_3d" | "generate_captions" => "kernel 3D/caption commands and transcription runtime",
+        "edit_3d" => "pm-scene3d and guarded kernel Studio document commands",
+        "generate_captions" => "kernel caption commands and transcription runtime",
         "list_media" => {
             "pm-kernel asset/folder/reference snapshot and optional live media registry"
         }

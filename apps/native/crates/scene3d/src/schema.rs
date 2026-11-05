@@ -337,12 +337,12 @@ pub fn source(v: &Value) -> Result<usize> {
                 }
             }
         }
-        let s = p["segments"].as_u64().unwrap_or(48) as usize;
+        let s = p["segments"].as_f64().unwrap_or(48.) as usize;
         return Ok(match v["primitive"].as_str().unwrap() {
             "box" => 24,
-            "roundedBox" => 6 * (2 * p["segments"].as_u64().unwrap_or(6) as usize + 1).pow(2),
+            "roundedBox" => 6 * (2 * p["segments"].as_f64().unwrap_or(6.) as usize + 1).pow(2),
             "plane" => 4,
-            "icosahedron" => 60 * 4usize.pow(p["detail"].as_u64().unwrap_or(2) as u32),
+            "icosahedron" => 60 * 4usize.pow(p["detail"].as_f64().unwrap_or(2.) as u32),
             "sphere" | "torus" => (s + 1) * (8.max(s / 2) + 1),
             _ => (s + 1) * 12,
         });
@@ -512,7 +512,7 @@ pub fn parse_scene(mut v: Value) -> Result<Value> {
         &["version", "objects", "lights", "camera", "environment"],
     )?;
     default(&mut v, "version", json!(1));
-    if v["version"] != 1 {
+    if v["version"].as_f64() != Some(1.) {
         return fail("Unknown 3D scene version");
     }
     for (k, max) in [("objects", 512), ("lights", 16)] {

@@ -1,8 +1,10 @@
 //! Bounded imports of explicitly supplied bytes. No URL or sibling-file reads.
+pub mod archive;
 pub mod cad;
+mod obj;
 pub mod splats;
 use crate::{Error, Result, fail};
-pub use pm_geom3d::obj::ImportFile;
+pub use obj::ImportFile;
 use pm_geom3d::{gltf, model_import::glb::GlbWriter};
 use serde_json::json;
 pub const MAX_BYTES: usize = 512 * 1024 * 1024;
@@ -13,6 +15,7 @@ pub struct Prepared {
     pub bytes: Vec<u8>,
     pub original: Vec<ImportFile>,
 }
+#[derive(Clone, Debug, PartialEq)]
 pub enum Model {
     Gltf(Box<gltf::Model>),
     Obj(pm_geom3d::obj::ObjMesh),
@@ -36,7 +39,19 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<Model> {
                 triangles: MAX_TRIANGLES,
             },
         )
-        .map(|m| Model::Gltf(Box::new(m)))
+        .and_then(|m| {
+            if let Some(g) = m
+                .geometries
+                .iter()
+                .find(|g| g.undrawable.is_some() || !g.short_attributes.is_empty())
+            {
+                return Err(gltf::Error(format!(
+                    "Malformed model geometry: {:?}; {:?}",
+                    g.undrawable, g.short_attributes
+                )));
+            }
+            Ok(Model::Gltf(Box::new(m)))
+        })
         .map_err(|e| Error(e.to_string())),
         "obj" => {
             pm_geom3d::obj::parse_obj(std::str::from_utf8(bytes).map_err(|e| Error(e.to_string()))?)
@@ -92,12 +107,12 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         load("converted.glb", &bytes)?;
         (replace_ext(&f.name, "glb"), bytes)
     } else if e == "obj" && files.len() > 1 {
-        match pm_geom3d::obj::prepare_import(&files).map_err(|e| Error(e.to_string()))? {
-            pm_geom3d::obj::Prepared::Glb { name, bytes } => {
+        match obj::prepare_import(&files).map_err(|e| Error(e.to_string()))? {
+            obj::Prepared::Glb { name, bytes } => {
                 load(&name, &bytes)?;
                 (name, bytes)
             }
-            pm_geom3d::obj::Prepared::Unchanged(_) => (f.name.clone(), f.bytes.clone()),
+            obj::Prepared::Unchanged(_) => (f.name.clone(), f.bytes.clone()),
         }
     } else {
         load(&f.name, &f.bytes)?;

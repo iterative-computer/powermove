@@ -182,3 +182,91 @@ impl LightTool {
         self.gesture.is_some()
     }
 }
+/// Source light creation from a surface pick. The caller adds this snapshot
+/// inside the same kernel gesture as subsequent pointing, for one Undo.
+pub fn new_light(kind: Kind, mode: Aim, hit: Hit) -> Result<Snapshot> {
+    if mode == Aim::Orbit {
+        return fail("Orbit needs an existing light");
+    }
+    let distance = (length(sub(hit.eye, hit.point)) * 0.9).max(1.5);
+    let position = if mode == Aim::Direct {
+        highlight_placement(hit.point, hit.normal, hit.eye, distance)?;
+        add(hit.point, mul(normalize(hit.normal), distance))
+    } else {
+        highlight_placement(hit.point, hit.normal, hit.eye, distance)?
+    };
+    let size = distance * 0.6;
+    Ok(Snapshot {
+        position,
+        target: hit.point,
+        intensity: match kind {
+            Kind::Area => 6.,
+            Kind::Spot => 40.,
+            Kind::Point => 25.,
+            Kind::Sun => 3.,
+        },
+        width: if kind == Kind::Area { size } else { 2. },
+        height: if kind == Kind::Area { size * 0.62 } else { 1.2 },
+        angle: if kind == Kind::Spot { 30. } else { 45. },
+    })
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct State {
+    pub on: bool,
+    pub aim: Aim,
+    pub kind: Kind,
+    pub adding: bool,
+}
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            on: false,
+            aim: Aim::Reflect,
+            kind: Kind::Area,
+            adding: false,
+        }
+    }
+}
+impl State {
+    pub fn set_on(&mut self, on: bool) {
+        self.on = on;
+        if !on {
+            self.adding = false;
+        }
+    }
+    pub fn choose_kind(&mut self, kind: Kind) {
+        self.kind = kind;
+        self.adding = true;
+    }
+}
+#[derive(Default)]
+pub struct Tuning {
+    change: Option<Change>,
+}
+impl Tuning {
+    pub fn begin(&mut self, id: String, snapshot: Snapshot) -> Result<()> {
+        snapshot.validate()?;
+        if self.change.is_some() {
+            return fail("Light adjustment already active");
+        }
+        self.change = Some(Change {
+            id,
+            before: snapshot,
+            after: snapshot,
+        });
+        Ok(())
+    }
+    pub fn set(&mut self, kind: Kind, what: Adjust, value: f64) -> Result<Option<Snapshot>> {
+        let Some(c) = &mut self.change else {
+            return Ok(None);
+        };
+        c.after = adjust(c.after, kind, what, value)?;
+        Ok(Some(c.after))
+    }
+    pub fn commit(&mut self) -> Option<Change> {
+        self.change.take().filter(|c| c.before != c.after)
+    }
+    pub fn cancel(&mut self) -> Option<(String, Snapshot)> {
+        self.change.take().map(|c| (c.id, c.before))
+    }
+}

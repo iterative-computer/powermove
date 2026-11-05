@@ -188,7 +188,35 @@ fn corpus_projects_round_trip() {
         let stored = parse(&text).unwrap();
         let original = canonical_project(project_of(&stored).clone());
         let mut store = DocumentStore::new_untitled(project_of(&stored).clone());
-        let upgraded = store.snapshot().document.to_value().unwrap();
+        let upgraded = store.snapshot().root().unwrap().to_value();
+        fn source_projection(value: Value) -> Value {
+            match value {
+                Value::Object(mut m) => {
+                    if let Some(source) = m.get("native3dArchive").and_then(|a| a.get("source")) {
+                        return source.clone();
+                    }
+                    m.remove("native3dUpgrade");
+                    let mut out = pm_model::Map::new();
+                    for (k, v) in m.iter() {
+                        out.insert(k.clone(), source_projection(v.clone()));
+                    }
+                    Value::Object(out)
+                }
+                Value::Array(a) => Value::Array(
+                    a.into_iter()
+                        .filter(|v| v.get("native3dSourceLayer").is_none())
+                        .map(source_projection)
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+        assert_eq!(
+            source_projection(upgraded.clone()),
+            original,
+            "original source must remain intact: {}",
+            path.display()
+        );
         assert_upgrade_archive(&original, &upgraded);
         let expected = to_canonical_string(&upgraded);
         let out = dir.path(&format!("{count}.pmv"));
@@ -264,7 +292,7 @@ fn assert_upgrade_archive(before: &Value, after: &Value) {
         }
     }
     for (key, _) in new.iter() {
-        assert!(old.get_key(key).is_some());
+        assert!(old.get_key(key).is_some() || key == "native3dUpgrade");
     }
 }
 

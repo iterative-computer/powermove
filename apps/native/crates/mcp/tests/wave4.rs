@@ -387,7 +387,7 @@ fn selection_body_errors_deduplication_and_extra_fields_match_tag() {
 }
 
 #[test]
-fn remaining_35_bodies_remain_explicit_blockers_without_mutating_the_project() {
+fn remaining_34_bodies_remain_explicit_blockers_without_mutating_the_project() {
     let evidence: Value =
         serde_json::from_str(include_str!("../fixtures/unavailable-wave4.json")).unwrap();
     let pending: std::collections::HashSet<_> = catalog::tools()
@@ -395,8 +395,15 @@ fn remaining_35_bodies_remain_explicit_blockers_without_mutating_the_project() {
         .map(|t| t["name"].as_str().unwrap())
         .filter(|n| !catalog::IMPLEMENTED.contains(n))
         .collect();
-    assert_eq!(pending.len(), 35);
-    let cases = evidence["cases"].as_array().unwrap();
+    assert_eq!(pending.len(), 34);
+    let historical = evidence["cases"].as_array().unwrap();
+    assert_eq!(historical.len(), 35);
+    // Only edit_3d is promoted by the explicit Studio source decision.
+    assert!(catalog::IMPLEMENTED.contains(&"edit_3d"));
+    let cases = historical
+        .iter()
+        .filter(|c| c["tool"] != "edit_3d")
+        .collect::<Vec<_>>();
     assert_eq!(cases.len(), pending.len());
     let f = Fixture::new();
     let mut session = f.session();

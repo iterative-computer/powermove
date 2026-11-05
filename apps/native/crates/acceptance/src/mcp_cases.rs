@@ -100,14 +100,13 @@ pub fn layout() -> Check {
     assert_eq!(f.call("get_panel_layout", json!({}))?, expected);
     assert_eq!(f.revision(), revision);
     assert_eq!(f.document()?, before);
+    // Pinned main's cleaner discards undeclared fields before this read.
     assert_eq!(
-        tool_error(
-            &mut f.session,
-            "get_panel_layout",
-            json!({"unexpected":true})
-        )?["code"],
-        "invalid_arguments"
+        f.call("get_panel_layout", json!({"unexpected":true}))?,
+        expected
     );
+    assert_eq!(f.revision(), revision);
+    assert_eq!(f.document()?, before);
     f.call("finish_session", json!({"commit":true}))?;
     f.call(
         "start_session",

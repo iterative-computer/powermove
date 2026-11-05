@@ -677,6 +677,10 @@ fn reachable_in_stored(project: &Value, history: Option<&Value>) -> HashSet<Stri
         }
     }
     add_keys(project.get("assets"), &mut ids);
+    crate::commands::scene3d::collect_original_assets(project, &mut ids);
+    if let Some(history) = history {
+        crate::commands::scene3d::collect_original_assets(history, &mut ids);
+    }
     ids
 }
 

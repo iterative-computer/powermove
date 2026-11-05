@@ -110,7 +110,7 @@ fn all_schemas_equal_executed_tag_source() {
     }
 }
 #[test]
-fn captured_installed_stdio_pairs_replay() {
+fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
     let f = Fixture::new();
     let mut rpc = Rpc::new(f.session());
     let fixture: Value =
@@ -130,7 +130,17 @@ fn captured_installed_stdio_pairs_replay() {
                     expected["result"]["tools"],
                     catalog::legacy_catalog()["tools"]
                 );
-                expected["result"]["tools"] = main["tools"].clone();
+                let studio: Value =
+                    serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                        .unwrap();
+                let mut tools = main["tools"].as_array().unwrap().clone();
+                for replacement in studio["tools"].as_array().unwrap() {
+                    *tools
+                        .iter_mut()
+                        .find(|t| t["name"] == replacement["name"])
+                        .unwrap() = replacement.clone();
+                }
+                expected["result"]["tools"] = Value::Array(tools);
                 expected
             } else {
                 pair["response"].clone()

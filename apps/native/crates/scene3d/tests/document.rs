@@ -192,7 +192,7 @@ fn legacy_container_archive_and_outer_intent_survive() {
 #[test]
 fn legacy_failure_is_visible_and_lossless() {
     let mut c = comp();
-    let old = json!({"id":"old","d":{"definition":"powermove.3d.obj-model","params":{"autoRotate":{"v":true}},"data":{"assetId":"source"}}});
+    let old = json!({"id":"old","dur":100,"d":{"definition":"powermove.3d.obj-model","params":{"autoRotate":{"v":true}},"data":{"assetId":"source"}}});
     c["layers"] = json!([old.clone()]);
     let r = migration::upgrade_project(&mut c).unwrap();
     assert_eq!(r.issues.len(), 1);
@@ -206,4 +206,18 @@ fn every_material_preset_is_valid() {
     for p in presets.as_array().unwrap() {
         schema::material(json!({"p":p["p"]})).unwrap();
     }
+}
+
+#[test]
+fn standalone_upgrade_archives_original_three_d_flag() {
+    let data = pm_scene3d::schema::layer_data(
+        pm_scene3d::schema::Role::Object,
+        json!({"object":{"source":{"primitive":"box"}}}),
+    )
+    .unwrap();
+    let original = json!({"id":"object","type":"extension","threeD":false,"d":{"definition":"powermove.3d.object","data":data}});
+    let mut project = json!({"layers":[original.clone()]});
+    pm_scene3d::migration::upgrade_project(&mut project).unwrap();
+    assert_eq!(project["layers"][0]["threeD"], true);
+    assert_eq!(project["layers"][0]["native3dArchive"]["source"], original);
 }

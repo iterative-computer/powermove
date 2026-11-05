@@ -691,9 +691,9 @@ fn caption_export_normalization_clipping_language_escaping_matches_tag() {
     }
 }
 #[test]
-fn scene_digest_matches_independent_tagged_fixtures() {
+fn scene_digest_matches_owner_selected_3d_source_fixtures() {
     let fixtures: Value =
-        serde_json::from_str(include_str!("../fixtures/scene-v1.2.0.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/scene3d-source-read.json")).unwrap();
     for fixture in fixtures["fixtures"].as_array().unwrap() {
         let f = Fixture::new();
         let mut p = f.read();
