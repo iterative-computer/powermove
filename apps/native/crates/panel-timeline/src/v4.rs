@@ -349,10 +349,23 @@ pub fn window(client: &mut TimelineClient, first: usize, visible: usize) -> Resu
         return Err(Error::InvalidIntent("visible rows"));
     }
     client.sync()?;
-    if client.model.mode == TimelineMode::Tracks {
+    project_window(&client.model, first, visible)
+}
+
+/// Project a model already synchronized to one immutable publication. Native
+/// presenters use this with evaluator/readout facts from that same publication;
+/// another actor publication cannot mix two document revisions in one frame.
+pub fn project_window(
+    model: &crate::TimelineModel,
+    first: usize,
+    visible: usize,
+) -> Result<Value, Error> {
+    if visible == 0 {
+        return Err(Error::InvalidIntent("visible rows"));
+    }
+    if model.mode == TimelineMode::Tracks {
         return Err(Error::MissingHost("track lane presentation"));
     }
-    let model = &client.model;
     let window = model.window(first, visible, visible);
     let selected = model
         .selection

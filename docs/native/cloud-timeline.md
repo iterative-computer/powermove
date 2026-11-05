@@ -51,3 +51,33 @@ Linux actor regressions cover every pro-edit dispatch variant, replacement rippl
 steps, cancellation, locked downstream refusal, joined/per-axis diamonds, exact
 subframe membership, graph/handle/property/work-area gestures, stale documents,
 numeric collision/validation, opaque key preservation and document Undo.
+
+## 2026-11-05 — production worker and Easing storage
+
+`Builtins::timeline_action` queues the existing bundled v4 worker, and
+`timeline_key` now uses the same grouped-key admission. Disposal awaits actual
+preview cancellation. Native effects receive nonzero request ids and the host
+ack remains pending until native replies arrive; unavailable effects reject.
+Main only deposits a receipt into the reply mailbox. The panel worker consumes
+it and finishes its own action (N3/N8). The Mac host must still substantiate
+actual transport completion rather than only acknowledging command enqueueing.
+
+The production presenter retains every negative/subframe/coincident key identity
+rather than dropping off-composition keys or deduplicating against an invented
+2048-point grid (N3/N7). Joined readouts evaluate each actual axis; navigation
+compares composition times. Outline, native scene and evaluated values share
+one immutable publication, even if the actor advances during presentation.
+
+The existing `pm-services` Easing library now has a worker adapter for explicit
+import, save, duplicate, rename, colour, group creation, move and archive. Export
+is exact source inspection. Storage is the admitted `ext.builtin-easing`
+extension namespace, containing the original `pm.easing.library.v1` member and
+an archive of every prior value. Unknown fields are retained. Archive and
+publication use one revision-checked kernel state transaction (N3/N4/N6).
+Missing, malformed or future-version source is never replaced with defaults.
+The original localStorage source still needs the migration owner's import;
+this adapter does not claim to discover it or provide a file chooser.
+
+No visual tokens, layout or product copy are introduced. No new
+`DESIGN-TODO(opus)` placeholder is introduced. All rendered output still awaits
+Mac captures and Opus review.

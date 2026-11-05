@@ -469,13 +469,13 @@ pub(super) async fn dispatch(
         }
         c.model.rebuild_rows();
     }
-    if action == "separateDimensions" || persist_view {
-        if let Err(error) = c.publish_view().await {
-            if let Some(published) = c.kernel.published(&c.project) {
-                c.model.restore_ui(&published.ui_state);
-            }
-            return Err(error.into());
+    if (action == "separateDimensions" || persist_view)
+        && let Err(error) = c.publish_view().await
+    {
+        if let Some(published) = c.kernel.published(&c.project) {
+            c.model.restore_ui(&published.ui_state);
         }
+        return Err(error.into());
     }
     Ok(Some(effects))
 }

@@ -45,6 +45,8 @@ pub(crate) struct Models {
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub export_probe_stamp: String,
     timeline_job: Option<TimelineJob>,
+    pub(crate) timeline_effect_pending: usize,
+    pub(crate) timeline_effect_result: Option<Result<(), String>>,
 }
 impl Models {
     pub fn new(
@@ -80,6 +82,8 @@ impl Models {
             settings_sequence: 1,
             export: Value::Null,
             timeline_job: None,
+            timeline_effect_pending: 0,
+            timeline_effect_result: None,
             project_reply: None,
             media_runtime: Default::default(),
             originals: Default::default(),
@@ -183,8 +187,13 @@ impl Backend {
             .as_u64()
             .filter(|n| *n > 0 && *n <= 512)
             .ok_or("visible rows")? as usize;
-        let mut frame =
-            pm_panel_timeline::v4::window(client, first, visible).map_err(|e| e.to_string())?;
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .sync(p.clone());
+        client.model.sync(&p);
+        let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
+            .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
         let mut scene = crate::timeline_scene::Scene {
             duration: client.model.index.duration,
@@ -217,32 +226,43 @@ impl Backend {
                 let path = row["path"].as_str().ok_or("property path")?.to_owned();
                 let label = property_label(&path);
                 row["label"] = json!(label);
-                let binding = pm_panel_inspector::Binding::Property(
-                    pm_panel_inspector::PropertyId::new(&layer, &path),
-                );
-                if let Ok(state) = self
-                    .model
-                    .as_mut()
-                    .ok_or("No open project")?
-                    .binding_state(&binding, time)
-                {
+                let channels = client.model.track_channels(&layer, &path);
+                let mut values = Vec::new();
+                let mut animated = false;
+                let mut at_key = !channels.is_empty();
+                for channel in &channels {
+                    let binding = pm_panel_inspector::Binding::Property(
+                        pm_panel_inspector::PropertyId::new(&layer, &channel.path),
+                    );
+                    let state = self
+                        .model
+                        .as_mut()
+                        .ok_or("No open project")?
+                        .binding_state(&binding, time)
+                        .map_err(|e| format!("{e:?}"))?;
                     let value = wire(&state.value);
-                    let readout = match value.as_f64() {
+                    values.push(match value.as_f64() {
                         Some(n) => format!("{n:.2}"),
                         None => value.to_string(),
-                    };
-                    row["readout"] = json!(readout);
-                    row["animated"] = json!(state.animated);
-                    row["keyAtPlayhead"] = json!(state.key_at_playhead);
-                } else {
-                    row["readout"] = json!("");
-                    row["animated"] = json!(false);
-                    row["keyAtPlayhead"] = json!(false);
+                    });
+                    animated |= state.animated;
+                    at_key &= state.key_at_playhead;
                 }
-                let channel = client.model.index.channel(&layer, &path);
-                row["previous"] =
-                    json!(channel.is_some_and(|c| c.keys.iter().any(|k| k.time < time)));
-                row["next"] = json!(channel.is_some_and(|c| c.keys.iter().any(|k| k.time > time)));
+                row["readout"] = json!(values.join(", "));
+                row["animated"] = json!(animated);
+                row["keyAtPlayhead"] = json!(at_key);
+                row["previous"] = json!(
+                    client
+                        .model
+                        .adjacent_key(-1, time, Some((&layer, &path)))
+                        .is_some()
+                );
+                row["next"] = json!(
+                    client
+                        .model
+                        .adjacent_key(1, time, Some((&layer, &path)))
+                        .is_some()
+                );
                 row["accessibilityLabel"] = json!(format!(
                     "{label}, {}",
                     row["readout"].as_str().unwrap_or("")
@@ -256,17 +276,17 @@ impl Backend {
                 for channel in &layer.channels {
                     if property
                         && path.is_some_and(|p| {
-                            p != channel.path
-                                && !(p == "scale" && channel.path.starts_with("scale."))
+                            !client
+                                .model
+                                .track_channels(&layer.id, p)
+                                .iter()
+                                .any(|axis| axis.path == channel.path)
                         })
                     {
                         continue;
                     }
                     for key in &channel.keys {
                         let time = layer.from + key.time;
-                        if time < 0. || time > scene.duration {
-                            continue;
-                        }
                         keys.push(crate::timeline_scene::Key {
                             id: key.id.clone(),
                             channel: channel.path.clone(),
@@ -282,15 +302,8 @@ impl Backend {
                     }
                 }
                 keys.sort_by(|a, b| a.time.total_cmp(&b.time));
-                // Occluded keys in the same logical pixel share one painted mark;
-                // the full identities remain in the native model for hit testing.
-                let mut seen = std::collections::BTreeSet::new();
-                keys.retain(|k| {
-                    seen.insert((
-                        (k.time / scene.duration.max(0.001) * 2048.).floor() as i64,
-                        k.selected,
-                    ))
-                });
+                // Retain every authored identity. The native renderer culls and
+                // groups using the actual viewport, never an invented 2048px grid.
                 scene.rows.insert(
                     row["id"].as_str().ok_or("row id")?.into(),
                     crate::timeline_scene::Row {
@@ -516,39 +529,31 @@ impl Backend {
         Ok(None)
     }
     pub(crate) fn start_timeline(&mut self, intent: Value) -> Result<(), String> {
-        if self.native.timeline_job.is_some() {
+        if self.native.timeline_job.is_some() || self.native.timeline_effect_pending != 0 {
             return Err("Timeline command pending".into());
         }
-        let mut client = self.native.timeline.take().ok_or("Timeline closed")?;
         let p = self.published().ok_or("closed")?;
+        let mut client = self.native.timeline.take().ok_or("Timeline closed")?;
         let time = self.time();
         self.native.timeline_job = Some(Box::pin(async move {
-            if intent["type"] == "native.select-key" {
-                let result = (async {
-                    client.sync().map_err(|e| e.to_string())?;
-                    let calls = client
-                        .model
-                        .select_keys(
-                            intent["layer"].as_str().ok_or("layer")?,
-                            intent["channel"].as_str().ok_or("channel")?,
-                            &[intent["key"].as_str().ok_or("key")?.into()],
-                            intent["additive"].as_bool().unwrap_or(false),
-                            false,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    for call in calls {
-                        client.call(call).await.map_err(|e| e.to_string())?;
-                    }
-                    Ok(Vec::new())
-                })
-                .await;
+            if intent["type"] == "easingLibrary" {
+                let result = crate::timeline_easing::dispatch(&client.kernel, &intent)
+                    .await
+                    .map(|()| Vec::new());
                 return (client, result);
             }
             let context = pm_panel_timeline::v4::Context {
                 time,
                 expected_document: p.snapshot.doc_id,
                 expected_revision: p.revision(),
-                millis: intent["millis"].as_u64().unwrap_or(0),
+                millis: intent["millis"].as_u64().unwrap_or_else(|| {
+                    static CLOCK: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    CLOCK
+                        .get_or_init(std::time::Instant::now)
+                        .elapsed()
+                        .as_millis() as u64
+                }),
                 in_field: false,
                 keys_admitted: true,
                 property_facts: &PropertyFacts::default(),
@@ -561,6 +566,12 @@ impl Backend {
         Ok(())
     }
     pub(crate) fn poll_timeline(&mut self) -> Option<Result<Value, String>> {
+        if self.native.timeline_effect_pending != 0 {
+            return None;
+        }
+        if let Some(result) = self.native.timeline_effect_result.take() {
+            return Some(result.map(|()| Value::Null));
+        }
         let future = self.native.timeline_job.as_mut()?;
         let mut cx = Context::from_waker(Waker::noop());
         let Poll::Ready((client, result)) = future.as_mut().poll(&mut cx) else {
@@ -568,22 +579,30 @@ impl Backend {
         };
         self.native.timeline = Some(client);
         self.native.timeline_job = None;
-        Some(result.map(|effects| {
-            for effect in effects {
-                use pm_panel_timeline::HostEffect;
-                let action = match effect {
-                    HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
-                    HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
-                    HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
-                    HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
-                    other => json!({"kind":"unavailable","action":format!("{other:?}")}),
-                };
-                self.native
-                    .platform
-                    .push(("timeline.effect".into(), action));
-            }
-            Value::Null
-        }))
+        let effects = match result {
+            Ok(effects) => effects,
+            Err(error) => return Some(Err(error)),
+        };
+        let mut actions = Vec::new();
+        for effect in effects {
+            use pm_panel_timeline::HostEffect;
+            let action = match effect {
+                HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
+                HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
+                HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
+                HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
+            };
+            actions.push(("timeline.effect".into(), action));
+        }
+        if actions.is_empty() {
+            return Some(Ok(Value::Null));
+        }
+        self.native.timeline_effect_pending = actions.len();
+        self.native.timeline_effect_result = Some(Ok(()));
+        self.native.platform.extend(actions);
+        // The HostAck stays pending until every native platform request replies.
+        None
     }
 }
 fn property_label(path: &str) -> &str {
@@ -782,8 +801,7 @@ impl Backend {
             }
             "panel.timeline" => return Ok(NativeCommand::Timeline(args.clone())),
             "panel.timeline.dispose" => {
-                self.native.timeline_job = None;
-                Value::Null
+                return Ok(NativeCommand::Timeline(json!({"type":"dispose"})));
             }
             "viewer.chrome.drive" => {
                 let p = self.published().ok_or("closed")?;

@@ -909,3 +909,33 @@ fn graph_native_commands_persist_view_facts_without_document_edits() {
     );
     assert_eq!(document(&c), before);
 }
+
+#[test]
+fn presentation_can_hold_one_immutable_publication_while_actor_advances() {
+    let (_actor, mut c) = client();
+    let old = c.model.clone();
+    let revision = old.index.revision.to_string();
+    dispatch(
+        &mut c,
+        json!({"type":"switch","id":id("b"),"name":"visibility"}),
+    )
+    .unwrap();
+    let old_frame = v4::project_window(&old, 0, 10).unwrap();
+    assert_eq!(old_frame["revision"], revision);
+    let old_b = old_frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(old_b["visible"], true);
+    let current = v4::window(&mut c, 0, 10).unwrap();
+    assert_ne!(current["revision"], old_frame["revision"]);
+    let new_b = current["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["layer"] == "b")
+        .unwrap();
+    assert_eq!(new_b["visible"], false);
+}
