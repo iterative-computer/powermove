@@ -5,6 +5,7 @@ use pm_promedia::{
     lut::CubeLut,
     scopes::{self, ScopeConfig, Scopes},
 };
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnalysisStage {
@@ -30,14 +31,14 @@ pub struct ScopeRequest {
 pub enum AnalysisState {
     Empty,
     Pending,
-    Ready(Box<Scopes>),
+    Ready(Arc<Scopes>),
     Failed(ServiceErrorCode),
 }
 pub struct ColourAnalysis {
     pub state: AnalysisState,
     /// Smoothing/animation isn't performed here. Waiting retains the last real
     /// analysis; a read error clears it. The UI shows no spinner before 500 ms.
-    pub previous: Option<Box<Scopes>>,
+    pub previous: Option<Arc<Scopes>>,
     pub pending_since_ms: Option<u64>,
     last_sample_ms: Option<u64>,
     active: Option<ScopeRequest>,
@@ -115,8 +116,9 @@ impl ColourAnalysis {
         }
         match result {
             Ok(scopes) => {
-                self.previous = Some(Box::new(scopes.clone()));
-                self.state = AnalysisState::Ready(Box::new(scopes));
+                let scopes = Arc::new(scopes);
+                self.previous = Some(scopes.clone());
+                self.state = AnalysisState::Ready(scopes);
             }
             Err(e) => {
                 self.previous = None;

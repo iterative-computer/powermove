@@ -4,6 +4,7 @@ mod generated;
 mod mixer;
 mod native;
 mod projects;
+mod spec_states;
 
 use super::*;
 use serde_json::{Value, json};

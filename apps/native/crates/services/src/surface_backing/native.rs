@@ -20,10 +20,24 @@ pub enum MigrationState {
     Idle,
     Running,
     WaitingForElectron,
+    WaitingForLocalElectron,
+    NotEnoughSpace { needed: u64, available: u64 },
+    ProfileRefused,
+    WaitingForSecrets,
+    SecretDenied,
     NeedsSecretConsent { interrupted: bool },
     Paused,
     Failed(ServiceErrorCode),
     Complete(MigrationSummary),
+}
+/// First-launch currently returns anyhow for these failures. The native host
+/// must supply structured facts; do not parse diagnostics or invent byte counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MigrationFault {
+    LowDisk { needed: u64, available: u64 },
+    ProfileRefused,
+    SecretDenied,
+    Other(ServiceErrorCode),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationRequest {
@@ -62,7 +76,10 @@ impl Migration {
     /// DESIGN-TODO(opus): N002 requires Not Now/Continue Without Them to stay
     /// visible. pm-first-launch lacks skip_secret_consent; do not fake Complete.
     pub fn decline_secrets(&mut self) -> Result<()> {
-        if !matches!(self.state, MigrationState::NeedsSecretConsent { .. }) {
+        if !matches!(
+            self.state,
+            MigrationState::NeedsSecretConsent { .. } | MigrationState::SecretDenied
+        ) {
             return Err(invalid("no secret consent prompt"));
         }
         Err(unavailable(
@@ -75,7 +92,10 @@ impl Migration {
     /// Call ONLY for a fresh explicit response to secrets::PROMPT; not on retry,
     /// relaunch, automatic resume, or because an old consent receipt exists.
     pub fn consent(&mut self) -> Result<MigrationRequest> {
-        if !matches!(self.state, MigrationState::NeedsSecretConsent { .. }) {
+        if !matches!(
+            self.state,
+            MigrationState::NeedsSecretConsent { .. } | MigrationState::SecretDenied
+        ) {
             return Err(invalid("no current secret consent prompt"));
         }
         self.start(true)
@@ -89,14 +109,18 @@ impl Migration {
             consent,
         };
         self.active = Some(request.clone());
-        self.state = MigrationState::Running;
+        self.state = if consent {
+            MigrationState::WaitingForSecrets
+        } else {
+            MigrationState::Running
+        };
         self.progress = None;
         self.pause_requested = false;
         self.pause_boundary_reached = false;
         Ok(request)
     }
     pub fn request_pause(&mut self) -> Result<()> {
-        if self.active.is_none() {
+        if self.active.is_none() || self.state != MigrationState::Running {
             return Err(invalid("migration not running"));
         }
         self.pause_requested = true;
@@ -174,6 +198,25 @@ impl Migration {
     }
     pub fn library_may_attach(&self) -> bool {
         self.library_was_ready || matches!(self.state, MigrationState::Complete(_))
+    }
+    pub fn settle_fault(
+        &mut self,
+        request: &MigrationRequest,
+        fault: MigrationFault,
+    ) -> Result<()> {
+        if self.active.as_ref() != Some(request) {
+            return Err(stale());
+        }
+        self.active = None;
+        self.state = match fault {
+            MigrationFault::LowDisk { needed, available } => {
+                MigrationState::NotEnoughSpace { needed, available }
+            }
+            MigrationFault::ProfileRefused => MigrationState::ProfileRefused,
+            MigrationFault::SecretDenied => MigrationState::SecretDenied,
+            MigrationFault::Other(code) => MigrationState::Failed(code),
+        };
+        Ok(())
     }
 }
 /// Real first-launch dispatch. SecretAccess is injected only by a host that

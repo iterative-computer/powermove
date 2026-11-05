@@ -341,3 +341,41 @@ impl Meter {
         self.clear_clip();
     }
 }
+
+/// E18: a backing resource is invalidated only when its actual size/scale
+/// changes. No canvas reset or allocation is requested on repeated observations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterBacking {
+    pub logical: [f64; 2],
+    pub scale: f64,
+    pub pixels: [u32; 2],
+}
+impl MeterBacking {
+    pub fn new(width: f64, height: f64, scale: f64) -> Result<Self> {
+        if !width.is_finite() || !height.is_finite() || !scale.is_finite() {
+            return Err(invalid("invalid meter backing dimensions"));
+        }
+        let logical = [width.max(0.), height.max(0.)];
+        let scale = scale.max(1.);
+        let pixels = logical.map(|n| (n * scale).round());
+        if pixels
+            .iter()
+            .any(|n| !n.is_finite() || *n > u32::MAX as f64)
+        {
+            return Err(invalid("meter backing dimensions overflow"));
+        }
+        Ok(Self {
+            logical,
+            scale,
+            pixels: pixels.map(|n| n as u32),
+        })
+    }
+    pub fn replace_if_changed(&mut self, next: Self) -> bool {
+        if *self == next {
+            false
+        } else {
+            *self = next;
+            true
+        }
+    }
+}

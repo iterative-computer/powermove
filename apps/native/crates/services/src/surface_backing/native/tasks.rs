@@ -33,6 +33,11 @@ pub fn act(
     if task.window != window_id {
         return Err(invalid("task belongs to another window"));
     }
+    if (action == TaskAction::Pause && task.state != TaskState::Running)
+        || (action == TaskAction::Resume && task.state != TaskState::Paused)
+    {
+        return Err(invalid("task action is not available in this state"));
+    }
     match action {
         TaskAction::Pause => queue.pause(task_id),
         TaskAction::Resume => queue.resume(task_id),
@@ -40,17 +45,73 @@ pub fn act(
     }
     .map_err(task_error)
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskContainer {
+    Popover,
+    Window,
+}
+#[derive(Default)]
+pub struct TaskTiming {
+    finished: BTreeMap<TaskId, u64>,
+    running: BTreeMap<TaskId, (u64, u64, u64)>,
+}
+impl TaskTiming {
+    pub fn observe(&mut self, task: &Task, now_ms: u64) {
+        if task.state.terminal() {
+            self.finished.entry(task.id).or_insert(now_ms);
+        }
+        if task.state != TaskState::Running {
+            self.running.remove(&task.id);
+        } else {
+            let entry = self
+                .running
+                .entry(task.id)
+                .or_insert((now_ms, task.completed, task.total));
+            if task.completed < entry.1 || task.total != entry.2 {
+                *entry = (now_ms, task.completed, task.total);
+            }
+        }
+    }
+    /// S005's 5 s applies to the popover only; window rows stay for the session,
+    /// and failed rows stay until acted on. This never retires/forgets task data.
+    pub fn visible(&self, task: &Task, now_ms: u64, container: TaskContainer) -> bool {
+        container == TaskContainer::Window
+            || !matches!(task.state, TaskState::Completed | TaskState::Cancelled)
+            || self
+                .finished
+                .get(&task.id)
+                .is_none_or(|at| now_ms.saturating_sub(*at) < 5000)
+    }
+    pub fn seconds_left(&self, task: &Task, now_ms: u64) -> Option<u64> {
+        if task.state != TaskState::Running || task.total == 0 || task.completed >= task.total {
+            return None;
+        }
+        let &(start, initial, total) = self.running.get(&task.id)?;
+        let elapsed = now_ms.checked_sub(start)?;
+        let advanced = task.completed.checked_sub(initial)?;
+        if elapsed < 5000 || advanced == 0 || total != task.total {
+            return None;
+        }
+        let seconds =
+            (elapsed as f64 / 1000.) * (task.total - task.completed) as f64 / advanced as f64;
+        if !seconds.is_finite() || seconds >= u64::MAX as f64 {
+            return None;
+        }
+        Some(seconds.round() as u64)
+    }
+}
 #[derive(Default)]
 pub struct TaskRows {
     pub rows: BTreeMap<TaskId, Task>,
     pub cursor: u64,
+    window: Option<String>,
 }
 impl TaskRows {
     pub fn refresh(&mut self, queue: &BackgroundTasks, window_id: &str) {
         // Always include a snapshot on first subscription (cursor 0 alone may
         // otherwise miss rows after a queue was restored).
         let events = queue.events(window_id, self.cursor);
-        if self.cursor == 0 || events.reset {
+        if self.window.as_deref() != Some(window_id) || self.cursor == 0 || events.reset {
             self.rows = queue
                 .snapshot(window_id)
                 .into_iter()
@@ -62,6 +123,7 @@ impl TaskRows {
             }
         }
         self.cursor = events.cursor;
+        self.window = Some(window_id.into());
     }
     /// Parallel tasks retain their own units. An unknown total keeps the overall
     /// summary indeterminate, as in the tagged pill; never average frames and bytes.

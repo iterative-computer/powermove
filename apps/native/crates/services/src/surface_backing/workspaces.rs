@@ -72,6 +72,15 @@ pub fn save_as(
     {
         return Err(invalid("invalid workspace identity or name"));
     }
+    if records
+        .entries
+        .iter()
+        .any(|v| v["name"].as_str() == Some(name.trim()))
+    {
+        return Err(invalid(
+            "workspace name already exists; use explicit Replace or a new name",
+        ));
+    }
     let mut new = source.clone();
     let object = new
         .as_object_mut()

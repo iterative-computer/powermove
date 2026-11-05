@@ -128,20 +128,27 @@ struct Host {
     saved: Vec<Value>,
 }
 impl GeneratedHost for Host {
-    fn run(&mut self, _: &ToolRequest) -> Result<Value> {
+    fn run(&mut self, _: &ToolRequest) -> Result<ToolReply> {
         Err(unavailable("tool absent"))
     }
-    fn save_local(&mut self, _: &str, state: &Value) -> Result<()> {
+    fn save_local(&mut self, scope: &PanelScope, _: &str, state: &Value) -> Result<u64> {
         if self.fail {
             return Err(failure());
         }
         self.saved.push(state.clone());
-        Ok(())
+        assert_eq!(scope.workspace_id, "workspace");
+        Ok(scope.revision + 1)
     }
 }
 fn panel() -> GeneratedPanel {
-    GeneratedPanel::new(json!({"id":"p","controls":[],"state":{"x":1,"future":[1,2]},"unknown":7}))
-        .unwrap()
+    GeneratedPanel::new(
+        json!({"id":"p","controls":[],"state":{"x":1,"future":[1,2]},"unknown":7}),
+        PanelScope {
+            workspace_id: "workspace".into(),
+            revision: 1,
+        },
+    )
+    .unwrap()
 }
 #[test]
 fn generated_local_state_survives_failed_flush_and_reset() {
@@ -166,14 +173,24 @@ fn changed_tool_state_or_session_rejects_stale_preview() {
     let request = p.begin(session(1), 4, &control).unwrap();
     p.set_local("x", json!(5)).unwrap();
     assert!(
-        p.settle(&request, &session(1), 4, Ok(json!({"ok":true})))
-            .is_err()
+        p.settle(
+            &request,
+            &session(1),
+            4,
+            Ok(ToolReply::preview(json!({"ok":true}), 4))
+        )
+        .is_err()
     );
     assert!(p.preview.is_none());
     let next = p.begin(session(1), 4, &control).unwrap();
     assert!(
-        p.settle(&next, &session(2), 4, Ok(json!({"ok":true})))
-            .is_err()
+        p.settle(
+            &next,
+            &session(2),
+            4,
+            Ok(ToolReply::preview(json!({"ok":true}), 4))
+        )
+        .is_err()
     );
 }
 #[test]

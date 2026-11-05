@@ -158,6 +158,73 @@ pub trait SceneHost {
         Err(unavailable("3D model importer not installed"))
     }
 }
+/// Owner decision 2026-11-04: all old scenes upgrade automatically; there is no
+/// compatibility-mode switch. The engine/kernel owner supplies this transaction.
+/// DESIGN-TODO(opus): new Studio controls need a replacement-system spec; this
+/// lane exposes only raw inspected data and source-defined numeric domains.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpgradedScene {
+    pub published_revision: u64,
+    pub original_archive: String,
+    pub data: Value,
+}
+pub trait SceneUpgradeHost {
+    /// Atomically archive the authored original and publish the upgraded scene,
+    /// including animated values/media/parent links. On failure leave it intact.
+    fn upgrade_and_inspect(
+        &mut self,
+        _session: &Session,
+        _revision: u64,
+        _layer_id: &str,
+    ) -> Result<UpgradedScene> {
+        Err(unavailable("automatic Studio upgrade is not installed"))
+    }
+}
+pub fn add_menu_available(context_kind: Option<&str>) -> bool {
+    context_kind.is_none_or(|kind| kind == "empty")
+}
+/// Field paths/domains from na-3d-source b81b94c663d, scene-model.ts. No new
+/// chrome labels or default values are invented; the new engine must supply
+/// each actual channel after the automatic upgrade boundary above.
+pub fn studio_fields(data: &Value) -> Result<Vec<Field>> {
+    if data["light"]["type"] == "area" {
+        let mut out = vec![
+            color("light.color"),
+            number("light.intensity", 0.05, Some(0.), None),
+        ];
+        out.extend(target("light"));
+        out.extend([
+            number("light.width", 0.05, Some(0.001), None),
+            number("light.height", 0.05, Some(0.001), None),
+        ]);
+        return Ok(out);
+    }
+    let mut out = fields(data)?;
+    if data["object"].is_object() && data["object"]["useSourceMaterials"] != true {
+        for (key, step, min, max) in [
+            ("clearcoat", 0.01, 0., Some(1.)),
+            ("clearcoatRoughness", 0.005, 0.002, Some(1.)),
+            ("transmission", 0.01, 0., Some(1.)),
+            ("ior", 0.01, 1., Some(2.6)),
+            ("specular", 0.01, 0., Some(1.)),
+            ("sheen", 0.01, 0., Some(1.)),
+            ("iridescence", 10., 0., Some(1200.)),
+            ("dispersion", 0.01, 0., Some(1.)),
+            ("droplets", 0.01, 0., Some(1.)),
+            ("anisotropy", 0.01, -1., Some(1.)),
+            ("subsurface", 0.01, 0., None),
+        ] {
+            out.push(number(&format!("m.{key}"), step, Some(min), max));
+        }
+    }
+    if data["camera"].is_object() {
+        out.extend([
+            number("camera.fStop", 0.1, Some(0.), Some(64.)),
+            number("camera.focusDistance", 0.01, Some(0.), None),
+        ]);
+    }
+    Ok(out)
+}
 /// Editor camera is ephemeral; storing it never mutates the authored render camera.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Navigation {

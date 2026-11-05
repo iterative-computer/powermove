@@ -1323,3 +1323,92 @@ macOS still requires full app build; audio/3D sound and Undo; actual panel/sessi
 switches, IME and AX; Welcome focus; signed updater/save/export barrier; migration,
 secret-decline API, Keychain/TCC/bookmarks/notifications; live scopes/LUT pipeline;
 storage volume outcomes; and Opus review of actual light/dark/accessibility output.
+
+
+### Surface backing B: main reference reconciliation — 2026-11-04
+
+Merged `origin/feat/native-engine` at
+`711f44ba0667f81ce8388c4ec57565d1d0378630`. The owner’s later reference decision
+supersedes the earlier tag-only source label above: behavior now follows pinned
+main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, with v1.2.0 inputs retained.
+No main implementation or other lane was merged wholesale.
+
+Direct tag-to-pinned-main source comparison of these families found:
+
+- U02/generated controls: actual control membership, five-primary/explicit
+  secondary grouping, paired X/Y bindings and independent authored increments.
+  `generated_points` supplies grouping and minimum-anchored quantization, including
+  ECMAScript’s exact six-decimal halfway behavior. Numeric edits clamp; imported
+  out-of-range values/unknown metadata remain untouched. Inspector parameter
+  layout and other U-row view work remain with their UI/effects owners.
+- E18/Mixer: the meter backing-size adapter requests no invalidation for unchanged
+  logical/pixel size and scale. Hidden/not-playing gates were already modeled.
+  Actual GPU resource reuse and pacing remain an engine/Mac assertion.
+- P01/workspaces: full definitions, group/active-tab metadata, custom chrome and
+  authored colours survive the adapter unchanged. Historical schema-5/schema-6
+  stock-only migrations and durable settings remain delta-data/kernel work;
+  this lane does not copy main’s stock dimensions or colour literals into native.
+- The pinned-main 3D context contribution is empty-canvas/empty-timeline only.
+  That predicate is tested. The owner’s new-system decision supersedes the old
+  S098 legacy-system scope: `SceneUpgradeHost` requires automatic archive-safe
+  upgrade before new-system inspection, without a compatibility-mode switch.
+  Source-defined Studio numeric domains (coat/transmission/IOR, softbox dimensions,
+  focus/f-stop, etc.) are inspectable from the read-only source branch pinned at
+  `b81b94c663d2d4b380ba14a322fa2f6b14b769df`. No engine/schema port is claimed.
+- Mods has a Title Case menu wording delta already covered by Opus’s spec.
+  Onboarding’s compatible-provider ids/model validation are unchanged; provider
+  discovery/connection A01 belongs to its owner. The different Electron detail
+  sentence does not authorize new native copy over the approved spec.
+- Takes, Notes, generated action/source bindings, updates, release notes,
+  notification/permission logic and their tagged backing source are otherwise
+  unchanged in the compared paths. Main’s storage/upgrade/retention P rows and LUT
+  rendering E rows retain their assigned delta-data/delta-fx integration routes.
+
+Additional spec checks cover workspace-scoped generated-state publication,
+apply-vs-preview publication revisions, queued tasks offering Cancel only, 5 s
+popover terminal retention versus session-long window rows, 5 s ETA sampling,
+unknown-owner/low-disk/profile/Keychain migration states, first-sent-run notification
+consent, provisional authorization, separate question/completion events, and
+window-isolated task subscriptions. These strengthen the backing; none is a Mac
+UI or physical-performance pass.
+
+**Remaining outside-owned-path changes:** kernel atomic retained-record/notes/
+3D commands; automatic Studio schema/engine upgrade and media closure; first-launch
+`skip_secret_consent` plus typed low-space/profile/access facts; application worker
+and telemetry attachment; signed OS/update adapters. First-launch’s generic waiting
+outcome cannot establish a local owner, so the backing uses the spec’s unknown-owner
+wording unless the host supplies that fact. Reverse migration stays unavailable
+under the owner’s decision; the reviewed `.pmv` guidance is retained.
+
+**DESIGN-TODO(opus):** (1) N002 Not Now/Continue Without Them remains visible but
+returns Unavailable until `skip_secret_consent` exists; (2) the replacement Studio
+surface needs its own spec. New Studio data has a neutral nonvisual placeholder,
+not inferred labels/layout. No scope trace, welcome or mixer token was substituted;
+this lane creates no views and consumes none of the nine pending visual tokens.
+
+Post-merge validation (Rust 1.96.1; synthetic fixtures; zero failed/ignored tests):
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove
+cargo +1.96.1 test --locked --manifest-path apps/native/Cargo.toml -p pm-services -p pm-first-launch -p pm-promedia
+# pm-services: 177 passed (102 new + 75 existing)
+# pm-first-launch: 17 passed; pm-promedia: 94 passed; total: 288 passed
+cargo +1.96.1 clippy --locked --manifest-path apps/native/Cargo.toml -p pm-services --all-targets --no-deps -- -D warnings
+cargo +1.96.1 fmt --manifest-path apps/native/Cargo.toml -p pm-services --check
+CARGO_TARGET_DIR="$PWD/apps/native/target" cargo +1.96.1 check --locked --manifest-path apps/native/crates/services/isolated/Cargo.toml
+git diff --check
+gitleaks git --pre-commit --staged --redact
+gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow
+```
+
+The isolated lock’s only existing-package version change is `smallvec` 1.16.4 →
+1.16.3, required by the existing pm-expr exact `=1.16.3` dependency newly reached
+through first-launch/kernel. The workspace lock changes only the two local
+pm-services dependency names. No bulk upgrade, engine lock change or new crate.
+All checks above pass; staged secret scans are repeated before each commit.
+
+Mac verification remains exactly the application/OS/physical/Opus checks above,
+including the actual new Studio port and automatic old-project upgrade. No Linux
+check closes a Mac gate. N002 and 3D kernel/host gaps are explicit blockers to
+those user workflows, not exceptions hidden by passing model tests.

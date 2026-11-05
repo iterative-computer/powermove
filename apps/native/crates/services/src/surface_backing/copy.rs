@@ -127,7 +127,14 @@ pub const PERFORMANCE_LABELS: &[(&str, &str)] = &[
 ];
 pub fn migration_title(state: &MigrationState) -> &'static str {
     match state {
-        MigrationState::WaitingForElectron => "Quit Powermove to Continue",
+        // Generic Outcome doesn't establish a local process owner. Preserve the
+        // spec's unknown-owner treatment until the native host knows otherwise.
+        MigrationState::WaitingForElectron => "Powermove Might Still Be Open",
+        MigrationState::WaitingForLocalElectron => "Quit Powermove to Continue",
+        MigrationState::NotEnoughSpace { .. } => "Not Enough Space",
+        MigrationState::ProfileRefused => "Powermove Native Can’t Start",
+        MigrationState::WaitingForSecrets => "Keep Your Sign-Ins",
+        MigrationState::SecretDenied => "Keychain Access Wasn’t Allowed",
         MigrationState::NeedsSecretConsent { interrupted: false } => "Keep Your Sign-Ins",
         MigrationState::NeedsSecretConsent { interrupted: true } => {
             "The Keychain Request Didn’t Finish"

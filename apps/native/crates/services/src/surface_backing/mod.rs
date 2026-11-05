@@ -5,6 +5,7 @@
 pub mod authorization;
 pub mod copy;
 pub mod generated;
+pub mod generated_points;
 pub mod maintenance;
 pub mod mixer;
 pub mod native;

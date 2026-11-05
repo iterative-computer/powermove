@@ -11,6 +11,7 @@ pub enum Binding {
     Parameter(String),
     Button,
     Readout(String),
+    Note,
     Unsupported(String),
 }
 pub fn binding(control: &Value) -> Result<Binding> {
@@ -28,8 +29,12 @@ pub fn binding(control: &Value) -> Result<Binding> {
                 .into(),
         ));
     }
+    if kind == "note" {
+        return Ok(Binding::Note);
+    }
     if ![
-        "slider", "text", "color", "fill", "toggle", "select", "curve",
+        "slider", "number", "point", "gradient", "text", "color", "fill", "toggle", "select",
+        "curve",
     ]
     .contains(&kind)
     {
@@ -60,6 +65,28 @@ pub fn binding(control: &Value) -> Result<Binding> {
             .ok_or_else(|| invalid("missing parameter name"))?
             .into(),
     ))
+}
+/// Existing out-of-range values remain inspectable. Only an edit clamps to the
+/// declared numeric range (S102); unknown control metadata is left untouched.
+pub fn edit_value(control: &Value, value: Value) -> Result<Value> {
+    if !matches!(control["type"].as_str(), Some("slider" | "number")) {
+        return Ok(value);
+    }
+    let mut value = value
+        .as_f64()
+        .ok_or_else(|| invalid("invalid generated number"))?;
+    let min = control["min"].as_f64();
+    let max = control["max"].as_f64();
+    if min.zip(max).is_some_and(|(min, max)| min > max) {
+        return Err(invalid("invalid generated numeric range"));
+    }
+    if let Some(min) = min {
+        value = value.max(min);
+    }
+    if let Some(max) = max {
+        value = value.min(max);
+    }
+    Ok(json!(value))
 }
 pub fn strip_manifest_commands(commands: &Value) -> Result<Vec<Value>> {
     let commands = commands
@@ -183,14 +210,40 @@ pub struct ToolRequest {
     pub session: Session,
     pub revision: u64,
     pub effect: ButtonEffect,
+    pub panel_id: String,
+    pub label: Option<String>,
+    pub workspace: PanelScope,
 }
 pub trait GeneratedHost {
     /// Host must enforce target/keyframe/script capabilities, revision, hand-edit
     /// protection and one Undo step for apply. Script execution stays off-main.
-    fn run(&mut self, request: &ToolRequest) -> Result<Value>;
-    fn save_local(&mut self, panel_id: &str, state: &Value) -> Result<()>;
+    fn run(&mut self, request: &ToolRequest) -> Result<ToolReply>;
+    /// Compare workspace revision inside the writer; never save through whichever
+    /// workspace happens to be current when the delayed callback runs.
+    fn save_local(&mut self, scope: &PanelScope, panel_id: &str, state: &Value) -> Result<u64>;
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelScope {
+    pub workspace_id: String,
+    pub revision: u64,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolReply {
+    pub result: Value,
+    pub published_revision: u64,
+    pub applied: bool,
+}
+impl ToolReply {
+    pub fn preview(result: Value, revision: u64) -> Self {
+        Self {
+            result,
+            published_revision: revision,
+            applied: false,
+        }
+    }
 }
 pub struct GeneratedPanel {
+    pub scope: PanelScope,
     pub definition: Value,
     pub state: Value,
     defaults: Value,
@@ -199,8 +252,11 @@ pub struct GeneratedPanel {
     dirty: bool,
 }
 impl GeneratedPanel {
-    pub fn new(definition: Value) -> Result<Self> {
+    pub fn new(definition: Value, scope: PanelScope) -> Result<Self> {
         super::id(&definition)?;
+        if scope.workspace_id.is_empty() {
+            return Err(invalid("generated panel requires a workspace identity"));
+        }
         if !definition["controls"].is_array() {
             return Err(invalid("missing generated controls"));
         }
@@ -212,6 +268,7 @@ impl GeneratedPanel {
             return Err(invalid("invalid local state"));
         }
         Ok(Self {
+            scope,
             definition,
             defaults: state.clone(),
             state,
@@ -241,7 +298,14 @@ impl GeneratedPanel {
     /// Dirty state is retained on worker failure (N4).
     pub fn flush_local(&mut self, host: &mut impl GeneratedHost) -> Result<()> {
         if self.dirty {
-            host.save_local(super::id(&self.definition)?, &self.state)?;
+            let revision =
+                host.save_local(&self.scope, super::id(&self.definition)?, &self.state)?;
+            if revision <= self.scope.revision {
+                return Err(unavailable(
+                    "generated local state publication not acknowledged",
+                ));
+            }
+            self.scope.revision = revision;
             self.dirty = false;
         }
         Ok(())
@@ -260,6 +324,9 @@ impl GeneratedPanel {
             session,
             revision,
             effect: button_effect(control, &self.state)?,
+            panel_id: super::id(&self.definition)?.into(),
+            label: control["label"].as_str().map(str::to_owned),
+            workspace: self.scope.clone(),
         };
         self.active = Some(request.clone());
         self.preview = None;
@@ -270,17 +337,32 @@ impl GeneratedPanel {
         request: &ToolRequest,
         current: &Session,
         revision: u64,
-        result: Result<Value>,
+        result: Result<ToolReply>,
     ) -> Result<()> {
         if self.active.as_ref() != Some(request) {
             return Err(stale());
         }
         self.active = None;
-        if &request.session != current || request.revision != revision {
+        if &request.session != current {
             return Err(stale());
         }
         // Worker failure is propagated, not reformatted into a successful preview.
-        self.preview = Some(result?);
+        let reply = result?;
+        let permits_apply = matches!(
+            request.effect,
+            ButtonEffect::Tool { apply: true, .. }
+                | ButtonEffect::Undo
+                | ButtonEffect::Commands(_)
+                | ButtonEffect::Command(_)
+        );
+        if (reply.applied && reply.result["ok"] == false)
+            || reply.published_revision != revision
+            || (reply.applied && (!permits_apply || revision <= request.revision))
+            || (!reply.applied && revision != request.revision)
+        {
+            return Err(stale());
+        }
+        self.preview = Some(reply.result);
         Ok(())
     }
 }
