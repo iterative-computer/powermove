@@ -112,3 +112,56 @@ this lane. Blend/matte menu descriptors remain unimplemented placeholders.
 No U02/U03/U08/U13/U14 row is fully closed: U08 has real V8/menu/actor coverage,
 U13 has real Color Depth and scalar parameter coverage, while screen/native
 service qualification and the blockers above remain explicit.
+
+## 2026-11-05 — final merged Linux verification / BLOCKED
+
+Fetched and merged `origin/feat/native-engine` at
+`5bcd425ddc158cbd891ee4b515cf9993fad29a66` (already an ancestor; no conflicts).
+Implementation commits: `2702a18cd` and `85f03e014`. This lane's full requested
+acceptance remains **BLOCKED**, for the explicit shell/kernel/kit dependencies
+above. The partial implementation is pushed for integration; no complete
+U-row, whole-app parity or macOS behavior is certified.
+
+All shell commands use `source /workspace/.tools/activate.sh; cd /workspace/powermove`.
+The initially missing tool setup was restored outside Git. Rust 1.96.1 and Bun
+1.4.4; no new dependency, workspace member or lockfile update was needed.
+After the merge, the following exact checks passed:
+
+```sh
+cargo test --locked --manifest-path apps/native/Cargo.toml \
+  -p pm-panel-inspector -p pm-panel-media -p pm-panel-viewerchrome \
+  -p pm-builtins -p pm-effect-controls-wire -p pm-project-panel-check
+# 302 passed, 0 failed, 0 ignored: inspector 110, media 72, viewer 61,
+# builtins 35, effect-controls adapter 11, project adapter 13.
+
+cargo clippy --locked --manifest-path apps/native/Cargo.toml \
+  -p pm-panel-inspector -p pm-builtins --all-targets -- -D warnings
+cargo fmt --manifest-path apps/native/Cargo.toml \
+  -p pm-builtins -p pm-panel-inspector --check
+
+cd apps/native/js/v4
+bun test panels/inspector/test panels/effect-controls/test \
+  panels/project/tests panels/viewer/tests panels/settings
+# 230 passed, 0 failed, 89 snapshots (including 21 Inspector snapshots).
+bun x tsc --noEmit -p panels/inspector/tsconfig.json
+bun x tsc --noEmit -p panels/effect-controls/tsconfig.json
+bun x tsc --noEmit -p panels/viewer/tsconfig.json
+bun x tsc --noEmit -p panels/project/tsconfig.json
+bun x tsc --noEmit -p panels/settings/tsconfig.json
+bun x prettier --check panels/inspector/contracts.ts \
+  panels/inspector/session.ts panels/inspector/test/menus.test.ts
+```
+
+TypeScript and Prettier passed on the same implementation before the final
+integration fetch; the fetch introduced no source change. Secret scanning and
+`git diff --check` pass before each commit. All Rust test invocations used
+`--locked`. The existing native manifests/locks remain unchanged.
+
+Mac verification: build the actual app, exercise header and trailing Add Effect
+via pointer/keyboard, row menus and dismissal, numeric/choice/toggle/text/colour
+native field dispatch, selection/document replacement during menus and edits,
+Undo/Redo, AX/IME/text-focus ownership, light/dark/Increase Contrast, and Opus
+screen review. Also verify the added Color Depth setting against real render
+precision. Full Finder/image paste, point pads, anchor drags, durable media
+import/relink/save/reopen and captions remain blocked on the owner changes above;
+Linux metadata/actor tests do not prove those workflows.
