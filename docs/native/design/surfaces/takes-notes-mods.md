@@ -27,7 +27,9 @@ named versions of the project, separate from bounded Undo.
 
 **Delete**: immediate, as v1.2.0, with `Deleted {label}` and a borderless `Undo` in
 the status line until the next status. The take goes to the archive either way (N4).
-Restore from archive is README §6 question 2.
+There's no way to bring an archived take back, by owner decision (2026-11-04): the
+panel's `Restore` only ever means the 24 listed takes, and the list never shows archived
+ones.
 
 Keyboard: ↑/↓ move, Return restores, Delete deletes. VoiceOver: `{label}, saved
 {relative time}`; action `Restore`, custom action `Delete`.
