@@ -370,19 +370,11 @@ fn settings_project_services_validate_and_publish_only_after_actor_ack() {
     }
     let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":updated["revision"],"action":{"type":"write","id":"project.fps","value":29.97}})).unwrap() else { panic!("typed kernel request") };
     kernel.call("synthetic", request).wait().unwrap().unwrap();
-    assert_eq!(
-        kernel
-            .published("synthetic")
-            .unwrap()
-            .snapshot
-            .root()
-            .unwrap()
-            .get("fps")
-            .unwrap()
-            .to_value()
-            .as_f64(),
-        Some(29.97)
-    );
+    let published = kernel.published("synthetic").unwrap();
+    let root = published.snapshot.root().unwrap();
+    let comp =
+        pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref()).unwrap();
+    assert_eq!(comp.get("fps").unwrap().to_value().as_f64(), Some(29.97));
 }
 
 #[test]
