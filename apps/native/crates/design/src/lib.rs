@@ -44,6 +44,12 @@ pub struct Colors {
     /// Badges drawn over media (duration, offline): always dark, drawn at
     /// `metrics.media_badge_opacity`.
     pub media_badge: u32,
+    /// Red channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_red: u32,
+    /// Green channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_green: u32,
+    /// Blue channel scope trace; data colour drawn with dark-scheme viewer tokens.
+    pub scope_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
 }
@@ -196,6 +202,22 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// Mixer channel strip width.
+    pub channel_strip: f32,
+    /// Mixer fader knob height.
+    pub fader_knob: f32,
+    /// Welcome window width.
+    pub welcome_width: f32,
+    /// Welcome window height.
+    pub welcome_height: f32,
+    /// Width of In and Out brackets on rulers and scrubbers.
+    pub mark_bracket: f32,
+    /// Linked-clip sync badge height.
+    pub sync_badge: f32,
+    /// Minimum viewer width for labels in the 3D toolbar.
+    pub viewer_3d_labels: f32,
+    /// Viewer width below which the 3D toolbar becomes one pull-down.
+    pub viewer_3d_collapse: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -210,6 +232,10 @@ pub struct Motion {
     pub wheel_rest: f64,
     /// Still time before the Focus overlay capsule fades (s).
     pub overlay_idle: f64,
+    /// Delay before a tooltip appears for hover or keyboard focus (s).
+    pub tooltip_delay: f64,
+    /// Time window for an immediate tooltip swap to a neighbouring control (s).
+    pub tooltip_warm: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -334,6 +360,9 @@ impl Tokens {
                 warning: 0xf59e0b,
                 success: 0x3fcf8e,
                 media_badge: 0x000000,
+                scope_red: 0xff6b62,
+                scope_green: 0x4fd58a,
+                scope_blue: 0x6ba6ff,
                 labels: Labels {
                     blue: 0x3b4250,
                     violet: 0x4a3b6b,
@@ -367,6 +396,9 @@ impl Tokens {
                 warning: 0xa15c00,
                 success: 0x117a52,
                 media_badge: 0x000000,
+                scope_red: 0xff6b62,
+                scope_green: 0x4fd58a,
+                scope_blue: 0x6ba6ff,
                 labels: Labels {
                     blue: 0xc9d4e8,
                     violet: 0xd8cff0,
@@ -452,6 +484,14 @@ impl Tokens {
                 drop_stroke: 1.5,
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                channel_strip: 72.,
+                fader_knob: 14.,
+                welcome_width: 900.,
+                welcome_height: 640.,
+                mark_bracket: 6.,
+                sync_badge: 16.,
+                viewer_3d_labels: 860.,
+                viewer_3d_collapse: 560.,
             },
             typography: TypeScale {
                 minimum: 11.,
@@ -479,6 +519,8 @@ impl Tokens {
                 interaction: 0.075,
                 wheel_rest: 0.5,
                 overlay_idle: 2.,
+                tooltip_delay: 0.38,
+                tooltip_warm: 0.6,
             },
         };
         tokens.enforce_accessibility();
