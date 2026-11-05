@@ -85,7 +85,7 @@ impl ProEditCommand {
         match self {
             Self::Move { .. } => "Move Linked Clips",
             Self::Trim { .. } => "Trim Clips",
-            Self::Slip { .. } => "Slip Clips",
+            Self::Slip { .. } => "Slip Edit",
             Self::Delete { .. } => "Delete Clips",
             Self::Split { .. } => "Split Clips",
             Self::RippleDelete { .. } => "Ripple Delete",
