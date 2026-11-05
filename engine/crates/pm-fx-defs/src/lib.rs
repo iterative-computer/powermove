@@ -4,6 +4,11 @@
 //! extension definition when an extension overrides a built-in (N4/N6). No JS,
 //! shader compiler, renderer, or platform APIs are needed for defaults/Reset.
 
+pub mod catalog;
+pub mod graph;
+pub mod inputs;
+pub mod spatial;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::OnceLock};
