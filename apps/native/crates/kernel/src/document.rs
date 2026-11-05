@@ -272,6 +272,7 @@ impl DocumentStore {
 
     /// A never-saved project from a project value (stored or canonical form).
     pub fn new_untitled(project: Value) -> DocumentStore {
+        let project = crate::commands::scene3d::upgrade_project(project);
         let document = Document::new(Some(model::to_canonical(project)), 1);
         DocumentStore::from_parts(ProjectFile::untitled(), document, History::new(), true)
     }
@@ -282,6 +283,20 @@ impl DocumentStore {
         history: History,
         history_owned: bool,
     ) -> DocumentStore {
+        let document = {
+            let value = document.root().map(Node::to_value);
+            match value {
+                Some(value) => {
+                    let upgraded = crate::commands::scene3d::upgrade_project(value.clone());
+                    if upgraded != value {
+                        Document::new(Some(upgraded), document.revision())
+                    } else {
+                        document
+                    }
+                }
+                None => document,
+            }
+        };
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
@@ -1847,6 +1862,8 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
         };
         let mut ids = HashSet::with_capacity(items.len());
         for layer in items.iter() {
+            crate::commands::scene3d::validate_layer(&layer.to_value())
+                .map_err(|e| TransactionError::Invalid(e.to_string()))?;
             let id = layer.get("id").and_then(model::str_of);
             match id {
                 Some(id) if !id.is_empty() => {

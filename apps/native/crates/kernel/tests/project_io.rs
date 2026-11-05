@@ -173,7 +173,8 @@ fn legacy_base64_media_becomes_a_record() {
     );
 }
 
-/// Every corpus project survives an untitled save and reopen unchanged.
+/// Every corpus project preserves its authored source across automatic upgrade
+/// and saves/reopens the exact published native document.
 #[test]
 fn corpus_projects_round_trip() {
     let dir = TempDir::new("corpus");
@@ -185,8 +186,11 @@ fn corpus_projects_round_trip() {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         let stored = parse(&text).unwrap();
-        let expected = to_canonical_string(&canonical_project(project_of(&stored).clone()));
+        let original = canonical_project(project_of(&stored).clone());
         let mut store = DocumentStore::new_untitled(project_of(&stored).clone());
+        let upgraded = store.snapshot().document.to_value().unwrap();
+        assert_upgrade_archive(&original, &upgraded);
+        let expected = to_canonical_string(&upgraded);
         let out = dir.path(&format!("{count}.pmv"));
         save_as(&mut store, &out).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert_eq!(
@@ -195,9 +199,73 @@ fn corpus_projects_round_trip() {
             "{}",
             path.display()
         );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         count += 1;
     }
     assert!(count >= 30, "{count}");
+}
+
+// Independent losslessness checks: all outer fields and original layer order
+// stay exact. Replaced data must remain verbatim in its same-ID source archive.
+fn assert_upgrade_archive(before: &Value, after: &Value) {
+    let old = before.as_object().unwrap();
+    let new = after.as_object().unwrap();
+    for (key, value) in old.iter() {
+        if key == "comps" {
+            let old_comps = value.as_object().unwrap();
+            let new_comps = new.get_key(key).unwrap().as_object().unwrap();
+            assert_eq!(old_comps.len(), new_comps.len());
+            for (id, comp) in old_comps.iter() {
+                assert_upgrade_archive(comp, new_comps.get_key(id).unwrap());
+            }
+        } else if key == "layers" {
+            let old_layers = value.as_array().unwrap();
+            let new_layers = new.get_key(key).unwrap().as_array().unwrap();
+            let old_ids = old_layers
+                .iter()
+                .map(|l| l.get("id").unwrap())
+                .collect::<Vec<_>>();
+            let retained_order = new_layers
+                .iter()
+                .map(|l| l.get("id").unwrap())
+                .filter(|id| old_ids.contains(id))
+                .collect::<Vec<_>>();
+            assert_eq!(retained_order, old_ids);
+            for layer in old_layers {
+                let next = new_layers
+                    .iter()
+                    .find(|n| n.get("id") == layer.get("id"))
+                    .unwrap();
+                if next != layer {
+                    if let Some(archive) = next.get("native3dArchive") {
+                        assert_eq!(archive.get("source"), Some(layer));
+                        for (field, authored) in layer.as_object().unwrap().iter() {
+                            if !matches!(field.as_str(), Some("d" | "type" | "threeD")) {
+                                assert_eq!(
+                                    next.as_object().unwrap().get_key(field),
+                                    Some(authored)
+                                );
+                            }
+                        }
+                    } else {
+                        let mut unchanged = next.clone();
+                        let issue = unchanged
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("native3dUpgradeIssue")
+                            .unwrap();
+                        assert!(!issue.as_str().unwrap().is_empty());
+                        assert_eq!(&unchanged, layer);
+                    }
+                }
+            }
+        } else {
+            assert_eq!(new.get_key(key), Some(value));
+        }
+    }
+    for (key, _) in new.iter() {
+        assert!(old.get_key(key).is_some());
+    }
 }
 
 fn edited_copy(dir: &TempDir) -> (std::path::PathBuf, DocumentStore) {

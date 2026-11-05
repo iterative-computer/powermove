@@ -88,6 +88,11 @@ fn any_array<T: JsonTree>(value: Option<&T>, test: impl Fn(&T) -> bool) -> bool 
 }
 
 fn layer_needs_native<T: JsonTree>(layer: &T) -> bool {
+    // An upgraded layer carries the sole archived authored source. Older
+    // hydration/save paths do not implement that archive/diagnostic contract.
+    if present(field(layer, "native3dArchive")) || present(field(layer, "native3dUpgradeIssue")) {
+        return true;
+    }
     let kind = text(field(layer, "type"));
     // Exact TYPE_META roster in BOTH pinned readers. Missing/null types already
     // mean null in those readers. An extension definition is not a layer type:
@@ -488,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_3d_and_default_native_settings_do_not_blanket_block_projects() {
+    fn raw_legacy_3d_stays_readable_but_automatic_upgrade_archives_require_native() {
         let dir = TempDir::new();
         let mut cases = Vec::new();
         for (i, (definition, data)) in [
@@ -514,9 +519,25 @@ mod tests {
                 "color",
                 parse(r#"{"linearBlending":false,"blendDomain":"hdrSafe"}"#).unwrap(),
             );
+            // Raw legacy 3D and its old defaults alone are not a requirement.
+            assert!(!project_needs_native(&p));
+            let original = p.get("layers").unwrap().as_array().unwrap()[0].clone();
             let path = save(&dir, &format!("legacy-3d-{i}.pmv"), p, Value::Null);
-            assert_marked(&path, false);
-            cases.push((path, false));
+            assert_marked(&path, true);
+            let saved = document(&path);
+            let archived = saved
+                .get("proj")
+                .unwrap()
+                .get("layers")
+                .unwrap()
+                .as_array()
+                .unwrap()[0]
+                .get("native3dArchive")
+                .unwrap()
+                .get("source")
+                .unwrap();
+            assert_eq!(archived, &original);
+            cases.push((path, true));
         }
         oracle(&cases);
     }

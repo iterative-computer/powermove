@@ -1,0 +1,140 @@
+[
+  {
+    "id": "anodized",
+    "label": "Anodized Aluminum",
+    "p": {
+      "color": "#5C5F66",
+      "metalness": 1,
+      "roughness": 0.34,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "brushed",
+    "label": "Brushed Metal",
+    "p": {
+      "color": "#B9BCC2",
+      "metalness": 1,
+      "roughness": 0.42,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "polished",
+    "label": "Polished Steel",
+    "p": {
+      "color": "#D7D9DD",
+      "metalness": 1,
+      "roughness": 0.06,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "gold",
+    "label": "Gold",
+    "p": {
+      "color": "#E8C26A",
+      "metalness": 1,
+      "roughness": 0.14,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "glass",
+    "label": "Clear Glass",
+    "p": {
+      "color": "#FFFFFF",
+      "metalness": 0,
+      "roughness": 0.02,
+      "clearcoat": 0,
+      "transmission": 1,
+      "ior": 1.5,
+      "specular": 1
+    }
+  },
+  {
+    "id": "frosted",
+    "label": "Frosted Glass",
+    "p": {
+      "color": "#F4F6F8",
+      "metalness": 0,
+      "roughness": 0.35,
+      "clearcoat": 0,
+      "transmission": 1,
+      "ior": 1.5,
+      "specular": 1
+    }
+  },
+  {
+    "id": "lacquer",
+    "label": "Gloss Lacquer",
+    "p": {
+      "color": "#B3122E",
+      "metalness": 0,
+      "roughness": 0.45,
+      "clearcoat": 1,
+      "clearcoatRoughness": 0.02,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "soft-touch",
+    "label": "Soft-Touch Plastic",
+    "p": {
+      "color": "#E8E4DC",
+      "metalness": 0,
+      "roughness": 0.62,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 0.6
+    }
+  },
+  {
+    "id": "ceramic",
+    "label": "Glazed Ceramic",
+    "p": {
+      "color": "#F2F0EC",
+      "metalness": 0,
+      "roughness": 0.3,
+      "clearcoat": 0.8,
+      "clearcoatRoughness": 0.04,
+      "transmission": 0,
+      "specular": 1
+    }
+  },
+  {
+    "id": "rubber",
+    "label": "Matte Rubber",
+    "p": {
+      "color": "#26272A",
+      "metalness": 0,
+      "roughness": 0.85,
+      "clearcoat": 0,
+      "transmission": 0,
+      "specular": 0.4
+    }
+  },
+  {
+    "id": "screen",
+    "label": "Display Under Glass",
+    "p": {
+      "color": "#050507",
+      "metalness": 0,
+      "roughness": 0.6,
+      "clearcoat": 1,
+      "clearcoatRoughness": 0.012,
+      "transmission": 0,
+      "specular": 0,
+      "emissiveIntensity": 1
+    }
+  }
+]
