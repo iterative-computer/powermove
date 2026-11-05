@@ -1,3 +1,4 @@
+import { openFigmaConnect } from '../../overlays/figma/connect';
 import { receiveFigma } from '../core/figma/paste';
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -14,6 +15,9 @@ export function install(PM: PMRegistry): void {
 
   const bridge = (hostBridge() as any);
   const encoder = new window.TextEncoder();
+  PM.openFigmaConnect = () => {
+    if (bridge.figmaLink) openFigmaConnect(PM, bridge.figmaLink);
+  };
   bridge.figmaLink?.onReceive(async ({ id, doc }: any) => {
     try {
       bridge.figmaLink.result(id, await receiveFigma(PM, doc));
@@ -24,22 +28,11 @@ export function install(PM: PMRegistry): void {
   // File commands cannot wait for local-font enumeration or its permission prompt.
   bridge.onMenuCommand((command: any) => {
     if (command === 'connectFigma') {
-      void bridge.figmaLink
-        ?.start()
-        .then(({ code }: any) =>
-          PM.modal({
-            title: 'Connect Figma',
-            body: `Enter ${code} in Send to Powermove in Figma. This code expires in 5 minutes.`,
-            width: 420,
-            actions: [{ label: 'Done', pri: true, run: () => {} }],
-          }),
-        )
-        .catch((e: Error) => PM.toast(e.message, 6000, { error: true }));
+      if (bridge.figmaLink) openFigmaConnect(PM, bridge.figmaLink);
       return;
     }
     if (command === 'disconnectFigma') {
-      void bridge.figmaLink?.stop();
-      PM.toast('Figma disconnected');
+      void bridge.figmaLink?.stop().then(() => PM.toast('Figma disconnected'));
       return;
     }
     const editorCommand = command === 'copy' ? 'copyLayers' : command === 'paste' ? 'pasteLayers' : command;

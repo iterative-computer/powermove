@@ -11,7 +11,7 @@
       }
       body {
         margin: 0;
-        padding: 16px;
+        padding: 20px;
         font:
           12px/1.5 Inter,
           system-ui,
@@ -19,22 +19,14 @@
         background: var(--figma-color-bg, #fff);
         color: var(--figma-color-text, #222);
       }
-      label {
-        display: block;
-        margin-bottom: 6px;
+      h1 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        font-weight: 600;
       }
-      form {
-        display: flex;
-        gap: 8px;
-      }
-      input {
-        min-width: 0;
-        width: 100%;
-        padding: 7px 8px;
-        border: 1px solid var(--figma-color-border, #ccc);
-        border-radius: 4px;
-        background: var(--figma-color-bg, #fff);
-        color: inherit;
+      p {
+        margin: 10px 0;
+        color: var(--figma-color-text-secondary, #777);
       }
       button {
         padding: 8px 12px;
@@ -43,138 +35,208 @@
         background: var(--figma-color-bg-brand, #0d99ff);
         color: var(--figma-color-text-onbrand, #fff);
         cursor: pointer;
-        white-space: nowrap;
       }
       button:disabled {
         opacity: 0.5;
         cursor: default;
       }
-      button:focus-visible,
-      input:focus-visible {
+      button:focus-visible {
         outline: 2px solid var(--figma-color-border-brand, #0d99ff);
         outline-offset: 2px;
       }
-      #send {
-        margin-top: 16px;
+      #primary {
         width: 100%;
-      }
-      #status {
-        margin: 10px 0 0;
-        color: var(--figma-color-text-secondary, #777);
+        margin-top: 6px;
       }
       #copy {
+        display: block;
         background: transparent;
         color: var(--figma-color-text-brand, #0d99ff);
         padding: 4px 0;
+        margin-top: 12px;
+      }
+      #code {
+        font-size: 24px;
+        letter-spacing: 0.15em;
+        font-variant-numeric: tabular-nums;
+        color: var(--figma-color-text, #222);
+      }
+      [hidden] {
+        display: none !important;
       }
     </style>
   </head>
-  <body>
-    <label for="code">Pairing code</label>
-    <form id="pair">
-      <input
-        id="code"
-        inputmode="numeric"
-        maxlength="6"
-        placeholder="From File → Connect Figma"
-        aria-label="Pairing code"
-      /><button>Pair</button>
-    </form>
-    <button id="send" disabled>Send Selection</button>
-    <p id="status" role="status">Connect Figma in Powermove to pair.</p>
+  <body data-state="offline">
+    <h1 id="title">Send to Powermove</h1>
+    <p id="message" role="status">Open Powermove to continue.</p>
+    <p id="code" hidden aria-label="Connection code"></p>
+    <button id="primary" hidden>Connect</button>
+    <p id="result" hidden role="status"></p>
     <button id="copy" hidden>Copy for Powermove</button>
     <script>
-      const endpoint = 'http://localhost:47832';
+      const endpoint = 'http://localhost:47832',
+        $ = (id) => document.getElementById(id),
+        post = (pluginMessage) => parent.postMessage({ pluginMessage }, '*');
       let token = '',
+        count = 0,
+        reachable = false,
+        composition = false,
+        checking = false,
+        pairing = false,
+        sending = false,
+        preparing = false,
+        copying = false,
+        connectionFailed = false,
         lastDoc = null,
-        busy = false,
-        copyRequested = false;
-      const $ = (id) => document.getElementById(id),
-        post = (value) => parent.postMessage({ pluginMessage: value }, '*');
-      const status = (text) => ($('status').textContent = text);
-      async function request(path, data, auth = false) {
+        lastResult = '',
+        notice = '',
+        code = '',
+        timer;
+      function render() {
+        let state = !reachable
+          ? 'offline'
+          : pairing
+            ? 'approval'
+            : !token
+              ? 'disconnected'
+              : !composition
+                ? 'composition'
+                : count === 0
+                  ? 'empty'
+                  : 'ready';
+        document.body.dataset.state = state;
+        $('primary').hidden = false;
+        $('primary').disabled = false;
+        $('code').hidden = true;
+        $('result').hidden = true;
+        $('title').textContent = 'Send to Powermove';
+        if (state === 'offline') {
+          $('message').textContent = 'Open Powermove to continue.';
+          $('primary').hidden = true;
+        }
+        if (state === 'disconnected') {
+          $('message').textContent = notice || 'Connect to Powermove to send your layers.';
+          $('primary').textContent = 'Connect';
+        }
+        if (state === 'approval') {
+          $('message').textContent = 'Click Allow in Powermove.';
+          $('code').textContent = code;
+          $('code').hidden = false;
+          $('primary').hidden = true;
+        }
+        if (state === 'composition') {
+          $('message').textContent = 'Open a composition in Powermove.';
+          $('primary').hidden = true;
+        }
+        if (state === 'empty') {
+          $('message').textContent = 'Select layers in Figma';
+          $('primary').textContent = 'Select layers in Figma';
+          $('primary').disabled = true;
+        }
+        if (state === 'ready') {
+          $('message').textContent = 'Ready to send.';
+          $('primary').textContent = `Send ${count} ${count === 1 ? 'Layer' : 'Layers'}`;
+        }
+        if (sending || preparing) {
+          $('primary').disabled = true;
+          $('message').textContent = preparing ? 'Preparing selection…' : 'Sending…';
+        }
+        if (lastResult && token && !pairing) {
+          $('result').hidden = false;
+          $('result').textContent = lastResult;
+        }
+        $('copy').hidden = !connectionFailed;
+        $('copy').disabled = count === 0 || preparing || sending || pairing;
+      }
+      async function request(path, data, authenticated = false, timeout = 8000) {
         const controller = new AbortController(),
-          timer = setTimeout(() => controller.abort(), 125000);
+          timeoutId = setTimeout(() => controller.abort(), timeout);
         try {
-          const r = await fetch(endpoint + path, {
+          const response = await fetch(endpoint + path, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: 'Bearer ' + token } : {}) },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authenticated && token ? { Authorization: 'Bearer ' + token } : {}),
+            },
             body: JSON.stringify(data),
             signal: controller.signal,
           });
-          const v = await r.json();
-          if (!r.ok) throw new Error(v.error || 'Connection failed');
-          return v;
+          const value = await response.json();
+          if (!response.ok) {
+            const error = new Error(value.error || 'Could not connect.');
+            error.status = response.status;
+            throw error;
+          }
+          return value;
         } finally {
-          clearTimeout(timer);
+          clearTimeout(timeoutId);
         }
       }
-      $('pair').onsubmit = async (e) => {
-        e.preventDefault();
-        if (busy) return;
-        busy = true;
+      function forgetToken() {
+        token = '';
+        post({ type: 'token', token: null });
+        lastResult = '';
+      }
+      function schedule() {
+        clearTimeout(timer);
+        if (!document.hidden) timer = setTimeout(check, 2000);
+      }
+      async function check() {
+        if (checking || document.hidden) {
+          schedule();
+          return;
+        }
+        checking = true;
         try {
-          const v = await request('/pair', { code: $('code').value.trim() });
-          token = v.token;
-          post({ type: 'token', token });
-          $('code').value = '';
-          $('send').disabled = false;
-          status('Paired with Powermove.');
+          const checkedToken = token;
+          const s = await request('/status', {}, true);
+          if (s.protocolVersion !== 2) throw new Error('Update Powermove to connect.');
+          reachable = true;
+          composition = s.compositionOpen;
+          if (token && checkedToken === token && !s.tokenValid) {
+            forgetToken();
+            notice = 'Connect to Powermove again.';
+          }
+          connectionFailed = false;
         } catch (e) {
-          status(e.message);
-          $('copy').hidden = false;
+          reachable = false;
+          connectionFailed = true;
         } finally {
-          busy = false;
+          checking = false;
+          render();
+          schedule();
         }
-      };
-      $('send').onclick = () => {
-        if (busy) return;
-        busy = true;
-        $('send').disabled = true;
-        status('Preparing selection…');
+      }
+      async function connect() {
+        if (pairing) return;
+        pairing = true;
+        notice = '';
+        code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+        render();
+        try {
+          const value = await request('/pair', { code }, false, 65000);
+          token = value.token;
+          post({ type: 'token', token });
+          connectionFailed = false;
+          notice = '';
+        } catch (e) {
+          notice = e.message;
+          connectionFailed = !e.status;
+        } finally {
+          pairing = false;
+          await check();
+          render();
+        }
+      }
+      function selection(copy = false) {
+        copying = copy;
+        preparing = true;
+        render();
         post({ type: 'send' });
-      };
-      window.onmessage = async ({ data, source }) => {
-        if (source !== parent) return;
-        const m = data.pluginMessage;
-        if (!m) return;
-        if (m.type === 'token') {
-          token = m.token || '';
-          $('send').disabled = !token;
-          if (token) status('Paired with Powermove.');
-        }
-        if (m.type === 'error') {
-          status(m.text);
-          busy = false;
-          $('send').disabled = !token;
-        }
-        if (m.type === 'selection') {
-          lastDoc = m.doc;
-          if (copyRequested) {
-            copyRequested = false;
-            busy = false;
-            $('copy').click();
-            return;
-          }
-          try {
-            const v = await request('/send', m.doc, true);
-            status(`Sent ${v.layers} layers · ${v.flattened} flattened`);
-            $('copy').hidden = true;
-          } catch (e) {
-            status(e.message);
-            $('copy').hidden = false;
-          } finally {
-            busy = false;
-            $('send').disabled = !token;
-          }
-        }
-      };
-      $('copy').onclick = async () => {
+      }
+      async function copyDoc() {
         if (!lastDoc) {
-          busy = true;
-          copyRequested = true;
-          post({ type: 'send' });
-          status('Preparing a clipboard copy…');
+          selection(true);
           return;
         }
         const text = 'POWERMOVE_FIGMA_V1\n' + JSON.stringify(lastDoc);
@@ -183,13 +245,79 @@
         } catch {
           const field = document.createElement('textarea');
           field.value = text;
-          document.body.append(field);
+          document.body.appendChild(field);
           field.select();
-          document.execCommand('copy');
+          const ok = document.execCommand('copy');
           field.remove();
+          if (!ok) {
+            notice = 'Click Copy for Powermove again.';
+            render();
+            return;
+          }
         }
-        status('Copied. Paste in Powermove.');
+        notice = 'Copied. Paste in Powermove.';
+        $('message').textContent = notice;
+      }
+      $('primary').onclick = () => {
+        if (!token) void connect();
+        else if (count && composition) selection();
       };
+      $('copy').onclick = () => selection(true);
+      window.onmessage = async ({ data, source }) => {
+        if (source !== parent) return;
+        const m = data.pluginMessage;
+        if (!m) return;
+        if (m.type === 'token') {
+          token = m.token || '';
+          void check();
+        }
+        if (m.type === 'count') {
+          count = m.count;
+          render();
+        }
+        if (m.type === 'error') {
+          preparing = false;
+          sending = false;
+          notice = m.text;
+          lastResult = m.text;
+          render();
+          $('message').textContent = m.text;
+        }
+        if (m.type === 'selection') {
+          lastDoc = m.doc;
+          preparing = false;
+          if (copying) {
+            copying = false;
+            await copyDoc();
+            return;
+          }
+          sending = true;
+          render();
+          try {
+            const result = await request('/send', m.doc, true, 125000);
+            lastResult = `Sent ${result.layers} layers · ${result.flattened} flattened`;
+            connectionFailed = false;
+          } catch (e) {
+            lastResult = e.message;
+            if (e.status === 401) {
+              forgetToken();
+              notice = 'Connect to Powermove again.';
+            } else if (!e.status) {
+              connectionFailed = true;
+              reachable = false;
+            }
+          } finally {
+            sending = false;
+            render();
+          }
+        }
+      };
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) clearTimeout(timer);
+        else void check();
+      });
+      post({ type: 'ready' });
+      void check();
     </script>
   </body>
 </html>

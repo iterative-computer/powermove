@@ -65,6 +65,10 @@ const bridge: PowermoveBridge = {
   figmaLink: {
     start: () => ipcRenderer.invoke(IPC.figmaStart),
     stop: () => ipcRenderer.invoke(IPC.figmaStop),
+    closeSetup: () => ipcRenderer.invoke(IPC.figmaCloseSetup),
+    approve: (id, allow) => ipcRenderer.invoke(IPC.figmaApprove, { id, allow }),
+    pluginAction: (action) => ipcRenderer.invoke(IPC.figmaPluginAction, action),
+    onState: cloudEvent(IPC.figmaState),
     onReceive: cloudEvent(IPC.figmaReceive),
     result: (id, result) => ipcRenderer.send(IPC.figmaResult, { id, result }),
   },

@@ -43,7 +43,6 @@ figma.ui.onmessage = async (message) => {
     busy = false;
   }
 };
-void figma.clientStorage.getAsync('powermove-token').then((token) => status({ type: 'token', token }));
 export async function serializeSelection(): Promise<FigmaDoc> {
   if (!figma.currentPage.selection.length) throw new Error('Select layers in Figma first.');
   const fileId = figmaFileId(figma.root);

@@ -21,24 +21,27 @@ const doc = (nodes = [node()]): FigmaDoc => ({
   images: {},
 });
 async function connect(session: any) {
-  await session.app.evaluate(({ Menu }: any) => {
-    const item = Menu.getApplicationMenu().getMenuItemById('connectFigma');
-    item.click();
-  });
-  const label = session.page.getByText(/Enter [0-9]{6} in Send to Powermove/);
-  await expect(label).toBeVisible();
-  const code = (await label.textContent()).match(/[0-9]{6}/)[0];
-  const info = { code, port: 47832 };
-  await session.page.getByRole('button', { name: 'Done', exact: true }).click();
-  const url = `http://127.0.0.1:${info.port}`;
-  const send = (path: string, value: any, token?: string) =>
-    fetch(url + path, {
+  await session.app.evaluate(({ Menu }: any) => Menu.getApplicationMenu().getMenuItemById('connectFigma').click());
+  await expect(session.page.getByRole('button', { name: 'Copy Plugin Path' })).toBeEnabled();
+  const send = (route: string, value: any, token?: string) =>
+    fetch('http://localhost:47832' + route, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(value),
     });
-  return { info, send };
+  const paired = send('/pair', { code: '123456' });
+  await expect(session.page.getByText('Figma wants to connect.', { exact: true })).toBeVisible();
+  await expect(session.page.getByLabel('Connection code')).toHaveText('123456');
+  expect((await session.page.getByLabel('Connection code').boundingBox())!.height).toBeLessThan(40);
+  await session.page.getByRole('button', { name: 'Allow', exact: true }).click();
+  const response = await paired;
+  expect(response.status).toBe(200);
+  const { token } = (await response.json()) as any;
+  await expect(session.page.getByText('Figma Connected', { exact: true })).toBeVisible();
+  await session.page.getByRole('button', { name: 'Done', exact: true }).click();
+  return { send, token };
 }
+test.use({ desktopLaunchOptions: { env: { POWERMOVE_TEST_FIGMA_AUTOSTART: '1' } } });
 test.beforeEach(async ({ session }) => {
   await session.openEditor();
   await session.page.evaluate(() => {
@@ -49,12 +52,9 @@ test.beforeEach(async ({ session }) => {
   });
 });
 test('loopback rejects unpaired, invalid and oversized sends; imports a paired selection once', async ({ session }) => {
-  const { send, info } = await connect(session);
+  const { send, token } = await connect(session);
   expect((await send('/send', doc())).status).toBe(401);
-  expect((await send('/pair', { code: '000000' })).status).toBe(401);
-  const paired = await send('/pair', { code: info.code });
-  expect(paired.status).toBe(200);
-  const { token } = (await paired.json()) as any;
+  expect((await send('/pair', { code: '000000' })).status).toBe(403);
   expect((await send('/send', { ...doc(), extra: true }, token)).status).toBe(400);
   expect((await send('/send', { large: 'x'.repeat(MAX_PAYLOAD) }, token)).status).toBe(413);
   const result = await send('/send', doc(), token);
@@ -70,8 +70,7 @@ test('loopback rejects unpaired, invalid and oversized sends; imports a paired s
 test('resend changes content while keyframes, effects, names and timing survive; one undo restores content', async ({
   session,
 }) => {
-  const { send, info } = await connect(session);
-  const { token } = (await (await send('/pair', { code: info.code })).json()) as any;
+  const { send, token } = await connect(session);
   expect((await send('/send', doc(), token)).status).toBe(200);
   await expect(session.page.getByText('Imported 1 layer', { exact: true })).toBeVisible();
   const before = await session.page.evaluate(() => {
@@ -139,4 +138,92 @@ test('recognizes a plugin clipboard payload without a loopback connection', asyn
   await expect
     .poll(() => session.page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.figmaSource.fileKey)))
     .toEqual(['synthetic-file']);
+});
+
+// The harness explicitly opts into restart listening; ordinary hidden tests do not.
+test('remembers approval after relaunch and reports composition state', async ({ session }) => {
+  const { send, token } = await connect(session);
+  const { readFile } = await import('node:fs/promises');
+  const saved = await readFile(session.userData + '/figma-link.json', 'utf8');
+  expect(saved).not.toContain(token);
+  expect(JSON.parse(saved).tokenHashes).toHaveLength(1);
+  await session.relaunch();
+  expect(await (await send('/status', {}, token)).json()).toMatchObject({
+    tokenValid: true,
+    compositionOpen: true,
+    protocolVersion: 2,
+  });
+  await session.page.evaluate(() => (window as any).PM.ProjectsScreen.show());
+  expect(await (await send('/status', {}, token)).json()).toMatchObject({ tokenValid: true, compositionOpen: false });
+  await session.openEditor();
+  expect(await (await send('/status', {}, token)).json()).toMatchObject({ tokenValid: true, compositionOpen: true });
+  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById('connectFigma')!.click());
+  await expect(session.page.getByText('Figma Connected', { exact: true })).toBeVisible();
+  await session.page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(session.page.locator('.modal')).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      try {
+        await send('/status', {}, token);
+        return false;
+      } catch {
+        return true;
+      }
+    })
+    .toBe(true);
+});
+
+test('auto-start survives a busy port quietly and the setup sheet explains it', async () => {
+  const { createServer } = await import('node:http');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { launchApp } = await import('./helpers/app');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-figma-busy-'));
+  await writeFile(path.join(dir, 'figma-link.json'), JSON.stringify({ version: 1, tokenHashes: ['a'.repeat(64)] }));
+  const busy = createServer();
+  await new Promise<void>((resolve) => busy.listen(47832, '127.0.0.1', resolve));
+  let session: Awaited<ReturnType<typeof launchApp>> | undefined;
+  try {
+    session = await launchApp({ userData: dir, env: { POWERMOVE_TEST_FIGMA_AUTOSTART: '1' } });
+    await session.openEditor();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById('connectFigma')!.click());
+    await expect(
+      session.page.getByText('Another copy of Powermove is using Figma. Close it and try again.'),
+    ).toBeVisible();
+  } finally {
+    await session?.close();
+    await new Promise<void>((resolve) => busy.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the actual plugin UI connects through localhost from a null origin and sends layers', async ({
+  session,
+  browser,
+}) => {
+  const { readFile } = await import('node:fs/promises');
+  const ui = await browser.newPage();
+  try {
+    await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById('connectFigma')!.click());
+    await expect(session.page.getByRole('button', { name: 'Copy Plugin Path' })).toBeEnabled();
+    await ui.setContent(await readFile('../../packages/figma-plugin/ui.html', 'utf8'));
+    await expect(ui.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await ui.getByRole('button', { name: 'Connect', exact: true }).click();
+    await expect(session.page.getByText('Figma wants to connect.', { exact: true })).toBeVisible();
+    expect(await ui.getByLabel('Connection code').textContent()).toBe(
+      await session.page.getByLabel('Connection code').textContent(),
+    );
+    await session.page.getByRole('button', { name: 'Allow', exact: true }).click();
+    await ui.evaluate(() => window.postMessage({ pluginMessage: { type: 'count', count: 1 } }, '*'));
+    await expect(ui.getByRole('button', { name: 'Send 1 Layer', exact: true })).toBeEnabled();
+    await session.page.getByRole('button', { name: 'Done', exact: true }).click();
+    await ui.getByRole('button', { name: 'Send 1 Layer', exact: true }).click();
+    await ui.evaluate((doc) => window.postMessage({ pluginMessage: { type: 'selection', doc } }, '*'), doc());
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
+    await expect(ui.getByText('Sent 1 layers · 0 flattened')).toBeVisible();
+  } finally {
+    await ui.close();
+  }
 });

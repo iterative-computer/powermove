@@ -121,7 +121,7 @@ export function appMenuTemplate(
         commandItem('Save Project As…', 'CommandOrControl+Shift+S', 'saveAs', send),
         { type: 'separator' },
         { id: 'connectFigma', label: 'Connect Figma…', click: () => send('connectFigma') },
-        { label: 'Disconnect Figma', click: () => send('disconnectFigma') },
+        { id: 'disconnectFigma', label: 'Disconnect Figma', visible: false, click: () => send('disconnectFigma') },
         commandItem('Import Media…', 'CommandOrControl+I', 'import', send),
         { id: 'importSequence', label: 'Import Image Sequence…', click: () => send('importSequence') },
         { id: 'importFolder', label: 'Import Folder…', click: () => send('importFolder') },

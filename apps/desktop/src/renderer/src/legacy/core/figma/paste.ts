@@ -216,7 +216,13 @@ export async function receiveFigma(
   PM.toast(
     `${update ? 'Updated' : 'Imported'} ${plan.layers.length} ${plan.layers.length === 1 ? 'layer' : 'layers'}${details}${missing.length ? ` · Kept missing layers: ${missing.join(', ')}` : ''}`,
     8000,
-    { key: FIGMA_NOTICE, kind: 'status' },
+    {
+      key: FIGMA_NOTICE,
+      kind: 'status',
+      ...(doc.source === 'clipboard' && flattened
+        ? { action: { label: 'Connect Figma', run: () => PM.openFigmaConnect?.() } }
+        : {}),
+    },
   );
   return { layers: plan.layers.length, flattened, missing };
 }
