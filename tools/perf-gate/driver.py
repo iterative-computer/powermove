@@ -8,6 +8,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import platform
@@ -156,6 +157,7 @@ def gui_lock(wait_seconds=300, session_inode=None):
 class App:
     def __init__(self, kind, args, scratch):
         self.kind, self.scratch = kind, scratch
+        self.allow_missing_display = getattr(args, 'allow_missing_display', False)
         self.log = open(args.output.parent / (scratch.name + '-' + kind + '.stderr.log'), 'wb')
         # Rust and Node must agree with the explicit /tmp corpus/profile roots,
         # even when macOS supplies a per-account /var/folders TMPDIR.
@@ -167,11 +169,16 @@ class App:
             env.pop('PM_ENGINE_TRACE', None)
         env.pop('ELECTRON_RUN_AS_NODE', None)
         env.pop('POWERMOVE_E2E_LIVE', None)
+        if getattr(args, 'electron', None):
+            env['PM_PERF_ELECTRON_PATH'] = str(args.electron)
+            env['PM_PERF_ELECTRON_PROFILE'] = str(scratch / 'electron-profile')
+            env['PM_PERF_ELECTRON_ARGS'] = json.dumps(getattr(args, 'electron_args', []))
         argv = ([str(args.native), '--profile', str(scratch / 'native-profile')] if kind == 'native'
                 else ['node', str(HERE / 'electron.mjs'), str(args.reference)])
         self.started = time.monotonic()
+        self.own_process_group = not getattr(args, 'inherit_process_group', False)
         self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=self.log, env=env, start_new_session=True, bufsize=0)
+                                        stderr=self.log, env=env, start_new_session=self.own_process_group, bufsize=0)
         self.buffer = b''
         self.pid = None
         try:
@@ -216,18 +223,25 @@ class App:
             except (BrokenPipeError, subprocess.TimeoutExpired, OSError):
                 pass
             if self.process.poll() is None:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                self.signal_process(signal.SIGTERM)
                 try:
                     self.process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    self.signal_process(signal.SIGKILL)
                     self.process.wait(timeout=3)
         self.log.close()
         # Reap any remaining members of this run's unique process group only.
         try:
-            os.killpg(self.process.pid, signal.SIGTERM)
+            if self.own_process_group:
+                os.killpg(self.process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+    def signal_process(self, sig):
+        if self.own_process_group:
+            os.killpg(self.process.pid, sig)
+        else:
+            self.process.send_signal(sig)
 
     def action(self, op, **kwargs):
         if self.kind == 'electron':
@@ -236,11 +250,11 @@ class App:
         start = self.request(op, **kwargs)
         accepted = start['accepted_host_s']
         deadline = time.monotonic() + 15
+        completed_only = None
         while time.monotonic() < deadline:
             state = self.request('status')
             frame = state.get('frame')
-            matches = bool(frame and frame.get('gpu_ok') and frame.get('display_host_s') and
-                           frame['display_host_s'] >= accepted)
+            matches = bool(frame and frame.get('gpu_ok'))
             if op == 'seek':
                 # Caller supplies an exact project frame time.
                 matches = matches and frame.get('input_host_s') == accepted
@@ -252,11 +266,28 @@ class App:
             if op == 'open':
                 matches = matches and state.get('viewer_id') != old.get('viewer_id')
             if matches and state.get('opened') and not state.get('opening'):
-                return {'ms': (frame['display_host_s'] - accepted) * 1000,
-                        'endpoint': 'command-accepted-to-drawable-presentedTime',
-                        'physical_present': True, 'cache_hit': frame['cache_hit'],
-                        'metal_allocated_bytes': state['metal_allocated_bytes']}
+                completed = frame.get('completion_host_s')
+                display = frame.get('display_host_s')
+                physical = (isinstance(display, (int, float)) and not isinstance(display, bool)
+                            and math.isfinite(display) and display >= accepted)
+                own_share = ((completed - accepted) * 1000
+                             if isinstance(completed, (int, float)) and not isinstance(completed, bool)
+                             and math.isfinite(completed) and accepted <= completed
+                             and (not physical or completed <= display)
+                             else None)
+                value = {'ms': (display - accepted) * 1000 if physical else None,
+                         'own_share_ms': own_share,
+                         'on_screen_ms': (display - accepted) * 1000 if physical else None,
+                         'endpoint': 'command-accepted-to-drawable-presentedTime' if physical else 'command-accepted-to-gpu-completion',
+                         'physical_present': physical, 'cache_hit': frame['cache_hit'],
+                         'metal_allocated_bytes': state['metal_allocated_bytes']}
+                if physical:
+                    return value
+                if own_share is not None:
+                    completed_only = value
             time.sleep(.002)
+        if completed_only and getattr(self, 'allow_missing_display', False):
+            return completed_only
         raise TimeoutError('No matching native physically presented frame; missing stays missing')
 
 

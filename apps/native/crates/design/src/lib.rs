@@ -41,6 +41,9 @@ pub struct Colors {
     pub danger: u32,
     pub warning: u32,
     pub success: u32,
+    /// Badges drawn over media (duration, offline): always dark, drawn at
+    /// `metrics.media_badge_opacity`.
+    pub media_badge: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
 }
@@ -149,6 +152,50 @@ pub struct Metrics {
     pub popover_width: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
+    /// Indent per outline level.
+    pub tree_indent: f32,
+    /// Layer-kind badge square (timeline, Project list).
+    pub kind_badge: f32,
+    /// Minimum Project grid thumbnail width.
+    pub thumbnail_min: f32,
+    /// Content inset inside sheets and Settings panes.
+    pub sheet_inset: f32,
+    /// Shared value column in sheets.
+    pub sheet_value_column: f32,
+    /// Width of wide sheets (Export, Expression).
+    pub sheet_width_wide: f32,
+    /// Agent composer grows to this many lines, then scrolls.
+    pub composer_max_lines: f32,
+    /// Settings grouped-form card corner (control_radius + inner_radius).
+    pub group_radius: f32,
+    /// Minimum Settings row height (row + inset).
+    pub form_row: f32,
+    /// Space above each Settings section after the first.
+    pub section_gap: f32,
+    /// Transform handle and path vertex square.
+    pub gizmo_handle: f32,
+    /// Gizmo stroke and keyline width over the image.
+    pub gizmo_keyline: f32,
+    /// Rotation handle stem length.
+    pub rotation_stem: f32,
+    /// Anchor point crosshair circle.
+    pub anchor_mark: f32,
+    /// Bézier tangent end circle.
+    pub tangent_end: f32,
+    /// Transparency checkerboard square.
+    pub checker: f32,
+    /// Opacity of selected layers drawn outside the frame.
+    pub pasteboard_opacity: f32,
+    /// Attention dot and drop insertion-line end circle.
+    pub status_dot: f32,
+    /// Vertical text padding in bubbles, the composer and code blocks.
+    pub text_padding: f32,
+    /// Drop-target inner stroke (2 under Increase Contrast).
+    pub drop_stroke: f32,
+    /// Opacity of a drag source left in place.
+    pub drag_opacity: f32,
+    /// Opacity of `colors.media_badge` fills over media.
+    pub media_badge_opacity: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -159,6 +206,10 @@ pub struct Motion {
     pub start_scale: f64,
     /// Hover, press and selection feedback.
     pub interaction: f64,
+    /// Pointer rest before the scroll wheel edits a hovered value (s).
+    pub wheel_rest: f64,
+    /// Still time before the Focus overlay capsule fades (s).
+    pub overlay_idle: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -282,6 +333,7 @@ impl Tokens {
                 danger: 0xf36357,
                 warning: 0xf59e0b,
                 success: 0x3fcf8e,
+                media_badge: 0x000000,
                 labels: Labels {
                     blue: 0x3b4250,
                     violet: 0x4a3b6b,
@@ -297,7 +349,7 @@ impl Tokens {
                 window: 0xeeeef1,
                 panel: 0xfdfdfe,
                 panel_secondary: 0xf5f5f7,
-                viewer: 0xe6e6ea,
+                viewer: 0xe4e4e4,
                 field: 0xf3f3f6,
                 floating: 0xffffff,
                 hover: 0xebebef,
@@ -314,6 +366,7 @@ impl Tokens {
                 danger: 0xc22a1f,
                 warning: 0xa15c00,
                 success: 0x117a52,
+                media_badge: 0x000000,
                 labels: Labels {
                     blue: 0xc9d4e8,
                     violet: 0xd8cff0,
@@ -377,6 +430,28 @@ impl Tokens {
                 popover_width: 260.,
                 sheet_width: 480.,
                 agent_width: 360.,
+                tree_indent: 16.,
+                kind_badge: 18.,
+                thumbnail_min: 120.,
+                sheet_inset: 20.,
+                sheet_value_column: 240.,
+                sheet_width_wide: 600.,
+                composer_max_lines: 10.,
+                group_radius: 10.,
+                form_row: 40.,
+                section_gap: 40.,
+                gizmo_handle: 7.,
+                gizmo_keyline: 1.,
+                rotation_stem: 18.,
+                anchor_mark: 11.,
+                tangent_end: 6.,
+                checker: 8.,
+                pasteboard_opacity: 0.35,
+                status_dot: 6.,
+                text_padding: 8.,
+                drop_stroke: 1.5,
+                drag_opacity: 0.5,
+                media_badge_opacity: 0.55,
             },
             typography: TypeScale {
                 minimum: 11.,
@@ -402,6 +477,8 @@ impl Tokens {
                 reduced: 0.15,
                 start_scale: 0.96,
                 interaction: 0.075,
+                wheel_rest: 0.5,
+                overlay_idle: 2.,
             },
         };
         tokens.enforce_accessibility();
@@ -430,6 +507,7 @@ impl Tokens {
             }
         }
         self.metrics.border = 2.;
+        self.metrics.drop_stroke = 2.;
     }
     patchable! {
         colors.window: color, colors.panel: color, colors.panel_secondary: color,

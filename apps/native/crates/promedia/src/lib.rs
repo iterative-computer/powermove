@@ -4,6 +4,7 @@ pub mod cache;
 #[path = "../../../../../engine/crates/pm-media/src/cache_frame.rs"]
 pub mod cache_frame;
 pub mod codec;
+pub mod export_panel;
 pub mod media;
 pub mod render;
 pub mod render_job;

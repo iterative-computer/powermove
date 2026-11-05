@@ -8,8 +8,10 @@ globalThis.__extcheck = {
       call: (request) => unavailable("kernel.call", request),
       query: (method, args) => unavailable("kernel.query", { method, args }),
       scheduleFlush: (fn) => queueMicrotask(fn),
-      reportError: (error) =>
-        this.errors.push({ name: error?.name, message: error?.message }),
+      reportError: (report) => {
+        const error = report?.error ?? report;
+        this.errors.push({ name: error?.name, message: error?.message });
+      },
       pinGeneration: (handle) => unavailable("kernel.pin", { handle }),
       unpinGeneration: (handle) => unavailable("kernel.unpin", { handle }),
     };
@@ -32,9 +34,40 @@ globalThis.__extcheck = {
           session: { panel: "extcheck", generation: 1 },
           realmGlobal: globalThis,
           send: (batch) => call("dom.batch", { batch }),
+          requestAnimationFrame: (fn) =>
+            setTimeout(() => this.realm.task(() => fn(performance.now())), 16),
+          cancelAnimationFrame: (id) => clearTimeout(id),
           reportError: (error) => host.reportError(error),
         })
       : undefined;
+    const capabilities = {
+      ui: { controls: PowermoveCompat.controls },
+      panelsBackend: Object.fromEntries(
+        ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
+          (name) => [
+            name,
+            (...args) => {
+              if (!this.panels)
+                throw Error("Remote DOM panels are not attached");
+              return this.panels[name](...args);
+            },
+          ],
+        ),
+      ),
+      PM: {
+        invalidate: () => {
+          this.controls?.sync();
+          this.dom?.flush();
+          call("presentation.invalidate");
+        },
+        store: {
+          get: (key, fallback) => storage[key] ?? fallback,
+          set: (key, value) => {
+            storage[key] = value;
+          },
+        },
+      },
+    };
     this.realm = new PowermoveCompat.CompatRealm({
       id: "extcheck",
       generation: 1,
@@ -43,18 +76,21 @@ globalThis.__extcheck = {
       recorder,
       dom: this.dom,
       runtimeModules: PowermoveCompat.runtimeModules,
-      capabilities: {
-        PM: {
-          store: {
-            get: (key, fallback) => storage[key] ?? fallback,
-            set: (key, value) => {
-              storage[key] = value;
-            },
-          },
-        },
-      },
+      capabilities,
     });
+    if (this.dom)
+      this.panels = new PowermoveCompat.CompatPanels(
+        this.realm.kernel.panels,
+        this.dom.document,
+      );
     this.realm.installGlobals(globalThis);
+    if (this.dom && PowermoveCompat.controlStores)
+      this.controls = PowermoveCompat.connectControlState(
+        this.realm,
+        PowermoveCompat.controlStores,
+        this.dom.document,
+        PowermoveCompat.controlStyles,
+      );
     return true;
   },
   async activate(manifest, module) {
@@ -92,6 +128,7 @@ globalThis.__extcheck = {
       return {
         ok: false,
         error: { name: error?.name, message: error?.message },
+        reports: this.errors.slice(),
       };
     } finally {
       handle.setActivating(false);

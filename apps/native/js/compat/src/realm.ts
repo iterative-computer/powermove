@@ -1,4 +1,5 @@
 import * as powermove from "./frozen/kernel/editor-helpers";
+import { installIcons } from "./frozen/host/icons";
 import { HostChannel, HostError } from "./channel";
 import { DocumentMirror, copy, diff, patch, rebase, reconcile } from "./mirror";
 import type { ServicesRegistry } from "./services";
@@ -335,6 +336,8 @@ export class CompatRealm {
       task: (run) => this.task(run),
     });
     const window = this.domConnection?.globals.window;
+    if (window && typeof this.PM.icon !== "function")
+      installIcons(this.PM, window);
     if (window)
       this.kernel.installKeyListener(
         (id: string, args: any[]) => this.keymap.run(id, args),

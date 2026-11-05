@@ -1,122 +1,214 @@
 # P2 extension checks — 2026-11-01
 
-**OPEN / NOT PASSED.** No extension has paired Electron/native trace, visual
-oracle and scripted-interaction evidence. The new executable removes the
-previous missing V8 bundle-loader blocker; it does not complete the kernel,
-WebKit replay or Store facade adapters.
+**OPEN / NOT PASSED.** No extension has accepted paired Electron/native traces,
+visual oracles and complete scripted-interaction coverage. Successful activation
+and component tests are not extension matches.
 
 Reference: frozen `v1.2.0`, `07ed5fa17ee640659cb075f9cad1af2095011d60`.
-Base includes the dated macOS verification in `runtime-v8.md`. The local S1
-sandbox archive and matching bindings passed all five checksum checks. Rust
-1.96.1, shared target and build lock were used. No release, app update, tag or
-deployment was created.
+The earlier check's executable and harness were brought forward from its branch;
+they were not present in the fetched native-engine branch at continuation time.
+The S1 sandbox archive and bindings passed all five checksum checks. Builds use
+Rust 1.96.1, `engine/env.sh`, the shared target and the build lock. No release,
+app update, tag or deployment was created.
 
-## Population and results
+## Population and current evidence
 
 | Source | Total | Match | Mismatch | Can't run | Logic executed in real V8 | Activated |
 |---|---:|---:|---:|---:|---:|---:|
-| Owner installations | 44 | 0 | 0 | 44 | 44 | 30 |
-| Local public corpus | 10 | 0 | 0 | 10 | 9 | 6 |
+| Owner installations | 44 | 0 | 0 | 44 | 44 | 44 |
+| Local public corpus | 10 | 0 | 0 | 10 | 9 | 9 |
 | Published Store, latest releases | 4 | 0 | 0 | 4 | 0 | 0 |
-| **Total** | **58** | **0** | **0** | **58** | **53** | **36** |
+| **Total** | **58** | **0** | **0** | **58** | **53** | **53** |
 
-These are separate populations, without cross-source deduplication. Owner
-discovery counted immediate manifest-bearing installations, not the enabled
-set; their versions were 24 v1 and 20 v3. Nested manifests and directories
-without manifests are not separate installations. The public Store snapshot
-contained four latest releases; complete archive/tree/file hashes and sizes
-were checked, and the final catalog matched the initial catalog. Store reads
-were anonymous GETs only. The connector required an editor session, so collection
-used the public routes already documented in C-MATRIX.
+Activation counts are from the rebuilt runner's complete one-case-at-a-time
+headless V8 audit, after the kernel and compatibility fixes below.
+The previous baseline activated 36 of the same 53 executable inputs. Populations
+remain separate, without cross-source deduplication or unsupported-extension
+exclusions. Owner discovery counts immediate manifest-bearing installations:
+24 v1 and 20 v3. One local fixture declares permissions with apiVersion 1 and
+is rejected by the frozen manifest parser; its rejection remains unchanged.
+Store archives are compiled but never substituted into the trusted owner realm.
+The refreshed anonymous Store catalog still has four latest releases. All four
+compile and enter the isolated Store facade on the frozen Electron reference.
+None executes in the native helper: native release admission remains unavailable.
+The catalog was re-read after the all-source run without collection drift.
 
-Every one of the 58 reference attempts was blocked by another lane's GUI lock;
-the screen check itself was unlocked. This lane did not take that session or
-bypass its lock. Earlier disposable reference startup probes established a
-correct instrumented frozen build, but did not produce accepted captures.
-There are **zero accepted reference/native traces, screenshots or full scripts**.
+The all-source harness completed fresh attempts for every one of the 58 cases,
+with both roles attempted independently and each copied case deleted afterwards.
+These are comparison **attempts**, not 58 complete paired captures:
 
-On the native side, all 44 owner sources entered the actual compat bundle in
-`pm-runtime-v8`; 30 activated. Nine local fixtures entered V8 and six activated.
-The remaining local fixture is rejected by the frozen manifest parser because
-it declares permissions with apiVersion 1. This is a baseline/input blocker,
-not a native behavior mismatch. Store sources compiled, but were not run through
-the trusted owner facade: their permissioned Store adapter is still missing.
-No installed Store provenance, account state, variables or durable storage was
-copied into a test profile.
+| Source | Reference repeat failures | Reference not active | Native full-capture blockers |
+|---|---:|---:|---|
+| Owner installations | 43 | 1 | 44 missing native script/trace/PNG endpoint |
+| Local public corpus | 9 | 1 | 9 missing endpoint; 1 invalid frozen manifest |
+| Published Store | 4 | 0 | 4 missing native release admission |
 
-Native blockers overlap reference blockers and must not be added to the totals:
+No role supplied an accepted repeatable full capture. The native driver still
+stops after activation/disposal. Its missing WebKit/script endpoint is explicit;
+the standalone WebKit probe does not satisfy it. Store resource dispatch and
+complete per-extension reviewed scripts/projects are also unfinished. The
+incomplete default smoke script was used for this attempt and cannot prove P2.
+No source was excluded from the denominator.
 
-| Native blocker | Cases | Family / required work |
+## Activation investigation
+
+All 17 original failures were reproduced before changes, using copied inputs
+and the actual production bundle inside V8. Their immediate causes were:
+
+| Family | Original failures | Immediate cause |
 |---|---:|---|
-| Activation completed; no WebKit/scripted native capture | 36 | DOM panel, lifecycle: mount actual contributions, apply/ack remote DOM in WebKit, deliver real events and capture paint |
-| Activation needs app capabilities/providers | 17 | PM facade and sync services, with raster/DOM consumers: attach the kernel, built-in provider closure and engine backends |
-| Frozen manifest rejects a local fixture | 1 | Lifecycle/input: preserve the frozen rejection; test a valid version separately |
-| Permissioned Store facade/helper unavailable | 4 | Lifecycle and PM facade: implement Store-specific admission and reference provenance; never substitute trusted execution |
+| DOM panel | 11 | Missing panel open/close/isOpen backend |
+| PM facade | 5 | Missing `PM.invalidate` |
+| Lifecycle / DOM scheduling | 1 | Missing host animation-frame scheduler |
 
-No top **measured mismatch** family can be ranked because no pair completed.
-The two independently reproduced defects below are synthetic component defects,
-not claims about any owner's extension. Missing backends remain `can't run`;
-there are no unsupported-extension exclusions.
+The fresh headless audit now removes all 17 original activation failures:
+all 53 executable owner/corpus inputs activate in the real V8 runtime.
+Deeper failures exposed an absent icon helper/DOM string conversion and an
+incorrect initial project/composition representation, which were fixed in the
+previous continuation. The last blocker, shared controls, is now connected to
+the frozen Svelte document, selection and transport stores. Seven unchanged
+controls are compiled from the pinned reference: SelectField, TextField,
+ToggleField, Row, Section, Segmented and Disclosure. The other declared controls
+still fail explicitly when requested; activation does not exercise every API.
+The production bundle/CLI regression mounts TextField and SelectField, publishes
+a native history edit, changes the select through its real event handler, and
+undoes that edit while checking the displayed input value.
 
-## Executable and harness
+The runner preserves the underlying reported error rather than only returning
+the generic activation-error wrapper. No owner source, names, identifiers,
+selectors or error strings enter tracked files.
 
-[`tools/extcheck`](../../tools/extcheck/README.md) supplies read-only source
-collection, ordinal temporary cases, frozen compiler/import-boundary reuse,
-reference trace-recorder driving, script/PNG/trace comparison, fixed public
-reason codes, per-launch screen locking and cleanup. Match admission requires
-two equal captures per role, completed balanced traces, complete interaction
-outcomes and decoded premultiplied-RGBA pixels. The default smoke script is
-explicitly incomplete. No visual tolerance/design decision was made.
+No **measured cross-host mismatch** ranking exists yet. The table above is an
+activation-blocker classification, not an Electron/native mismatch ranking.
 
-`apps/native/crates/compat-runner` is the new `pm-compat-runner` executable and
-library. It loads the production compat bundle, installs its globals, compiles
-extension sources with the frozen compiler as a build tool, and activates v1–3
-modules inside the actual V8 owner. Shared Svelte runtime modules are bundled
-only when imported, rather than eagerly requiring unused browser capabilities.
-It awaits activation, preserves same-realm service/storage behavior across
-replacement, disposes contributions, captures activation errors, and cleans
-partial registrations after a throw. No FakeHost or Node runtime is linked.
+## Adapter implementation and limits
 
-The native recorder bridge executes a limited command subset through
-`pm-recorder`, including actual CPU raster/readback and pinned immutable
-drawImage sources. Unsupported operations explicitly fail. The V8-side real
-remote-DOM shim emits bounded batches and accepts owner-thread feedback. An
-eight-test native suite proves that event closures run in actual V8; it does
-not prove WebKit rendering. The CLI reports its missing gates and does not
-claim a completed native capture.
+- **Kernel:** the runner owns a disposable `pm-kernel::Kernel`, without a profile
+  or journal directory. Calls use the native history/transaction authority;
+  replies carry authoritative document, selection, workspace and history facts.
+  The adapter handles direct writes, history begin/commit/cancel/rollback,
+  undo/redo, external closures and cleanup pins, command batches through the
+  existing native command planner, selection and workspace writes, plus the
+  synchronous engine-query boundary. Immutable request/reply caching preserves
+  retries and rejects transaction-ID reuse with different requests. Unsupported
+  methods return acknowledged errors. Structural callback leases, complete PM
+  facade methods, built-in provider closure and rendering backends remain open.
+  Publications and history snapshots expose the legacy open-composition shape;
+  direct-write operations are staged in that shape and translated back to the
+  native canonical document before the authority applies them. The synthetic
+  initial project now comes from the same complete factory as the reference.
+- **Panels:** `CompatPanels` invokes actual contribution builds in the V8 DOM
+  mirror, tracks open/hidden state, refreshes registry overrides and disposes
+  owned roots/imperative cleanup functions. `PM.invalidate` flushes the DOM queue
+  and marks presentation dirty; animation frames use runtime-owned timers.
+  Opening a mirror contribution is not a WebKit paint acknowledgement.
+  The icon helper is extracted unchanged from the frozen public source. Shared
+  Svelte mounting/reactivity modules are loaded for the host even when extension
+  source imports neither; optional browser modules remain demand-loaded.
+- **WebKit:** `MacDomHost::new_remote_dom` accepts the host-built production
+  `PageApplier` bundle, using a dedicated document per realm. `RemoteDomPanel`
+  validates mutation batches through `pm-remote-dom::Router` on a routing worker
+  before queueing admitted batches to AppKit. The UI only presents admitted
+  batches and retains the front batch on backpressure. Actual page feedback
+  enters a bounded routing mailbox; its default handler explicitly refuses an
+  unattached mailbox. The router then forwards validated feedback to a bounded
+  realm-owner queue. Queue failure does not advance sequence state; only page
+  feedback advances the applied sequence. Detached pages may acknowledge/layout
+  but cannot forward input.
+  The CLI still does not create this host or run a complete capture script.
+- **Store:** `KernelStoreAdapter` connects installed-release CAS and profile
+  data-store state to the existing durable native kernel writer. It preserves
+  other source metadata and refuses stale revisions, changed profile identity
+  and collisions with installed local extensions. `StoreRuntimeHost` runs the
+  unchanged frozen asynchronous Store facade in the real confined Store helper,
+  with no PM global or trusted Compat facade. Each IPC call rechecks native
+  installation, revision and live permissions. Core project snapshots and
+  extension-private storage use the real kernel; report count/bytes and storage
+  are bounded. Raw engine operations and staged writes are rejected. Disposal
+  runs before helper replacement; the test verifies private storage survives it.
+  Registration/view/callback resources still require a concrete native
+  `StoreDispatch`; network transport is explicitly unavailable. The JSON bridge
+  does not claim full structured-clone/type parity. This is a tested boundary
+  and core connection, **not a complete public Store runtime**.
+  The checked public release metadata supplies archive/tree hashes but no native
+  signed-release envelope. All four current permission arrays are empty; that
+  does not supply installer provenance. No signature or permission decision is
+  fabricated, and no public archive runs through a trusted fallback.
+  The disposable Electron profile now uses the shipping Store marker and
+  verifies that the loaded record has Store isolation. No account, provenance
+  database, grant or owner profile state is copied.
 
-## Small fixes and synthetic reproductions
+The recorder still supports its documented native subset: basic state,
+paths/rectangles, transforms, pinned drawImage sources and pixel readback.
+Complete DOM-canvas integration, typed ImageData, text/paint/encoding and engine
+rendering remain open. No Canvas or visual tolerance exception was introduced.
 
-| Family | Before | Fix and proof |
-|---|---|---|
-| Lifecycle / bundle loading | The documented Bun 1.3.14 build silently ignored `--global-name`; its IIFE exposed no `PowermoveCompat`, so the real V8 loader failed with a missing global. | An explicit browser entry publishes the production namespace. A bare-V8 bundle regression test and the native runner tests now exercise it. |
-| DOM panel | `Range.selectNodeContents` on a comment selected length 0 instead of the comment's UTF-16 data length. | The remote range handles comment data like text data. The original synthetic `Synthetic 🦀` comment reproduced 0 versus 12 against the independent DOM implementation, then passed after the fix. |
+## Small synthetic reproductions
 
-Larger missing paths have minimal synthetic probes in the native suite: a
-default activation that calls `api.history.begin('Synthetic')` reaches the
-explicit unavailable kernel adapter; a DOM input event updates an output in
-the V8 mirror but has no WebKit presentation endpoint; drawing a rectangle and
-copying its pinned source proves native pixels but does not establish the full
-Canvas/text/paint/encoding/global contract. Those require owning-adapter work,
-not changes to extension source or reference goldens.
+`element.innerHTML = 42` reproduced a parser TypeError in the V8 DOM mirror,
+while the independent DOM produced `"42"`. The setter now performs DOMString
+conversion before parsing, including null-to-empty and Symbol rejection. The
+regression covers ordinary elements, templates and SVG. The earlier explicit
+browser-bundle export and comment-Range UTF-16 fixes remain in place.
 
-## Validation and remaining gate
+The Store core now applies the frozen broker's storage tuple arity, 128 UTF-16
+code-unit key limit and 256 KiB encoded private-storage limit. Synthetic native
+regressions cover both sides of the key boundary, surrogate pairs, oversized
+values, empty keys and extra arguments. The real confined-helper regression
+also distinguishes missing values from null and verifies disposal runs once.
+This is component/source-contract evidence, not a measured extension mismatch.
 
-| Check | Result |
-|---|---|
-| Existing sandbox V8 runtime suite | 61 pass: 55 unit + 6 integration |
-| New native compat runner | 8 pass, actual production bundle, V8 DOM event closures and native pixels |
-| Compat JS suite | 174 pass, including the new bundle regression |
-| Remote-DOM JS/Rust boundary suite | 37 pass, including the new range regression |
-| Harness unit suite | 10 pass: trace validity/types/order, privacy-safe differences, symlink/traversal refusal, decoded visual comparison and missing evidence |
-| Frozen compiler → bundled module → actual V8 CLI | Pass, original synthetic extension with omitted `entry`, shared compat/DOM bundle, command/storage result and disposal |
-| Native runner Clippy | Pass with all targets, no dependencies, warnings denied |
+Passing native tests cover stored/canonical composition translation, native
+history round trips and external closures, transaction retry identity, selection
+refusal, presentation demand, bounded DOM admissions/feedback and Store session
+permission revocation. The production page-shell/applier event round trip also
+passes in the headless DOM harness. After GUI availability returned, the real
+WebKit smoke example ran through the shared lease with the production
+PageApplier and reported `remote_dom_webkit_applied=1`, then closed its window.
+That acknowledgement remains component evidence only.
 
-The complete task remains open: wire actual kernel publications/leases and
-the connected built-in providers; finish recorder/WebKit/Store adapters; author
-reviewed per-extension projects and interaction scripts; obtain a free GUI slot;
-capture repeatable frozen traces/PNGs and run the same scripts natively. The
-current bundled native adapter performs activation/disposal only. It cannot
-certify Gate P2. Private inputs and raw per-case artifacts were confined to
-temporary copies and removed; only these aggregate counts and original
-synthetic code enter Git.
+## Harness and resource handling
+
+The shared GUI lease now waits and retries every 60 seconds instead of skipping
+a busy lane. Waiting occurs outside the capture execution timeout. Screen state
+is checked after acquisition; the lock file is never removed. A free slot was
+obtained after waiting. The disposable frozen reference was instrumented and
+built; an existing matching Electron 44 binary avoids a second installation.
+
+Repeat-reference investigation found a generated workspace ID in behavioral
+trace rows. A fixture-only identity alias now makes the investigated pair's
+traces equal, without changing workspace state or authored strings; a synthetic
+regression also checks that ID accessors are not invoked. The pair still differs
+visually in the live timeline playhead glow and render-time readout. No masking,
+tolerance change, replacement renderer or timing-value rewrite was introduced.
+The complete all-source attempt records 56 nondeterministic reference pairs and
+two reference activation failures. This is unavailable oracle evidence, not a
+measured Electron/native mismatch family ranking.
+
+Disk pressure is never counted as an extension result: builds/captures pause
+below 6.5 GiB and resume at or above 6.5 GiB. Inputs remain one case at a time and
+are deleted after use. Other lanes' targets and input profiles are untouched.
+
+Build and capture entry points also honor `/tmp/pm-shots/PAUSE_LOCAL`, checking
+every five minutes. A new local pause stops the owned process group, releases the
+GUI lease, and retries the interrupted attempt after the pause ends. No lock or
+pause file is removed. Both capture roles also wait while
+`/tmp/pm-shots/USER_ACTIVE` exists, and stop their owned capture if it appears.
+Builds/tests use `nice -n 20`, four Cargo build jobs and four Rust test threads.
+GUI probes and the fresh all-source attempts ran only after availability returned.
+
+Latest completed checks: compatibility 177 pass and typecheck pass; capture
+harness 21 pass; native V8 runner 20 pass, including the actual confined Store
+helper and durable kernel CAS; trace recorder 9 pass (1518 assertions); disposable
+reference-profile regression pass. The expanded build-tool-to-V8 CLI regression
+passes with real shared controls, native history edits and select/undo handling.
+The prior unchanged remote-DOM suite has 39 passing tests and its typecheck;
+WebKit headless contracts 25 pass and Store contracts 90 pass. All-target
+Clippy (`--no-deps -- -D warnings`) and Rust formatting pass for the runner,
+including the new Store modules. The updated wrapper also completes successfully.
+
+Only anonymised aggregates and original synthetic probes belong in Git. Raw
+sources, reports, traces, screenshots and selectors stay under disposable paths;
+the installed profile is read-only. The final gate still requires completed
+repeatable captures for every source, complete interaction coverage, and fixes
+or explicit `can't run` evidence for every remaining case.

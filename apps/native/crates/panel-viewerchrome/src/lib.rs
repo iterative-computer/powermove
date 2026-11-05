@@ -6,6 +6,7 @@ pub mod inspection;
 pub mod source;
 pub mod state;
 pub mod transport;
+pub mod v4;
 
 pub use geometry::*;
 pub use inspection::*;

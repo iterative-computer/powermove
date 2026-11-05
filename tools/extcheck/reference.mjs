@@ -1,9 +1,11 @@
 // Node only. Frozen Electron + the existing trace-recorder overlay, never the owner's profile.
-import { cp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { readFile, writeFile, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { prepareReferenceExtension } from "./reference-profile.mjs";
+import { admitFixtureWorkspace } from "./fixture-aliases.mjs";
 
 delete process.env.ELECTRON_RUN_AS_NODE;
 delete process.env.POWERMOVE_E2E_LIVE;
@@ -22,12 +24,9 @@ const status = {
   script_sha256: request.script_sha256,
 };
 try {
-  if (request.case.startsWith("store-")) {
-    status.reason = "reference-store-profile-adapter-unavailable";
-    throw Error(
-      "Store provenance and permission adapter is required for reference capture",
-    );
-  }
+  const store = request.case.startsWith("store-") ? request.store : undefined;
+  if (request.case.startsWith("store-") && !store)
+    throw Error("Verified Store identity required");
   status.revision = execFileSync("git", ["-C", ref, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
@@ -42,12 +41,12 @@ try {
   const manifest = JSON.parse(
     await readFile(path.join(request.extension, "manifest.json"), "utf8"),
   );
-  if (!/^[a-z0-9][a-z0-9._-]*$/.test(manifest.id))
-    throw Error("Unsafe extension id");
-  await mkdir(path.join(profile, "extensions"), { recursive: true });
-  await cp(request.extension, path.join(profile, "extensions", manifest.id), {
-    recursive: true,
-  });
+  await prepareReferenceExtension(
+    profile,
+    request.extension,
+    manifest.id,
+    store,
+  );
   const { launchApp } = await import(
     pathToFileURL(path.join(ref, "apps/desktop/e2e/helpers/app.trace.mjs"))
   );
@@ -94,6 +93,17 @@ try {
     (id) => window.PM.Kernel.loader.activeIds().includes(id),
     manifest.id,
   );
+  if (store) {
+    const trust = await session.page.evaluate(
+      (id) =>
+        window.PM.Kernel.loader.records().find((record) => record.id === id)
+          ?.trust,
+      manifest.id,
+    );
+    if (trust !== "store")
+      throw Error("Store reference did not enter its isolated facade");
+    status.store_isolated = true;
+  }
   if (!active) {
     console.error(
       await session.page.evaluate(
@@ -122,7 +132,7 @@ try {
       window.__PMTrace.start({
         scenario: request.case,
         synthetic: true,
-        role: "trusted",
+        role: request.case.startsWith("store-") ? "store" : "trusted",
         apiVersions: [apiVersion],
         reference: { revision },
         adapter: fingerprint,
@@ -140,6 +150,7 @@ try {
       apiVersion: manifest.apiVersion ?? 1,
     },
   );
+  await session.page.evaluate(admitFixtureWorkspace);
   const interactions = [];
   for (let index = 0; index < request.script.steps.length; index++) {
     const step = request.script.steps[index];

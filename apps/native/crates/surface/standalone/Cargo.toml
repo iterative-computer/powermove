@@ -36,3 +36,11 @@ path = "../tests/ui_kit.rs"
 [[example]]
 name = "ui_kit_wire"
 path = "../examples/ui_kit_wire.rs"
+
+[[example]]
+name = "host_wire"
+path = "../examples/host_wire.rs"
+
+[[test]]
+name = "host_data"
+path = "../tests/host_data.rs"

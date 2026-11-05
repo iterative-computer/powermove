@@ -26,8 +26,19 @@ pub enum Component {
     PopoverAnchor,
     ProgressRow,
     EmptyState,
+    Switch,
+    SecureField,
+    FormGroup,
+    FormRow,
+    ColourPopover,
+    ViewerGizmo,
+    ViewerOverlay,
+    Banner,
+    PushButton,
 }
 impl Component {
+    /// Original kit catalog, retained for consumers that enumerate its frozen recipes.
+    /// Use `catalog()` to include the additive panel kit.
     pub const ALL: &[Self] = &[
         Self::InspectorRow,
         Self::NumberField,
@@ -50,6 +61,20 @@ impl Component {
         Self::ProgressRow,
         Self::EmptyState,
     ];
+    pub const ADDITIONS: &[Self] = &[
+        Self::Switch,
+        Self::SecureField,
+        Self::FormGroup,
+        Self::FormRow,
+        Self::ColourPopover,
+        Self::ViewerGizmo,
+        Self::ViewerOverlay,
+        Self::Banner,
+        Self::PushButton,
+    ];
+    pub fn catalog() -> impl Iterator<Item = Self> {
+        Self::ALL.iter().chain(Self::ADDITIONS).copied()
+    }
     pub fn of(node: &Node) -> Option<Self> {
         serde_json::from_value(node.props.get("data-pm-component")?.clone()).ok()
     }
@@ -67,13 +92,18 @@ impl Component {
                 | Self::ListItem
                 | Self::TreeItem
                 | Self::ToolbarItem
+                | Self::Switch
+                | Self::SecureField
+                | Self::ViewerGizmo
+                | Self::PushButton
         )
     }
     pub fn surface(self) -> Surface {
         match self {
             Self::ToolbarItem => Surface::Toolbar,
             Self::SheetAnchor => Surface::Sheet,
-            Self::PopoverAnchor => Surface::Popover,
+            Self::PopoverAnchor | Self::ColourPopover => Surface::Popover,
+            Self::ViewerOverlay | Self::Banner => Surface::ViewerOverlay,
             Self::List | Self::Tree | Self::ListItem | Self::TreeItem => Surface::List,
             _ => Surface::InspectorRow,
         }
@@ -101,6 +131,14 @@ pub enum Widget {
     Popover,
     Progress,
     EmptyState,
+    SecureTextField,
+    FormGroup,
+    FormRow,
+    ColourPopover,
+    ViewerGizmo,
+    ViewerOverlay,
+    Banner,
+    PushButton,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -117,6 +155,8 @@ pub struct Recipe {
     pub focus: u32,
     pub border_color: u32,
     pub border: f32,
+    /// Field/group outline is enabled by Increase Contrast; swatch keylines stay visible.
+    pub draw_border: bool,
     pub visual_height: Option<f32>,
     pub hit: f32,
     pub width: Option<f32>,
@@ -173,17 +213,29 @@ impl Recipe {
             PopoverAnchor => Widget::Popover,
             ProgressRow => Widget::Progress,
             EmptyState => Widget::EmptyState,
+            Switch => Widget::Switch,
+            SecureField => Widget::SecureTextField,
+            FormGroup => Widget::FormGroup,
+            FormRow => Widget::FormRow,
+            ColourPopover => Widget::ColourPopover,
+            ViewerGizmo => Widget::ViewerGizmo,
+            ViewerOverlay => Widget::ViewerOverlay,
+            Banner => Widget::Banner,
+            PushButton => Widget::PushButton,
         };
-        let floating = matches!(kind, ToolbarItem | SheetAnchor | PopoverAnchor);
+        let floating = matches!(
+            kind,
+            ToolbarItem | SheetAnchor | PopoverAnchor | ColourPopover | ViewerOverlay | Banner
+        );
         let field = matches!(
             kind,
-            NumberField | TextField | PopUpButton | SegmentedControl
+            NumberField | TextField | SecureField | PopUpButton | SegmentedControl
         );
         Self {
             widget,
             material: t.material(kind.surface(), glass_available),
             content_material: Material::Solid,
-            background: if kind == PopoverAnchor {
+            background: if matches!(kind, PopoverAnchor | ColourPopover) {
                 t.colors.floating
             } else if kind == ToolbarItem {
                 t.colors.window
@@ -201,27 +253,29 @@ impl Recipe {
             focus: t.colors.focus,
             border_color: t.colors.separator,
             border: t.metrics.border,
+            draw_border: kind == ColourWell
+                || ((field || kind == FormGroup) && t.accessibility.increase_contrast),
             visual_height: match kind {
-                NumberField | TextField | SegmentedControl | Segment | ColourWell => {
+                NumberField | TextField | SecureField | SegmentedControl | Segment | ColourWell => {
                     Some(t.metrics.field)
                 }
                 // Standalone pop-ups are `control` tall; inside an InspectorRow
                 // `Panel::prepare` narrows them to `field` (language §9 rows).
-                PopUpButton => Some(t.metrics.control),
+                PopUpButton | PushButton => Some(t.metrics.control),
                 InspectorRow | ListItem | TreeItem | ProgressRow => Some(t.metrics.row),
                 _ => None,
             },
             hit: t.metrics.hit,
             width: match kind {
                 SheetAnchor => Some(t.metrics.sheet_width),
-                PopoverAnchor => Some(t.metrics.popover_width),
+                PopoverAnchor | ColourPopover => Some(t.metrics.popover_width),
+                ColourWell => Some(t.metrics.field),
                 _ => None,
             },
             radius: match kind {
                 Segment => Some(t.metrics.inner_radius),
-                NumberField | TextField | SegmentedControl | PopUpButton | ColourWell => {
-                    Some(t.metrics.control_radius)
-                }
+                NumberField | TextField | SecureField | SegmentedControl | PopUpButton
+                | ColourWell => Some(t.metrics.control_radius),
                 // Selection shape of a row (panels/README.md §3 Selected).
                 ListItem | TreeItem => Some(t.metrics.control_radius),
                 _ => None,

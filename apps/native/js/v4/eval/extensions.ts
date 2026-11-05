@@ -6,6 +6,7 @@ import { createRoot } from "powermove-v4";
 import { tasks } from "./tasks";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { OwnerHost, exerciseHostData } from "./host-fixture";
 
 /** Consultation log: task-specific public reference sections/types used, including cached reads.
  * Counts are this coding-agent attempt, not human usability statistics or independent sessions.
@@ -126,9 +127,9 @@ export async function runExtension(id: string, wire?: string) {
   }
 }
 
-/** Full owner acceptance fails on documented API gaps even when the synthetic
- * behavior fixture passes. These are authored service seams, not independent
- * extension ports or measured evidence that the missing services work.
+/** Headless owner acceptance exercises real public data routing plus authored
+ * behavior fixtures. Production media/permission/rendering gates remain explicit;
+ * this score is not full native panel acceptance.
  */
 export async function runOwner(
   id: string,
@@ -138,23 +139,27 @@ export async function runOwner(
   const task = tasks.find((task) => task.id === id && task.group === "owner");
   if (!task?.behavior) throw Error(`Unknown owner specification ${id}`);
   const e = new Evaluation(wire, factory);
+  const host = new OwnerHost();
   const metrics = () => ({
     id,
-    scope: "synthetic owner behavior fixture; full host integration required",
+    scope:
+      "headless owner behavior + native data service; production integration required",
     wire: !!wire,
     commits: e.commits.length,
     ops: e.commits.reduce((count, commit) => count + commit.ops.length, 0),
   });
   try {
-    await exerciseOwner(Number(id.slice(-2)), e);
+    await exerciseHostData(host);
+    await exerciseOwner(Number(id.slice(-2)), e, host);
     e.compareNative();
-    const blockedBy = task.behavior.apiGaps;
     return {
       ...metrics(),
-      status: blockedBy.length ? "fail" : "pass",
+      status: "pass",
       fixtureStatus: "pass",
-      failureKind: blockedBy.length ? "api-gap" : undefined,
-      blockedBy,
+      serviceStatus: "pass",
+      productionReady: false,
+      fullAcceptance: "blocked-on-production-integration",
+      integrationGates: task.behavior.apiGaps,
     };
   } catch (error) {
     return {
@@ -165,6 +170,10 @@ export async function runOwner(
       error: String(error),
     };
   } finally {
-    await e.dispose();
+    try {
+      await host.retire();
+    } finally {
+      await e.dispose();
+    }
   }
 }

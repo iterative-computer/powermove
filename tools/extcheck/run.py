@@ -9,7 +9,6 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
-import signal
 import subprocess
 import tarfile
 import tempfile
@@ -20,6 +19,8 @@ FAMILIES = ("PM facade", "sync services", "raster override", "recorder canvas", 
 SOURCES = ("owner", "local-corpus", "store")
 ROOT = Path(__file__).resolve().parents[2]
 WORK = Path("/tmp/pm-extcheck")
+PAUSE_LOCAL = Path("/tmp/pm-shots/PAUSE_LOCAL")
+USER_ACTIVE = Path("/tmp/pm-shots/USER_ACTIVE")
 DEFAULT_SCRIPT = {"version": 1, "complete": False, "steps": [
     {"op": "reload"}, {"op": "seek", "time": 0},
     {"op": "screenshot", "label": "active", "family": "DOM panel"},
@@ -30,13 +31,31 @@ class Blocked(Exception):
     """A public fixed reason code, never an extension error message."""
 
 
+class LocalPause(Exception):
+    """Retry owned capture after the owner's local-execution pause ends."""
+
+
+def wait_for_local_execution():
+    while PAUSE_LOCAL.exists():
+        print("Local execution paused by owner; checking again in five minutes", flush=True)
+        time.sleep(300)
+
+
+def stop_capture(child):
+    from gui_capture import stop_owned_process
+    stop_owned_process(child)
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
 def disk_check():
-    if shutil.disk_usage(WORK).free < 8 * 1024**3:
-        raise Blocked("disk-below-8-GiB")
+    while True:
+        wait_for_local_execution()
+        if shutil.disk_usage(WORK).free >= 6.5 * 1024**3:return
+        print("Waiting for disk space at or above 6.5 GiB", flush=True)
+        time.sleep(120)
 
 
 def safe_file(root, value):
@@ -266,8 +285,27 @@ def compare(left, right, script):
 def capture(command, request, output, timeout):
     if not command:
         raise Blocked("native-integrated-runner-unavailable")
+    while True:
+        disk_check()
+        try:
+            # Waiting for another lane is outside the capture's execution deadline.
+            # A full native adapter also owns a WebKit window. Apply the same
+            # lease to either role, including externally supplied adapters.
+            from gui_capture import gui_slot
+            with gui_slot():
+                return capture_unlocked(command, request, output, timeout)
+        except LocalPause:
+            # Only this attempt's owned disposable output is removed. Retry the
+            # same input/script after releasing the GUI lease and owner's pause.
+            if output.exists():shutil.rmtree(output)
+
+
+def capture_unlocked(command, request, output, timeout):
+    if not command:
+        raise Blocked("native-integrated-runner-unavailable")
     output.mkdir()
-    disk_check()
+    if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+        raise LocalPause()
     env = dict(os.environ)
     env.pop("ELECTRON_RUN_AS_NODE", None)
     env.pop("POWERMOVE_USER_DATA", None)
@@ -276,15 +314,24 @@ def capture(command, request, output, timeout):
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=log,
                                  env=env, start_new_session=True, cwd=ROOT)
         try:
-            child.communicate(json.dumps({**request, "output": str(output)}).encode(), timeout=timeout)
+            deadline=time.monotonic()+timeout
+            data=json.dumps({**request, "output": str(output)}).encode()
+            while True:
+                if PAUSE_LOCAL.exists() or USER_ACTIVE.exists() or shutil.disk_usage(WORK).free < 6.5 * 1024**3:
+                    stop_capture(child)
+                    raise LocalPause()
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise subprocess.TimeoutExpired(command,timeout)
+                try:
+                    child.communicate(data,timeout=min(.25,remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    data=None
         except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+            stop_capture(child)
             raise Blocked("capture-timeout") from None
+        finally:
+            if child.poll() is None:stop_capture(child)
     if child.returncode:
         if child.returncode in (75, 76):
             raise Blocked("gui-busy" if child.returncode == 75 else "screen-locked")
@@ -298,7 +345,7 @@ def capture(command, request, output, timeout):
         if reason not in ("reference-not-ready", "reference-extension-not-active", "unsupported-script-step",
                           "reference-store-profile-adapter-unavailable",
                           "reference-capture-failed", "native-integrated-runner-unavailable",
-                          "native-extension-compile-failed", "native-store-facade-unavailable", "native-runner-failed",
+                          "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
                           "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
             reason = "capture-driver-blocked"
         raise Blocked(reason)
@@ -377,6 +424,7 @@ def main():
                 reasons[str(error)] += 1
         for source in SOURCES:
             rows = populations.get(source, [])
+            source_reasons = Counter()
             counts = {"total": len(rows), "match": 0, "mismatch": 0, "cant_run": 0,
                       "reference_captured": 0, "native_captured": 0, "native_logic_executed": 0, "native_activated": 0,
                       "enumerated": source in populations}
@@ -397,9 +445,11 @@ def main():
                     validate_script(script)
                     request = {"version": 1, "case": case, "extension": str(extension), "input_sha256": sha,
                                "script_sha256": digest(json.dumps(script, sort_keys=True).encode()), "script": script}
+                    if source == "store":
+                        request["store"] = {"repoId": item["repoId"], "releaseId": item["latest"]["id"]}
                     ref = case_root / "reference"
                     failures=[]
-                    for role, command in (("reference",["python3",str(Path(__file__).with_name("gui_capture.py")),"node", str(Path(__file__).with_name("reference.mjs")), str(args.reference_root)]),
+                    for role, command in (("reference",["node", str(Path(__file__).with_name("reference.mjs")), str(args.reference_root)]),
                                           ("native",native)):
                         try:
                             capture(command,{**request,"role":role},case_root/role,args.timeout)
@@ -412,6 +462,7 @@ def main():
                         except Blocked as error:
                             failures.append(str(error))
                             reasons[str(error)]+=1
+                            source_reasons[str(error)]+=1
                         if role=="native" and (case_root/role/"capture.json").is_file():
                             status=json.loads((case_root/role/"capture.json").read_text())
                             counts["native_logic_executed"]+=status.get("logic_executed") is True
@@ -437,12 +488,15 @@ def main():
                 except Blocked as error:
                     counts["cant_run"] += 1
                     reasons[str(error)] += 1
+                    source_reasons[str(error)] += 1
                 except (OSError, ValueError, KeyError, TypeError, tarfile.TarError):
                     counts["cant_run"] += 1
                     reasons["input-or-artifact-invalid"] += 1
+                    source_reasons["input-or-artifact-invalid"] += 1
                 finally:
                     shutil.rmtree(case_root)
                     print(f"{case}: completed", flush=True)
+            counts["reasons"] = dict(source_reasons)
         if store and "store" in populations:
             try:
                 if store.catalog() != initial:

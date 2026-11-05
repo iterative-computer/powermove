@@ -19,7 +19,7 @@ string or a behaviour.
 | [effect-controls.md](effect-controls.md) | `layer-effects` | Effect Controls |
 | [viewer-chrome.md](viewer-chrome.md) | `viewer` | Viewer (no visible title) |
 | [media-browser.md](media-browser.md) | `assets` | Project |
-| [effects-presets.md](effects-presets.md) | `fxbrowser` | Effects & Presets |
+| [effects-presets.md](effects-presets.md) | `fxbrowser` | Effects (owner decision 3) |
 | [agent-panel.md](agent-panel.md) | agent surface | Agent |
 | [settings.md](settings.md) | Settings window | Settings |
 | [export-sheet.md](export-sheet.md) | Export sheet | Export |
@@ -103,8 +103,8 @@ visuals below are the defaults; a spec only restates a row when it differs.
 | **Selected, panel not key** | Same fill, unchanged (a neutral fill does not need an inactive variant). Accent marks become `c.secondary` when the window is not key. |
 | **Disabled** | Text and glyphs `c.muted`; wells keep `c.field`; no hover; the system disabled appearance for AppKit controls. Never lower opacity of a whole region. Disabled items stay in focus order only when HIG does so for that control (menus: yes; buttons: no). |
 | **Error** | Inline, at the place of the failure: `exclamationmark.triangle.fill` at `m.symbol_inline` in `c.danger` (or `c.warning` for recoverable), message `t.body` `c.danger`/`c.warning` text with the fix in the same sentence. Never a red fill, never colour alone. |
-| **Drag source** | The dragged item renders at 50 % in place (system drag image is the item at 100 %, system shadow). |
-| **Drop target** | `c.accent_wash` fill + 1.5 pt `c.accent` inner stroke on the target shape (`m.control_radius`); for a gap between rows, a 2 pt `c.accent` insertion line with a 6 pt circle at its leading end. Invalid target: no highlight and the system "not allowed" cursor. |
+| **Drag source** | The dragged item renders at `m.drag_opacity` (50 %) in place (system drag image is the item at 100 %, system shadow). |
+| **Drop target** | `c.accent_wash` fill + `m.drop_stroke` (1.5 pt) `c.accent` inner stroke on the target shape (`m.control_radius`); for a gap between rows, a 2 pt `c.accent` insertion line with an `m.status_dot` circle at its leading end. Invalid target: no highlight and the system "not allowed" cursor. |
 | **Multi-select** | Every selected row gets the selected fill; the anchor row (last clicked) has the focus ring when keyboard-focused. A count appears where the spec says (never as a toast). |
 | **Large data (60 k rows)** | §4. |
 
@@ -208,6 +208,21 @@ substitute literals — it blocks on the token.
 | `metrics.composer_max_lines` | 10 | Agent composer grows to this many lines, then scrolls |
 | `colors.media_badge` | `#000000` at 55 % alpha | Fill of badges drawn over media (duration, offline) — always dark, see language §4 *Over the image* |
 | `colors.viewer` (light **change**) | `#E4E4E4` (was `#E6E6EA`) | Viewer surround is pure neutral in light too, so footage reads true (language §4) |
+| `metrics.group_radius` | 10 (= `control_radius + inner_radius`) | Settings grouped-form card corner (reviews/na-cloud-p-settings.md) |
+| `metrics.form_row` | 40 (= `row + inset`) | Minimum Settings row height |
+| `metrics.section_gap` | 40 (= 2 × `sheet_inset`) | Space above each Settings section after the first |
+| `metrics.gizmo_handle` | 7 (= `keyframe − 2`) | Transform handle and path vertex square (viewer-chrome.md §2) |
+| `metrics.gizmo_keyline` | 1 | Gizmo stroke and keyline width over the image |
+| `metrics.rotation_stem` | 18 | Rotation handle stem length |
+| `metrics.anchor_mark` | 11 | Anchor point crosshair circle |
+| `metrics.tangent_end` | 6 | Bézier tangent end circle |
+| `metrics.checker` | 8 | Transparency checkerboard square |
+| `metrics.pasteboard_opacity` | 0.35 | Selected layers drawn outside the frame (opacity) |
+| `motion.overlay_idle` | 2.0 | Still time before the Focus overlay capsule fades (s) |
+| `metrics.status_dot` | 6 | Attention/unread dot and the drop insertion-line end circle (reviews/na-cloud-p-agent.md) |
+| `metrics.text_padding` | 8 (= `gap + 2`) | Vertical padding of text in bubbles, the agent composer and code blocks |
+| `metrics.drop_stroke` | 1.5 (Increase Contrast 2) | Drop-target inner stroke (§3 *Drop target*) |
+| `metrics.drag_opacity` | 0.5 | Opacity of a drag source left in place (§3 *Drag source*) |
 
 ---
 

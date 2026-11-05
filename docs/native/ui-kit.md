@@ -93,6 +93,21 @@ survive rounding without overflow, and typed finite commits do not acquire
 scrub clamping. Wheel editing is deliberately left unbound pending the design
 item below; ordinary inspector scrolling cannot accidentally edit values.
 
+## v4 integration reconciliation (2026-11-01)
+
+The strict primitive contract is retained: anchor fixtures create `anchored`,
+matching the JSX components, instead of putting `anchor` on a `div`. No recipe,
+token, visual property or Opus interaction decision changed. JSX declarations
+explicitly enumerate the kit's accessibility and semantic markers. Component
+options/value callbacks override primitive event signatures rather than
+intersecting incompatible types; boolean list selection stays boolean.
+
+Plain `bun test` now builds the standalone native examples and runs native
+conformance instead of failing for a missing environment variable. Current
+combined counts and freeze gates are in [v4-eval.md](v4-eval.md). The older kit-only
+counts below remain historical evidence. New design TODOs: **none**; the existing
+Opus F1–F7 follow-ups and rendering-review gate remain unchanged.
+
 ## Validation and tests
 
 `validate_panel(surface, tokens, layout)` emits stable ID/property diagnostics:
@@ -124,14 +139,14 @@ also mounts without process, Buffer, window, document or Chromium.
 source /workspace/.tools/activate.sh
 cd /workspace/powermove/apps/native
 cargo test --locked -p pm-surface
-# Shared Cargo.lock reconciliation belongs to the integration lane.
+# The merged workspace lock resolves on Linux; standalone uses the same sources.
 cargo test --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface
 cargo clippy --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface --all-targets -- -D warnings
 cargo fmt --manifest-path crates/surface/standalone/Cargo.toml --check
 cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --examples
 cd js/v4
 bun install --frozen-lockfile
-PM_UI_KIT_WIRE=../../crates/surface/standalone/target/debug/examples/ui_kit_wire PM_SURFACE_WIRE=../../crates/surface/standalone/target/debug/examples/wire bun test
+bun test # builds both kit/surface wire validators and host_wire automatically
 bun run typecheck
 bun run format
 bun run build
@@ -196,3 +211,146 @@ Increase Contrast/Reduce Transparency/Reduce Motion captures, before/after pairs
 all changed interaction states, keyboard walkthrough, VoiceOver/AX evidence,
 contrast spot checks and Opus sign-off are still required by the design review
 checklist. All visual output is provisional until that review.
+
+## UI kit part 2 — additive panel kit (2026-11-01)
+
+This section supersedes the earlier F1/F2 implementation status. The six-op
+protocol and v1–3 extension paths are unchanged. Added exports: `SettingsRoot`,
+`Switch`, `SecureField`, `FormGroup`, `FormRow`, `PushButton`, `ColourPopover`
+(`ColorPopover`), `ViewerGizmo`, `ViewerOverlay`, `Banner`, and `ColorWell` as an
+alias of `ColourWell`. `ColourWell` accepts `minimal`; `EmptyState` accepts an
+optional decorative SF Symbol slot and an optional action. Pop-up options accept
+separators, key equivalents and details; `widthSample` requests native measurement
+of that string plus the system chevron. Separators are absent from primitive
+selectable options, so neither keyboard nor binding edits can select one.
+
+The new components publish through `Panel::components`, `Panel::decorations` and
+AccessKit. `Component::ALL` retains the original catalog; `Component::catalog()`
+adds `ADDITIONS`. Settings switches require `metadata.hostWindow: "settings"` on
+the top-level content root (`SettingsRoot` provides it). The shell must verify
+that declaration against its actual host window. Existing `Toggle` remains a
+checkbox. Form titles sit outside the card; native form layout centres controls
+on the label line and keeps wrapped detail below it. Native group separators
+use the specified leading inset. Increase Contrast enables field/card outlines
+using `metrics.border` and `colors.separator`, and strengthens gizmo keylines.
+
+`SecureField` accepts an opaque native binding, with no value, child text or
+input/change callbacks. The JSX entry rejects those inputs before publication;
+AX projection never includes a secure value or text-setting action. Raw invalid
+surface descriptors receive `secureValueOnSurface` diagnostics, not a claim that
+the generic surface is a secret store. The AppKit adapter must keep secure editor
+buffers and Keychain operations entirely outside the surface and JS, using
+`SecureFieldHost`. The Linux `InspectSecureFieldHost` records only IDs, binding
+references and native commands.
+
+`ColourPopoverHost` owns the native picker and `NSColorSampler`; the Linux
+`InspectColourPopoverHost` records its commands. The picker recipe describes the
+SB area, hue/opacity controls, geometry, Fill modes, document recents and required
+native AX axes. `ColourEdit` starts a binding transaction only on preview;
+outside dismissal commits, Escape cancels, and opening/dismissing without editing
+never normalizes or rewrites an authored colour string. The native adapter still
+must create/graft the picker controls (including hex, gradient stops and recents)
+and their live values, implement the specified rings/checkerboard using the
+design tokens, and report native dismissal to the worker. The recipe and Linux
+AX projection do not certify a rendered colour picker.
+
+Viewer handles describe transform, rotation, anchor, path vertices and tangents
+in display points, retain authored positions, pad targets to `metrics.hit`, and
+use the dark palette over media. `Panel::over_image` includes plain text and
+symbol descendants so their token styles also resolve with that palette.
+`prepare_with_palettes` accepts the active theme's dark tokens while the window
+is light; the simpler preparation methods use standard dark tokens in a light
+window and retain supplied theme patches in a dark window. The production host
+must supply the theme's dark palette. Viewer overlays use the permitted glass
+material with solid dark fallback, enter/exit cross-fades, Reduce Motion timing,
+and a token deadline that pauses for hover, an open menu or keyboard focus.
+`BannerSlot` holds one banner, replaces its deadline and dismisses after the
+specified four seconds unless it has an action. Banners publish medium AX/live
+announcements (high for errors); inline notices use solid panel-secondary fill.
+
+`NumericWheel` consumes native normalized notches only after both pointer rest
+and absence of actual container scrolling meet `motion.wheel_rest`. Pointer
+motion beyond `metrics.drag_threshold` restarts the gate. Discrete wheels are
+eligible; trackpads require Option, which gates them without reducing the step.
+Shift multiplies by ten; Option on a discrete wheel multiplies by one tenth.
+One sequence uses one Bindings transaction, closing after the rest interval
+following the last event, including events clamped at a bound. Failed queue
+operations are retryable; an unwritten begin is cancelled on timeout. Retired,
+disabled or rebound controls cancel the original binding. The host must notify
+actual scrolling (including momentum), normalize native device units, schedule
+`tick`, call `leave`, and cancel before Bindings reconciliation on retirement.
+No event is captured while the rest/modifier gate is closed.
+
+### Design-token dependency and neutral placeholders
+
+**Update (design lead, 2026-11-01, `feat/na-design-fix-kit2`):** pm-design now
+carries every panels/README §6 token (metrics, `motion.wheel_rest`,
+`motion.overlay_idle`, `colors.media_badge` + `metrics.media_badge_opacity`,
+light `colors.viewer` `#E4E4E4`), so `DesignTokenTable::from_design` resolves
+them and the missing-token path is exercised with an older host table. The
+paragraphs below describe the lane's state before that.
+
+At this lane's base, the pm-design struct/table does **not** yet contain the
+README §6 additions. That crate and its token snapshot are outside this lane's
+owned paths. No production token values were duplicated into the kit.
+`DesignTokenTable::from_design` resolves available names;
+`prepare_with_token_table`/`prepare_with_palettes` accept a newer, host-owned
+pm-design serialization. New recipes expose unresolved names and
+`missingDesignToken` diagnostics instead of substituting geometry. NumericWheel
+and overlay timing refuse construction without their token. Synthetic test
+values exercise the exact specified 0.5-second rest, 16-point indentation and
+other approved measurements; they are not runtime defaults.
+
+**Required from the pm-design lane:** `motion.wheel_rest`, `metrics.tree_indent`,
+`metrics.group_radius`, `metrics.form_row`, `metrics.gizmo_handle`,
+`metrics.gizmo_keyline`, `metrics.rotation_stem`, `metrics.anchor_mark`,
+`metrics.tangent_end`, `metrics.checker`, `motion.overlay_idle`; the containing
+Settings panes still need the specified sheet/section tokens, and native
+popover/gizmo painting needs `colors.media_badge`. This is an integration
+dependency, not a missing design spec. New `DESIGN-TODO(opus)` items: **none**.
+
+### Decisions and verification
+
+- Add metadata/recipes instead of changing primitive option schemas or retiring
+  old components: frozen v4 contract, N4/N6 and prune rule.
+- Resolve current design tokens, report missing additions and keep neutral
+  placeholders: design ownership and N1; no invented visuals or fallback values.
+- Native secure text and colour-sampling seams expose only IDs/commands;
+  gestures enqueue binding edits and remain inspectable without a JS wait:
+  N7/N8 and the kernel single-writer boundary.
+- Preserve authored colour strings and exact gizmo coordinates; use documented
+  wheel gates/modifiers instead of browser wheel quirks: N3 and quirk policy.
+- Strengthen contrast, preserve active dark-theme patches, suppress accidental
+  wheel edits while scrolling, and test failed queues/cancellation: N1/N2/N4.
+
+Linux validation: **129 pm-surface tests**, **242 Bun tests**, **28 snapshots**;
+no skipped tests. New part-2 coverage includes 34 Rust tests and 16 Bun tests with
+10 wire snapshots. All JSX snapshots replay through the real Rust surface/panel
+validator; Rust tests assert AX roles/actions/redaction, token resolution,
+contrast/transparency/motion variants, native command doubles, deadlines and
+transaction/error paths. Existing Rust/JS token-literal guards pass. No dependency
+was added, so neither Cargo lockfile needs a change. Commands:
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove/apps/native
+cargo test --locked -p pm-surface
+cargo clippy --locked -p pm-surface --all-targets -- -D warnings
+cargo fmt -p pm-surface --check
+cd js/v4
+bun install --frozen-lockfile
+bun test
+bun run typecheck
+bun run format
+bun run build
+```
+
+macOS remains required: connect the actual AppKit/GPUI host and panel ViewModel
+adapters to the publications/traits; verify secure text services and Keychain,
+colour picker/NSColorSampler/gradient keyboard and AX subtrees, native menu
+measurement and key equivalents, Settings form alignment and regular switches,
+actual hit rectangles, wheel/trackpad units and momentum, focus preservation,
+Focus/full-screen idle fade and banner placement. Supply light/dark and all
+accessibility-variant captures and VoiceOver evidence for Opus review. All visual
+output remains provisional; this Linux implementation is not native visual
+acceptance or a renderer integration claim.
