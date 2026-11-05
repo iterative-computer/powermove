@@ -8,15 +8,15 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1423, 1, 3179));
-    assert_eq!(r.exit_code(false), 1);
-    assert_eq!(r.exit_code(true), 1);
+    assert_eq!(r.counts(), (1424, 0, 3179));
+    assert_eq!(r.exit_code(false), 0);
+    assert_eq!(r.exit_code(true), 2);
     assert_eq!(
         r.workflows
             .iter()
             .filter(|w| w.status == Status::BlockedBy)
             .count(),
-        82
+        83
     );
     assert_eq!(
         r.workflows.iter().find(|w| w.id == "W071").unwrap().status,
@@ -95,7 +95,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1423 pass / 1 fail / 3179 blocked-by")
+            .contains("1424 pass / 0 fail / 3179 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
@@ -163,7 +163,7 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         eprintln!("counts {:?}", report.counts());
         return;
     }
-    assert_eq!(report.counts(), (1466, 1, 3136));
+    assert_eq!(report.counts(), (1467, 0, 3136));
     assert_eq!(
         report.blockers_csv(),
         include_str!("../data/legacy-v1.2.0-remaining-blockers.csv")
@@ -381,13 +381,12 @@ fn backing_groups_partition_every_blocker_without_hiding_failures() {
                 .contains(&case.blocked_by.as_deref().unwrap())
         );
     }
-    let failed = report
+    let curve = report
         .cases
         .iter()
         .find(|c| c.id == "W061.frozen-set-easing")
         .unwrap();
-    assert_eq!(failed.status, Status::Fail);
-    assert!(failed.reason.contains("104.94929544957891"));
+    assert_eq!(curve.status, Status::Pass);
 }
 
 #[test]

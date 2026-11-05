@@ -681,3 +681,14 @@ not certify the still-blocked complete application/compatibility workflows.
 Source oracle/delta-route checks reproduce both pinned ledgers. No Mac evidence
 or visual acceptance is claimed. Source SHA-256 metadata is structured to avoid
 API-key-pattern false positives without changing digests or scanner rules.
+
+### Integrated Mac repairs — 2026-11-05
+
+The unchanged sequential Glide oracle now passes, as do the native Backtick and
+M binding metadata/resolver checks. The measured main result is 1,672 passed,
+10 failed and 2,662 blocked. The ten failures are the composition-flowchart
+binding's eight checks and the two Studio catalog identity checks. Legacy has
+no remaining authored-curve failure. Complete-controller/window evidence stays
+blocked. See [int2-fixes.md](int2-fixes.md) for source proof, required-feature
+counter changes and final suite results; the older dated tables above retain
+their original context.

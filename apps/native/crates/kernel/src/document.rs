@@ -954,9 +954,43 @@ impl DocumentStore {
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
-        for command in commands {
+        let mut presets = crate::commands::properties::Presets::default();
+        // Flush before any other command can read or override the animation,
+        // and once more at the end, matching runCommands/finishPresets.
+        for command in commands
+            .iter()
+            .map(Some)
+            .chain((!commands.is_empty()).then_some(None))
+        {
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
-            let ops = command.plan(tree, origin)?;
+            let property = match command {
+                Some(Command::Property(crate::PropertyCommand::Set(c))) => Some(c),
+                _ => None,
+            };
+            let mut ops = if property.is_none() {
+                presets.finish(tree, origin)?
+            } else {
+                Vec::new()
+            };
+            // A flush can change the scratch tree. Apply it before planning
+            // the following command, using the same inverse/history path.
+            for op in ops.drain(..) {
+                let (inv, scope) = capture_inverse(root.as_ref(), &op);
+                let (next, did) = apply_one(root, &op, revision)?;
+                root = next;
+                changed |= did;
+                inverse.push(inv);
+                scopes.push(scope);
+                forward.push(op);
+            }
+            let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
+            let ops = match (command, property) {
+                (_, Some(c)) => {
+                    crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
+                }
+                (Some(c), None) => c.plan(tree, origin)?,
+                (None, None) => Vec::new(),
+            };
             for op in ops {
                 let (inv, scope) = capture_inverse(root.as_ref(), &op);
                 let (next, did) = apply_one(root, &op, revision)?;

@@ -2012,5 +2012,25 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "K196",
+    "chord": "`",
+    "command": "maximizePanel",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K197",
+    "chord": "m",
+    "command": "toggleLayerStrips",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

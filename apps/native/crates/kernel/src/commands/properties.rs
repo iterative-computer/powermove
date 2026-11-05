@@ -278,8 +278,72 @@ fn ease_name(ease: Option<&EaseSpec>) -> Result<Option<String>, CommandError> {
     }
 }
 
-/// `setProperty(command)`.
+/// Named presets collected for one uninterrupted run of property commands.
+/// The pinned editor finishes these after every key has its final neighbours.
+type PresetEdits = Vec<(String, String, Option<bool>)>;
+type PropertyPresets = (String, String, PresetEdits);
+#[derive(Default)]
+pub(crate) struct Presets(Vec<PropertyPresets>);
+
+impl Presets {
+    fn remember(&mut self, layer: &str, channel: &str, id: String, name: String) {
+        let index = self
+            .0
+            .iter()
+            .position(|(l, c, _)| l == layer && c == channel);
+        let index = index.unwrap_or_else(|| {
+            self.0.push((layer.into(), channel.into(), Vec::new()));
+            self.0.len() - 1
+        });
+        let edits = &mut self.0[index].2;
+        if let Some(edit) = edits.iter_mut().find(|e| e.0 == id) {
+            edit.1 = name;
+        } else {
+            edits.push((id, name, None));
+        }
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        root: &pm_model::Node,
+        origin: super::Origin,
+    ) -> Result<Vec<pm_model::Op>, CommandError> {
+        if self.0.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut cx = Cx::new(root, origin);
+        for (layer_id, channel, edits) in self.0.drain(..) {
+            let (loc, mut layer) = cx.layer_mut_checked(&layer_id)?;
+            let path = channels::materialize(&mut layer, &channel).expect("written property");
+            let prop = channels::get_mut(&mut layer, &path).expect("written property");
+            track::apply_presets(track::keys_mut(prop), &edits);
+            cx.put_layer(&loc, layer)?;
+        }
+        Ok(cx.finish())
+    }
+}
+
+pub(crate) fn plan_set(
+    root: &pm_model::Node,
+    origin: super::Origin,
+    c: &SetProperty,
+    presets: &mut Presets,
+) -> Result<Vec<pm_model::Op>, CommandError> {
+    let mut cx = Cx::new(root, origin);
+    set_property_inner(&mut cx, c, Some(presets))?;
+    Ok(cx.finish())
+}
+
+/// `setProperty(command)` outside a property batch.
 pub(crate) fn set_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), CommandError> {
+    set_property_inner(cx, c, None)
+}
+
+fn set_property_inner(
+    cx: &mut Cx<'_>,
+    c: &SetProperty,
+    presets: Option<&mut Presets>,
+) -> Result<(), CommandError> {
     let (loc, mut layer, channel, path) = resolve(cx, &c.layer_id, &c.channel)?;
     if preserves(cx, c.preserve_hand_edits) && locked_intent(&layer, &channel) {
         return Err(hand_edit(&c.layer_id, &channel));
@@ -322,7 +386,11 @@ pub(crate) fn set_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), Comma
         // get their preset against the final neighbours.
         if created || ease.is_some() {
             let name = ease.clone().unwrap_or_else(|| "linear".into());
-            track::apply_presets(keys, &[(id, name, None)]);
+            if let Some(presets) = presets {
+                presets.remember(&c.layer_id, &channel, id, name);
+            } else {
+                track::apply_presets(keys, &[(id, name, None)]);
+            }
         }
     } else {
         let speed_before = (channel == "c.speed")

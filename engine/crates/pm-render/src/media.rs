@@ -860,6 +860,7 @@ fn convert_format(
     reuse: Option<Target>,
     format: wgpu::TextureFormat,
     still_chroma: bool,
+    packed: Option<&pm_media::frame::PixelFormat>,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -883,6 +884,18 @@ fn convert_format(
             )
         });
     let mut uniform = source_uniform(color, working, precision, chroma_info);
+    if let Some(packed) = packed {
+        // Packed stills normalize in this same pass. m0 is otherwise unused
+        // for RGB; preserve the decode-in shader's exact code-value arithmetic.
+        let n = packed.norm();
+        uniform.a[0] = 2;
+        let max = match packed.planes[0].format {
+            pm_media::frame::PlaneFormat::Rgba8 => 255.0,
+            pm_media::frame::PlaneFormat::Rgba16 => 65535.0,
+            _ => 0.0,
+        };
+        uniform.m[0] = [max, n.y_off as f32, n.y_div as f32, n.a_div as f32];
+    }
     if still_chroma && chroma_info.is_some() {
         // Reconstruct original AVIF stills with the full Lanczos-3 source
         // filter. Video keeps its separately qualified playback kernel.
@@ -902,22 +915,10 @@ fn convert_format(
     });
     queue.write_buffer(&buffer, 0, bytes_of(&uniform));
     let luma_view = luma.create_view(&Default::default());
-    // A 1×1 stand-in when there is no chroma plane.
-    let dummy;
-    let chroma_view = match chroma {
-        Some(c) => c.create_view(&Default::default()),
-        None => {
-            dummy = Target::new(
-                device,
-                "pm no chroma",
-                1,
-                1,
-                wgpu::TextureFormat::Rg32Float,
-                wgpu::TextureUsages::TEXTURE_BINDING,
-            );
-            dummy.view.clone()
-        }
-    };
+    // RGB never samples the chroma binding (source_uniform sets kind=0).
+    // Both bindings accept an unfilterable float texture, so reuse its view.
+    let chroma_view =
+        chroma.map_or_else(|| luma_view.clone(), |c| c.create_view(&Default::default()));
     let layout = pipelines.source_layout(format);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pm source"),
@@ -1123,9 +1124,17 @@ impl MediaCache {
         let imported = importer
             .import(&still.frame)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-        let normalized = importer
-            .normalize(queue, encoder, &imported)
-            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        let packed = (still.frame.format.layout == pm_media::frame::Layout::Rgba)
+            .then_some(still.frame.format.as_ref());
+        let normalized = if packed.is_some() {
+            Normalized::Rgb {
+                rgba: imported.textures[0].clone(),
+            }
+        } else {
+            importer
+                .normalize(queue, encoder, &imported)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+        };
         let format = video_storage(precision, if deep { 16 } else { 8 }, false);
         let mut target = convert_format(
             device,
@@ -1150,7 +1159,13 @@ impl MediaCache {
             )),
             format,
             true,
+            packed,
         );
+        // The normalization is scratch. Reuse it for the next source only
+        // after these reads; the queue preserves command order.
+        if packed.is_none() {
+            importer.recycle(normalized);
+        }
         pipelines
             .resample
             .fill_mips(device, encoder, &target.texture);
@@ -1552,6 +1567,7 @@ impl MediaCache {
             reuse,
             format,
             false,
+            None,
         );
         if fields.is_none() {
             importer.recycle(normalized);

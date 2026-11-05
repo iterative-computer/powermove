@@ -817,9 +817,12 @@ impl VectorCache {
         let coverage = self
             .coverage
             .get_or_insert_with(|| AreaCoverage::new(device));
-        // Shapes new to the outline cache are outlined on several threads.
-        self.scene_outlines
-            .prepare(layout.cells.iter().map(|cell| &scene.items[cell.item]));
+        // One shape cannot supply the independent misses parallel preparation
+        // needs. Avoid generating a second geometry key for those scenes.
+        if scene.items.len() >= PREPARE_IN_PARALLEL {
+            self.scene_outlines
+                .prepare(layout.cells.iter().map(|cell| &scene.items[cell.item]));
+        }
         let mut outlines: Vec<Option<SceneOutline>> =
             std::iter::repeat_with(|| None).take(scene.items.len()).collect();
         for cell in &layout.cells {

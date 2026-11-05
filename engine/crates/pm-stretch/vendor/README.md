@@ -43,3 +43,10 @@ Split computation and unguarded calls retain the scalar loop. The batch stops
 at the next interval, preserving all DSP calls, input offsets, checkpoints,
 seeded state, and canonical pre-roll. The scalar path remains the bitwise
 comparison oracle in `pm-stretch/tests/stretch.rs`.
+
+Guarded setup also reuses exact FFT coefficient tables on each worker. Each
+call site retains its most recent table of at most 32,768 coefficients. Copies
+retain the setup checkpoints; uncached sizes and ordinary no-callback setup use
+the original arithmetic. No process-wide mutex is acquired on the audio path.
+The existing guarded/plain seeded PCM comparisons cover repeated construction
+and reset at multiple rates, channels, speed ratios and call partitions.

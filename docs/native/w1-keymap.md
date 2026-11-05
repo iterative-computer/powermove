@@ -346,3 +346,15 @@ Acceptance: single-tap reveal/toggle closed, double-tap within/outside threshold
 ## Post-v1.2.0 bindings
 
 On main, plain backtick → maximizePanel is added to the 194 default rows. On the native-engine branch, the later priority-90 rows are j → shuttleBackward(false), k → shuttleStop, l → shuttleForward(false), ctrl+j → shuttleBackward(true), ctrl+shift+space → playAround. They are **not in v1.2.0**. While unsupported/paused (except the forced Control-J start), these decline and let shipped J/K event navigation or L property reveal run. Native cutover must deliver the explicitly required shuttle addition without replacing the shipped fallthrough behavior. See W079.
+
+## Current-main additions
+
+The pinned current main (`c7f46a05641b23944d3692c9d80f9677c7e1ef1d`) adds
+these native bindings alongside the retained 195-entry W1 table. The legacy
+acceptance inventory stays frozen. Their handlers use workspace geometry
+and the timeline property-reveal model, respectively.
+
+| ID | Chord | Command | Args | Priority | In fields | Repeat | Loose |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Native K196 | &#96; | maximizePanel | [] | 100 | no | no | no |
+| Native K197 | m | toggleLayerStrips | [] | 90 | no | no | no |

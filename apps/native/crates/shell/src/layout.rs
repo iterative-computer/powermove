@@ -205,6 +205,30 @@ impl Layout {
         );
         Ok(())
     }
+    /// Display a panel at workspace size without changing the saved docking layout.
+    pub fn geometry_with_maximized(
+        &self,
+        bounds: Rect,
+        t: &Tokens,
+        panel: Option<&str>,
+    ) -> Geometry {
+        if let Some(panel) = panel {
+            for (dock, d) in self.docks.iter().enumerate().filter(|(_, d)| !d.collapsed) {
+                if let Some(group) = d.groups.iter().position(|g| g.active() == panel) {
+                    return Geometry {
+                        panels: vec![Placement {
+                            dock,
+                            group,
+                            rect: bounds,
+                        }],
+                        dividers: vec![],
+                    };
+                }
+            }
+        }
+        self.geometry(bounds, t)
+    }
+
     pub fn geometry(&self, bounds: Rect, t: &Tokens) -> Geometry {
         let mut out = Geometry::default();
         let gap = t.metrics.gap;

@@ -38,9 +38,9 @@ fn corpus_pmv4() {
     fixture::corpus_fixture("pmv4").unwrap();
 }
 #[test]
-fn all_195_real_bindings_under_seven_routing_contexts() {
+fn all_197_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
-    assert_eq!(keyboard::production::shipped().len(), 195);
+    assert_eq!(keyboard::production::shipped().len(), 197);
     for binding in &c.bindings {
         for context in keyboard::CONTEXTS {
             keyboard::check(binding, context).unwrap();
@@ -89,17 +89,7 @@ fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
 }
 
 #[test]
-fn frozen_replace_curve_passes_and_set_curve_defect_stays_visible() {
+fn frozen_replace_and_sequential_set_preserve_complete_authored_curves() {
     pm_acceptance::curve_oracle::replace().unwrap();
-    let error = pm_acceptance::curve_oracle::set().expect_err(
-        "Glide defect fixed: promote this strict oracle without changing its expected values",
-    );
-    assert!(
-        error.starts_with("set_property: rotation at 1s is "),
-        "{error}"
-    );
-    assert!(
-        error.ends_with("complete glide curve was not preserved"),
-        "{error}"
-    );
+    pm_acceptance::curve_oracle::set().unwrap();
 }

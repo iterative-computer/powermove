@@ -11,6 +11,11 @@
 #	define SIGNALSMITH_LINEAR_FFT_LOCAL_SETUP_CHECKPOINT
 #endif
 
+#ifndef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
+# define SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT() false
+# define SIGNALSMITH_LINEAR_FFT_LOCAL_HAS_SETUP_CHECKPOINT
+#endif
+
 #if defined(__FAST_MATH__) && (__apple_build_version__ >= 16000000) && (__apple_build_version__ <= 16000099) && !defined(SIGNALSMITH_IGNORE_BROKEN_APPLECLANG)
 #	error Apple Clang 16.0.0 generates incorrect SIMD for ARM. If you HAVE to use this version of Clang, turn off -ffast-math.
 #endif
@@ -22,6 +27,28 @@
 namespace signalsmith { namespace linear {
 
 namespace _impl {
+	// Guarded preparation often constructs many independent voices at the same
+	// rate. Their FFT coefficients are identical; keep one bounded table per
+	// calling worker and call site. The ordinary path remains the PCM oracle.
+	template<class T, class Fill>
+	void setupTable(std::vector<T> &table, size_t key, Fill fill) {
+		struct Cached { size_t key = 0; std::vector<T> values; };
+		static thread_local Cached cached;
+		bool keep = SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT() && key > 0 && table.size() <= 32768;
+		if (keep && cached.key == key && cached.values.size() == table.size()) {
+			for (size_t i = 0; i < table.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				table[i] = cached.values[i];
+			}
+			return;
+		}
+		fill();
+		if (keep) {
+			cached.values = table;
+			cached.key = key;
+		}
+	}
+
 	// Helpers for complex arithmetic, ignoring the NaN/Inf edge-cases you get without `-ffast-math`
 	template<class V>
 	void complexMul(std::complex<V> *a, const std::complex<V> *b, const std::complex<V> *c, size_t size) {
@@ -117,11 +144,13 @@ struct SimpleFFT {
 	void resize(size_t size) {
 		twiddles.resize(size*3/4);
 		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+		_impl::setupTable(twiddles, size, [&] {
 		for (size_t i = 0; i < size*3/4; ++i) {
 			if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			Sample twiddlePhase = -2*M_PI*i/size;
 			twiddles[i] = std::polar(Sample(1), twiddlePhase);
 		}
+		});
 		working.resize(size);
 		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 	}
@@ -376,6 +405,7 @@ struct SplitFFT {
 		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		outerTwiddlesI.resize(innerSize*(outerSize - 1));
 		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+		_impl::setupTable(outerTwiddles, size, [&] {
 		for (size_t i = 0; i < innerSize; ++i) {
 			SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			for (size_t s = 1; s < outerSize; ++s) {
@@ -383,6 +413,7 @@ struct SplitFFT {
 				outerTwiddles[i + (s - 1)*innerSize] = std::polar(Sample(1), twiddlePhase);
 			}
 		}
+		});
 		for (size_t i = 0; i < outerTwiddles.size(); ++i) {
 			if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			outerTwiddlesR[i] = outerTwiddles[i].real();
@@ -994,24 +1025,30 @@ struct RealFFT {
 		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		if (!halfBinShift) {
+			_impl::setupTable(twiddles, size, [&] {
 			for (size_t i = 0; i < twiddles.size(); ++i) {
 				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample rotPhase = i*(-2*M_PI/size) - M_PI/2; // bake rotation by (-i) into twiddles
 				twiddles[i] = std::polar(Sample(1), rotPhase);
 			}
+			});
 		} else {
+			_impl::setupTable(twiddles, size, [&] {
 			for (size_t i = 0; i < twiddles.size(); ++i) {
 				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample rotPhase = (i + 0.5)*(-2*M_PI/size) - M_PI/2;
 				twiddles[i] = std::polar(Sample(1), rotPhase);
 			}
+			});
 	
 			halfBinTwists.resize(hSize);
+			_impl::setupTable(halfBinTwists, size, [&] {
 			for (size_t i = 0; i < hSize; ++i) {
 				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample twistPhase = -2*M_PI*i/size;
 				halfBinTwists[i] = std::polar(Sample(1), twistPhase);
 			}
+			});
 		}
 	}
 	
@@ -1408,4 +1445,9 @@ using ModifiedRealFFT = RealFFT<Sample, splitComputation, true>;
 #	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
 #	undef SIGNALSMITH_LINEAR_FFT_LOCAL_SETUP_CHECKPOINT
 #endif
+#ifdef SIGNALSMITH_LINEAR_FFT_LOCAL_HAS_SETUP_CHECKPOINT
+# undef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
+# undef SIGNALSMITH_LINEAR_FFT_LOCAL_HAS_SETUP_CHECKPOINT
+#endif
+
 #endif // include guard

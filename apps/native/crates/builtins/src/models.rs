@@ -548,7 +548,7 @@ impl Backend {
                 time,
                 expected_document: p.snapshot.doc_id,
                 expected_revision: p.revision(),
-                millis: 0,
+                millis: intent["millis"].as_u64().unwrap_or(0),
                 in_field: false,
                 keys_admitted: true,
                 property_facts: &PropertyFacts::default(),

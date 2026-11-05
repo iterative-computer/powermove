@@ -1,5 +1,5 @@
-//! Frozen authored Glide curve oracle. Failure remains a product failure in
-//! acceptance JSON; a known-defect unit guard does not turn it into a pass.
+//! Frozen authored Glide curve oracle, independent of native preset tables.
+//! Both operation variants must preserve the complete authored curve.
 use crate::fixture::{Fixture, without_revision};
 use pm_kernel::DocumentStore;
 use serde_json::{Value, json};

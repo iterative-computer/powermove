@@ -54,7 +54,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         retired.blocked_by.as_deref(),
         Some("delta-data:archived-web-export-preferences")
     );
-    assert_eq!(r.counts(), (1655, 28, 2661));
+    assert_eq!(r.counts(), (1672, 10, 2662));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
     assert_eq!(r.specs.iter().filter(|s| s.in_370_roster).count(), 370);
@@ -73,11 +73,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
             .count(),
         83
     );
-    for id in [
-        "MAIN.MCP.edit_3d.catalog",
-        "MAIN.MCP.tools.identity",
-        "MAIN.curve.set",
-    ] {
+    for id in ["MAIN.MCP.edit_3d.catalog", "MAIN.MCP.tools.identity"] {
         assert_eq!(
             r.cases.iter().find(|c| c.id == id).unwrap().status,
             Status::Fail,
@@ -85,6 +81,9 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         );
     }
     for id in [
+        "MAIN.curve.set",
+        "MAIN.KEY.133.definition",
+        "MAIN.KEY.198.definition",
         "MAIN.MCP.export_video.catalog",
         "MAIN.MCP.get_project_state.catalog",
         "MAIN.MCP.project_memory.catalog",
@@ -97,7 +96,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
             "{id}"
         );
     }
-    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1423, 1, 3179));
+    assert_eq!(r.compatibility.as_ref().unwrap().counts(), (1424, 0, 3179));
     let blocked = r
         .cases
         .iter()

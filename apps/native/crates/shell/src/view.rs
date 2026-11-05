@@ -37,6 +37,7 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    maximized_panel: Option<String>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -99,6 +100,7 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            maximized_panel: None,
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -501,6 +503,22 @@ impl Editor {
                     h.borrow_mut().popup(true);
                 }
             }
+            "maximizePanel" => {
+                if self.maximized_panel.take().is_none() {
+                    let at = window.mouse_position();
+                    self.maximized_panel = self
+                        .geometry
+                        .panels
+                        .iter()
+                        .find(|p| p.rect.contains(at.x.into(), at.y.into()))
+                        .map(|p| {
+                            self.layout.docks[p.dock].groups[p.group]
+                                .active()
+                                .to_owned()
+                        });
+                    handled = self.maximized_panel.is_some();
+                }
+            }
             "toggleSidebar" | "toggleInspector" => {
                 let id = if cmd.name == "toggleSidebar" {
                     "left"
@@ -821,7 +839,11 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
         };
-        self.geometry = self.layout.geometry(self.dock_bounds, &t);
+        self.geometry = self.layout.geometry_with_maximized(
+            self.dock_bounds,
+            &t,
+            self.maximized_panel.as_deref(),
+        );
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
             a.rect

@@ -814,6 +814,32 @@ impl Controller {
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
+            "toggleLayerStrips" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.reveal_masks() else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = ticket.await;
+                    let _ = this.update(cx, |v, cx| {
+                        if !v
+                            .builtins
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+                        {
+                            return;
+                        }
+                        if let Err(error) = result {
+                            v.message = format!("Mask properties could not be shown: {error}");
+                        }
+                        v.drain_builtins(cx);
+                    });
+                })
+                .detach();
+            }
             "fit" | "fitComp" | "viewer.fit" => {
                 self.zoom = None;
                 self.persist_ui();

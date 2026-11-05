@@ -18,7 +18,7 @@
 // with the working storage format.
 
 struct Params {
-    // kind (0 RGB, 1 Y′CbCr), transfer, working (0 Standard, 1 linear), alpha plan.
+    // kind (0 RGB, 1 Y′CbCr, 2 packed RGB), transfer, working (0 Standard, 1 linear), alpha plan.
     a: vec4<u32>,
     // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
@@ -242,6 +242,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         else { stored = vec4<f32>(m * ycc, v.a); }
     } else {
         stored = v;
+        if (P.a.x == 2u && P.m0.x != 0.0) {
+            stored = vec4<f32>((round(v.rgb * P.m0.x) - vec3<f32>(P.m0.y)) / P.m0.z,
+                round(v.a * P.m0.x) / P.m0.w);
+        }
     }
     var w: vec4<f32>;
     switch P.a.w {
