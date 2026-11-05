@@ -262,3 +262,38 @@ Focused qualification: `advanced_effects` **40 passed / 0 failed**,
 all-target `pm-render` Clippy passes with `-D warnings`. These totals include
 shared support tests in separate binaries; they are not a count of independent
 pixel oracles. Full workspace, strict and performance gates remain separate.
+
+
+## E10 saved color conversion qualification
+
+Closed by `35ce14350`; the named `pm-render --test advanced_effects`
+set passes on offscreen Metal. These tests retain saved definitions, use
+independent f64 conversion equations, and preserve signed working values.
+
+| Named test in `advanced/color_contract.rs` | Clause proved |
+| --- | --- |
+| `e10_saved_profile_all_d65_transfers_clip_amount_depths_and_alpha` | Every input/output profile, D65 matrix and linear/encoded transfer pair; explicit clipping and amount; 8/16/32 depths and alpha. Equations also match all 216 values executed from pinned main. |
+| `e10_saved_compander_signed_hdr_zero_alpha_identity_and_all_depths` | Compression/expansion, signed HDR, gain/gamma and identity, zero/full/partial alpha at all depths. |
+| `e10_saved_channel_combiner_v1_v2_all_legacy_channels_targets_and_alpha` | Both saved revisions, all eleven source channels and eight targets, external hidden input, inversion and solid alpha at all depths. |
+| `e10_saved_channel_combiner_v2_all_twelve_multichannel_conversions` | Every new HLS/HSV/YIQ/YUV/XYZ/YCbCr conversion in both directions at all depths. |
+| `e10_saved_effects_all_depths_encode_and_decode_png8_and_png16` | Saved JSON reload, viewer/final-export equality and exact independently decoded PNG samples for every saved program and working depth. |
+| `e10_absent_null_and_explicit_combiner_v1_keep_saved_pixels_and_missing_versions_fail` | Absent/null/explicit v1 retain historical pixels; v2 stays distinct; unavailable saved revisions report the effect and version. |
+
+## E05 saved color family qualification
+
+Closed by renderer `35ce14350` and application `b1bb0d036`. The inventory is
+fourteen saved programs: Tint, Channel Mixer, Invert v1/v2, Levels v1/v2,
+Levels Individual, Threshold, Shift Channels, Exposure, Tritone, Color Balance
+HLS, Brightness & Contrast and Black & White. No old program is replaced.
+
+| Named test | Clause proved |
+| --- | --- |
+| `color_family::e05_every_saved_color_family_all_depths_signed_hdr_alpha_and_controls` | Independent scalar equations for all fourteen programs at 8/16/32 depths; signed HDR, straight/premultiplied and zero/full alpha; defaults and authored controls; every Invert channel and Shift Channels route, level clipping/zero spans, mixer monochrome, exposure transfer bypass and legacy brightness. |
+| `color_family::e05_black_white_all_six_hue_sectors_and_tint_keep_premultiplied_alpha` | Six hue sectors, authored weights and tint with partial alpha at every depth. |
+| `color_family::e05_every_saved_color_family_viewer_final_and_decoded_output` | Every saved program and depth through JSON reload, viewer/final-export equality and exact decoded PNG8/PNG16 samples. The established PNG8 SDR gamut mapping is explicit; working HDR values remain unclipped. |
+| `color_family::e05_saved_color_channels_survive_document_serialization_and_reverse_seek` | Actual Document serialization/reopen preserves authored channels; evaluated saved keys render identically through reverse seeks at all depths. |
+| `pm-builtins::tests::effect_delta::e07_e05_application_declared_color_swaps_are_real_actions_and_undo_atomically` | Real registered Tint metadata exposes Swap Colors in the v4 panel; its native event swaps both evaluated values in one actor transaction, and one Undo/Redo restores both. |
+
+The renderer target currently has three separate crop failures under E06/E07;
+those rows remain open. E05/E10 completion does not promote provider, source,
+media-delivery, physical-display or whole-application capability flags.
