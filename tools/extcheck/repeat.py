@@ -10,6 +10,7 @@ from stability import inspect_repeats
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--reference-root',type=Path,required=True)
+    p.add_argument('--reference-revision',choices=list(run.REFERENCES.values()),default=run.REFERENCE)
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--case',action='append',default=[])
     p.add_argument('--store',action='store_true')
@@ -40,7 +41,7 @@ def main():
                     labels=[step['label'] for step in script['steps'] if step['op']=='screenshot']
                     request={'version':1,'case':case,'extension':str(input),'input_sha256':sha,
                              'script_sha256':run.digest(json.dumps(script,sort_keys=True).encode()),
-                             'script':script,'role':'reference','clock_fixture':clock_fixture}
+                             'script':script,'role':'reference','clock_fixture':clock_fixture,'reference_revision':args.reference_revision}
                     if source=='store':request['store']={'repoId':item['repoId'],'releaseId':item['latest']['id']}
                     for sample in range(args.repeats):
                         out=root/str(sample);outputs.append(out)
@@ -62,7 +63,7 @@ def main():
             fd=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
             os.fchmod(fd,0o600)
             with os.fdopen(fd,'w') as report:
-                report.write(json.dumps({'totals':dict(totals),'cases':rows},indent=2)+'\n')
+                report.write(json.dumps({'reference':args.reference_revision,'reference_scope':'current-main' if args.reference_revision==run.REFERENCE else 'legacy-input','totals':dict(totals),'cases':rows},indent=2)+'\n')
     if args.case and set(args.case)-set(rows):p.error('Requested anonymous cases were not found')
     print(json.dumps(dict(totals)))
     return 0 if totals.get('stable',0)>0 and sum(totals.values())==totals['stable'] else 2

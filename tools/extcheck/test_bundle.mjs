@@ -58,6 +58,13 @@ try {
     CLOCK_SOURCE,
     "Bun and Node must install identical fixture source bytes",
   );
+  assert.equal(
+    JSON.parse(await readFile(path.join(out, "compiler.json"), "utf8"))
+      .revision,
+    execFileSync("git", ["-C", reference, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim(),
+  );
   const result = JSON.parse(
     execFileSync(runner, [], {
       encoding: "utf8",

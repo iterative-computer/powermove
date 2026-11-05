@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { REFERENCES, referenceRevision } from "./references.mjs";
 import { CLOCK_SOURCE, CLOCK_FIXTURE } from "./clock-source.mjs";
 
 export const CLOCK_ASSET = `/* extcheck-clock: owned fixture */\n${CLOCK_SOURCE}\nglobalThis.__extcheckClock.fixture=${JSON.stringify(CLOCK_FIXTURE)};`;
@@ -40,12 +41,12 @@ export function clockHelper(original) {
     );
 }
 
-export async function prepare(reference) {
+export async function prepare(reference, expected = REFERENCES.current) {
+  referenceRevision(expected);
   const revision = execFileSync("git", ["-C", reference, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
-  if (revision !== "07ed5fa17ee640659cb075f9cad1af2095011d60")
-    throw Error("Wrong reference revision");
+  if (revision !== expected) throw Error("Wrong reference revision");
   const htmlEdits = [];
   for (const [htmlPath, src] of [
     ["apps/desktop/src/renderer/index.html", "./host/extcheck-clock.js"],
@@ -99,7 +100,7 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  await prepare(path.resolve(process.argv[2]));
+  await prepare(path.resolve(process.argv[2]), process.argv[3]);
   console.log(
     "Prepared frozen trace overlay and shared comparison clock; rebuild reference before capture",
   );

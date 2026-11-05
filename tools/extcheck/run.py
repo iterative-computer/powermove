@@ -17,7 +17,8 @@ import tempfile
 import time
 from resources import disk_ready
 
-REFERENCE = "07ed5fa17ee640659cb075f9cad1af2095011d60"
+REFERENCES = json.loads(Path(__file__).with_name("references.json").read_text())
+REFERENCE = REFERENCES["current"]
 FAMILIES = ("PM facade", "sync services", "raster override", "recorder canvas", "DOM panel", "lifecycle")
 SOURCES = ("owner", "local-corpus", "store")
 EXPECTED_POPULATION = {"owner": 44, "local-corpus": 10, "store": 4}
@@ -349,7 +350,7 @@ def capture_unlocked(command, request, output, timeout):
         reason = status.get("reason")
         # Adapters may only expose these reviewed public codes.
         if reason not in ("reference-not-ready", "reference-extension-not-active", "unsupported-script-step",
-                          "reference-store-profile-adapter-unavailable",
+                          "reference-store-profile-adapter-unavailable", "native-reference-revision-mismatch",
                           "reference-capture-failed", "reference-clock-fixture-unavailable", "native-integrated-runner-unavailable",
                           "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
                           "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
@@ -362,7 +363,7 @@ def capture_unlocked(command, request, output, timeout):
     if any(status.get(k) != v for k, v in expected.items()):
         raise Blocked("capture-identity-mismatch")
     if request["role"] == "reference":
-        if status.get("revision") != REFERENCE:
+        if status.get("revision") != request.get("reference_revision", REFERENCE):
             raise Blocked("reference-revision-mismatch")
     elif status.get("path") != {"logic": "runtime-v8", "panels": "webkit-remote-dom", "canvas": "native-recorder"}:
         raise Blocked("native-path-unverified")
@@ -424,6 +425,7 @@ def main():
     parser.add_argument("--corpus-root", type=Path, default=ROOT/"apps/desktop/e2e/fixtures/compat-corpus")
     parser.add_argument("--store", action="store_true")
     parser.add_argument("--reference-root", type=Path, required=True)
+    parser.add_argument("--reference-revision", choices=list(REFERENCES.values()), default=REFERENCE)
     parser.add_argument("--native-command", help="JSON argv array; adapter reads one request on stdin")
     parser.add_argument("--native-runner", type=Path, help="Built pm-compat-runner executable (uses bundled native adapter)")
     parser.add_argument("--scripts", type=Path, help="Private per-case scripts, e.g. owner-0001.json")
@@ -444,7 +446,8 @@ def main():
         if args.native_runner else None)
     if native is not None and (not isinstance(native, list) or not native or not all(isinstance(x, str) for x in native)):
         parser.error("native command must be a nonempty JSON string array")
-    summary = {"gate": "OPEN", "reference": REFERENCE, "sources": {}, "families": {}, "reasons": {}}
+    summary = {"gate": "OPEN", "reference": args.reference_revision,
+               "reference_scope": "current-main" if args.reference_revision == REFERENCE else "legacy-input", "sources": {}, "families": {}, "reasons": {}}
     families, reasons, build_blockers = Counter(), Counter(), Counter()
     clock_fixture = fixture_identity()
     summary["clock_fixture"] = clock_fixture
@@ -490,7 +493,7 @@ def main():
                         raise Blocked("unsupported-api-version")
                     script = load_script(args.scripts, case)
                     request = {"version": 1, "case": case, "extension": str(extension), "input_sha256": sha,
-                               "clock_fixture": clock_fixture,
+                               "clock_fixture": clock_fixture, "reference_revision": args.reference_revision,
                                "script_sha256": digest(json.dumps(script, sort_keys=True).encode()), "script": script}
                     if source == "store":
                         request["store"] = {"repoId": item["repoId"], "releaseId": item["latest"]["id"]}
@@ -558,11 +561,11 @@ def main():
     summary["native_build_blockers"]=dict(build_blockers)
     if (all(v["enumerated"] and v["total"] and v["match"] == v["total"] for v in summary["sources"].values())
             and not reasons):
-        summary["gate"] = "PASS"
+        summary["gate"] = "PASS" if args.reference_revision == REFERENCE else "LEGACY_PASS"
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
-    return 0 if summary["gate"] == "PASS" else 2
+    return 0 if summary["gate"] in ("PASS", "LEGACY_PASS") else 2
 
 
 if __name__ == "__main__":

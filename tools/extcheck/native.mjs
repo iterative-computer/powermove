@@ -2,6 +2,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { referenceRevision } from "./references.mjs";
 import { CLOCK_FIXTURE } from "./clock-source.mjs";
 import { fileURLToPath } from "node:url";
 const chunks = [];
@@ -17,6 +18,16 @@ const status = {
   clock_fixture: CLOCK_FIXTURE,
 };
 try {
+  const revision = execFileSync(
+    "git",
+    ["-C", process.argv[2], "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  if (revision !== referenceRevision(request.reference_revision)) {
+    status.reason = "native-reference-revision-mismatch";
+    throw Error("Compiler checkout does not match the requested oracle");
+  }
+  status.compiler_revision = revision;
   execFileSync(
     "bun",
     [

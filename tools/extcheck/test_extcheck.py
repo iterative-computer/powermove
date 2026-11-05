@@ -333,5 +333,30 @@ class HarnessTests(unittest.TestCase):
             (root/'local-corpus-0001.json').write_text('[]')
             with self.assertRaisesRegex(run.Blocked,'invalid-script'):run.load_script(root,'local-corpus-0001')
 
+    def test_current_main_pin_is_the_default_and_legacy_is_distinct(self):
+        self.assertEqual(run.REFERENCE,'c7f46a05641b23944d3692c9d80f9677c7e1ef1d')
+        self.assertEqual(run.REFERENCES['legacy'],'07ed5fa17ee640659cb075f9cad1af2095011d60')
+        self.assertNotEqual(run.REFERENCE,run.REFERENCES['legacy'])
+
+    def test_reference_capture_cannot_cross_the_requested_revision(self):
+        fixture={'version':1,'sha256':'synthetic'}
+        for requested,actual,valid in [(run.REFERENCE,run.REFERENCES['legacy'],False),
+                                       (run.REFERENCE,run.REFERENCE,True),
+                                       (run.REFERENCES['legacy'],run.REFERENCES['legacy'],True)]:
+            with tempfile.TemporaryDirectory() as temporary:
+                output=Path(temporary)/'out'
+                request={'role':'reference','case':'local-corpus-0001','input_sha256':'input',
+                         'script_sha256':'script','clock_fixture':fixture,'reference_revision':requested}
+                status={'status':'captured',**{key:request[key] for key in ('case','input_sha256','script_sha256')},
+                        'clock_fixture':fixture,'revision':actual}
+                child=Mock(returncode=0);child.poll.return_value=0
+                child.communicate.side_effect=lambda *_args,**_kwargs:(output/'capture.json').write_text(json.dumps(status))
+                with patch('run.subprocess.Popen',return_value=child),patch('run.disk_ready',return_value=True), \
+                     patch.object(run,'PAUSE_LOCAL',Mock(exists=Mock(return_value=False))):
+                    if valid:self.assertEqual(run.capture_unlocked(['synthetic-driver'],request,output,1),status)
+                    else:
+                        with self.assertRaisesRegex(run.Blocked,'reference-revision-mismatch'):
+                            run.capture_unlocked(['synthetic-driver'],request,output,1)
+
 
 if __name__=='__main__':unittest.main()

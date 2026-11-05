@@ -1,11 +1,21 @@
 // Build tool only. The resulting scripts run without Bun/Node in pm-runtime-v8.
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { referenceRevision } from "./references.mjs";
 import { readFile, writeFile, realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { initial } from "./initial";
 import { CLOCK_SOURCE } from "./clock-source.mjs";
 import { controlImports, controlPlugin } from "./shared-controls";
 const [reference, input, output] = process.argv.slice(2);
+const revision = execFileSync("git", ["-C", reference!, "rev-parse", "HEAD"], {
+  encoding: "utf8",
+}).trim();
+referenceRevision(revision);
+await writeFile(
+  path.join(output!, "compiler.json"),
+  JSON.stringify({ revision }),
+);
 await writeFile(path.join(output!, "clock.js"), CLOCK_SOURCE);
 await writeFile(path.join(output!, "initial.json"), JSON.stringify(initial()));
 const rawManifest = JSON.parse(

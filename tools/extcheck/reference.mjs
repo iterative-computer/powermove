@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { prepareReferenceExtension } from "./reference-profile.mjs";
 import { admitFixtureWorkspace } from "./fixture-aliases.mjs";
+import { referenceRevision } from "./references.mjs";
 import { CLOCK_FIXTURE } from "./clock-source.mjs";
 import { withBootClock } from "./startup-clock.mjs";
 
@@ -32,7 +33,7 @@ try {
   status.revision = execFileSync("git", ["-C", ref, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
-  if (status.revision !== "07ed5fa17ee640659cb075f9cad1af2095011d60")
+  if (status.revision !== referenceRevision(request.reference_revision))
     throw Error("Wrong reference");
   const hash = createHash("sha256");
   for (const file of ["core.ts", "overlay/runtime.ts", "overlay/transform.mjs"])

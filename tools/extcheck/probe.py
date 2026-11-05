@@ -49,11 +49,14 @@ def inspect_recordings(recordings):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--reference-root', type=Path, required=True)
+    parser.add_argument('--reference-revision', choices=list(run.REFERENCES.values()), default=run.REFERENCE)
     parser.add_argument('--native-runner', type=Path, required=True)
     parser.add_argument('--corpus-root', type=Path, default=run.ROOT/'apps/desktop/e2e/fixtures/compat-corpus')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.output.resolve().is_relative_to(run.ROOT):parser.error('Private diagnostics belong outside the public checkout')
+    actual=subprocess.check_output(['git','-C',str(args.reference_root),'rev-parse','HEAD'],text=True).strip()
+    if actual!=args.reference_revision:parser.error('Compiler checkout does not match the requested reference')
     counts = Counter()
     run.WORK.mkdir(mode=0o700, exist_ok=True)
     cases = {}
@@ -84,7 +87,7 @@ def main():
                 cases[case] = {'reason': reason, 'recordings': 0}
         print(f'{case}: completed', flush=True)
     report = {'evidence': 'native-component-only', 'gate': 'OPEN', 'p2_population': 58,
-              'accepted_matches': 0, 'clock_fixture': run.fixture_identity(), 'counts': dict(counts), 'cases': cases}
+              'accepted_matches': 0, 'compiler_revision':actual, 'clock_fixture': run.fixture_identity(), 'counts': dict(counts), 'cases': cases}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(args.output, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)
     os.fchmod(fd, 0o600)
