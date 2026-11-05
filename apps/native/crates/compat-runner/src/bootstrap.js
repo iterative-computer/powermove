@@ -153,6 +153,7 @@ globalThis.__extcheck = {
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     this.realm.installGlobals(globalThis);
+    __installNativeCanvas(this);
     if (globalThis.__extcheckClock)
       globalThis.__extcheckClock.task = (fn) => this.realm.task(fn);
     if (this.dom && PowermoveCompat.controlStores)

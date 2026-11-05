@@ -784,7 +784,11 @@ mod tests {
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(runner.json("result").unwrap(), 42);
         assert_eq!(runner.json("fallback").unwrap(), true);
-        assert!(host.private_reports().iter().any(|report|report["method"]=="runtime-error"));
+        assert!(
+            host.private_reports()
+                .iter()
+                .any(|report| report["method"] == "runtime-error")
+        );
         assert!(
             kernel
                 .lock()

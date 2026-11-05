@@ -406,3 +406,106 @@ conflicts. Post-refresh counts: locked native runner **24**, portable host
 **20**, Store host **90**, Python **40**, preparation/startup/reference Node
 **11**, real V8 clock **3**, all passing. Clippy/fmt remain clean. The prior
 intermittent profile-reopen failure stays recorded, and P2 remains OPEN.
+
+## 2026-11-05 — ext4 native resource and Store connections (P2 still open)
+
+This lane adds production connections within the extension-owned crates. It does
+not record a new accepted comparison: **0/58 complete comparisons accepted**.
+Current-main remains pinned to `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`;
+legacy inputs and the identical deterministic clock fixture in both hosts remain
+required. No private source, corpus identifier, project, selector or screenshot
+was added. No visual design decision or new DESIGN-TODO(opus) was introduced.
+
+- **Native Canvas → DOM:** the actual V8 runner binds DOM canvas nodes to native
+  recorder surfaces, retaining DOM node/context identity and same-size resize
+  reset. Immutable PNG frames carry the exact source version and DOM sequence.
+  `CompatRunner::canvas_frames()` flushes bindings and freezes pixels on the
+  worker. The shell owner must enqueue DOM batches before these frames.
+  `MacDomHost::present_canvas` queues resource IDs; bounded, generation-scoped
+  native resources are fetched separately from the DOM mutation protocol. The
+  bundled page decodes/replaces the bitmap before releasing its resource or
+  polling further work. Refused admission does not evict an older resource.
+  Disconnected canvases leave the binding set; their held native sources survive.
+  The app must still wire these queues; this is not full-window presentation.
+- **Recorder bindings:** quadratic/cubic paths, arcs/ellipse/arcTo, six-component
+  transforms, dashes, stroke caps/joins/miter, point tests, smoothing state and
+  native PNG encoding now use the existing recorder. PNG decode tests check the
+  actual pixel readback, including translucent pixels; held frames survive
+  repaint and reset. Other overloads, typed ImageData, paints/text/shadows,
+  resources, JPEG and engine overrides remain explicit unsupported backends.
+  This is a connected subset, not a full HTML Canvas implementation.
+- **Actual page capture endpoints:** `inspect_capture` reads one rendered node
+  through host-authored JS; `capture_png` uses WebKit's snapshot completion and
+  native PNG encoding. Both return worker-polled tickets and reject stale host
+  generations. Neither blocks AppKit waiting for JS. The remote-DOM smoke example
+  now verifies the rendered output and real PNG completion, with an optional
+  second argument to save the PNG. A rendering-document snapshot does not replace
+  a full-app screenshot, scripted native input or a complete behavior trace.
+- **Store:** `KernelStoreAdapter::install_archive` connects pinned signature/hash
+  verification and immutable archive preservation to the real durable kernel CAS,
+  returning exact verified virtual files to its compiler caller. It does not
+  invent publisher pins, old installer provenance or grants. `KernelStoreDispatch`
+  connects bounded command registration/disposal to the kernel's provider stacks,
+  qualifies IDs under the owning extension, refuses foreign owners and validates
+  command schemas. Callback continuations run back in the confined helper after
+  returning from the kernel call. Other registration kinds/view/resource/network
+  dispatch still fail explicitly. Public catalog hashes alone remain insufficient
+  for admission; the four public releases have not run through this installer.
+
+Decisions: **N3/N6** select actual native pixels and recorder semantics rather
+than another page renderer; no tolerance, masking or Chromium quirk was added.
+**N7/N8** select inspectable generation/node/resource IDs, nonblocking UI admission
+and worker-polled capture tickets. **N4/N6** select publisher-pinned Store admission,
+owner-scoped provider stacks and confined callbacks; unsupported methods remain
+visible. No existing consumer was pruned.
+
+### PID 0 profile-reopen regression: deterministic reproduction, not fixed
+
+The locked runner sweep reproduced **26 pass / 1 FAIL** at clean profile reopen,
+with `Library(AsCopy(Locked))` and the synthetic PID 0 record. Later ordinary
+sweeps passed; that does not resolve the failure. The new owned diagnostic runs
+before V8 initialization, acquires the production `pm_kernel::locks::FileLock`,
+forks a child that only waits on a pipe, drops the parent lock (joining its
+heartbeat), then attempts immediate reopen while the child still holds the
+inherited descriptor. It deterministically returns **FAIL / WouldBlock / PID 0**.
+It always releases and reaps its child before reporting the failure.
+
+```sh
+source /workspace/.tools/activate.sh; cd /workspace/powermove
+cargo run --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner --example lock-inheritance
+```
+
+This establishes the retained open-file-description mechanism independently of
+V8, Bun or a particular helper spawn implementation. Close-on-exec does not
+release an inherited descriptor before exec. The kernel must explicitly unlock
+the stable inode after the heartbeat's final write and before dropping its
+locked descriptor, including safe error paths. An explicit unlock is distinct
+from unlinking the lock file, which remains forbidden. `kernel/src/locks.rs` is
+outside ext4 ownership; it was not edited. No retry, serialization, unlink or
+assertion relaxation was introduced. The diagnostic intentionally exits 1 on
+the current kernel and is not counted as a pass.
+
+### Checks before the integration refresh
+
+All Cargo test/build/check/Clippy commands use `--locked`. Tooling was provisioned
+outside the repository after this container lacked the requested activation file.
+The lock update adds only this runner's dependency edges; no dependency version
+was upgraded and the engine lockfile is unchanged.
+
+- `cargo test --locked --manifest-path apps/native/Cargo.toml -p pm-compat-runner -p pm-compat-host`:
+  **29 runner + 23 host pass** on the latest ordinary sweep; the earlier reopen
+  failure and deterministic failing diagnostic remain visible above.
+- `bun test apps/native/crates/compat-host/tests/canvas-page.test.ts`:
+  **2 pass / 11 assertions**, using the real PageApplier and a browser contract
+  double. Checks decode-before-release/poll and refusal of a future DOM sequence;
+  this is not WebKit pixel evidence.
+- Package all-target Clippy (`--no-deps -- -D warnings`) and fmt pass on Linux.
+  The host also passes macOS ARM64 cross-target checking/Clippy, including probes;
+  this proves Rust typing only, not macOS linking or runtime behavior.
+
+Remaining before all-58 acceptance: app-shell full script/trace/window-capture
+wiring (outside this lane), reviewed private scenarios/projects and input snapshot,
+real native input, complete recorder/engine/Store dispatch, authentic release or
+preserved installer provenance, and the kernel lock correction above. The existing
+single-command extcheck driver still refuses its unattached native full capture;
+these component endpoints must not change that status to `captured`.
