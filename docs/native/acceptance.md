@@ -667,3 +667,17 @@ current main. Retained old window/layout/visual gates remain historical evidence
 they do not reinstate v1.2.0 as the UI target. All old IDs, cases and provenance
 remain inspectable. This distinction follows the owner's explicit current-main
 reference plus the required old-project/extension compatibility boundary.
+
+### Main-reference integration replay — 2026-11-04
+
+Merged integration base `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9` without
+conflicts, including the owner's newer Opus specifications. After the final
+fetch/merge, all **85 + 17 + 37 Rust tests and 8 Python tests** pass; formatting
+and strict crate-local Clippy pass. Configured current-main results reproduce
+**1,651 / 32 / 2,661**, separately retaining legacy **1,466 / 1 / 3,136**.
+Strict exit 1 deliberately preserves the measured failures. All 32 selected
+legacy file/extension input probes pass in the configured run; that subset does
+not certify the still-blocked complete application/compatibility workflows.
+Source oracle/delta-route checks reproduce both pinned ledgers. No Mac evidence
+or visual acceptance is claimed. Source SHA-256 metadata is structured to avoid
+API-key-pattern false positives without changing digests or scanner rules.
