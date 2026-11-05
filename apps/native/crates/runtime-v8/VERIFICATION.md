@@ -32,6 +32,14 @@ the read-only snapshot flag fix. Keep it enabled on both platforms. The abort
 regressions check actual host start/cancel counts and outstanding capacity;
 they do not merely compare accounting arithmetic.
 
+A full replay under concurrent release compilation also exposed an idle-test
+scoping error: the fixture's 30-ms watchdog can legitimately notice its **initial
+active task** under contention, while the test expected zero lifetime notices.
+It now records execution IDs and requires every observed notice to belong to
+that initial task, with no active execution and no additional kernel calls in
+the idle window. No watchdog deadline/tolerance was changed and the timer-wake
+assertions remain enabled. This is an idle assertion, not a startup timing gate.
+
 ## macOS ARM64 signed diagnostic probes
 
 Prerequisites: macOS 14+, Xcode tools/codesign, Python 3.9+, Rust **1.96.1**,

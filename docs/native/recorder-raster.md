@@ -281,3 +281,10 @@ The native workspace command now passes with its existing lockfile: **130 tests*
 across recorder/raster, including two new readback contract tests. Strict package
 Clippy passes. Decisions: N1/N2 bound native read cost; N3/N6 preserve pixel
 semantics. The earlier whole-path/macOS performance gates remain open.
+
+The existing release `ops` benchmark on this shared Linux runner reports median /
+p95 **71 / 177 ns** for one-pixel reads from dense 1080p. The same run's dense
+full-frame read remains **21.445 / 44.732 ms**, and copy-base full output is
+**0.897 / 1.106 ms**. These are native-only diagnostics under build contention,
+not quiet-window/paired Electron timings or a complete EXT-RASTER-1 pass; the
+dense full-frame cost still exceeds the 4-ms whole-path target.

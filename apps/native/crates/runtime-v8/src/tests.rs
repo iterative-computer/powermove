@@ -69,11 +69,13 @@ impl KernelHooks for Kernel {
 #[derive(Default)]
 struct Watch {
     notices: AtomicUsize,
+    noticed_executions: Mutex<Vec<u64>>,
     prompts: AtomicUsize,
     stop: AtomicBool,
 }
 impl WatchdogHooks for Watch {
-    fn notice(&self, _: &Generation, _: u64) {
+    fn notice(&self, _: &Generation, execution: u64) {
+        self.noticed_executions.lock().unwrap().push(execution);
         self.notices.fetch_add(1, Ordering::Relaxed);
     }
     fn prompt(&self, _: &Generation, _: u64) -> WatchdogDecision {
@@ -1043,11 +1045,24 @@ fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
 fn idle_realms_do_not_poll_or_commit_and_timers_wake_them() {
     let f = fixture();
     let r = f.pool.realm(RealmKind::Compat).unwrap();
-    eval(&r, "42");
+    let initial = r.eval("42").unwrap();
+    let initial_execution = initial.execution;
+    assert_eq!(wait(initial).unwrap().value, "42");
+    assert!(r.active_execution().is_none());
     let before = f.kernel.calls.load(Ordering::Relaxed);
     thread::sleep(Duration::from_millis(100));
     assert_eq!(f.kernel.calls.load(Ordering::Relaxed), before);
-    assert_eq!(f.watch.notices.load(Ordering::Relaxed), 0);
+    assert!(r.active_execution().is_none());
+    // CPU contention may legitimately trigger the watchdog during the initial
+    // task. Attribute notices by execution instead of calling that idle work.
+    assert!(
+        f.watch
+            .noticed_executions
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|id| *id == initial_execution)
+    );
     eval(
         &r,
         "setTimeout(()=>{storage.timer=19;runtime.stage({id:'timer'})},15)",
