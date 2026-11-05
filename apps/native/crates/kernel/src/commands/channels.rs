@@ -245,6 +245,9 @@ pub(crate) fn find(layer: &Value, channel: &str) -> Option<Vec<Step>> {
     if let Some(k) = channel.strip_prefix("x.") {
         return found(vec![key("d"), key("params"), key(k)]);
     }
+    if let Some(p) = super::scene3d::path(layer, channel) {
+        return Some(p);
+    }
     if let Some(rest) = channel.strip_prefix("m.") {
         let mut parts = rest.split('.');
         let (Some(mask_id), Some(field)) = (parts.next(), parts.next()) else {
@@ -267,7 +270,7 @@ pub(crate) fn find(layer: &Value, channel: &str) -> Option<Vec<Step>> {
 /// Every channel of a layer with its key (`PM.allProps`, without the
 /// structured and 3D scene channels).
 pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
-    let mut out = Vec::new();
+    let mut out = super::scene3d::all(layer);
     if let Some(p) = layer.get("p").and_then(Value::as_object) {
         for (k, v) in p.iter() {
             if is_property(v) {

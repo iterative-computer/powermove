@@ -4880,6 +4880,7 @@ dependencies = [
  "pm-eval",
  "pm-expr",
  "pm-model",
+ "pm-scene3d",
  "pm-text",
  "pm-wasm",
  "serde_json",
@@ -5272,6 +5273,16 @@ dependencies = [
  "sha2",
  "url",
  "v8",
+]
+
+[[package]]
+name = "pm-scene3d"
+version = "0.1.0"
+dependencies = [
+ "pm-geom3d",
+ "pm-model",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
