@@ -9,6 +9,7 @@ pub use catalog::{FieldDescriptor, FieldType};
 pub mod content;
 mod edit;
 mod effects;
+mod effect_definitions;
 pub mod input;
 mod relations;
 pub mod v4_effects;

@@ -210,7 +210,7 @@ impl Inspector {
         effect: &str,
     ) -> Result<Vec<(PropertyId, crate::ParamDefinition)>, InspectorError> {
         let fx = self.effect(layer, effect)?;
-        let Some(definition) = self.definitions.get(text(&fx, "type")) else {
+        let Some(definition) = self.saved_effect_definition(&fx) else {
             return Err(InspectorError::MissingDefinition(text(&fx, "type").into()));
         };
         Ok(definition

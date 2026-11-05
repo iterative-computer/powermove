@@ -1166,3 +1166,5 @@ fn collapsed_properties_dispose_native_binding_capabilities() {
     }
     assert_eq!(kernel.published("synthetic").unwrap().revision(), before);
 }
+
+mod effect_delta;
