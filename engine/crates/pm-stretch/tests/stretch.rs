@@ -270,6 +270,125 @@ fn checkpointed_stereo_setup_matches_plain_seeded_pcm() {
     }
 }
 
+/// The scalar path is intentionally unguarded. Compare complete native
+/// histories through wraps, partial intervals, zero-input calls, transposition,
+/// flush and reset, including the random phase path below 0.5x.
+#[test]
+fn batched_output_keeps_scalar_pcm_at_every_call_boundary() {
+    extern "C" fn checkpoint() {}
+    for sample_rate in [44_100, 48_000, 96_000] {
+        for channels in [1, 2, 6, 32] {
+            for rate in [0.35, 0.5, 1.5, 1.6, 2.0] {
+                let mut scalar = Stretcher::new(channels, sample_rate).unwrap();
+                // Construct identically: this isolates the output batching
+                // from the guarded constructor's separate setup optimization.
+                let mut batched = Stretcher::new(channels, sample_rate).unwrap();
+                for epoch in 0..2 {
+                    if epoch != 0 {
+                        scalar.reset().unwrap();
+                        batched.reset_with_checkpoint(checkpoint).unwrap();
+                    }
+                    let factor = if epoch == 0 { 1.0 } else { 1.25 };
+                    scalar.set_transpose(factor).unwrap();
+                    batched.set_transpose(factor).unwrap();
+                    let lead = scalar.output_seek_length(rate);
+                    let signal = |c: usize, from: usize, n: usize| -> Vec<f32> {
+                        (from..from + n)
+                            .map(|i| {
+                                // Distinct signed samples per channel; no
+                                // platform random source or shared mono head.
+                                let x = (i as u32)
+                                    .wrapping_mul(1_664_525)
+                                    .wrapping_add(c as u32 * 101 + 1_013_904_223);
+                                (x as i32 as f64 / i32::MAX as f64 * 0.2) as f32
+                            })
+                            .collect()
+                    };
+                    let input: Vec<_> = (0..channels).map(|c| signal(c, 0, lead)).collect();
+                    let views: Vec<_> = input.iter().map(Vec::as_slice).collect();
+                    scalar.output_seek(&views).unwrap();
+                    batched
+                        .output_seek_with_checkpoint(&views, checkpoint)
+                        .unwrap();
+                    let mut fed = lead;
+                    let interval = scalar.interval_samples();
+                    for (call, frames) in [0, 1, 63, interval, 17, 4097, 512, 8192, 3]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        // A zero-input call must advance output without
+                        // changing the following call's native input history.
+                        let n = if call == 3 {
+                            0
+                        } else {
+                            (frames as f64 * rate).round() as usize
+                        };
+                        let input: Vec<_> = (0..channels).map(|c| signal(c, fed, n)).collect();
+                        let views: Vec<_> = input.iter().map(Vec::as_slice).collect();
+                        let mut expected = vec![vec![0.0; frames]; channels];
+                        let mut actual = expected.clone();
+                        scalar
+                            .process(
+                                &views,
+                                &mut expected
+                                    .iter_mut()
+                                    .map(Vec::as_mut_slice)
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap();
+                        batched
+                            .process_with_checkpoint(
+                                &views,
+                                &mut actual.iter_mut().map(Vec::as_mut_slice).collect::<Vec<_>>(),
+                                checkpoint,
+                            )
+                            .unwrap();
+                        for (c, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                            assert_eq!(
+                                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                                actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                                "{sample_rate} Hz, {channels} channels, {rate}x, epoch {epoch}, call {call}, channel {c}"
+                            );
+                        }
+                        fed += n;
+                    }
+                    let mut expected = vec![vec![0.0; 2 * interval]; channels];
+                    let mut actual = expected.clone();
+                    scalar
+                        .flush(
+                            &mut expected
+                                .iter_mut()
+                                .map(Vec::as_mut_slice)
+                                .collect::<Vec<_>>(),
+                            rate,
+                        )
+                        .unwrap();
+                    batched
+                        .flush_with_checkpoint(
+                            &mut actual.iter_mut().map(Vec::as_mut_slice).collect::<Vec<_>>(),
+                            rate,
+                            checkpoint,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        expected
+                            .iter()
+                            .flatten()
+                            .map(|v| v.to_bits())
+                            .collect::<Vec<_>>(),
+                        actual
+                            .iter()
+                            .flatten()
+                            .map(|v| v.to_bits())
+                            .collect::<Vec<_>>(),
+                        "flush {sample_rate}/{channels}/{rate}/{epoch}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Within about one sample per analysis interval of unity (|rate − 1| below
 /// 1/1440 at 48 kHz) the library does not re-analyse the previous block and
 /// its output follows the speed (measured: 1.001× moves 997 Hz to 997.5 Hz);

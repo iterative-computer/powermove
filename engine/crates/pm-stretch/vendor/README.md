@@ -36,3 +36,10 @@ fb55f69ac14cdbac66b9c76053069ff63bc36d18af20d8c028b9acc0aad6516a  signalsmith-li
 To update: copy the same files from the new tags, reapply the documented local
 setup changes, update this table and the hashes, and rerun `cargo test -p pm-stretch` and the pm-audio stretch tests
 (`docs/engine/pm-audio.md`, "Pitch-preserving stretch").
+
+Guarded native processing also batches the output-only span between synthesis
+intervals through STFT's existing `readOutput` and `moveOutput` bulk operations.
+Split computation and unguarded calls retain the scalar loop. The batch stops
+at the next interval, preserving all DSP calls, input offsets, checkpoints,
+seeded state, and canonical pre-roll. The scalar path remains the bitwise
+comparison oracle in `pm-stretch/tests/stretch.rs`.
