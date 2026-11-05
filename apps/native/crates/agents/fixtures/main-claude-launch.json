@@ -1,0 +1,1175 @@
+{
+  "reference": "c7f46a05641b23944d3692c9d80f9677c7e1ef1d",
+  "sources": [
+    {
+      "file": "apps/desktop/src/shared/agent-models.ts",
+      "sha256": "891f5e1d10aab98199cd9c51145ccf65c4f9c5a3be4b39d405020dc69f4ea58e"
+    },
+    {
+      "file": "apps/desktop/src/main/claude/adapter.ts",
+      "sha256": "94936dbfe6790fd48d7d25cd5edffaadb1da267c12a1b3bec5fccbb35df375b3"
+    }
+  ],
+  "recorder": {
+    "file": "apps/native/crates/agents/scripts/capture-main-claude-launch.cjs",
+    "sha256": "991c7ed685c605ed115a222f74a597f111970f64555aee1aec2d38025b696f70"
+  },
+  "cases": [
+    {
+      "access": "editor",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "editor",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--no-session-persistence",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "default",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":false,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__external__*",
+        "--disallowedTools",
+        "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "editor",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "editor",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--no-session-persistence",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "default",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":false,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__external__*",
+        "--disallowedTools",
+        "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "editor",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "editor",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--no-session-persistence",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "default",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":false,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__external__*",
+        "--disallowedTools",
+        "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "editor",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "editor",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--no-session-persistence",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "default",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":false,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__external__*",
+        "--disallowedTools",
+        "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "project",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "project",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "auto",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[\"*\"],\"allowLocalBinding\":true}}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Bash,WebSearch,WebFetch,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__powermove__project_memory,mcp__external__*",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nSHELL NETWORK\nShell commands have full internet access.\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "project",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "project",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "auto",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"allowUnsandboxedCommands\":true,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[\"*\"],\"allowLocalBinding\":true}}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__powermove__project_memory,mcp__external__*",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nSHELL NETWORK\nShell commands have full internet access.\n\nAPPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user's home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. An automatic reviewer approves routine requests and may ask the user; if a request is declined, do not retry it.\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "project",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "project",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "acceptEdits",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"allowUnsandboxedCommands\":false,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[\"*\"],\"allowLocalBinding\":true}}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,Bash,WebSearch,WebFetch,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__powermove__project_memory,mcp__external__*",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nSHELL NETWORK\nShell commands have full internet access.\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "project",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "project",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--permission-mode",
+        "acceptEdits",
+        "--settings",
+        "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"allowUnsandboxedCommands\":true,\"failIfUnavailable\":true,\"network\":{\"allowedDomains\":[\"*\"],\"allowLocalBinding\":true}}}",
+        "--tools",
+        "default",
+        "--allowedTools",
+        "Read,Glob,Grep,WebSearch,WebFetch,Skill,Agent,Task,mcp__powermove__get_project_state,mcp__powermove__project_memory,mcp__external__*",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nSHELL NETWORK\nShell commands have full internet access.\n\nAPPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user's home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. Powermove asks the user to approve it; if they decline, do not retry it.\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "computer",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "computer",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--dangerously-skip-permissions",
+        "--tools",
+        "default",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "computer",
+      "approval": "auto",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "computer",
+        "approval": "auto",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--dangerously-skip-permissions",
+        "--tools",
+        "default",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "computer",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "computer",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": false,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--dangerously-skip-permissions",
+        "--tools",
+        "default",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "access": "computer",
+      "approval": "supervised",
+      "options": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        "prompt": "Preserve \"quotes\"\nAnd Unicode 🎬",
+        "imagePaths": [
+          "/synthetic/reference image.png"
+        ],
+        "model": "opus",
+        "reasoningEffort": "high",
+        "sessionId": "synthetic-session",
+        "access": "computer",
+        "approval": "supervised",
+        "extensionsDir": "/synthetic/Extensions",
+        "instructions": "Synthetic original instructions",
+        "additionalInstructions": "Original extra instructions",
+        "nativeTools": {
+          "command": "/synthetic/Powermove",
+          "args": [
+            "--powermove-mcp"
+          ]
+        },
+        "externalMcpServers": {
+          "external": {
+            "command": "/synthetic/external"
+          },
+          "powermove": {
+            "command": "/must-not-be-used"
+          }
+        },
+        "askOutsideSandbox": true,
+        "effort": "high",
+        "toolNames": [
+          "mcp__powermove__get_project_state",
+          "mcp__powermove__project_memory"
+        ],
+        "inspectionToolNames": [
+          "mcp__powermove__get_project_state"
+        ],
+        "shellNetworkInstructions": "Shell commands have full internet access."
+      },
+      "argv": [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--verbose",
+        "--mcp-config",
+        "{\"mcpServers\":{\"external\":{\"command\":\"/synthetic/external\"},\"powermove\":{\"type\":\"stdio\",\"command\":\"/synthetic/Powermove\",\"args\":[\"--powermove-mcp\"]}}}",
+        "--json-schema",
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--resume",
+        "synthetic-session",
+        "--dangerously-skip-permissions",
+        "--tools",
+        "default",
+        "--add-dir",
+        "/synthetic/Extensions",
+        "--system-prompt",
+        "Synthetic original instructions\n\nReturn the final answer only through the requested JSON schema.\n\nOriginal extra instructions"
+      ],
+      "message": {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preserve \"quotes\"\nAnd Unicode 🎬\n\nREFERENCE IMAGES\nInspect these files with the Read tool:\n- /synthetic/reference image.png"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

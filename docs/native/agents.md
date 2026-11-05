@@ -362,3 +362,35 @@ with durable history, nested child cancellation/draining, watch/unwatch and
 exactly-once accepted continuation delivery. Test actor/file durability and
 runtime-owned auth/session preservation under process kill. Linux doubles and
 source-derived recordings do not certify these behaviors, native UI or signing.
+
+## 2026-11-05 — current-main native Claude launch
+
+`claude_launch::Options` now builds and launches the native stream-json worker
+against owner-pinned main `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`.
+Project Auto selects Claude Code's `--permission-mode auto`; supervised Project
+uses `acceptEdits`; Editor keeps its denied shell/write tools; Computer still
+requires fresh run consent. Requests reaching stdio remain user questions or
+fallback approval cards. This supersedes the old claim that Claude has no
+classifier. No runtime-availability flag or live-provider pass is inferred.
+
+Three portable tests compare all arguments and stdin against **12 executions of
+main's unmodified adapter**, verify pinned source/recorder hashes, and reject
+missing instructions/schema/MCP maps. CLI JSON values compare structurally;
+all flag positions and other argument bytes remain exact. The recorder injects
+synthetic native/external MCP descriptors and instruction strings, so it tests
+launch policy, not tool catalog availability or generated workspace instructions.
+Regenerate with `node crates/agents/scripts/capture-main-claude-launch.cjs --check`
+from `apps/native` after installing the existing `work/oracle` TypeScript package.
+
+`cargo run --locked -p pm-agents --example live-provider-check` is an explicitly
+opted-in editor-only credential check. See the example's `PM_AGENT_LIVE_*`
+inputs; no key or transcript is copied or printed. It has not been run here.
+The Mac must verify the pinned native CLI, isolated auth homes, Project Auto
+classifier/fallbacks, supervised approvals, signed launch and both architectures.
+
+Decision: use main's real classifier/argv and preserve the remaining stdio
+approval boundary (A03, N3/N4); native subprocess/worker launch with no Node or
+main-thread JS wait (N7/N8). No old consumer or runtime archive is pruned.
+`DESIGN-TODO(opus)`: reconcile the old Access picker's Auto subtitle in
+`design/panels/agent-panel.md` with main's Claude classifier; no new copy or
+visual choice is supplied by this service change.
