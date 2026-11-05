@@ -148,15 +148,10 @@ impl FileLock {
         let worker = thread::Builder::new()
             .name("pm-lock-heartbeat".into())
             .spawn(move || {
-                loop {
-                    match rx.recv_timeout(Duration::from_secs(5)) {
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = write_record(&mut file, std::process::id());
-                        }
-                        _ => {
-                            break;
-                        }
-                    }
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    rx.recv_timeout(Duration::from_secs(5))
+                {
+                    let _ = write_record(&mut file, std::process::id());
                 }
                 // LockedFile writes PID 0 and explicitly unlocks before close.
             })?;

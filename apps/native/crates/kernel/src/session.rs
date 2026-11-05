@@ -510,7 +510,7 @@ impl Kernel {
         let mut plan = project
             .store()
             .prepare_portable_export(path)
-            .map_err(|e| failure(&e.to_string()))?;
+            .map_err(failure)?;
         plan.workspace = Some(project.workspace().clone());
         Ok(plan)
     }

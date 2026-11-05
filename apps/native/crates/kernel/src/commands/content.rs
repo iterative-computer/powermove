@@ -237,19 +237,18 @@ fn extension_content(
     if let Some(id) = patch
         .get("definition")
         .filter(|v| !matches!(v, Value::Null))
+        && d.get("definition") != Some(id)
     {
-        if d.get("definition") != Some(id) {
-            return Err(CommandError::Invalid(
-                "An extension layer definition cannot be changed in place".into(),
-            ));
-        }
+        return Err(CommandError::Invalid(
+            "An extension layer definition cannot be changed in place".into(),
+        ));
     }
-    if let Some(version) = patch.get("version").filter(|v| !matches!(v, Value::Null)) {
-        if definition.and_then(|v| v.get("version")) != Some(version) {
-            return Err(CommandError::Invalid(
-                "Extension layer version is owned by its definition".into(),
-            ));
-        }
+    if let Some(version) = patch.get("version").filter(|v| !matches!(v, Value::Null))
+        && definition.and_then(|v| v.get("version")) != Some(version)
+    {
+        return Err(CommandError::Invalid(
+            "Extension layer version is owned by its definition".into(),
+        ));
     }
     for (key, label) in [("w", "width"), ("h", "height")] {
         if let Some(value) = patch.get(key).filter(|v| !matches!(v, Value::Null)) {

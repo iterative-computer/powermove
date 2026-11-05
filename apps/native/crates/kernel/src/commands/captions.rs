@@ -288,14 +288,13 @@ fn stack_placement(
             );
         }
     }
-    if taken.contains(&content.style.placement) {
-        if let Some(free) = ["bottom", "top", "middle"]
+    if taken.contains(&content.style.placement)
+        && let Some(free) = ["bottom", "top", "middle"]
             .into_iter()
             .find(|p| !taken.contains(*p))
-        {
-            content.style.placement = free.into();
-            content.style.offset_y = 0.;
-        }
+    {
+        content.style.placement = free.into();
+        content.style.offset_y = 0.;
     }
 }
 fn explicit_placement(style: &Json) -> bool {

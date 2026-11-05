@@ -547,13 +547,12 @@ impl Kernel {
                         .slots
                         .get(project)
                         .ok_or_else(|| KernelFailure::NoProject(project.clone()))?;
-                    if let crate::state::StateOp::UiDocument { document, .. } = op {
-                        if *document != slot.project.store().doc_id() {
-                            return Err(KernelFailure::Storage(
-                                "The document was closed or replaced; UI state was not changed"
-                                    .into(),
-                            ));
-                        }
+                    if let crate::state::StateOp::UiDocument { document, .. } = op
+                        && *document != slot.project.store().doc_id()
+                    {
+                        return Err(KernelFailure::Storage(
+                            "The document was closed or replaced; UI state was not changed".into(),
+                        ));
                     }
                 }
                 _ => {}
