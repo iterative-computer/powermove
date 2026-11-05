@@ -11,6 +11,7 @@ pub trait Store {
     /// written before their referencing archive, so a crash cannot dangle them.
     fn set(&mut self, key: &str, value: &Value) -> io::Result<()>;
 }
+#[derive(Clone)]
 pub struct Threads {
     project: String,
     archive: Value,

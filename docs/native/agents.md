@@ -394,3 +394,19 @@ main-thread JS wait (N7/N8). No old consumer or runtime archive is pruned.
 `DESIGN-TODO(opus)`: reconcile the old Access picker's Auto subtitle in
 `design/panels/agent-panel.md` with main's Claude classifier; no new copy or
 visual choice is supplied by this service change.
+
+## 2026-11-05 — real process, panel and actor persistence path
+
+`pm-panel-agentpanel::{runtime::ProviderRuns,store::KernelStore}` connects real
+provider process handles to the existing thread model and attached kernel library
+writer. Submitted intent persists before launch; checked machine acceptance and
+interrupt acknowledgement are distinct; event receipts and panel projections
+publish together; failed IO retains the exact pending delivery. Reopen marks
+unfinished runs interrupted without automatic restart, preserves their old
+status, and cannot restore Computer authority. The real-actor/real-pipe test
+reopens and compares the entire durable archive.
+
+See [agents-cloud4.md](agents-cloud4.md) for the integration APIs, decisions and
+rules, exact outside-owned changes and A01–A10 remaining acceptance. This closes
+portable service boundaries, not the missing application registration/renderer,
+provider credentials, project-memory metadata admission or all of HANDOFF 9.

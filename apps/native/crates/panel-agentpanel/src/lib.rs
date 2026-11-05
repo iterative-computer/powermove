@@ -1,4 +1,5 @@
-//! Agent panel MODEL only. No renderer, JS, native dialogs, or filesystem writer.
+//! Agent panel model and concrete provider worker bridge. No renderer, JS,
+//! native dialogs, or independent filesystem writer.
 //! Commands and effects address project/thread/run/row ids. Hosts execute effects
 //! on workers and acknowledge them; kernel writes return nonblocking futures.
 //! See docs/native/panels/agentpanel.md for tagged evidence and integration limits.
@@ -10,6 +11,8 @@ pub mod kernel;
 pub mod model;
 pub mod placement;
 pub mod questions;
+pub mod runtime;
+pub mod store;
 pub mod v4;
 pub mod view;
 
