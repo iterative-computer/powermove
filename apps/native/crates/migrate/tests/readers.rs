@@ -318,5 +318,14 @@ fn sample_skips_unreadable_blobs_but_full_capture_fails() {
     assert!(
         Snapshot::capture(&source, Some(&blobs), &t.path().join("full"), BlobCopy::All).is_err()
     );
+    // A failed full copy must remain recoverable, never look like an admitted
+    // complete snapshot, and never delete the already copied LevelDB files.
+    assert!(t.path().join("full/leveldb/CURRENT").is_file());
+    assert!(!t.path().join("full/snapshot.json").exists());
+    assert!(Snapshot::open(&t.path().join("full")).is_err());
     fs::set_permissions(blobs.join("1/00/2"), fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        fs::read(blobs.join("1/00/2")).unwrap(),
+        b"private synthetic denied file"
+    );
 }

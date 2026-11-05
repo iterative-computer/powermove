@@ -4,7 +4,10 @@
 mod checkpoint;
 mod closure;
 mod disk;
+pub mod integration;
+pub mod restore;
 pub mod secrets;
+pub mod sparkle;
 pub use checkpoint::Checkpoint;
 
 use anyhow::{Context, Result, ensure};
@@ -766,6 +769,7 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(native.join("first-launch.lock"))?;
     lock.try_lock_exclusive()?;
     validate_native_paths(&native)?;
@@ -809,7 +813,7 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
         &pass.base_hash[..16]
     ));
     if destination.exists() {
-        fs::remove_dir_all(&pending)?;
+        disk::archive(&pending)?;
     } else {
         fs::rename(&pending, destination)?;
         File::open(&deltas)?.sync_all()?;

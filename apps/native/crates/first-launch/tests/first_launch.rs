@@ -827,3 +827,51 @@ fn interrupted_delta_keeps_unknown_quarantined_archives_and_beta_changes() {
     let media: Value = read(&config.native_profile.join("Media Store/migration.json"));
     assert_eq!(media["passes"].as_object().unwrap().len(), 2);
 }
+
+#[test]
+fn denied_or_locked_keychain_needs_fresh_consent_then_final_delta_without_source_changes() {
+    struct Denied {
+        reads: usize,
+    }
+    impl SecretAccess for Denied {
+        fn legacy_password(&mut self) -> anyhow::Result<zeroize::Zeroizing<Vec<u8>>> {
+            self.reads += 1;
+            anyhow::bail!("synthetic Keychain denied or locked");
+        }
+        fn put_native(&mut self, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            panic!("denied Keychain cannot write native secrets");
+        }
+    }
+    let t = tempdir().unwrap();
+    let config = profile(&t.path().canonicalize().unwrap());
+    write(
+        &config.electron_profile.join("agent-provider.json"),
+        &json!({"secret":VECTOR,"unknown":"preserved"}),
+    );
+    let before = files(&config.electron_profile);
+    run(&config, |_| Ok(())).unwrap();
+    let mut denied = Denied { reads: 0 };
+    assert!(resume_with_secret_consent(&config, &mut denied, |_| Ok(())).is_err());
+    for _ in 0..2 {
+        assert!(matches!(
+            run(&config, |_| Ok(())).unwrap(),
+            Outcome::NeedsSecretConsent { interrupted: true }
+        ));
+    }
+    assert_eq!(denied.reads, 1);
+    assert!(!config.native_profile.join("secret-locators.json").exists());
+    let mut consent = SyntheticSecrets {
+        reads: 0,
+        values: Vec::new(),
+        fail: false,
+    };
+    resume_with_secret_consent(&config, &mut consent, |_| Ok(())).unwrap();
+    assert_eq!(consent.reads, 1);
+    assert_eq!(consent.values.len(), 1);
+    assert_eq!(before, files(&config.electron_profile));
+    media_db(&config.electron_profile, true);
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(consent.reads, 1);
+    let migration: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    assert_eq!(migration["passes"].as_object().unwrap().len(), 2);
+}

@@ -72,10 +72,10 @@ impl Checkpoint {
         // Only our fixed private staging directory, while the coordinator lock
         // is held. A completed checkpoint is never removed or rewritten.
         if stage.exists() {
-            fs::remove_dir_all(&stage)?;
+            disk::archive(&stage)?;
         }
         disk::private_dir(&stage)?;
-        let result = (|| {
+        (|| {
             let before = inventory(source)?;
             let chromium_before = (
                 disk::walk(&source.join("IndexedDB"))?,
@@ -222,11 +222,8 @@ impl Checkpoint {
             fs::rename(&stage, root)?;
             File::open(root.parent().unwrap())?.sync_all()?;
             Ok(cp)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_dir_all(&stage);
-        }
-        result
+        })()
+        // Leave failed captures intact. A retry archives them before starting.
     }
 }
 fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {

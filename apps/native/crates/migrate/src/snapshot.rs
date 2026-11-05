@@ -98,8 +98,9 @@ impl Snapshot {
         fs::create_dir(&target)?;
         #[cfg(unix)]
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
-        // On failure remove only the directory created by THIS capture.
-        let result = (|| {
+        // On failure retain this attempt for inspection/recovery (N4). A failed
+        // capture has no valid snapshot.json and cannot be opened as complete.
+        (|| {
             fs::create_dir(target.join("leveldb"))?;
             fs::create_dir(target.join("blobs"))?;
             let mut hashes = BTreeMap::new();
@@ -133,7 +134,10 @@ impl Snapshot {
                         });
                         if matches!(policy, BlobCopy::Sample { .. }) && permission {
                             if out.exists() {
-                                fs::remove_file(&out)?;
+                                let retained = target.join("unreadable-partials").join(relative);
+                                fs::create_dir_all(retained.parent().unwrap())?;
+                                fs::rename(&out, &retained)?;
+                                File::open(retained.parent().unwrap())?.sync_all()?;
                             }
                             continue;
                         }
@@ -174,11 +178,7 @@ impl Snapshot {
                 root: target.clone(),
                 inventory: inv,
             })
-        })();
-        if result.is_err() {
-            fs::remove_dir_all(&target)?;
-        }
-        result
+        })()
     }
     pub fn open(root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;

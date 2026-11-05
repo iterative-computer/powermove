@@ -193,3 +193,27 @@ pub fn resolved(path: &Path) -> Result<PathBuf> {
     let parent = resolved(path.parent().context("profile has no parent")?)?;
     Ok(parent.join(path.file_name().context("profile has no name")?))
 }
+
+/// Retain an owned attempt under a fresh sibling name. Caller holds the migration
+/// lease. Never follows links or removes a prior archive, even after a no-op delta.
+pub fn archive(path: &Path) -> Result<PathBuf> {
+    ensure!(
+        !fs::symlink_metadata(path)?.file_type().is_symlink(),
+        "linked attempt"
+    );
+    let parent = path.parent().context("attempt has no parent")?;
+    let name = path
+        .file_name()
+        .context("attempt has no name")?
+        .to_string_lossy();
+    for sequence in 0u64.. {
+        let archived = parent.join(format!("{name}.archive-{sequence:016x}"));
+        if fs::symlink_metadata(&archived).is_ok() {
+            continue;
+        }
+        fs::rename(path, &archived)?;
+        File::open(parent)?.sync_all()?;
+        return Ok(archived);
+    }
+    unreachable!()
+}
