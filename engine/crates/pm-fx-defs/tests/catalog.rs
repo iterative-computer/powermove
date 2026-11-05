@@ -246,3 +246,29 @@ fn assembled_programs_are_keyed_by_implementation_revision_and_preserve_raw_sour
         }
     }
 }
+
+#[test]
+fn typed_references_create_static_inputs_instead_of_animated_channels() {
+    let channels = main_catalog().current("setChannels").unwrap();
+    assert_eq!(channels.input_defaults().len(), 4);
+    for key in ["redLayer", "greenLayer", "blueLayer", "alphaLayer"] {
+        assert!(!channels.channels().contains_key(key));
+        assert!(!channels.defaults().contains_key(key));
+        assert_eq!(
+            serde_json::to_value(&channels.input_defaults()[key]).unwrap(),
+            json!({"layerId":null,"stage":"source"})
+        );
+    }
+    let stroke = main_catalog().current("stroke").unwrap();
+    assert!(!stroke.channels().contains_key("path"));
+    assert_eq!(
+        serde_json::to_value(stroke.input_defaults()["path"].clone()).unwrap(),
+        json!({"kind":"path","layerId":null,"pathId":null})
+    );
+    let lut = main_catalog().current("applyColorLut").unwrap();
+    assert!(!lut.channels().contains_key("lut"));
+    assert_eq!(
+        serde_json::to_value(lut.input_defaults()["lut"].clone()).unwrap(),
+        json!({"kind":"asset","assetId":null})
+    );
+}

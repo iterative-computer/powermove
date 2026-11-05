@@ -1,4 +1,5 @@
-//! Native, inspectable definitions generated from the immutable v1.2.0 registry.
+//! Native, inspectable definitions from immutable tagged and main registries.
+//! `builtins()` retains v1.2.0; `catalog::main_catalog()` is explicitly separate.
 //!
 //! This is data, not a second contribution registry: callers supply the active
 //! extension definition when an extension overrides a built-in (N4/N6). No JS,
@@ -29,6 +30,12 @@ pub struct Parameter {
     pub presentation: Map<String, Value>,
 }
 
+impl Parameter {
+    pub fn is_reference(&self) -> bool {
+        matches!(self.kind.as_deref(), Some("layer" | "path" | "asset"))
+    }
+}
+
 /// Effect or transition definition; shader source and presentation are retained
 /// verbatim as extension-authored data. Optional flags remain absent when absent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -49,6 +56,7 @@ impl Definition {
     pub fn defaults(&self) -> BTreeMap<String, Value> {
         self.params
             .iter()
+            .filter(|p| !p.is_reference())
             .map(|p| (p.k.clone(), p.def.clone()))
             .collect()
     }
@@ -58,7 +66,19 @@ impl Definition {
     pub fn channels(&self) -> BTreeMap<String, PropertyChannel> {
         self.params
             .iter()
+            .filter(|p| !p.is_reference())
             .map(|p| (p.k.clone(), PropertyChannel::new(p.def.clone())))
+            .collect()
+    }
+
+    /// Typed reference creation defaults belong in Effect.inputs, outside
+    /// animation data. Every invocation owns its sentinels.
+    pub fn input_defaults(&self) -> inputs::Inputs {
+        self.params
+            .iter()
+            .filter_map(|p| {
+                inputs::empty_reference(p.kind.as_deref()?).map(|input| (p.k.clone(), input))
+            })
             .collect()
     }
 
