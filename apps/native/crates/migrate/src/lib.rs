@@ -6,10 +6,13 @@
 //! history, take, trash and agent-artifact inventory; see [`migration`].
 pub mod indexeddb;
 pub mod leveldb;
+pub mod library_media;
 pub mod local_storage;
 pub mod migration;
 pub mod snapshot;
+pub mod storage_upgrade;
 pub mod structured_clone;
 mod wire;
+pub mod workspace;
 
 pub use anyhow::Result;

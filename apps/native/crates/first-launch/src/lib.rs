@@ -292,7 +292,7 @@ fn run_inner(
         finish(&native, &mut state, Step::Library, &mut hook)?;
     }
     hook(Event::Started(Step::Media))?;
-    let pass = media(&native, &batches, &closure, &mut hook)?;
+    let pass = media(&native, &root, &batches, &closure, &mut hook)?;
     if !state.completed.contains(&Step::Media) {
         finish(&native, &mut state, Step::Media, &mut hook)?;
     }
@@ -390,6 +390,7 @@ fn read_batches(cp: &Checkpoint, root: &Path) -> Result<Vec<(Snapshot, Vec<index
 }
 fn media(
     native: &Path,
+    checkpoint_root: &Path,
     batches: &[(Snapshot, Vec<indexeddb::Record>)],
     closure: &ClosureInput,
     hook: &mut impl FnMut(Event) -> Result<()>,
@@ -409,11 +410,14 @@ fn media(
     }
     disk::space(native, needed)?;
     let mut count = 0;
-    migration::migrate_many(
+    let disk_records =
+        pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
+    migration::migrate_many_with_disk(
         &batches
             .iter()
             .map(|(s, r)| (s, r.as_slice()))
             .collect::<Vec<_>>(),
+        &disk_records,
         closure,
         &native.join("Media Store"),
         |_| {
@@ -475,6 +479,17 @@ fn bootstrap(
             continue;
         }
         let mut value = store.read(key)?.context("checkpoint key disappeared")?;
+        if ["workspaces", "workspaceTrash"].contains(&key.as_str()) {
+            let raw = as_json(&value)?;
+            if let Some(items) = raw.as_array() {
+                value = to_kernel(&serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(pm_native_migrate::workspace::migrate)
+                        .collect(),
+                ))?;
+            }
+        }
         if [
             "openWindows",
             "windowTabs",
@@ -664,7 +679,11 @@ fn library(
                 id,
                 to_kernel(&project)?,
                 history,
-                p.workspace.unwrap_or_else(|| parse("{}").unwrap()),
+                p.workspace
+                    .as_ref()
+                    .map(|v| to_kernel(&pm_native_migrate::workspace::migrate(&as_json(v)?)))
+                    .transpose()?
+                    .unwrap_or_else(|| parse("{}").unwrap()),
                 to_kernel(&meta)?,
             )?;
         }
@@ -800,7 +819,7 @@ pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Resu
         disk::atomic(&availability, &c)?;
         c
     };
-    let pass = media(&native, &batches, &closure, &mut hook)?;
+    let pass = media(&native, &pending, &batches, &closure, &mut hook)?;
     let identity = disk::hash(&pending.join("checkpoint.json"))?.0;
     let destination = deltas.join(format!(
         "{}-{}-{}",

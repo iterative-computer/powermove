@@ -142,6 +142,9 @@ pub struct Pass {
     pub snapshot: String,
     pub base_hash: String,
     pub records: BTreeMap<String, Imported>,
+    /// Main's filesystem-backed media keys, separate from browser origins.
+    #[serde(default)]
+    pub disk_records: BTreeMap<String, KeyRecord>,
     pub closure: Vec<ClosureEntry>,
     pub blocked_owners: BTreeSet<String>,
     pub mapping_conflicts: BTreeSet<String>,
@@ -180,8 +183,28 @@ pub fn migrate_many(
     batches: &[(&Snapshot, &[Record])],
     closure: &ClosureInput,
     root: &Path,
+    hook: impl FnMut(Checkpoint) -> Result<()>,
+) -> Result<Pass> {
+    migrate_many_with_disk(batches, &[], closure, root, hook)
+}
+
+/// Main's owned filesystem media is part of the same immutable pass and
+/// closure as browser media. Source links remain in the captured index.
+pub fn migrate_many_with_disk(
+    batches: &[(&Snapshot, &[Record])],
+    disk_records: &[crate::library_media::DiskMediaRecord],
+    closure: &ClosureInput,
+    root: &Path,
     mut hook: impl FnMut(Checkpoint) -> Result<()>,
 ) -> Result<Pass> {
+    let mut disk_keys = BTreeSet::new();
+    for record in disk_records {
+        ensure!(
+            disk_keys.insert(&record.key),
+            "duplicate disk media input key"
+        );
+        record.verify_owned()?;
+    }
     for (snapshot, _) in batches {
         ensure!(
             snapshot.complete(),
@@ -198,6 +221,18 @@ pub fn migrate_many(
         "invalid media payload index"
     );
     fs::create_dir_all(root)?;
+    ensure!(
+        fs::symlink_metadata(root)?.is_dir(),
+        "unsafe migration destination"
+    );
+    for record in disk_records {
+        if let Some(path) = &record.owned_path {
+            ensure!(
+                !path.canonicalize()?.starts_with(root.canonicalize()?),
+                "migration destination overlaps disk media input"
+            );
+        }
+    }
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     check_space(root, 0)?;
     // Serialization is per destination; source is never locked or opened by a
@@ -229,9 +264,14 @@ pub fn migrate_many(
         .to_hex()
         .to_string()
     };
-    let base_hash = blake3::hash(&serde_json::to_vec(&(records, closure))?)
-        .to_hex()
-        .to_string();
+    let mut base_bytes = serde_json::to_vec(&(records, closure))?;
+    // Preserve existing pass identities when the extra format is absent.
+    if !disk_records.is_empty() {
+        base_bytes.extend(serde_json::to_vec(
+            &disk_records.iter().map(|r| &r.raw).collect::<Vec<_>>(),
+        )?);
+    }
+    let base_hash = blake3::hash(&base_bytes).to_hex().to_string();
     let id = format!("{snapshot_id}:{base_hash}");
     let state_file = root.join("migration.json");
     let mut state: State = if state_file.exists() {
@@ -248,6 +288,7 @@ pub fn migrate_many(
         snapshot: snapshot_id,
         base_hash,
         records: BTreeMap::new(),
+        disk_records: BTreeMap::new(),
         closure: Vec::new(),
         blocked_owners: BTreeSet::new(),
         mapping_conflicts: BTreeSet::new(),
@@ -319,6 +360,36 @@ pub fn migrate_many(
             publish_key(root, k, &mut pass.mapping_conflicts)?;
         }
     }
+    for r in disk_records {
+        let Some(path) = &r.owned_path else {
+            continue;
+        };
+        r.verify_owned()?;
+        let mut key = import_file(
+            root,
+            path,
+            r.size,
+            ImportInfo {
+                key: &r.key,
+                mime: &r.mime,
+                revision: Some(&r.revision),
+                at: Some(0.0),
+                expected: None,
+            },
+        )?;
+        // Verify both the checkpoint and the published copy against main's
+        // full SHA-256, in addition to the native BLAKE3 verification.
+        let mut copied = r.clone();
+        copied.owned_path = Some(object_path(root, &key.hash)?);
+        copied.verify_owned()?;
+        key.source = "main-disk".into();
+        pass.disk_records.insert(r.key.clone(), key.clone());
+        save(&mut state, &id, &pass, &state_file)?;
+        hook(Checkpoint::ObjectPublished)?;
+        publish_key(root, &key, &mut pass.mapping_conflicts)?;
+        save(&mut state, &id, &pass, &state_file)?;
+        hook(Checkpoint::RecordPublished)?;
+    }
     pass.phase = Phase::CheckingClosure;
     save(&mut state, &id, &pass, &state_file)?;
     pass.closure.clear();
@@ -333,7 +404,24 @@ pub fn migrate_many(
             })
             .collect();
         let selected = select_record(&matches, reference)?;
-        let stored = selected.and_then(|r| r.stored.clone());
+        let disk = pass
+            .disk_records
+            .get(&reference.key)
+            .or_else(|| {
+                reference
+                    .legacy_id
+                    .as_ref()
+                    .and_then(|id| pass.disk_records.get(id))
+            })
+            .filter(|r| {
+                reference
+                    .revision
+                    .as_ref()
+                    .is_none_or(|revision| revision == &r.revision)
+            });
+        let stored = disk
+            .cloned()
+            .or_else(|| selected.and_then(|r| r.stored.clone()));
         // The captured record remains a rendition when project metadata says so,
         // even if a sampled legacy fingerprint happens to collide.
         let mut original = None;
@@ -483,6 +571,7 @@ fn verify_pass(root: &Path, pass: &Pass) -> Result<()> {
         .records
         .values()
         .filter_map(|r| r.stored.as_ref())
+        .chain(pass.disk_records.values())
         .chain(
             pass.closure
                 .iter()
@@ -508,6 +597,18 @@ fn verify_pass(root: &Path, pass: &Pass) -> Result<()> {
             );
         }
     }
+    for key in pass.disk_records.values() {
+        if !pass.mapping_conflicts.contains(&key.key) {
+            let file = root
+                .join("keys")
+                .join(format!("{}.json", sha256(key.key.as_bytes())));
+            let actual: KeyRecord = serde_json::from_reader(open_regular(&file)?)?;
+            ensure!(
+                same_mapping(&actual, key),
+                "published disk media mapping changed or missing"
+            );
+        }
+    }
     Ok(())
 }
 fn same_mapping(a: &KeyRecord, b: &KeyRecord) -> bool {
@@ -528,11 +629,11 @@ fn publish_key(root: &Path, key: &KeyRecord, conflicts: &mut BTreeSet<String>) -
         "legacy key is outside host store schema; checkpoint retained"
     );
     ensure!(
-        key.mime.len() <= 200
-            && !key.revision.is_empty()
-            && key.revision.len() <= 200
-            && key.at.is_finite()
-            && key.size < (1u64 << 53),
+        // This is the native library mapping, not a PMV4 media index. Main's
+        // disk uploader accepts revisions up to 256 UTF-16 units and its
+        // stored-record reader preserves arbitrary strings. Keep them exact;
+        // the separate PMV4 writer still enforces that format's 200-unit bound.
+        !key.revision.is_empty() && key.at.is_finite() && key.size < (1u64 << 53),
         "media metadata is outside host store schema"
     );
     let target = root

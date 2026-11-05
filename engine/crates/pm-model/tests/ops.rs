@@ -333,6 +333,18 @@ fn random_pair(seed: u64) -> (Value, Value) {
     (before, after)
 }
 
+#[test]
+fn retained_nested_record_revisions_match_whole_array_reconciliation() {
+    let (before, after) = random_pair(11096547269030033895);
+    let ops = diff_ops(Some(&before), Some(&after));
+    let (leaf, _) = diff_patches(Some(&before), Some(&after));
+    let mut doc_ops = Document::new(Some(before.json_normalized()), 1);
+    doc_ops.apply_ops_at(&ops, 2).unwrap();
+    let mut doc_leaf = Document::new(Some(before.json_normalized()), 1);
+    doc_leaf.apply_at(&leaf, 2).unwrap();
+    assert_eq!(doc_ops, doc_leaf);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 4_000, ..ProptestConfig::default() })]
 

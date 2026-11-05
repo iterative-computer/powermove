@@ -17,6 +17,7 @@ pub(crate) fn inventory(
     batches: &[(Snapshot, Vec<Record>)],
 ) -> Result<ClosureInput> {
     let profile = root.join("profile");
+    let disk_records = pm_native_migrate::library_media::read_index(&profile.join("Media Store"))?;
     let store = LibraryStore::open(&profile);
     let mut out = ClosureInput {
         inventoried: [
@@ -121,6 +122,26 @@ pub(crate) fn inventory(
         }
     }
     let mut seen = BTreeSet::new();
+    for r in &mut out.references {
+        let disk = disk_records
+            .iter()
+            .find(|d| d.key == r.key || r.legacy_id.as_deref() == Some(&d.key));
+        if let Some(disk) = disk {
+            if r.source_path.is_none() {
+                r.source_path = disk.source_path.clone();
+            }
+            if let Some(path) = &disk.owned_path {
+                // Full main SHA-256 is already verified. Proxy provenance is
+                // still determined from authored asset metadata, never filename.
+                if !r.is_proxy() && matches_original(path, r)? {
+                    r.original_blake3 = Some(disk::hash(path)?.0);
+                    r.before = Availability::Original;
+                } else {
+                    r.before = Availability::ProxyOnly;
+                }
+            }
+        }
+    }
     out.references
         .retain(|r| seen.insert(serde_json::to_string(r).unwrap()));
     Ok(out)

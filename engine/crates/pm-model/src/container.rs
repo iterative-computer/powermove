@@ -76,6 +76,14 @@ pub struct Container {
     /// The saved document (`{ proj, history, ... }` or a bare project).
     pub document: Value,
     pub media: Vec<MediaRecord>,
+    /// Native-retained records without a current known consumer. Same range,
+    /// overlap and checksum validation as live media; never discarded.
+    pub archived_media: Vec<MediaRecord>,
+    /// The validated PMV4 index, including fields a newer writer owns.
+    pub index: Option<Value>,
+    /// Unknown PMV3 header/per-media metadata, excluding document and ranges.
+    /// Writers of a newer container retain this as an opaque archive.
+    pub legacy_metadata: Option<Value>,
 }
 
 /// Why a file could not be read.
@@ -262,6 +270,9 @@ pub fn read_container<R: RandomAccess + ?Sized>(
         format: ContainerFormat::Json,
         document: json::parse_file_text(&text)?,
         media: Vec::new(),
+        archived_media: Vec::new(),
+        index: None,
+        legacy_metadata: None,
     })
 }
 
@@ -285,12 +296,42 @@ fn read_pmv3<R: RandomAccess + ?Sized>(source: &R, size: u64) -> Result<Containe
         return Err(BAD_HEADER);
     }
     let header = json::parse_file_text(&read_vec(source, 9, header_length)?)?;
+    let legacy_metadata = pmv3_metadata(&header);
     let (document, media) = pmv3_index(header, body_start, size)?;
     Ok(Container {
         format: ContainerFormat::Pmv3,
         document,
         media,
+        archived_media: Vec::new(),
+        index: None,
+        legacy_metadata,
     })
+}
+
+fn pmv3_metadata(header: &Value) -> Option<Value> {
+    let mut extra = header.as_object()?.clone();
+    extra.remove("document");
+    let mut records = Vec::new();
+    if let Some(Value::Array(media)) = extra.remove("media") {
+        for item in media {
+            let Some(mut record) = item.as_object().cloned() else {
+                continue;
+            };
+            for key in ["id", "type", "offset", "length"] {
+                record.remove(key);
+            }
+            if !record.is_empty() {
+                if let Some(id) = item.get("id") {
+                    record.insert("id", id.clone());
+                }
+                records.push(Value::Object(record));
+            }
+        }
+    }
+    if !records.is_empty() {
+        extra.insert("media", Value::Array(records));
+    }
+    (!extra.is_empty()).then_some(Value::Object(extra))
 }
 
 /// `projectContainerIndex(header, bodyStart, fileSize)`.
@@ -409,12 +450,17 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
     let Some(items) = index.get("media").and_then(Value::as_array) else {
         return Err(BAD_INDEX);
     };
-    if items.len() > MAX_MEDIA_RECORDS {
+    let archived = match index.get("nativeArchivedMedia") {
+        None => &[][..],
+        Some(Value::Array(items)) => items.as_slice(),
+        Some(_) => return Err(BAD_INDEX),
+    };
+    if items.len() + archived.len() > MAX_MEDIA_RECORDS {
         return Err(BAD_INDEX);
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut media = Vec::with_capacity(items.len());
-    for item in items {
+    for item in items.iter().chain(archived) {
         let (offset, length, sha256) =
             valid_range(Some(item), index_offset).ok_or(BAD_PMV4_MEDIA)?;
         let (
@@ -460,13 +506,17 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
         return Err(BAD_CONTENT_CHECKSUM);
     }
     let document = json::parse_file_text(&bytes)?;
+    let archived_media = media.split_off(items.len());
     let container = Container {
         format: ContainerFormat::Pmv4,
         document,
         media,
+        archived_media,
+        index: Some(index),
+        legacy_metadata: None,
     };
     if options.verify_media {
-        for record in &container.media {
+        for record in container.media.iter().chain(&container.archived_media) {
             container.verify_media(source, record)?;
         }
     }
