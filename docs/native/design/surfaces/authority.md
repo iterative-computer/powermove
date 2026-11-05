@@ -56,7 +56,7 @@ panel's missing-values state, or when an extension asks (`requestValues`):
 | Needs re-entry (Keychain item unreadable) | warning line under the row `Enter this again; the saved value can’t be read.` and an empty field |
 | Note | `t.minimum` `c.muted` at the bottom: `Stays on this Mac. Never included when you publish or share this extension.` |
 | Buttons | `Cancel` · `Save` (disabled until every required value is present; label `Saving…` while writing) |
-| Error | write failed → Error line above the footer `Couldn’t save these values. {ServiceErrorCode informative}` |
+| Error | write failed → Error line above the footer `Couldn’t save these values. {ServiceErrorCode informative}`. Reveal failed: unreadable item → that row switches to *Needs re-entry*; any other code → Error line `Couldn’t show {label}. {informative}`. Remove failed → Error line `Couldn’t remove {label}. {informative}`; the row keeps its set state. |
 
 **Reveal** — alert: message `{label}`, informative = the value in full
 (the user asked to see it), buttons `Done` (default) · `Copy`. Copy writes to the pasteboard with
@@ -88,13 +88,16 @@ choice (Settings ▸ Extensions `Uninstall…` or Store), alert:
 The uninstall itself is an archived release (`ArchivedRelease`,
 `ArchiveReason`), so it asks nothing else. `Delete` removes the Keychain
 items (secrets are the one thing N4 archiving does not keep). An extension
-without saved values uninstalls with no alert.
+without saved values uninstalls with no alert. If the values can't be
+deleted after the uninstall succeeds: alert, message
+`{extension} was removed, but its values couldn’t be deleted.`,
+informative = `ServiceErrorCode` informative, button `OK`.
 
 **Delete a saved workspace / layout** (`WorkspacesPanel`, Window ▸
 Workspace) — alert (shipped confirmation kept): message
 `Delete the workspace “{name}”?`, informative
-`Your panels stay as they are. You can undo this.`, buttons `Delete`
-(destructive) · `Cancel` (default). `Edit ▸ Undo Delete Workspace` restores
+`Your panels stay as they are. You can undo this.`, buttons `Cancel`
+(default) · `Delete` (destructive). `Edit ▸ Undo Delete Workspace` restores
 it; `LayoutStore` keeps the deleted JSON archived (N4).
 
 **Delete a local (user-made) panel or extension project in the Library

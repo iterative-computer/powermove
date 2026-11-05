@@ -424,7 +424,7 @@ function SectionContent({
       {/* API GAP: SettingsGroup recipe and sheet_inset token are not available.
         Keep semantic AXGroup placeholders instead of an invented card recipe. */}
       {groups.map((group) => (
-        <UI.FormGroup key={group} label={group}>
+        <UI.FormGroup key={group} title={group}>
           {rows
             .filter((row) => row.group === group)
             .map((row) => (

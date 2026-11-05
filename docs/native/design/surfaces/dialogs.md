@@ -44,7 +44,7 @@ changed) → README §2 (replaces the shipped thrown error).
 |---|---|
 | Message | `Delete “{name}”?` |
 | Informative | used elsewhere: `It’s used in {n} other compositions. Those layers are removed too. You can undo this.` · otherwise `You can undo this.` |
-| Buttons | `Delete` (destructive) · `Cancel` (default) |
+| Buttons | `Cancel` (default) · `Delete` (destructive) |
 
 ## S029 Keyframe dialogs
 
@@ -103,9 +103,24 @@ Extends [panels/export-sheet.md](../panels/export-sheet.md) Presets section
 
 | Action | Surface / copy |
 |---|---|
-| Save with a name that exists | alert (sheet on the Export sheet): `A preset named “{name}” already exists. Do you want to replace it?` · buttons `Replace` · `Cancel` (default) |
+| Save with a name that exists | alert (sheet on the Export sheet): `A preset named “{name}” already exists. Do you want to replace it?` · buttons `Cancel` (default) · `Replace` |
 | Manage | the `Saved Preset` pop-up ends with separator, `Rename “{current}”…`, `Delete “{current}”` (only when a saved preset is chosen) |
 | Rename | alert with an accessory `NSTextField` (width 240): message `Rename Preset`, buttons `Rename` · `Cancel` |
-| Delete | alert: `Delete the preset “{name}”?` · `Delete` (destructive) · `Cancel` (default). Deleted presets are archived in app storage (N4). |
+| Delete | alert: `Delete the preset “{name}”?` · `Cancel` (default) · `Delete` (destructive). Deleted presets are archived in app storage (N4). |
 | Persistence failure | inline Error under the Presets section: `Couldn’t save the preset.` + `ServiceErrorCode` informative |
 | Queued export | Queue rows and actions are owned by the promedia review (Background Tasks replaces the Render Queue); nothing added here. |
+
+## Answers (design review 2026-11-01)
+
+- **Leave attributes, not one layer** — the disabled option reads
+  `Leave all attributes in the layer` (no name, no quotes).
+- **Scale Keyframes errors** — Time: `Enter a percentage greater than 0.`;
+  Value: `Enter a number.` Collision copy is unchanged.
+- **Diagnostic without a line** — Error state shows `{message}` alone; never a
+  guessed `Line n:`.
+- **Expression preview** — pending: keep the previous result line (first time:
+  empty line, height reserved; no spinner). Unavailable (nothing evaluates at the
+  playhead): `c.muted` `No value at the playhead.`
+- **Rename Preset** — empty or whitespace-only: `Rename` disabled, no message;
+  unchanged: `Rename` acts as `Cancel`; another preset's name: Error under the
+  field `A preset with that name already exists.` and `Rename` disabled.

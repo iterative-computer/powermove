@@ -41,6 +41,7 @@ globalThis.__extcheck = {
         })
       : undefined;
     const capabilities = {
+      ui: { controls: PowermoveCompat.controls },
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [
@@ -55,6 +56,7 @@ globalThis.__extcheck = {
       ),
       PM: {
         invalidate: () => {
+          this.controls?.sync();
           this.dom?.flush();
           call("presentation.invalidate");
         },
@@ -82,6 +84,13 @@ globalThis.__extcheck = {
         this.dom.document,
       );
     this.realm.installGlobals(globalThis);
+    if (this.dom && PowermoveCompat.controlStores)
+      this.controls = PowermoveCompat.connectControlState(
+        this.realm,
+        PowermoveCompat.controlStores,
+        this.dom.document,
+        PowermoveCompat.controlStyles,
+      );
     return true;
   },
   async activate(manifest, module) {

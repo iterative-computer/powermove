@@ -3,7 +3,14 @@ mod builtins;
 mod builtins_tests;
 mod diag;
 mod export_coordinator;
+#[path = "surfaces/dialogs.rs"]
+pub mod dialogs;
+
+#[path = "surfaces/editing.rs"]
+pub mod editing;
 mod lifecycle;
+#[path = "surfaces/library.rs"]
+pub mod library_surface;
 mod mcp;
 mod media;
 mod panels;
@@ -16,6 +23,7 @@ mod smoke;
 mod v4_native;
 mod v4_control;
 mod v4_view;
+mod surfaces;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

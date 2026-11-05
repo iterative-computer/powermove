@@ -39,9 +39,7 @@ const detail = {
   fontSize: token("typography.minimum"),
 };
 
-/** Neutral structural wrapper until the kit's sheet form-row recipe lands.
- * API-GAP: InspectorRow hard-codes inspector metrics/checkbox alignment. Do not
- * substitute those metrics for sheet_inset, sheet_value_column or row+inset. */
+/** Use the approved kit's sheet form controls without changing the v4 API. */
 function FormRow(props: {
   name: keyof typeof rows;
   help?: string;
@@ -51,19 +49,16 @@ function FormRow(props: {
   return (
     <UI.FormRow
       label={label}
-      help={props.help ?? help}
+      detail={props.help ?? help}
       id={`export.row.${props.name}`}
-    >
-      {props.children}
-    </UI.FormRow>
+      control={props.children}
+    />
   );
 }
 function Group(props: { label: string; children: ComponentChildren }) {
-  // API-GAP: settings-card recipe owns light/dark fill and summed radius.
-  return <UI.FormGroup label={props.label}>{props.children}</UI.FormGroup>;
+  return <UI.FormGroup title={props.label}>{props.children}</UI.FormGroup>;
 }
-/** The kit has no push-button yet. ToolbarItem is an explicitly provisional,
- * neutral action placeholder; the native adapter must use NSButton here. */
+/** Native NSButton role metadata is owned by the approved kit. */
 function Action(props: {
   label: string;
   id: string;
@@ -72,7 +67,7 @@ function Action(props: {
   onClick: () => void;
 }) {
   const { primary, ...rest } = props;
-  return <UI.PushButton {...rest} primary={primary} />;
+  return <UI.PushButton {...rest} role={primary ? "default" : "normal"} />;
 }
 export interface ExportSheetProps {
   model: ExportModel;

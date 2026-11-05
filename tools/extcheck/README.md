@@ -42,6 +42,8 @@ bash tools/extcheck/run.sh \
 build lock, the verified S1 archive **and bindings**, and monitors disk during
 builds. Cargo runs at `nice -n 20` with four build jobs and four test threads.
 It uses debug=0 to avoid a second dependency build with line tables.
+Runner tests first build the actual `pm-store-helper` with the same sandbox
+feature and verified archive; no substitute helper is used.
 Set `PM_S1_ARTIFACT` to another verified copy if needed. No V8 source build.
 
 The native runner is a workspace package, `pm-compat-runner`. Its tests
@@ -92,8 +94,13 @@ do not imply an empty Store. The Store connector can be used instead when an
 isolated editor session is already available; it was session-gated in this run.
 
 Store sources are compiled but never run through the trusted owner facade.
-Permissioned Store facade/helper and reference provenance adapters remain
-required. No extensions are excluded from the denominator because an adapter
+The frozen asynchronous facade now has a confined native helper/core connection
+and durable kernel Store state adapter, covered by synthetic tests. Public
+releases still need native installer admission and registration/view/resource
+dispatch. The checked release metadata has no signed-release envelope for the native
+installer. The disposable Electron profile uses the
+shipping Store marker and verifies Store isolation, without copying account
+state or granting full access. No extensions are excluded because an adapter
 is absent.
 
 ## Scripts and capture protocol

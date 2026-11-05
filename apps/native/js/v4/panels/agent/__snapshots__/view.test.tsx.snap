@@ -355,6 +355,26 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -1164,6 +1184,26 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "label": "Agent access, Supervised",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -1973,6 +2013,26 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -2699,6 +2759,26 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -3532,6 +3612,26 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -4446,6 +4546,26 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -5406,6 +5526,26 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -6282,6 +6422,26 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -7143,6 +7303,26 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -8091,6 +8271,26 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -9063,6 +9263,26 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -9990,6 +10210,26 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -10905,6 +11145,26 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -11729,6 +11989,26 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -12692,6 +12972,26 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -13538,6 +13838,26 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -14437,6 +14757,26 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -15352,6 +15692,26 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -16263,6 +16623,26 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -17173,6 +17553,26 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -17997,6 +18397,26 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -18806,6 +19226,26 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {
@@ -19615,6 +20055,26 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "label": "Agent access, Composition only",
         "metadata": {
           "apiGap": "accessMenu",
+          "pmKit": {
+            "menu": [
+              {
+                "label": "Composition only",
+                "v": "editor",
+              },
+              {
+                "label": "Supervised",
+                "v": "supervised",
+              },
+              {
+                "label": "Auto",
+                "v": "auto",
+              },
+              {
+                "label": "Full access",
+                "v": "full",
+              },
+            ],
+          },
         },
         "options": [
           {

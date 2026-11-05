@@ -6,6 +6,9 @@ const root = join(import.meta.dir, "../../../../..");
 const reference = "07ed5fa17ee640659cb075f9cad1af2095011d60";
 const base = "apps/desktop/src/renderer/src/kernel/";
 const sources: Record<string, string> = {
+  "ease-runtime": "apps/desktop/src/renderer/src/legacy/core/easing.ts",
+  "store-api": "apps/desktop/src/renderer/sandbox/shim-api.ts",
+  "sandbox-rpc": "apps/desktop/src/shared/sandbox-rpc.ts",
   icons: "apps/desktop/src/renderer/src/legacy/core/util.ts",
   "pm-facades": "apps/desktop/src/renderer/src/kernel/install.ts",
   "layout-model": "apps/desktop/src/renderer/src/layout/model.ts",
@@ -83,6 +86,11 @@ const EMPTY_AFFINE=[1,0,0,1,0,0], EMPTY_MAT3=[1,0,0,0,1,0,0,0,1], EMPTY_MAT4=[1,
     target: ts.ScriptTarget.ES2023,
     module: ts.ModuleKind.ESNext,
   });
+  if (name === "store-api")
+    code = code
+      .replace("'../../shared/sandbox-rpc'", "'./sandbox-rpc'")
+      .replace("'../src/legacy/core/easing'", "'./ease-runtime'")
+      .replace("'../src/legacy/core/space-3d'", "'../legacy/core/space-3d'");
   if (name === "registries")
     code = code
       .replace("from './keychord'", "from '../../keychord'")
@@ -141,6 +149,9 @@ const EMPTY_AFFINE=[1,0,0,1,0,0], EMPTY_MAT3=[1,0,0,0,1,0,0,0,1], EMPTY_MAT4=[1,
 }
 if (import.meta.main)
   for (const name of [
+    "ease-runtime",
+    "store-api",
+    "sandbox-rpc",
     "host",
     "registries",
     "glsl",
