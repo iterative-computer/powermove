@@ -390,7 +390,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
             >
               <Copy>{extension.name}</Copy>
               <Copy secondary>{`${extension.type} · ${extension.source}`}</Copy>
-              {/* Switch intentionally absent pending kit support, as in RowControl. */}
+              {/* Activation service is unavailable; do not imply an acknowledged enable switch. */}
             </UI.ListItem>
           ))}
         </virtual-list>

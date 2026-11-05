@@ -119,13 +119,10 @@ impl SurfaceView {
             }
             let kind = match Component::of(&node) {
                 Some(Component::PopUpButton) => Some(crate::v4_control::Kind::Popup),
-                Some(Component::Checkbox | Component::Toggle | Component::Switch) => {
-                    Some(if self.publication.panel == "settings" {
-                        crate::v4_control::Kind::Switch
-                    } else {
-                        crate::v4_control::Kind::Checkbox
-                    })
+                Some(Component::Checkbox | Component::Toggle) => {
+                    Some(crate::v4_control::Kind::Checkbox)
                 }
+                Some(Component::Switch) => Some(crate::v4_control::Kind::Switch),
                 Some(Component::PushButton) => Some(crate::v4_control::Kind::Push),
                 Some(Component::ToolbarItem)
                     if self.publication.panel == "export"
@@ -755,8 +752,8 @@ impl SurfaceView {
         if let Some(geometry) = virtual_window {
             element = element
                 .aria_row_count(geometry.count)
-                .on_scroll_wheel(cx.listener(move |_, _, _, cx| {
-                    cx.defer(move |v, cx| {
+                .on_scroll_wheel(cx.listener(move |_, _, window, cx| {
+                    cx.defer_in(window, move |v, _, cx| {
                         let Some(scroll) = v.scrolls.get(&id) else {
                             return;
                         };
