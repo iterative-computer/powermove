@@ -517,6 +517,33 @@ pub(crate) fn effect_steps_raster<'d>(
             let h = (size.1 * scale.1.abs()).max(1.) as u32;
             let sampling = definition.metadata.get("sampling");
             let grid = definition.metadata.get("grid");
+            let kernel_scale = step
+                .owner
+                .as_ref()
+                .map_or([scale.0, scale.1], |o| o.pixel_scale);
+            let space_scale = if sampling
+                .and_then(|s| s.get("space"))
+                .and_then(|s| s.as_str())
+                == Some("layer")
+            {
+                kernel_scale[0].hypot(kernel_scale[1])
+            } else {
+                scale.0.abs().max(scale.1.abs())
+            };
+            // Main's viewer adds fixed support and scales authored padding by
+            // its declared factor and the actual composition/layer density.
+            step.padding = (step.padding
+                * definition
+                    .metadata
+                    .get("viewportPaddingFactor")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.)
+                + definition
+                    .metadata
+                    .get("viewportPaddingPixels")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.))
+                * space_scale;
             if sampling.is_some() || grid.is_some() {
                 let lod = if let Some(sampling) = sampling {
                     pm_fx_defs::spatial::sample_lod(

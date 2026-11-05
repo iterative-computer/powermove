@@ -261,6 +261,9 @@ fn e06_all_saved_spatial_revisions_depth_crop_zoom_and_source_contracts() {
                     );
                 } else {
                     let actual = draw(&mut renderer, &value, &MapResolver::default(), depth);
+                    eprintln!(
+                        "spatial crop {id} v{version},source {source},depth {depth},params {params}"
+                    );
                     if depth == 32 {
                         check_float_viewport(&mut renderer, &value, &actual);
                     } else {

@@ -328,6 +328,105 @@ fn preview_window(
     })
 }
 
+/// A cropped effect needs the pixels outside the presentation rectangle.
+/// Keep a composition-sized logical canvas and express the viewport as its ROI;
+/// the compositor then grows that ROI by the declared chain padding. Without
+/// this, the viewport edge becomes an artificial blur/shadow sampling edge.
+fn effect_viewport_request(
+    comp: &Comp<'_>,
+    effects: &Effects,
+    request: &RenderRequest,
+) -> Result<Option<RenderRequest>, RenderError> {
+    let Some((ox, oy)) = request.origin else {
+        return Ok(None);
+    };
+    if !comp.layers().iter().any(|layer| {
+        // Local source chains already retain their complete padded raster.
+        if pm_eval::node::string(pm_eval::node::member(Some(layer), "effectSpace"))
+            .is_some_and(|s| s.as_bytes() == b"source")
+        {
+            return false;
+        }
+        pm_eval::node::array(pm_eval::node::member(Some(layer), "fx")).is_some_and(|fx| {
+            fx.iter().any(|effect| {
+                if matches!(
+                    pm_eval::node::member(Some(effect), "on").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Bool(false))
+                ) {
+                    return false;
+                }
+                let id = pm_eval::node::to_js_string(pm_eval::node::member(Some(effect), "type"))
+                    .to_string_lossy();
+                let Ok(key) =
+                    effects.saved_key(&id, pm_eval::node::member(Some(effect), "version"))
+                else {
+                    return false;
+                };
+                effects
+                    .get(pm_protocol::definitions::DefinitionKind::Effect, &key)
+                    .is_some_and(|d| {
+                        !d.flags.viewport_safe
+                            || !d.flags.viewport_padding.is_empty()
+                            || crate::effects::versions::main_definition(&key).is_some_and(|d| {
+                                d.metadata
+                                    .get("viewportPaddingPixels")
+                                    .and_then(|v| v.as_f64())
+                                    .is_some_and(|p| p > 0.)
+                            })
+                    })
+            })
+        })
+    }) {
+        return Ok(None);
+    }
+    let scale = request.scale.unwrap_or_else(|| {
+        plan::derived_scale(comp, request.output_size.width, request.output_size.height)
+    });
+    let dim = |field: &str, fallback: u32| {
+        let n = pm_eval::node::to_number(comp.member(field));
+        if n.is_finite() && n > 0. {
+            n
+        } else {
+            f64::from(fallback)
+        }
+    };
+    // Align the new ROI to integer pixels while retaining fractional pan in
+    // the canvas origin. Negative pans keep their exact outside-comp extent.
+    let x = ox.ceil().max(0.);
+    let y = oy.ceil().max(0.);
+    let base = (ox - x, oy - y);
+    let width = (dim("w", request.output_size.width) * scale.0 - base.0)
+        .ceil()
+        .max(x + f64::from(request.output_size.width));
+    let height = (dim("h", request.output_size.height) * scale.1 - base.1)
+        .ceil()
+        .max(y + f64::from(request.output_size.height));
+    let limit = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
+    if width > limit || height > limit {
+        return Err(RenderError::Request(
+            "effect viewport canvas exceeds the bounded output dimensions".into(),
+        ));
+    }
+    let r = request.region.unwrap_or(pm_protocol::common::PixelRect {
+        x: 0,
+        y: 0,
+        width: request.output_size.width,
+        height: request.output_size.height,
+    });
+    let mut expanded = request.clone();
+    expanded.output_size = pm_protocol::common::Size::new(width as u32, height as u32);
+    expanded.scale = Some(scale);
+    expanded.region = Some(pm_protocol::common::PixelRect {
+        x: x as u32 + r.x,
+        y: y as u32 + r.y,
+        width: r.width,
+        height: r.height,
+    });
+    expanded.origin = (base != (0., 0.)).then_some(base);
+    expanded.preview_canvas = true;
+    Ok(Some(expanded))
+}
+
 /// The renderer.
 pub struct Renderer {
     device: wgpu::Device,
@@ -1713,6 +1812,8 @@ impl Renderer {
         }
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let expanded_request = effect_viewport_request(&comp, &self.effects, request)?;
+        let request = expanded_request.as_ref().unwrap_or(request);
         let open = capability::open_composition_id(root);
         let project = open
             .as_deref()

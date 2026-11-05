@@ -163,6 +163,7 @@ fn e07_saved_shadow_revisions_offset_softness_only_alpha_hdr_and_crop() {
                                     "void main(){fragColor=gl_FragCoord.x<16.?vec4(0.125,0.25,1.,0.5):vec4(0.);}",
                                 ),
                             );
+                            value["colorDepth"] = json!(depth);
                             if source {
                                 value["layers"][0]["effectSpace"] = json!("source");
                             }
@@ -209,6 +210,9 @@ fn e07_saved_shadow_revisions_offset_softness_only_alpha_hdr_and_crop() {
                                         );
                                     }
                                 }
+                                eprintln!(
+                                    "shadow crop v{version},source {source},depth {depth},angle {angle},softness {softness},only {only}"
+                                );
                                 if depth == 32 {
                                     check_float_viewport(&mut renderer, &value, &actual);
                                 } else {
