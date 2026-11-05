@@ -81,3 +81,175 @@ fn main_disk_revision_and_mime_are_not_restricted_by_the_pmv4_index_contract() {
     assert_eq!(result.disk_records["media:synthetic"].mime, mime);
     assert!(!result.cutover_ready); // An incomplete owner inventory is still blocked.
 }
+
+#[test]
+fn source_link_import_verifies_full_identity_and_retries_availability_as_new_pass() {
+    use pm_native_migrate::{library_media::SourceStatus, migration::*};
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let source = root.join("linked.mov");
+    let raw = record(json!({"sourcePath":source}));
+    let record = DiskMediaRecord::decode(raw.clone(), &root).unwrap();
+    let closure = ClosureInput {
+        inventoried: [
+            OwnerKind::Current,
+            OwnerKind::Trash,
+            OwnerKind::Take,
+            OwnerKind::Undo,
+            OwnerKind::Redo,
+            OwnerKind::Agent,
+        ]
+        .into_iter()
+        .collect(),
+        references: vec![Reference {
+            owner: "synthetic".into(),
+            owner_kind: OwnerKind::Current,
+            key: record.key.clone(),
+            legacy_id: None,
+            revision: Some("r1".into()),
+            fingerprint: None,
+            original_blake3: None,
+            source_path: Some(source.clone()),
+            playback_proxy: false,
+            playback_proxy_version: 0,
+            poster: false,
+            before: Availability::Original,
+        }],
+    };
+    let dest = root.join("native");
+    let run = || {
+        migrate_many_with_disk(&[], std::slice::from_ref(&record), &closure, &dest, |_| {
+            Ok(())
+        })
+        .unwrap()
+    };
+    let missing = run();
+    assert_eq!(
+        missing.disk_sources[&record.key],
+        (raw, SourceStatus::Missing)
+    );
+    assert_eq!(missing.closure[0].status, Status::NewlyMissing);
+    assert!(!missing.cutover_ready);
+    fs::write(&source, b"bad").unwrap();
+    let changed = run();
+    assert_eq!(changed.disk_sources[&record.key].1, SourceStatus::Changed);
+    assert!(changed.disk_records.is_empty());
+    fs::write(&source, b"abc").unwrap();
+    let verified = run();
+    assert!(verified.cutover_ready);
+    assert_eq!(verified.closure[0].status, Status::VerifiedOriginal);
+    assert_ne!(verified.base_hash, missing.base_hash);
+    let before = fs::read(dest.join("migration.json")).unwrap();
+    assert!(run().cutover_ready);
+    assert_eq!(fs::read(dest.join("migration.json")).unwrap(), before);
+    fs::remove_file(&source).unwrap();
+    assert!(
+        dest.join("objects")
+            .join(&verified.disk_records[&record.key].hash[..2])
+            .join(&verified.disk_records[&record.key].hash)
+            .exists()
+    );
+    assert_eq!(run().closure[0].status, Status::VerifiedOriginal);
+}
+
+#[test]
+fn linked_proxy_stays_proxy_and_interrupted_copy_resumes_without_deleting_sources() {
+    use pm_native_migrate::migration::*;
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let source = root.join("proxy.mov");
+    fs::write(&source, b"abc").unwrap();
+    let record = DiskMediaRecord::decode(record(json!({"sourcePath":source})), &root).unwrap();
+    let closure = ClosureInput {
+        inventoried: [
+            OwnerKind::Current,
+            OwnerKind::Trash,
+            OwnerKind::Take,
+            OwnerKind::Undo,
+            OwnerKind::Redo,
+            OwnerKind::Agent,
+        ]
+        .into_iter()
+        .collect(),
+        references: vec![Reference {
+            owner: "synthetic".into(),
+            owner_kind: OwnerKind::Undo,
+            key: record.key.clone(),
+            legacy_id: None,
+            revision: Some("r1".into()),
+            fingerprint: None,
+            original_blake3: None,
+            source_path: None,
+            playback_proxy: true,
+            playback_proxy_version: 0,
+            poster: false,
+            before: Availability::ProxyOnly,
+        }],
+    };
+    let dest = root.join("native");
+    assert!(
+        migrate_many_with_disk(
+            &[],
+            std::slice::from_ref(&record),
+            &closure,
+            &dest,
+            |_| anyhow::bail!("synthetic interruption")
+        )
+        .is_err()
+    );
+    let pass = migrate_many_with_disk(&[], &[record], &closure, &dest, |_| Ok(())).unwrap();
+    assert_eq!(pass.closure[0].status, Status::ProxyOnly);
+    assert!(pass.closure[0].export_warning);
+    assert!(pass.closure[0].original.is_none());
+    assert_eq!(fs::read(source).unwrap(), b"abc");
+}
+
+#[test]
+fn interrupted_link_copy_can_resume_offline_before_public_key_was_written() {
+    use pm_native_migrate::{library_media::SourceStatus, migration::*};
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let source = root.join("source.mov");
+    fs::write(&source, b"abc").unwrap();
+    let input = DiskMediaRecord::decode(record(json!({"sourcePath":source})), &root).unwrap();
+    let closure = ClosureInput {
+        inventoried: [
+            OwnerKind::Current,
+            OwnerKind::Trash,
+            OwnerKind::Take,
+            OwnerKind::Undo,
+            OwnerKind::Redo,
+            OwnerKind::Agent,
+        ]
+        .into_iter()
+        .collect(),
+        references: vec![],
+    };
+    let dest = root.join("native");
+    assert!(
+        migrate_many_with_disk(&[], std::slice::from_ref(&input), &closure, &dest, |step| {
+            assert_eq!(step, Checkpoint::ObjectPublished);
+            anyhow::bail!("synthetic process interruption")
+        })
+        .is_err()
+    );
+    assert_eq!(fs::read_dir(dest.join("keys")).unwrap().count(), 0);
+    fs::remove_file(source).unwrap();
+    let resumed =
+        migrate_many_with_disk(&[], std::slice::from_ref(&input), &closure, &dest, |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(resumed.disk_sources[&input.key].1, SourceStatus::Missing);
+    let owned = &resumed.disk_records[&input.key];
+    assert_eq!(
+        fs::read(
+            dest.join("objects")
+                .join(&owned.hash[..2])
+                .join(&owned.hash)
+        )
+        .unwrap(),
+        b"abc"
+    );
+    assert_eq!(fs::read_dir(dest.join("keys")).unwrap().count(), 1);
+}

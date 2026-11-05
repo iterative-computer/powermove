@@ -6,8 +6,8 @@ use anyhow::{Result, ensure};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
-    io::Read,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -100,40 +100,113 @@ impl DiskMediaRecord {
         })
     }
 
-    pub fn verify_owned(&self) -> Result<()> {
-        if let Some(path) = &self.owned_path {
-            let mut file = open_regular(path)?;
-            let before = file.metadata()?;
-            ensure!(before.len() == self.size, "owned media length changed");
-            let mut hash = Sha256::new();
-            let mut total = 0u64;
-            let mut buffer = vec![0; 1 << 20];
-            loop {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                total += n as u64;
-                hash.update(&buffer[..n]);
+    /// Open the exact bytes, refusing links and cloud placeholders before reading.
+    /// Full verification deliberately ignores mtime as an identity shortcut.
+    pub fn open_verified(&self) -> Result<File> {
+        use std::os::unix::fs::MetadataExt;
+        let path = self
+            .owned_path
+            .as_ref()
+            .or(self.source_path.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("media has no payload"))?;
+        let mut file = open_regular(path)?;
+        let before = file.metadata()?;
+        ensure!(before.len() == self.size, "media length changed");
+        let mut hash = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0; 65536];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
             }
-            ensure!(
-                total == self.size && format!("{:x}", hash.finalize()) == self.sha256,
-                "owned media checksum changed"
-            );
+            total += n as u64;
+            ensure!(total <= self.size, "media length changed");
+            hash.update(&buffer[..n]);
+        }
+        let after = file.metadata()?;
+        let current = fs::symlink_metadata(path)?;
+        let identity = |m: &fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
+        ensure!(
+            current.is_file()
+                && identity(&before) == identity(&after)
+                && identity(&after) == identity(&current),
+            "media identity changed"
+        );
+        ensure!(
+            total == self.size && format!("{:x}", hash.finalize()) == self.sha256,
+            "media checksum changed"
+        );
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+
+    pub fn verify_owned(&self) -> Result<()> {
+        if self.owned_path.is_some() {
+            self.open_verified()?;
         }
         Ok(())
     }
+
+    /// Preserve a reason for unavailable source links. Owned corruption is fatal.
+    pub fn source_status(&self) -> Result<SourceStatus> {
+        if self.source_path.is_none() {
+            self.verify_owned()?;
+            return Ok(SourceStatus::Owned);
+        }
+        match self.open_verified() {
+            Ok(_) => Ok(SourceStatus::Verified),
+            Err(e) => {
+                if let Some(io) = e.downcast_ref::<std::io::Error>() {
+                    return match io.kind() {
+                        std::io::ErrorKind::NotFound => Ok(SourceStatus::Missing),
+                        std::io::ErrorKind::PermissionDenied => Ok(SourceStatus::Denied),
+                        _ => Err(e),
+                    };
+                }
+                // The pre-open dataless check is a policy refusal, not offline success.
+                if e.to_string().starts_with("source_not_local:") {
+                    return Ok(SourceStatus::NotLocal);
+                }
+                Ok(SourceStatus::Changed)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceStatus {
+    Owned,
+    Verified,
+    Missing,
+    Denied,
+    NotLocal,
+    Changed,
 }
 
 pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
-    let index = root.join("Index");
-    if !index.exists() {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(root) {
+        Ok(m) => ensure!(m.is_dir(), "unsafe media root"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
     }
-    ensure!(
-        fs::symlink_metadata(&index)?.is_dir(),
-        "unsafe media index directory"
-    );
+    let index = root.join("Index");
+    match fs::symlink_metadata(&index) {
+        Ok(m) => ensure!(m.is_dir(), "unsafe media index directory"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    }
     let mut records = Vec::new();
     for entry in fs::read_dir(&index)? {
         let entry = entry?;
@@ -148,7 +221,15 @@ pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
         {
             continue;
         }
-        let raw = serde_json::from_reader(open_regular(&entry.path())?)?;
+        let input = open_regular(&entry.path())?;
+        ensure!(
+            input.metadata()?.len() <= 256 * 1024,
+            "media index record too large"
+        );
+        let mut bytes = Vec::new();
+        input.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 256 * 1024, "media index record too large");
+        let raw = serde_json::from_slice(&bytes)?;
         let record = DiskMediaRecord::decode(raw, root)?;
         ensure!(
             format!("{:x}", Sha256::digest(record.key.as_bytes())) == hash,

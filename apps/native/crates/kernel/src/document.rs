@@ -959,6 +959,17 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
+        for command in commands {
+            if let Command::Media(crate::MediaCommand::AdmitImport { prepared }) = command
+                && prepared
+                    .expected_document()
+                    .is_some_and(|id| id != self.doc_id())
+            {
+                return Err(TransactionError::Invalid(
+                    "Import belongs to an earlier document session".into(),
+                ));
+            }
+        }
         let revision = self.revision() + 1;
         let mut root = start.cloned();
         let mut forward = Vec::new();
@@ -1017,7 +1028,11 @@ impl DocumentStore {
         validate(&document, &forward)?;
         let media = commands
             .iter()
-            .flat_map(crate::commands::scene3d::import_media)
+            .flat_map(|c| {
+                crate::commands::scene3d::import_media(c)
+                    .into_iter()
+                    .chain(crate::commands::media::import_media(c))
+            })
             .collect::<Vec<_>>();
         for item in &media {
             if self

@@ -38,7 +38,7 @@ impl Evidence for Proof {
             six_owner_domains: true,
             state_complete: true,
             secrets_complete: !self.force_secret_gap,
-            restore_verified: self.ready,
+            installer_recovery_verified: self.ready,
             source_generation: 2,
             checkpoint_generation: if self.changed { 1 } else { 2 },
         })

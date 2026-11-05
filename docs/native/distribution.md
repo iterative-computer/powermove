@@ -1,5 +1,15 @@
 # Native distribution plumbing
 
+Current implementation: see [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation).
+`pm-update-policy::sparkle` now owns the supported asynchronous public-API bridge
+behind `sparkle-macos`; the synchronous `Installer` contract below remains for
+older consumers and tests, not the production Sparkle integration route. Policy
+readiness now requires `installer_recovery_verified`, not reverse migration.
+The owner has ruled out reverse migration and archive Restore UI; older Restore
+requirements below do not override that decision. Application termination/import
+leases and real signed installer/Keychain/notarization proofs remain required.
+
+
 Status: Linux-tested code and local packaging commands, **not cutover approval**.
 No app was published, signed, submitted for notarization, installed, tagged or
 released. No production feed, credential, Keychain item, profile or release

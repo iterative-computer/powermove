@@ -88,7 +88,8 @@ pub struct Eligibility {
     pub final_delta_complete: bool,
     pub all_six_owner_domains: bool,
     pub state_and_secrets_complete: bool,
-    pub restore_verified: bool,
+    /// Installer replacement/recovery proof only. No reverse data migration.
+    pub installer_recovery_verified: bool,
 }
 impl Eligibility {
     pub fn allows_native(self) -> bool {
@@ -105,7 +106,7 @@ impl Eligibility {
         route == Some(crate::updater::FeedRoute::NativeCutover)
             && self.installed_identity_verified
             && self.owner_approved
-            && self.restore_verified
+            && self.installer_recovery_verified
     }
 }
 
@@ -274,11 +275,25 @@ pub fn check(
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Stage {
     Downloading,
-    Downloaded { file: String },
-    Staging { file: String },
-    Staged { file: String, ticket: String },
-    InstallRequested { file: String, ticket: String },
+    Downloaded {
+        file: String,
+    },
+    Staging {
+        file: String,
+    },
+    Staged {
+        file: String,
+        ticket: String,
+    },
+    InstallRequested {
+        file: String,
+        ticket: String,
+    },
     Completed,
+    Sparkle {
+        file: String,
+        phase: crate::sparkle::Phase,
+    },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -383,7 +398,7 @@ impl StagingStore {
         }
         Ok(receipts)
     }
-    fn append(&self, offer: &Offer, stage: Stage) -> Result<()> {
+    pub(crate) fn append(&self, offer: &Offer, stage: Stage) -> Result<()> {
         let sequence = self.journal()?.len();
         // A torn pending publication is retained, not reused or deleted.
         let attempt = self.root.join(format!(
@@ -412,7 +427,7 @@ impl StagingStore {
     pub fn status(&self) -> Result<Option<(String, Stage)>> {
         Ok(self.journal()?.pop().map(|r| (r.offer.id, r.stage)))
     }
-    fn validate_offer(
+    pub(crate) fn validate_offer(
         &self,
         offer: &Offer,
         verifier: &impl SignatureVerifier,
@@ -432,8 +447,7 @@ impl StagingStore {
         }
         Ok(())
     }
-    /// Streams into a new retained attempt; partial downloads are never executed.
-    /// Rechecks the gate before network and again before installer staging.
+    /// Legacy synchronous adapter entrypoint retained for existing consumers.
     pub fn download_and_stage(
         &self,
         offer: &Offer,
@@ -449,19 +463,64 @@ impl StagingStore {
             Some(Stage::Staged { .. } | Stage::InstallRequested { .. } | Stage::Completed) => {
                 return Ok(());
             }
-            Some(Stage::Staging { .. }) => bail!("recover interrupted installer before staging"),
+            Some(Stage::Staging { .. } | Stage::Sparkle { .. }) => {
+                bail!("recover interrupted installer before staging")
+            }
             _ => {}
         }
+        let name = self.download_payload(
+            offer,
+            readiness,
+            transport,
+            verifier,
+            installer.available_space(&self.root)?,
+        )?;
+        self.stage_verified(offer, &name, installer)
+    }
+    /// Verify a retained archive independently before the Sparkle-owned cycle.
+    /// Sparkle downloads itself and verifies the exact same pinned EdDSA
+    /// signature; no external-archive adoption selector is used.
+    pub fn download_verified(
+        &self,
+        offer: &Offer,
+        readiness: &mut impl Readiness,
+        now: u64,
+        transport: &mut impl Transport,
+        verifier: &impl SignatureVerifier,
+        available_space: u64,
+    ) -> Result<String> {
+        ensure!(
+            !matches!(
+                self.status()?.map(|(_, s)| s),
+                Some(
+                    Stage::Sparkle { .. }
+                        | Stage::Staging { .. }
+                        | Stage::Staged { .. }
+                        | Stage::InstallRequested { .. }
+                        | Stage::Completed
+                )
+            ),
+            "recover existing installer first"
+        );
+        ensure!(readiness.current()?.allows_native(), "update gate closed");
+        self.validate_offer(offer, verifier, now)?;
+        self.download_payload(offer, readiness, transport, verifier, available_space)
+    }
+    fn download_payload(
+        &self,
+        offer: &Offer,
+        readiness: &mut impl Readiness,
+        transport: &mut impl Transport,
+        verifier: &impl SignatureVerifier,
+        available_space: u64,
+    ) -> Result<String> {
         let required = offer
             .release
             .size
             .checked_mul(2)
             .and_then(|n| n.checked_add(RESERVE))
             .context("update space overflow")?;
-        ensure!(
-            installer.available_space(&self.root)? >= required,
-            "insufficient update space"
-        );
+        ensure!(available_space >= required, "insufficient update space");
         self.append(offer, Stage::Downloading)?;
         let name = format!("archive-{:08}.part", next_attempt(&self.root)?);
         let path = self.root.join(&name);
@@ -496,7 +555,7 @@ impl StagingStore {
             "migration changed during download"
         );
         self.validate_offer(offer, verifier, readiness.now_unix()?)?;
-        self.stage_verified(offer, &name, installer)
+        Ok(name)
     }
     fn stage_verified(
         &self,
@@ -521,7 +580,7 @@ impl StagingStore {
             },
         )
     }
-    fn verify_archive(&self, offer: &Offer, name: &str) -> Result<PathBuf> {
+    pub(crate) fn verify_archive(&self, offer: &Offer, name: &str) -> Result<PathBuf> {
         ensure!(
             Path::new(name).components().count() == 1
                 && name.starts_with("archive-")
@@ -616,6 +675,7 @@ impl StagingStore {
                     Recovery::Pending => {}
                 }
             }
+            Stage::Sparkle { .. } => bail!("recover with asynchronous Sparkle binding"),
             Stage::Completed => {}
         }
         Ok(self.status()?.map(|(_, stage)| stage))

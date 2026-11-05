@@ -130,10 +130,19 @@ pub(crate) fn inventory(
             if r.source_path.is_none() {
                 r.source_path = disk.source_path.clone();
             }
-            if let Some(path) = &disk.owned_path {
+            use pm_native_migrate::library_media::SourceStatus;
+            let available = matches!(
+                disk.source_status()?,
+                SourceStatus::Owned | SourceStatus::Verified
+            );
+            if available && let Some(path) = disk.owned_path.as_ref().or(disk.source_path.as_ref())
+            {
                 // Full main SHA-256 is already verified. Proxy provenance is
                 // still determined from authored asset metadata, never filename.
-                if !r.is_proxy() && matches_original(path, r)? {
+                if !r.is_proxy()
+                    && (matches_original(path, r)?
+                        || (r.original_blake3.is_none() && r.fingerprint.is_none()))
+                {
                     r.original_blake3 = Some(disk::hash(path)?.0);
                     r.before = Availability::Original;
                 } else {

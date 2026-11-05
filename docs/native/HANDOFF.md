@@ -293,19 +293,23 @@ visible until its actual assertion has been demonstrated.
     concrete release candidate to the owner. **Never merge this branch without
     explicit owner OK.** A merge approval does not authorize tagging, publishing
     an update or dispatching a release workflow.
-13. **Beta.** Base: verified `feat/native-engine`; packaging/migration work is
-    already integrated, with the unresolved application bindings listed in
+13. **Beta.** Base: verified `feat/native-engine`. Beta3 preparation supplies the
+    service flat-file/source-link adapter, kernel import/folder admission,
+    optional public-API Sparkle binding, isolated checkpoint recovery and
+    headless signing proof tooling. See [current implementation and owner gates](beta2-readiness.md#beta3-implementation-preparation),
     [distribution.md](distribution.md), [first-launch.md](first-launch.md),
-    [s6-migration.md](s6-migration.md) and [os-base.md](os-base.md). State: isolated
-    profile and migration/update models exist; signed end-to-end beta proof is
-    open. Next: finish N001–N007 specs/UI and first-launch/updater integration,
-    native resource/rpath inventory and Sparkle driver; test direct/skipped-TR
-    migration, Keychain consent/denial, final delta, current-state forward/reverse
-    Restore, interrupted saves/installs, both architectures/macOS 14+, sandbox/JIT,
-    TCC, signing/notarization/Gatekeeper and isolated beta identity. Complete the
-    previous gates and owner review before any authorized beta publication.
-    Preserve original Electron data, unknown fields, history and archived copies;
-    prune consumers only after their replacements and rollback are proven.
+    [s6-migration.md](s6-migration.md) and [os-base.md](os-base.md).
+    Application termination/import leases and actual signed installer/Keychain/
+    notarization/physical proof remain open. Finish the application integration,
+    native resource/rpath inventory, direct/skipped-TR and final-delta proof,
+    consent/denial, interrupted saves/replacement, both architectures/macOS 14+,
+    sandbox/JIT, TCC, Gatekeeper and isolated beta identity. Checkpoint recovery
+    copies into a new private directory; installer recovery retains the old app.
+    The owner requires **no reverse migration and no archive Restore UI**. The
+    original app must refuse a native file it cannot fully read without changing
+    it. Preserve original Electron data, unknown fields, history and archived
+    copies. Complete prior gates and owner review before any authorized beta
+    publication; this preparation authorizes no tag, upload or release.
 
 ## Mac setup, build, test and run
 
