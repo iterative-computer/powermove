@@ -364,3 +364,169 @@ closure, agent/tool adapters and the macOS integration above remain open.
 All 83 workflow verdicts and pass/fail/blocked status columns are maintained in
 [W1](w1-workflows.md#native-execution-status). The complete per-case open work is
 [remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv).
+
+## Parity follow-up — 2026-11-04
+
+This dated section supersedes the Wave 5 counts above. Branch
+`feat/na-cloud-accept2`, integration base `ed5482622f41c533199a724dcb8c8738dd4dcc93`.
+Only the acceptance subtree and the two lane-owned Markdown documents change.
+The shared triage, original workflows/keymap, 396 specs and frozen 370 roster
+remain intact. There are no visual changes or new `DESIGN-TODO(opus)` notes.
+
+The configured Linux run executes **4,603 assertions: 1,466 pass / 1 fail /
+3,136 blocked**. It closes **23 original blockers** against existing production
+backing. The default run is **1,423 / 1 / 3,179**; its additional 43 blockers
+explicitly require the optional native worker/bundle. All **83 full workflow
+contracts remain blocked**. W061's aggregate is fail because its supporting
+curve oracle fails; the other 82 aggregates are blocked. All 396 complete spec
+replacements remain blocked. A component/unit pass never certifies an app flow.
+
+| Newly executed original IDs | Real backing and scope |
+|---|---|
+| A510 | `McpSession` → `pm-mcp-backends::BuiltinSources`: isolated source staging, rewritten user-fork manifest, exact pristine merge base, inert kernel registrations, no overwrite, and retained commit/cancel archives. Inputs are synthetic shipped-resource trees; no installed extension is discovered. |
+| A532 | Actual MCP effect registration validator: valid definition, exact diagnostics/precedence, duplicate keys, UTF-16 size boundary, unchanged document/revision. No shader compilation/pixels claimed. |
+| A660–A663, A666, A668–A669, A678 | Current-source v1–3 registry APIs in actual native V8: keybindings, effects/transitions/layers, theme data/events, synchronous/asynchronous menus, status callbacks and Inspector sections. Exact identity, override/restoration, refused definitions and owned disposal execute. |
+| A690 | Actual `pm-compat-runner` → native V8 StorageAPI get/set/delete, exact nested values, owner isolation and retained state across v1–3 activation/reload. Profile/disk restart remains a host gate. |
+| A693, A695–A696, A698 | Activation-frozen variables; all five menu contribution locations; conditional sections at all three placements and retained mount cleanup; both status sides/title/computed callbacks. These certify API data/lifecycle, without painting or native input. |
+| B568–B570, B610–B614 | Actual current compat control binding/gesture code in native V8, with the explicit recording API sinks used by the tagged unit contracts. Exact live time, command mapping, work-area clamps, begin/write/commit/cancel, one-shot/default origin, local and legacy-history modes. These are unit dispatch contracts, not kernel transactions or native drags. |
+
+The [closure ledger](../../apps/native/crates/acceptance/data/closures-2026-11-04.csv)
+retains every resolved ID and assertion. Original pass count rises from 23 to 46.
+Two supporting curve checks and three connected compat probes bring the inventory
+from 4,598 to 4,603; 1,365 resolver probes, 18 worker probes, two declared adapter doubles
+and three public container copies retain their limits.
+
+Three new supporting probes use the existing real `pm-compat-runner` binding:
+`W040.compat-kernel-history` checks native authored writes, callback return/throw
+identity, rollback, history.cancel retention, external closures and Undo/Redo;
+`W040.compat-kernel-edits` checks typed apply/begin/dispatch/commit/cancel,
+atomic malformed-tail refusal and Undo/Redo; `W040.compat-native-pixels` checks
+real JS recorder → native CPU fill/drawImage/readback after source resize/disposal.
+No recorder or kernel test double supplies those results. Their untested complete
+API members and Canvas/engine/WebKit requirements stay blocked. The optional
+worker test suite now bundles current production sources and executes every
+bundle-backed case, as well as the parent configured report.
+
+### Measured defect remains a failure
+
+`W061.frozen-set-easing` now executes the existing frozen e2e Glide oracle in the
+main acceptance report too. Sequential `set_property` at 0/2/3 seconds, with
+10/110/−40 values and Glide `[0.16, 0.84, 0.24, 1]`, evaluates at 1 second to
+**90.42094586353606**, expected **104.94929544957891**. The paired
+`W061.frozen-replace-easing` passes. Both runners share the same independent f64
+curve inversion; no tolerance, key, handle or expected value changed. The owning
+kernel/MCP lane must preserve both easing handles in sequential key creation.
+The known-defect Rust guard is harness verification, never a product pass.
+
+The complete configured run exits **1**, with or without `--strict`, because a
+measured failure takes precedence over blockers. A strict W040 run exits **2**
+for its remaining blockers; passing filtered A532 exits **0**. Blockers remain
+in JSON/CSV when a failure determines the process exit.
+
+### Exact remaining backing and retained provenance
+
+[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv)
+contains all 3,136 outstanding assertion IDs and exact unverified contracts.
+[blocker-groups.csv](../../apps/native/crates/acceptance/data/blocker-groups.csv)
+and JSON `blocker_groups` partition them once into **151 backing IDs**. The
+[83-workflow backing inventory](../../apps/native/crates/acceptance/data/backings.json)
+names each remaining coordinator/adapter/oracle. MCP groups retain exact tool
+names and `catalog::backing`; compat groups name detached API backends instead
+of grouping all API members as an unspecified runtime. The 1,755 physical-key
+variants still need the same real shell dispatcher. No production backing
+availability is inferred from a flag or an adjacent passing component.
+
+Dependencies other lanes can provide:
+
+- **Engine/media/export:** `pm-engine-service` links Metal/AppKit and cannot be
+  used as the real Headless adapter on Linux. Supply actual renderer/resource,
+  original-byte/media-probe/decoder/waveform and ExportChild bindings, then execute
+  the retained frame/timestamp/audio oracles. Existing metadata/cache/archive
+  probes do not establish decoded media or rendered delivery.
+- **Kernel/MCP:** repair the measured Glide defect; file-open/adopt and resident
+  media ingress are still needed for A506 packed-media Save; unfinished tool
+  bodies remain grouped by exact tool name. Metadata alone cannot seed bytes.
+- **Compat:** native V8/kernel history closures and typed edit transactions now
+  run, as does JS recorder → native CPU fill/drawImage/readback with immutable
+  source pins. Complete `history.selection` dispatch and `edit.mutateStart` /
+  `edit.mutateFinish` / `edit.mutateAbort` lease adapters are still missing.
+  Animation/model/space3d queries, profile/disk storage lifecycle, full Canvas
+  text/paint/encoding, engine resources and native host actions remain.
+  Execute WebKit/remote-DOM and all unchanged extension scenarios;
+  registry and control dispatch unit checks do not replace them.
+- **Application:** native windows/close/open coordination, panels, key dispatch,
+  menus, clipboard, IME/AX and editing controls; agent provider/thread/approval,
+  Store transport/install/publish and speech-model/inference services remain
+  separately named. Physical performance and signed helper/updater gates need Mac.
+
+The requested `bun run --cwd apps/desktop test:e2e:ledger` was attempted on this
+container and exits 1: its available `playwright` command reports `unknown command 'test'`. The configured Playwright test runner is not usable here. No Electron ledger
+or GUI case is reported as executed or passing. The frozen source/declaration
+ledger and retained Rust equivalents run independently above.
+
+The standalone frozen e2e runner initially failed five inventory tests because
+its required declaration annotations were absent from the merged shared triage.
+The repair stores those exact links in the owned
+[e2e-declarations.csv](../../apps/native/crates/acceptance/data/e2e-declarations.csv),
+checks all **614** declaration IDs/file/line/hashes/titles/workflows/native-check
+links against the frozen ledger, and leaves shared triage untouched. No declaration
+or assertion was dropped. A fresh read-only TypeScript 5.9.3 extraction against
+the actual tag also matches all 290 source files, 289 specs, 614 declarations
+and 80 parameterized declarations. Its actual report remains **29 passed / 1 failed checks**,
+with **3 complete headless declarations passed / 1 failed / 610 blocked**.
+
+The refresh script now writes only owned CSV snapshots and appends the dated
+[W1 status](w1-workflows.md#native-execution-status--2026-11-04). Identical replay
+is a no-op; it refuses rewriting differing dated shared evidence. Historical
+triage links remain a subset of the current e2e map; every original provenance
+field remains unchanged. Filtered/external-corpus inputs, changed rosters,
+duplicate IDs and incomplete blocker partitions are refused.
+
+### Project memory source reconciliation
+
+Read-only checks of frozen commit `07ed5fa17ee640659cb075f9cad1af2095011d60`
+find **no `project_memory` reference** under either `apps/desktop/src/main/agent-tools`
+or `apps/desktop/src/renderer/src`. Its 67-tool union has no such tool and
+`get_project_state` has no memory-index description. A511/A512 and the older
+appendix sentence claiming that this already ships misattribute later behavior
+to the tag. This is a source-inventory error, not evidence of a lost shipped tool.
+
+N3/N4 select retaining both original IDs/wording as explicit additional native
+requirements, with blocker **`memory-post-tag-requirement`**: implement kernel
+memory storage/index and admit the tool through an explicit versioned API change.
+Do not insert a fictitious 68th member into the frozen union or silently drop
+memory. Regression checks keep the frozen union and both pending requirements.
+
+### Decisions and verification
+
+| Decision | Selecting rule |
+|---|---|
+| Execute existing native V8/registry/file/kernel backing by exact assertion ID; distinguish original unit contracts from application gates | N1/N3/N6/N7: authored behavior and evidence scope stay exact |
+| Share the unchanged independent Glide oracle and expose its failure in both reports | N3: correctness over imitation; never turn a defect into a pass or blocker |
+| Keep frozen rosters/claims and append W1 evidence; move generated declaration links into owned output | N4/N7 and ownership/prune: retain all consumers and provenance without editing shared triage |
+| Keep runtime dependencies separately locked; refresh only graph edges/new package dependencies, including the required smallvec pin | N7/N8 and lockfile ownership: no Node/Chromium in native execution or bulk upgrades |
+| Canonicalize disposable temp roots; run actors, child waits and V8 on workers | N4/N8 and macOS-safe test rule: accept system temp aliases and keep main-thread waits absent |
+
+Final Linux checks: **79 acceptance + 17 optional-worker + 36 retained-e2e Rust
+tests, plus 4 Python report tests; all pass, none ignored**. Formatting and
+crate-local Clippy `-D warnings` pass for all three manifests. The companion's
+current-source bundle test is serialized with its service-storage drop/reopen
+fixture: a bundler child can briefly inherit an advisory lock during fork/exec.
+The exact refusal/reopen assertions remain unchanged, with no retry/tolerance. The configured
+acceptance run and frozen e2e report deliberately exit 1 for the measured product
+defect above; strict W040 exits 2. Every Cargo build/test/run/Clippy uses `--locked`.
+
+```sh
+source /workspace/.tools/activate.sh; cd /workspace/powermove
+apps/native/crates/acceptance/scripts/verify.sh --strict
+cargo run --locked --manifest-path apps/native/crates/acceptance/src/e2e/Cargo.toml --bin pm-e2e-triage
+python3 apps/native/crates/acceptance/scripts/refresh-reports.py work/native-acceptance/report.json
+```
+
+The first two commands deliberately return 1 while their real reports retain the
+failure and blockers. The strict filtered W040 command uses the same native
+worker and current bundle as `verify.sh`, with `--workflow W040 --strict`.
+Reverification on macOS still needs the S1 archive plus matching bindings and
+`--features macos-sandbox`, actual GPUI/AppKit/IME/AX/WebKit execution, Metal
+frames, codecs/source identity, audio devices, signed confinement/migration and
+physical display/performance gates. Linux evidence certifies none of those.
