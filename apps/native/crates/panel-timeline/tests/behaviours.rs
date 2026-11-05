@@ -1241,9 +1241,10 @@ fn cue_modifiers_toggle_without_starting_drag() {
     assert_eq!(s, CueSelection::default());
 }
 #[test]
-fn missing_caption_kernel_is_rejected_instead_of_simulating_success() {
+fn caption_moves_reach_the_kernel_and_undo_retains_cues() {
     let mut v = fixture();
     layer_mut(&mut v, 2).insert("type", Value::from("captions"));
+    layer_mut(&mut v, 2).insert("d", pm_model::json::parse(r#"{"cues":[{"id":"cue","start":1,"end":2,"text":"Synthetic"}],"opaque":{"keep":true}}"#).unwrap());
     let (_a, mut c) = client_with(v);
     let p = c
         .model
@@ -1255,7 +1256,36 @@ fn missing_caption_kernel_is_rejected_instead_of_simulating_success() {
             },
         )
         .unwrap();
-    assert!(block_on(c.dispatch(p)).is_err());
+    let published = c.kernel.published(&c.project).unwrap();
+    let before = published.snapshot.document.to_value().unwrap();
+    let before_revision = published.revision();
+    block_on(c.dispatch(p)).unwrap();
+    assert!(c.kernel.published(&c.project).unwrap().revision() > before_revision);
+    block_on(c.call(pm_kernel::HistoryCall::Undo.into())).unwrap();
+    let after = c
+        .kernel
+        .published(&c.project)
+        .unwrap()
+        .snapshot
+        .document
+        .to_value()
+        .unwrap();
+    // History preserves authored content; revision is a separate monotonic stamp.
+    let layer = |document: pm_model::Value| {
+        let document = pm_model::canonical::realize_project(document);
+        document
+            .get("layers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l.get("id").and_then(Value::as_str) == Some("c"))
+            .unwrap()
+            .get("d")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(layer(before), layer(after));
 }
 #[test]
 fn import_drop_is_id_addressed_and_option_requests_folder() {

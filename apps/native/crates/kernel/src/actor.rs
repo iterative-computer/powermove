@@ -280,9 +280,16 @@ enum Msg {
         call: crate::profile::ProfileCall,
         reply: Reply<Result<crate::profile::ProfileReply, KernelFailure>>,
     },
+    PrepareExport {
+        session: crate::session::SessionHandle,
+        document: u64,
+        path: std::path::PathBuf,
+        reply: Reply<Result<crate::SavePlan, KernelFailure>>,
+    },
     PrepareSave {
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
+        document: Option<u64>,
         reply: Reply<Result<crate::session::SessionSave, KernelFailure>>,
     },
     FinishSave {
@@ -445,15 +452,47 @@ impl KernelHandle {
         });
         p
     }
+    pub fn prepare_export(
+        &self,
+        session: crate::session::SessionHandle,
+        document: u64,
+        path: std::path::PathBuf,
+    ) -> Pending<Result<crate::SavePlan, KernelFailure>> {
+        let (reply, pending) = oneshot();
+        self.send(Msg::PrepareExport {
+            session,
+            document,
+            path,
+            reply: Box::new(move |v| reply.resolve(v)),
+        });
+        pending
+    }
     pub fn prepare_save(
         &self,
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
     ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
+        self.prepare_save_checked(session, path, None)
+    }
+    /// A queued automation save remains bound to the observed document lifetime.
+    pub fn prepare_document_save(
+        &self,
+        session: crate::session::SessionHandle,
+        document: u64,
+    ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
+        self.prepare_save_checked(session, None, Some(document))
+    }
+    fn prepare_save_checked(
+        &self,
+        session: crate::session::SessionHandle,
+        path: Option<std::path::PathBuf>,
+        document: Option<u64>,
+    ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
         let (r, p) = oneshot();
         self.send(Msg::PrepareSave {
             session,
             path,
+            document,
             reply: Box::new(move |v| r.resolve(v)),
         });
         p
@@ -780,13 +819,32 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
         match msg {
             Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
             Msg::Profile { call, reply } => reply(kernel.profile(call)),
-            Msg::PrepareSave {
+            Msg::PrepareExport {
                 session,
+                document,
                 path,
                 reply,
             } => {
+                reply(kernel.prepare_session_export(session, document, path));
+            }
+            Msg::PrepareSave {
+                session,
+                path,
+                document,
+                reply,
+            } => {
                 let id = session.project.clone();
-                let result = kernel.prepare_session_save(session, path);
+                let result = if document.is_some_and(|expected| {
+                    kernel
+                        .project(&id)
+                        .is_none_or(|p| p.store().doc_id() != expected)
+                }) {
+                    Err(KernelFailure::Storage(
+                        "The document was closed or replaced; the save was not applied".into(),
+                    ))
+                } else {
+                    kernel.prepare_session_save(session, path)
+                };
                 let revision = publish(&mut kernel, &shared, &id);
                 reply(result);
                 if let Some(revision) = revision {

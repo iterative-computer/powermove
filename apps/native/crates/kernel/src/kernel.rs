@@ -397,6 +397,9 @@ impl Kernel {
             .slots
             .get_mut(id)
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
+        slot.project
+            .store_mut()
+            .set_runtime_state(self.state.clone());
         let workspace_write = matches!(request.call, Call::Workspace(WorkspaceCall::Mutate { .. }));
         let mut handled = slot.project.handle(request);
         if let (Some(journal), Some(durability)) = (&mut slot.journal, &self.durability) {
@@ -537,10 +540,22 @@ impl Kernel {
         tx: crate::state::StateTransaction,
     ) -> Result<crate::state::StateAck, KernelFailure> {
         for op in &tx.ops {
-            if let crate::state::StateOp::Ui { project, .. } = op
-                && !self.slots.contains_key(project)
-            {
-                return Err(KernelFailure::NoProject(project.clone()));
+            match op {
+                crate::state::StateOp::Ui { project, .. }
+                | crate::state::StateOp::UiDocument { project, .. } => {
+                    let slot = self
+                        .slots
+                        .get(project)
+                        .ok_or_else(|| KernelFailure::NoProject(project.clone()))?;
+                    if let crate::state::StateOp::UiDocument { document, .. } = op
+                        && *document != slot.project.store().doc_id()
+                    {
+                        return Err(KernelFailure::Storage(
+                            "The document was closed or replaced; UI state was not changed".into(),
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
         let (next, changes) = self.state.stage(tx).map_err(KernelFailure::Storage)?;

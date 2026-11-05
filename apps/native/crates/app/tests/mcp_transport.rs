@@ -78,7 +78,11 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
     let generated=Command::new("bun").args(["-e", "import { allProjects } from './engine/corpus/src/projects'; const p=allProjects().find(p=>!p.extensions?.length && p.doc.layers?.length); if(!p) process.exit(1); process.stdout.write(JSON.stringify(p.doc));"])
         .current_dir(repo).output().expect("Bun is required for the existing corpus generator");
-    assert!(generated.status.success(), "Corpus preparation failed");
+    assert!(
+        generated.status.success(),
+        "Corpus preparation failed: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
     for proxy in [false, true] {
         let case = root.path().join(if proxy { "proxy" } else { "direct" });
         std::fs::create_dir_all(&case).unwrap();

@@ -11,6 +11,7 @@ publish = false
 # are linked by path (docs/gpui/engine-boundary.md, section 2).
 
 [dependencies]
+pm-captions = { path = "../../../../engine/crates/pm-captions" }
 pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-scene3d = { path = "../scene3d" }
 serde_json = "1"
