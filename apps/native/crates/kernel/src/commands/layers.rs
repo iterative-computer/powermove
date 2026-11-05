@@ -330,7 +330,7 @@ fn obj(pairs: &[(&str, Value)]) -> Value {
 }
 
 /// `PM.mkLayer(type, opts, comp)` for the types the core can build without
-/// a registry (not captions, extension or shader layers).
+/// a registry (extension and shader layers need their owning definitions).
 pub(crate) fn make_layer(
     layer_type: &str,
     id: &str,
@@ -345,9 +345,8 @@ pub(crate) fn make_layer(
     {
         return result;
     }
-    if matches!(layer_type, "captions" | "extension" | "shader") {
+    if matches!(layer_type, "extension" | "shader") {
         return Err(CommandError::NotImplemented(match layer_type {
-            "captions" => "add_layer (captions: use add_captions)",
             "extension" => "add_layer (extension layers need their definition)",
             _ => "add_layer (shader layers need the shader template)",
         }));
@@ -399,6 +398,7 @@ pub(crate) fn make_layer(
         }
     };
     let d = match layer_type {
+        "captions" => super::captions::initial_content(content, h)?,
         "solid" => obj(&[
             ("color", values::s("#1b1b1f")),
             ("w", n(w)),
@@ -483,8 +483,10 @@ pub(crate) fn make_layer(
         }
     };
     let mut d = d;
-    for (k, v) in content.iter() {
-        values::obj(&mut d).insert(k.clone(), v.clone());
+    if layer_type != "captions" {
+        for (k, v) in content.iter() {
+            values::obj(&mut d).insert(k.clone(), v.clone());
+        }
     }
     for (k, v) in properties.iter() {
         if let Some(ch) = p.get_key_mut(k).and_then(Value::as_object_mut) {
@@ -498,6 +500,14 @@ pub(crate) fn make_layer(
     l.insert("p", Value::Object(p));
     l.insert("d", d);
     Ok(Value::Object(l))
+}
+
+pub(crate) fn make_caption_layer(
+    id: &str,
+    name: Option<&str>,
+    comp: (f64, f64, f64),
+) -> Result<Value, CommandError> {
+    make_layer("captions", id, name, comp, &Map::new(), &Map::new())
 }
 
 const FORBIDDEN_KEYS: [&str; 3] = ["__proto__", "prototype", "constructor"];

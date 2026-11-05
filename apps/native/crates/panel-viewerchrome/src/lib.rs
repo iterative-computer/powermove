@@ -191,14 +191,17 @@ impl ViewModel {
                 };
                 return Ok(Plan {
                     stamp: self.stamp.clone(),
-                    effect: Effect::Document(Request::new(
-                        caller,
-                        Call::Transact {
-                            label: Some("Work area".into()),
-                            body: WriteBody::Commands(vec![Command::Comp(command)]),
-                            expected_revision: Some(self.stamp.revision),
-                        },
-                    )),
+                    effect: Effect::Document(
+                        Request::new(
+                            caller,
+                            Call::Transact {
+                                label: Some("Work area".into()),
+                                body: WriteBody::Commands(vec![Command::Comp(command)]),
+                                expected_revision: Some(self.stamp.revision),
+                            },
+                        )
+                        .with_document(self.stamp.document),
+                    ),
                 });
             }
             Action::Select { ids, mode } => {
@@ -236,13 +239,16 @@ impl ViewModel {
                 };
                 return Ok(Plan {
                     stamp: self.stamp.clone(),
-                    effect: Effect::Document(Request::new(
-                        caller,
-                        SelectionCall::Layers {
-                            ids: next,
-                            add: mode == SelectionMode::Add,
-                        },
-                    )),
+                    effect: Effect::Document(
+                        Request::new(
+                            caller,
+                            SelectionCall::Layers {
+                                ids: next,
+                                add: mode == SelectionMode::Add,
+                            },
+                        )
+                        .with_document(self.stamp.document),
+                    ),
                 });
             }
             Action::Host(action) => return Ok(self.host(action)),

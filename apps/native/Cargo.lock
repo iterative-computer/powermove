@@ -5001,6 +5001,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "libc",
+ "pm-captions",
  "pm-edit",
  "pm-eval",
  "pm-expr",
@@ -5274,6 +5275,19 @@ dependencies = [
  "pm-design",
  "pm-kernel",
  "pm-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pm-panel-studio3d"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-scene3d",
+ "pm-surface",
  "serde",
  "serde_json",
 ]
