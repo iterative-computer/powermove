@@ -84,7 +84,9 @@ buttons its spec lists.
 
 Right-click on a header (title or tab) shows the **dock menu** owned by
 `pm-shell` (Close Panel, Move to Left Dock / Right Dock / Bottom Dock with a
-checkmark on the current one, Pop Out). Panels do not add to it.
+checkmark on the current one, Group With ▸, Dock Above ▸, Dock Below ▸, Maximize
+Panel, Pop Out). Panels do not add to it. Tab stacks, drop zones and maximize:
+[main-delta-ui.md §2](../surfaces/main-delta-ui.md#2-docking-bottom-dock-tab-stacks-drop-zones-maximize-p01-u01).
 
 ---
 
