@@ -192,7 +192,7 @@ fn legacy_container_archive_and_outer_intent_survive() {
 #[test]
 fn legacy_failure_is_visible_and_lossless() {
     let mut c = comp();
-    let old = json!({"id":"old","d":{"definition":"powermove.3d.obj-model","params":{"autoRotate":{"v":true}},"data":{"assetId":"source"}}});
+    let old = json!({"id":"old","dur":100,"d":{"definition":"powermove.3d.obj-model","params":{"autoRotate":{"v":true}},"data":{"assetId":"source"}}});
     c["layers"] = json!([old.clone()]);
     let r = migration::upgrade_project(&mut c).unwrap();
     assert_eq!(r.issues.len(), 1);

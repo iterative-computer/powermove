@@ -1,5 +1,6 @@
 //! Studio's document side. No UI, JS engine, platform handles or second writer.
 //! Source contracts: 3D source b81b94c66; shipped reference c7f46a056.
+pub mod geometry;
 pub mod import;
 pub mod light_tool;
 pub mod migration;

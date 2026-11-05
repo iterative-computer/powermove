@@ -57,7 +57,7 @@ impl Lens {
                 far,
             } => {
                 if ![fov, aspect, near, far].iter().all(|v| v.is_finite())
-                    || !(0. ..180.).contains(&fov)
+                    || (fov <= 0. || fov >= 180.)
                     || aspect <= 0.
                     || near <= 0.
                     || far <= near

@@ -152,6 +152,28 @@ pub(crate) fn resolve(
 ) -> Result<(LayerLoc, Value, String, Vec<Step>), CommandError> {
     let (loc, mut layer) = cx.layer_mut_checked(layer_id)?;
     let key = values::channel_key(channel).to_owned();
+    // The 3D source preserves hand-authored channels for every generated
+    // origin, including expressions and full keyframe replacements.
+    if cx.origin().is_generated()
+        && layer
+            .get("d")
+            .and_then(|d| d.get("definition"))
+            .and_then(Value::as_str)
+            .is_some_and(|d| {
+                [
+                    pm_scene3d::schema::OBJECT,
+                    pm_scene3d::schema::LIGHT,
+                    pm_scene3d::schema::CAMERA,
+                ]
+                .contains(&d)
+            })
+        && (locked_intent(&layer, &key) || locked_intent(&layer, "3d"))
+    {
+        return Err(CommandError::PreservedHandEdit {
+            layer_id: layer_id.into(),
+            channel: key,
+        });
+    }
     let path =
         channels::materialize(&mut layer, &key).ok_or_else(|| CommandError::PropertyNotFound {
             layer_id: layer_id.to_owned(),

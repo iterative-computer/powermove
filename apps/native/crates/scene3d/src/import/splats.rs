@@ -289,8 +289,16 @@ pub fn parse_ply(bytes: &[u8]) -> Result<Data> {
 impl Data {
     /// Dense-core framing (2nd–98th percentile), unit radius, COLMAP y-down to
     /// editor y-up. The host applies this to the immutable decoded asset.
-    pub fn normalization(&self) -> (Vec3, f64) {
+    pub fn normalization(&self) -> Result<(Vec3, f64)> {
+        let b = self.dense_core()?;
+        Ok((
+            mul(add(b.min, b.max), 0.5),
+            (length(sub(b.max, b.min)) / 2.).max(1e-6),
+        ))
+    }
+    pub fn dense_core(&self) -> Result<Bounds> {
         let n = self.splats.len();
+        count(n)?;
         let mut lo = [0.; 3];
         let mut hi = [0.; 3];
         for a in 0..3 {
@@ -299,11 +307,14 @@ impl Data {
                 .iter()
                 .map(|s| s.center[a] as f64)
                 .collect::<Vec<_>>();
+            for value in &v {
+                finite(*value)?;
+            }
             v.sort_by(f64::total_cmp);
             lo[a] = v[(n as f64 * 0.02).floor() as usize];
             hi[a] = v[((n as f64 * 0.98).floor() as usize).min(n - 1)];
         }
-        (mul(add(lo, hi), 0.5), (length(sub(hi, lo)) / 2.).max(1e-6))
+        Ok(Bounds { min: lo, max: hi })
     }
     /// Stable, exact far-to-near ordering; no 16-bit depth quantization quirk.
     pub fn order(&self, view: [f64; 16]) -> Result<Vec<u32>> {

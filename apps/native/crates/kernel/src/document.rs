@@ -174,6 +174,8 @@ struct Gesture {
 
 /// A transaction staged on a scratch tree, not yet published.
 struct Staged {
+    /// Immutable 3D import capabilities, admitted on a worker before planning.
+    media: Vec<project_io::MediaEntry>,
     document: Document,
     forward: Vec<Op>,
     inverse: Vec<Op>,
@@ -271,7 +273,6 @@ impl DocumentStore {
 
     /// A never-saved project from a project value (stored or canonical form).
     pub fn new_untitled(project: Value) -> DocumentStore {
-        let project = crate::commands::scene3d::upgrade_project(project);
         let document = Document::new(Some(model::to_canonical(project)), 1);
         DocumentStore::from_parts(ProjectFile::untitled(), document, History::new(), true)
     }
@@ -282,20 +283,8 @@ impl DocumentStore {
         history: History,
         history_owned: bool,
     ) -> DocumentStore {
-        let document = {
-            let value = document.root().map(Node::to_value);
-            match value {
-                Some(value) => {
-                    let upgraded = crate::commands::scene3d::upgrade_project(value.clone());
-                    if upgraded != value {
-                        Document::new(Some(upgraded), document.revision())
-                    } else {
-                        document
-                    }
-                }
-                None => document,
-            }
-        };
+        let (document, history) =
+            crate::commands::scene3d::upgrade_document_history(document, history);
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
@@ -642,6 +631,9 @@ impl DocumentStore {
         cause: ChangeCause,
     ) -> Option<Committed> {
         if !staged.changed {
+            for item in staged.media {
+                self.file.media.insert(item);
+            }
             return None;
         }
         let structural = staged
@@ -668,6 +660,9 @@ impl DocumentStore {
         );
         self.history_owned = true;
         self.tap_push();
+        for item in staged.media {
+            self.file.media.insert(item);
+        }
         self.publish(staged.document, forward, cause);
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -821,6 +816,9 @@ impl DocumentStore {
         let origin = self.gesture_mut(id)?.origin;
         let staged = self.stage_commands(commands, origin)?;
         if !staged.changed {
+            for item in staged.media {
+                self.file.media.insert(item);
+            }
             return Ok(None);
         }
         self.gesture_mut(id)?.scopes.extend(staged.scopes);
@@ -968,7 +966,24 @@ impl DocumentStore {
         inverse.reverse();
         let document = Document::from_root(root, revision);
         validate(&document, &forward)?;
+        let media = commands
+            .iter()
+            .flat_map(crate::commands::scene3d::import_media)
+            .collect::<Vec<_>>();
+        for item in &media {
+            if self
+                .file
+                .media
+                .get(item.id.as_str().unwrap_or(""))
+                .is_some_and(|old| old.revision != item.revision || old.length() != item.length())
+            {
+                return Err(TransactionError::Invalid(
+                    "A retained 3D import already owns this asset ID".into(),
+                ));
+            }
+        }
         Ok(Staged {
+            media,
             document,
             forward,
             inverse,
@@ -1016,6 +1031,7 @@ impl DocumentStore {
         let document = Document::from_root(root, revision);
         validate(&document, ops)?;
         Ok(Staged {
+            media: vec![],
             document,
             forward: ops.to_vec(),
             inverse,
@@ -1194,6 +1210,18 @@ impl DocumentStore {
         {
             ids.extend(assets.keys().filter_map(|k| k.as_str().map(str::to_owned)));
         }
+        if let Some(root) = self.root() {
+            crate::commands::scene3d::collect_original_assets(&root.to_value(), &mut ids);
+        }
+        for record in self.history.records() {
+            for op in record.forward.iter().chain(record.inverse.iter()) {
+                if let Op::Leaf(p) = op
+                    && let Some(value) = p.value.as_ref()
+                {
+                    crate::commands::scene3d::collect_original_assets(value, &mut ids);
+                }
+            }
+        }
         ids
     }
 }
@@ -1325,6 +1353,9 @@ impl DocumentStore {
             WriteBody::Ops(ops) => self.stage_ops(ops, true)?,
         };
         if !staged.changed {
+            for item in staged.media {
+                self.file.media.insert(item);
+            }
             return Ok(None);
         }
         let applied = Applied {
@@ -1332,6 +1363,9 @@ impl DocumentStore {
             inverse: staged.inverse,
             scopes: staged.scopes,
         };
+        for item in staged.media {
+            self.file.media.insert(item);
+        }
         self.publish(staged.document, staged.forward.into(), cause);
         self.set_state_token(next_token());
         Ok(Some(applied))
@@ -1370,6 +1404,9 @@ impl DocumentStore {
             inverse: staged.inverse,
             scopes: staged.scopes,
         };
+        for item in staged.media {
+            self.file.media.insert(item);
+        }
         self.publish(staged.document, ops.into(), cause);
         self.set_state_token(next_token());
         Ok(Some(applied))

@@ -1,0 +1,14 @@
+// Independent, test-only TypeScript schema oracle; source b81b94c66.
+// npm install --prefix WORK zod@4.6.5; PM_ORACLE_MODULE_ROOT=WORK node generate.mjs
+import {stripTypeScriptTypes,createRequire} from 'node:module';
+import vm from 'node:vm';import fs from 'node:fs';import path from 'node:path';
+const require=createRequire(path.join(process.env.PM_ORACLE_MODULE_ROOT,'package.json'));
+if(require('zod/package.json').version!=='4.6.5')throw Error('zod 4.6.5 required');
+const {z}=require('zod');const raw=fs.readFileSync(new URL('schema.ts',import.meta.url),'utf8');
+const code=stripTypeScriptTypes(raw.replace(/^import .*;\n/gm,'').replace(/^export /gm,''),{mode:'strip'});
+const {parseScene}=vm.runInNewContext(`${code}\n;({parseScene})`,{z,layer3DProperties:()=>[]});
+const object=extra=>({id:'model',source:{primitive:'box'},...extra});
+const cases=[{}, {version:1.0}, {objects:[object({})]}, {lights:[{id:'key',type:'area'}]}, {camera:{projection:'orthographic',p:{fStop:2.8,focusDistance:3}}}, {environment:{samples:1024,shadowCatcher:true}}, {objects:[object({material:{screen:'display',p:{sheen:.5,iridescence:700,dispersion:.1,droplets:.2,anisotropy:-.8,subsurface:3}}})]}, {objects:[object({source:{primitive:'roundedBox',parameters:{segments:6,radius:.1}}})]}, {objects:[object({source:{lathe:[[0,0],[1,0],[1,2]]}})]}, {objects:[object({source:{extrude:[[0,0],[1,0],[0,1]],depth:.2,bevel:.1}})]}, {objects:[object({source:{mesh:{positions:[0,0,0,1,0,0,0,1,0],indices:[0.0,1.0,2.0],normals:[0,0,1,0,0,1,0,0,1],uvs:[0,0,1,0,0,1]}}})]}, {objects:[object({p:{x:{v:1,kf:[{t:.5,v:2,i:'key',ei:[-.2,0],future:true}],expr:'time'}}})]}, {objects:[object({source:{assetId:'a'},material:{maps:{color:'c',normal:'n'}}})]},
+ {future:true},{objects:[object({future:true})]},{objects:[object({p:{unknown:1}})]},{objects:[object({material:{p:{roughness:.019}}})]},{objects:[object({material:{p:{ior:2.7}}})]},{objects:[object({material:{p:{anisotropy:-1.1}}})]},{objects:[object({p:{visible:1}})]},{objects:[object({p:{x:{v:0,kf:[{t:-.1,v:1}]}}})]},{objects:[object({parent:'missing'})]},{objects:[object({id:'camera'})]},{objects:[object({id:'_invalid'})]},{objects:[object({id:'a',parent:'b'}),object({id:'b',parent:'a'})]},{objects:[object({})],lights:[{id:'model'}]},{camera:{p:{near:10,far:5}}},{environment:{samples:3}},{environment:{samples:4.5}}, {lights:Array.from({length:17},(_,i)=>({id:'light'+i}))}, {objects:[object({source:{mesh:{positions:[0,0,0,1,0,0,0,1,0],indices:[0,1,3]}}})]}, {objects:[object({source:{lathe:[[-1,0],[1,1]]}})]}, {objects:[object({source:{primitive:'icosahedron',parameters:{detail:6}}})]}, {objects:[object({p:{x:{v:0,kf:Array.from({length:2401},(_,i)=>({t:i,v:0}))}}})]}];
+const results=cases.map(input=>{try{return {input,ok:true,output:parseScene(input)}}catch{return {input,ok:false}}});
+fs.writeFileSync(new URL('cases.json',import.meta.url),JSON.stringify({source:'b81b94c66',cases:results},null,2)+'\n');

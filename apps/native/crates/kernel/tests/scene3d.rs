@@ -205,7 +205,8 @@ fn duplicate_remaps_all_3d_key_ids() {
 }
 #[test]
 fn saved_pmv_reopens_exact_content_and_undo() {
-    let dir = common::TempDir::new("scene3d");
+    let mut dir = common::TempDir::new("scene3d");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
     let mut s = store();
     apply(
         &mut s,
@@ -225,4 +226,492 @@ fn saved_pmv_reopens_exact_content_and_undo() {
             .unwrap()
             .is_empty()
     );
+}
+#[test]
+fn animated_legacy_upgrade_uses_original_expression_context() {
+    let p = json!({"id":"P","name":"Legacy","compId":"C","w":640,"h":360,"fps":30,"dur":2,"layers":[{"id":"old","name":"Old","type":"extension","from":0,"dur":1,"p":{},"d":{"definition":"powermove.3d.obj-model","data":{"assetId":"asset"},"params":{"yaw":{"v":0,"kf":[],"expr":"time * 90"},"autoRotate":{"v":true,"kf":[],"expr":null},"speed":{"v":25,"kf":[],"expr":null}}}}],"assets":{}});
+    let s = DocumentStore::new_untitled(to_model(&p));
+    let root = project(&s);
+    let layers = root["comps"]["C"]["layers"].as_array().unwrap();
+    assert_eq!(layers[0]["type"], "group");
+    let camera = layers
+        .iter()
+        .find(|l| l["d"]["definition"] == "powermove.3d.camera")
+        .unwrap();
+    assert_eq!(
+        camera["p"]["position.x"]["kf"].as_array().unwrap().len(),
+        31
+    );
+    let model = layers
+        .iter()
+        .find(|l| l["d"]["definition"] == "powermove.3d.object")
+        .unwrap();
+    assert_eq!(model["p"]["rotation.y"]["kf"].as_array().unwrap().len(), 31);
+    assert_eq!(model["p"]["rotation.y"]["kf"][30]["v"], 50.);
+}
+#[test]
+fn legacy_history_and_redo_are_upgraded_and_original_archived() {
+    let mut dir = common::TempDir::new("scene3d-history");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let p = json!({"id":"P","name":"History","compId":"C","w":640,"h":360,"fps":30,"dur":10,"layers":[{"id":"old","name":"Edited","type":"extension","from":0,"dur":5,"p":{},"d":{"definition":"powermove.3d.scene","data":{"scene":{"objects":[{"id":"box","source":{"primitive":"box"}}]}}}}],"assets":{}});
+    let path = json!(["comps", "C", "layers", 0, "name"]);
+    let history = json!({"version":1,"paths":"composition","index":0,"entries":[{"label":"Rename","forward":[{"path":path,"exists":true,"value":"Edited"}],"backward":[{"path":path,"exists":true,"value":"Original"}]},{"label":"Rename again","forward":[{"path":path,"exists":true,"value":"Redo"}],"backward":[{"path":path,"exists":true,"value":"Edited"}]}]});
+    let file = dir.path("legacy.json");
+    std::fs::write(&file, json!({"proj":p,"history":history}).to_string()).unwrap();
+    let mut s = DocumentStore::open(
+        pm_kernel::project_io::open_project(&file, Default::default()).unwrap(),
+    );
+    assert_eq!(layer(&s, "old")["type"], "group");
+    assert_eq!(layer(&s, "old")["name"], "Edited");
+    assert_eq!(project(&s)["native3dHistoryArchive"], history);
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "old")["name"], "Original");
+    assert_eq!(layer(&s, "old")["type"], "group");
+    s.redo().unwrap();
+    s.redo().unwrap();
+    assert_eq!(layer(&s, "old")["name"], "Redo");
+    let output = dir.path("native.pmv");
+    common::save_as(&mut s, &output).unwrap();
+    let p = project(&s);
+    let mut s = DocumentStore::open(
+        pm_kernel::project_io::open_project(&output, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&s), p);
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "old")["name"], "Edited");
+}
+fn geometric(s: &mut DocumentStore, args: Value) {
+    let geometry = pm_kernel::commands::scene3d::prepare_geometry(
+        &s.snapshot(),
+        None,
+        &to_model(&args),
+        &[],
+        0.,
+        &pm_scene3d::geometry::NoAssets,
+    )
+    .unwrap();
+    s.execute(
+        Scene3dCommand::ApplyPrepared {
+            comp: None,
+            args: to_model(&args),
+            selection: vec![],
+            time: 0.,
+            autokey: false,
+            geometry,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+}
+#[test]
+fn drop_to_floor_uses_real_bounds_and_rejects_stale_preflight() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"y":5}}}),
+    );
+    let args = json!({"operation":"drop_to_floor","target":"model"});
+    let geometry = pm_kernel::commands::scene3d::prepare_geometry(
+        &s.snapshot(),
+        None,
+        &to_model(&args),
+        &[],
+        0.,
+        &pm_scene3d::geometry::NoAssets,
+    )
+    .unwrap();
+    apply(
+        &mut s,
+        json!({"operation":"update_object","target":"model","patch":{"name":"Changed"}}),
+    );
+    let before = project(&s);
+    assert!(
+        s.execute(
+            Scene3dCommand::ApplyPrepared {
+                comp: None,
+                args: to_model(&args),
+                selection: vec![],
+                time: 0.,
+                autokey: false,
+                geometry
+            }
+            .into(),
+            Origin::Mcp
+        )
+        .is_err()
+    );
+    assert_eq!(project(&s), before);
+    geometric(&mut s, args);
+    assert_eq!(layer(&s, "model")["p"]["position.y"]["v"], 0.5);
+}
+#[test]
+fn auto_studio_is_one_atomic_edit() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"add_object","id":"model"}));
+    let before = project(&s);
+    geometric(&mut s, json!({"operation":"auto_studio"}));
+    let p = project(&s);
+    let ls = p["comps"]["C"]["layers"].as_array().unwrap();
+    assert_eq!(ls.len(), 5);
+    assert_eq!(
+        ls.iter()
+            .filter(|l| l["d"]["definition"] == "powermove.3d.light"
+                && l["d"]["data"]["light"]["type"] == "area")
+            .count(),
+        3
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+}
+#[test]
+fn place_on_uses_world_bounds() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"stand","object":{"source":{"primitive":"box"},"p":{"x":4,"y":1,"sy":2}}}),
+    );
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"sphere"},"p":{"x":-2,"y":5}}}),
+    );
+    geometric(
+        &mut s,
+        json!({"operation":"place_on","target":"model","on_target":"stand"}),
+    );
+    assert_eq!(layer(&s, "model")["p"]["position.x"]["v"], 4.);
+    let args = to_model(&json!({"operation":"place_on","target":"model","on_target":"stand"}));
+    let g = pm_kernel::commands::scene3d::prepare_geometry(
+        &s.snapshot(),
+        None,
+        &args,
+        &[],
+        0.,
+        &pm_scene3d::geometry::NoAssets,
+    )
+    .unwrap();
+    assert!(
+        (g.bounds["model"][1].as_f64().unwrap() - g.bounds["stand"][4].as_f64().unwrap()).abs()
+            < 1e-10
+    );
+}
+#[test]
+fn exploded_group_writes_normal_position_tracks() {
+    let mut s = store();
+    for (id, x) in [("left", -2), ("right", 2)] {
+        apply(
+            &mut s,
+            json!({"operation":"add_object","id":id,"object":{"source":{"primitive":"box"},"p":{"x":x}}}),
+        );
+    }
+    // A saved native model group. The general GroupCommand's geometry-host
+    // integration is outside this test's scene-command contract.
+    let mut p = project(&s);
+    let ls = p["comps"]["C"]["layers"].as_array_mut().unwrap();
+    for l in ls.iter_mut() {
+        l["group"] = json!("group");
+    }
+    ls.insert(0,json!({"id":"group","type":"group","name":"Group","threeD":true,"on":true,"from":0,"dur":10,"p":{},"d":{}}));
+    let mut s = DocumentStore::new_untitled(to_model(&p));
+    let before = project(&s);
+    geometric(
+        &mut s,
+        json!({"operation":"explode","target":"group","duration":2}),
+    );
+    assert_eq!(
+        layer(&s, "left")["p"]["position.x"]["kf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        layer(&s, "right")["p"]["position.x"]["kf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+}
+#[test]
+fn imported_glb_and_originals_survive_undo_reopen_and_archive_recovery() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let mut dir = common::TempDir::new("scene3d-import");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let bytes = import::triangle_glb(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], &[0, 1, 2]);
+    let archive = Archive::open(&dir.path("archive")).unwrap();
+    let receipt = std::sync::Arc::new(
+        archive
+            .admit(
+                import::prepare(
+                    vec![ImportFile {
+                        name: "product.glb".into(),
+                        mime: "model/gltf-binary".into(),
+                        bytes: bytes.clone(),
+                    }],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+    );
+    let mut s = store();
+    let before = project(&s);
+    s.execute(
+        Scene3dCommand::Import {
+            comp: None,
+            asset_id: "asset".into(),
+            layer_id: "model".into(),
+            receipt: receipt.clone(),
+            time: 0.,
+            setup_studio: true,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(
+        project(&s)["comps"]["C"]["layers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(s.media().len(), 1);
+    let imported = project(&s);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    assert!(receipt.primary().path().exists());
+    s.redo().unwrap();
+    assert_eq!(project(&s), imported);
+    let path = dir.path("import.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(reopened.media().len(), 1);
+    assert_eq!(
+        imported["assets"]["asset"]["native3dSources"][0]["id"],
+        "asset"
+    );
+    let out = dir.path("asset.bin");
+    reopened
+        .media()
+        .get("asset")
+        .unwrap()
+        .copy_to(&out)
+        .unwrap();
+    assert_eq!(std::fs::read(out).unwrap(), bytes);
+    reopened.undo().unwrap();
+    assert!(project(&reopened)["assets"].get("asset").is_none());
+    // Simulate journal/library recovery with metadata and the durable content
+    // archive, without relying on a PMV media range or an original source file.
+    let mut recovered = DocumentStore::new_untitled(to_model(&imported));
+    let recovered_receipt =
+        std::sync::Arc::new(archive.recover(&imported["assets"]["asset"]).unwrap());
+    let rev = recovered.revision();
+    recovered
+        .execute(
+            Scene3dCommand::BindImport {
+                asset_id: "asset".into(),
+                receipt: recovered_receipt,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+    assert_eq!(recovered.revision(), rev);
+    assert_eq!(recovered.media().len(), 1);
+    common::save_as(&mut recovered, &dir.path("recovered.pmv")).unwrap();
+}
+#[test]
+fn normal_add_layer_and_content_commands_support_registered_3d_definitions() {
+    use pm_kernel::commands::layers::AddLayer;
+    let mut s = store();
+    let content=to_model(&json!({"definition":"powermove.3d.object","data":{"object":{"source":{"primitive":"box"}}}})).as_object().unwrap().clone();
+    s.execute(
+        LayerCommand::Add(Box::new(AddLayer {
+            id: "model".into(),
+            layer_type: "extension".into(),
+            comp: None,
+            name: None,
+            from: None,
+            duration: None,
+            content,
+            properties: to_model(&json!({"opacity":40}))
+                .as_object()
+                .unwrap()
+                .clone(),
+            color: None,
+            index: None,
+            parent: None,
+            blend: None,
+            motion_blur: None,
+            visible: None,
+            shy: None,
+            collapsed: None,
+            time: 0.,
+        }))
+        .into(),
+        Origin::Extension,
+    )
+    .unwrap();
+    assert_eq!(layer(&s, "model")["p"]["opacity"]["v"], 40);
+    let patch = to_model(&json!({"data":{"object":{"source":{"primitive":"sphere"}}}}))
+        .as_object()
+        .unwrap()
+        .clone();
+    s.execute(
+        pm_kernel::ContentCommand::Set {
+            layer_id: "model".into(),
+            patch,
+            time: 0.,
+        }
+        .into(),
+        Origin::Extension,
+    )
+    .unwrap();
+    assert_eq!(
+        layer(&s, "model")["d"]["data"]["object"]["source"]["primitive"],
+        "sphere"
+    );
+}
+#[test]
+fn full_channel_assignment_validates_expression_and_keeps_keys_addressable() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"sx":{"v":1,"kf":[{"t":0,"v":1}]},"sy":{"v":1,"kf":[{"t":0,"v":1}]}}}}),
+    );
+    let l = layer(&s, "model");
+    let a = &l["p"]["scale.x"]["kf"][0]["i"];
+    let b = &l["p"]["scale.y"]["kf"][0]["i"];
+    assert!(a.is_string() && b.is_string());
+    assert_ne!(a, b);
+    let before = project(&s);
+    assert!(s.execute(command(json!({"operation":"update_object","target":"model","patch":{"material":{"p":{"roughness":{"v":0.5,"kf":[],"expr":"("}}}}})),Origin::Interface).is_err());
+    assert_eq!(project(&s), before);
+}
+#[test]
+fn resolved_service_uses_the_native_world_and_opacity_evaluator() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"x":3,"y":4,"z":5}}}),
+    );
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("model", "opacity", 40., 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    apply(
+        &mut s,
+        json!({"operation":"add_light","id":"light","light":{"type":"area"}}),
+    );
+    apply(&mut s, json!({"operation":"add_camera","id":"camera"}));
+    let resolved = pm_kernel::commands::scene3d::resolve_scene(&s.snapshot(), None, 0.).unwrap();
+    assert_eq!(&resolved.model_worlds["model"][12..15], &[3., 4., 5.]);
+    assert_eq!(resolved.opacities["model"], 0.4);
+    assert_eq!(resolved.camera_id.as_deref(), Some("camera"));
+    assert_eq!(resolved.targets["light"], [0.; 3]);
+}
+
+#[test]
+fn unrepresentable_unicode_keeps_original_units_and_reports_failed_upgrade() {
+    let input = pm_model::json::parse(r#"{"id":"P","compId":"C","w":8,"h":8,"fps":30,"dur":1,"unknown":"\ud800","layers":[{"id":"legacy","ty":"extension","d":{"definition":"powermove.3d.obj-model","data":{"assetId":"a"}}}],"assets":{}}"#).unwrap();
+    let original = input.get("layers").unwrap().as_array().unwrap()[0].clone();
+    let mut s = DocumentStore::new_untitled(input.clone());
+    let root = s.snapshot().root().unwrap().to_value();
+    assert_eq!(root.get("unknown"), input.get("unknown"));
+    let l = &root
+        .get("comps")
+        .unwrap()
+        .get("C")
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .as_array()
+        .unwrap()[0];
+    assert_eq!(
+        l.get("native3dArchive").unwrap().get("source"),
+        Some(&original)
+    );
+    assert_eq!(
+        l.get("d").unwrap().get("definition").unwrap().as_str(),
+        Some("powermove.3d.unupgraded")
+    );
+    assert!(l.get("native3dUpgradeIssue").is_some());
+    let mut dir = common::TempDir::new("scene3d-unicode");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("retained.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(
+        reopened.snapshot().root().unwrap().to_value(),
+        s.snapshot().root().unwrap().to_value()
+    );
+}
+
+#[test]
+fn splat_import_undo_reopen_preserves_exact_source() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let mut dir = common::TempDir::new("scene3d-splat-save");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let mut bytes = [0f32, 0., 0., 1., 1., 1.]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    bytes.extend([255, 128, 32, 255, 255, 128, 128, 128]);
+    let receipt = std::sync::Arc::new(
+        Archive::open(&dir.path("archive"))
+            .unwrap()
+            .admit(
+                import::prepare(
+                    vec![ImportFile {
+                        name: "scene.splat".into(),
+                        mime: "".into(),
+                        bytes: bytes.clone(),
+                    }],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+    );
+    let mut s = store();
+    apply(&mut s, json!({"operation":"add_camera","id":"cam"}));
+    s.execute(
+        Scene3dCommand::Import {
+            comp: None,
+            asset_id: "splat".into(),
+            layer_id: "model".into(),
+            receipt,
+            time: 0.,
+            setup_studio: true,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let imported = project(&s);
+    let path = dir.path("splat.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), imported);
+    let out = dir.path("source.splat");
+    reopened
+        .media()
+        .get("splat")
+        .unwrap()
+        .copy_to(&out)
+        .unwrap();
+    assert_eq!(std::fs::read(out).unwrap(), bytes);
+    reopened.undo().unwrap();
+    assert!(project(&reopened)["assets"].get("splat").is_none());
 }
