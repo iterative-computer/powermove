@@ -155,10 +155,16 @@ for (const [state, arrange] of cases)
         accessibility: result.accessibility,
         focusOrder: result.focusOrder,
       }).toMatchSnapshot(state);
-      expect(evaluation.node(ids.list).props.metadata).toMatchObject({
-        acceptsDrops: false,
-        selectionMode: "single",
-      });
+      if (["empty", "no-search-results", "empty-scope"].includes(state)) {
+        expect(evaluation.find(ids.list)).toBeUndefined();
+        if (state === "empty")
+          expect(evaluation.node(ids.search).props.disabled).toBe(true);
+      } else {
+        expect(evaluation.node(ids.list).props.metadata).toMatchObject({
+          acceptsDrops: false,
+          selectionMode: "single",
+        });
+      }
       if (state === "60k-rows") {
         expect(evaluation.nodes().length).toBeLessThan(65);
         expect(evaluation.node(ids.list).props.metadata).toMatchObject({

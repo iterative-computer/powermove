@@ -245,6 +245,9 @@ export class ExportModel {
   chosenPreset = "";
   open = false;
   error?: string;
+  planningError?: string;
+  presetError = false;
+  presetFault?: unknown;
   /** Transport/projection failures are inspectable; no unapproved error copy. */
   fault?: unknown;
   constructor(
@@ -273,6 +276,7 @@ export class ExportModel {
       !!this.current.project &&
       !this.locked &&
       !this.error &&
+      !this.planningError &&
       !this.fault &&
       this.readyPlanVersion === this.planVersion &&
       this.current.capabilities[this.options.format].available
@@ -426,9 +430,22 @@ export class ExportModel {
     const version = ++this.planVersion;
     const draft = this.draftVersion;
     if (this.error) return;
-    const ack = await this.command("export.plan", {
-      options: json(this.options),
-    });
+    let ack;
+    try {
+      ack = await this.command("export.plan", { options: json(this.options) });
+    } catch (error) {
+      if (
+        !this.disposed &&
+        version === this.planVersion &&
+        draft === this.draftVersion
+      ) {
+        this.planningError =
+          error instanceof Error ? error.message : String(error);
+        this.readyPlanVersion = -1;
+        this.changed();
+      }
+      throw error;
+    }
     if (
       this.disposed ||
       version !== this.planVersion ||
@@ -437,6 +454,8 @@ export class ExportModel {
       return;
     this.accept(ack.value, true);
     this.readyPlanVersion = version;
+    this.planningError = undefined;
+    this.fault = undefined;
     this.changed();
   }
   async choosePreset(id: string) {
@@ -462,6 +481,7 @@ export class ExportModel {
   }
   async savePreset() {
     if (this.locked || !this.presetName.trim() || this.error) return;
+    this.presetError = false;
     this.busy = true;
     this.changed();
     try {
@@ -476,6 +496,11 @@ export class ExportModel {
           .reverse()
           .find((p) => p.name === this.presetName.trim())?.id ??
         this.chosenPreset;
+    } catch (error) {
+      this.presetError = true;
+      this.presetFault = error;
+      this.fault = undefined;
+      throw error;
     } finally {
       this.busy = false;
       this.changed();

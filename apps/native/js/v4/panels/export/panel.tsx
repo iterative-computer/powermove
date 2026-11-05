@@ -449,6 +449,17 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     onClick={() => watch(model.savePreset())}
                   />
                 </FormRow>
+                {model.presetError ? (
+                  <text
+                    role="status"
+                    style={{
+                      color: token("colors.danger"),
+                      fontSize: token("typography.minimum"),
+                    }}
+                  >
+                    Couldn’t save the preset. Try again.
+                  </text>
+                ) : null}
                 <text style={detail}>{colorNote}</text>
               </Group>
             </>
@@ -467,15 +478,28 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             <div style={stack}>
               <text
                 id="export.summary"
-                label={p.summary}
-                metadata={{ export: { announce: "polite" } }}
+                label={
+                  model.planningError
+                    ? `Can’t export with these settings: ${model.planningError}`
+                    : p.summary
+                }
+                metadata={{
+                  export: { announce: "polite" },
+                  ...(model.planningError
+                    ? { symbol: "exclamationmark.triangle.fill" }
+                    : {}),
+                }}
                 style={{
-                  color: token("colors.secondary"),
+                  color: token(
+                    model.planningError ? "colors.warning" : "colors.secondary",
+                  ),
                   fontSize: token("typography.body"),
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {p.summary}
+                {model.planningError
+                  ? `Can’t export with these settings: ${model.planningError}`
+                  : p.summary}
               </text>
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>

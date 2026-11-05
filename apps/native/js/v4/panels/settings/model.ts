@@ -111,6 +111,7 @@ export class SettingsModel {
   range: [number, number] = [0, 0];
   anchorId?: string;
   readonly pending = new Set<string>();
+  private readonly failedReads = new Set<string>();
   readonly failures = new Map<string, unknown>(); // inspection only; never rendered as product copy
   private profile = new Map<string, Json>();
   private listeners = new Set<() => void>();
@@ -156,6 +157,14 @@ export class SettingsModel {
       .filter((r) => r.section !== "project" || !!this.publication.project)
       .map((r) => ({
         ...r,
+        ...(this.failures.has(r.id) && r.profileKey
+          ? {
+              error: this.failedReads.has(r.id)
+                ? "Couldn’t load this setting."
+                : "Couldn’t save this setting. Try again.",
+              ...(this.failedReads.has(r.id) ? { disabled: true } : {}),
+            }
+          : {}),
         ...(r.profileKey && !this.profileSettings ? { disabled: true } : {}),
         ...(r.profileKey && this.profile.has(r.profileKey)
           ? { value: this.profile.get(r.profileKey) }
@@ -203,8 +212,10 @@ export class SettingsModel {
               return;
             if (ack.value !== undefined) this.profile.set(key, ack.value);
           } catch (error) {
-            if (this.alive && epoch === this.epoch)
+            if (this.alive && epoch === this.epoch) {
+              this.failedReads.add(row.id);
               this.failures.set(row.id, error);
+            }
           }
         }),
     );
@@ -441,6 +452,7 @@ export class SettingsModel {
     const epoch = this.epoch;
     this.pending.add(id);
     this.failures.delete(id);
+    this.failedReads.delete(id);
     this.changed();
     try {
       const ack = await this.profileSettings.setSetting(row.profileKey, value);

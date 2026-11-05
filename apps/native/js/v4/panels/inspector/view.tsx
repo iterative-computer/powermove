@@ -126,7 +126,17 @@ function Action(props: {
   return (
     <ToolbarItem
       {...rest}
-      metadata={{ symbol: symbol ?? (props.id === "inspector:add-effect" ? "wand.and.rays" : props.id === "inspector:new-layer" ? "plus" : props.id.startsWith("key:") ? "diamond" : "") }}
+      metadata={{
+        symbol:
+          symbol ??
+          (props.id === "inspector:add-effect"
+            ? "wand.and.rays"
+            : props.id === "inspector:new-layer"
+              ? "plus"
+              : props.id.startsWith("key:")
+                ? "diamond"
+                : ""),
+      }}
       title={tooltip ?? props.label}
       onClick={(event) => {
         if (!props.disabled) onActivate(event);
@@ -181,6 +191,7 @@ function AlignmentStrip({
                 key={button.id}
                 id={`align:${button.id}`}
                 label={button.label}
+                tooltip={`${button.label}\nTo composition`}
                 symbol={button.symbol}
                 disabled={target.first.locked}
                 tabIndex={alignmentButtons[focused].id === button.id ? 0 : -1}

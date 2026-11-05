@@ -66,14 +66,23 @@ function Placeholder({
     </div>
   );
 }
-/** A neutral description of the unavailable push button, not a custom control. */
-function Push({ label, danger }: { label: string; danger?: boolean }) {
+/** The kit owns system push/default/destructive button presentation. */
+function Push({
+  label,
+  danger,
+  onClick,
+}: {
+  label: string;
+  danger?: boolean;
+  onClick?: () => void;
+}) {
   return (
-    <Placeholder gap="pushButton" label={label}>
-      <text style={danger ? { ...body, color: t("colors.danger") } : body}>
-        {label}
-      </text>
-    </Placeholder>
+    <UI.PushButton
+      label={label}
+      role={danger ? "destructive" : "normal"}
+      disabled={!onClick}
+      onClick={onClick}
+    />
   );
 }
 function Rows({
@@ -317,7 +326,10 @@ function Message({
       <Placeholder gap="preview" label="Rendered result">
         <text style={title}>Rendered result</text>
         <text style={reading}>{text}</text>
-        <Push label="Keep Change" />
+        <Push
+          label="Keep Change"
+          onClick={() => send({ type: "keepResult" })}
+        />
         <Push label="Undo Change" />
         <Push label="Add to Timeline" />
         <Push label="Show in Finder" />
@@ -407,8 +419,16 @@ export function AgentView({
         >
           <UI.ToolbarItem
             id="agent-threads"
-            label="Switch Thread"
-            title="Switch Thread"
+            label={
+              s.threadTitle
+                ? `Switch thread, ${s.threadTitle}`
+                : "Switch thread"
+            }
+            title={
+              s.threadTitle
+                ? `Switch thread, ${s.threadTitle}`
+                : "Switch thread"
+            }
             disabled
             metadata={{ apiGap: "threadPicker" }}
           />
@@ -457,7 +477,10 @@ export function AgentView({
         ) : n.connection === "waiting" ? (
           <>
             <UI.ProgressRow label="Waiting for sign-in…" />
-            <Push label="Open Settings" />
+            <Push
+              label="Open Settings"
+              onClick={() => send({ type: "openSettings" })}
+            />
           </>
         ) : n.connection === "unavailable" ? (
           <UI.EmptyState
@@ -466,7 +489,10 @@ export function AgentView({
             action={
               <>
                 <Push label="Try Again" />
-                <Push label="Connection Settings…" />
+                <Push
+                  label="Connection Settings…"
+                  onClick={() => send({ type: "openSettings" })}
+                />
               </>
             }
           />
