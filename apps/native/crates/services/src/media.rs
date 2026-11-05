@@ -2,6 +2,8 @@
 use crate::error::{Context, Result};
 use crate::service_ensure as ensure;
 use crate::storage::{ServiceStorage, component, digest, generations, read_capped};
+/// Real main-reference file/source-link resolver, shared with first launch.
+pub use pm_first_launch::media::{AdmittedMedia, FileMedia, ResidentSources, SourceAccess};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 

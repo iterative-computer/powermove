@@ -392,3 +392,29 @@ they do **not** claim main media migrated. Pending work:
 
 The signal is BLOCKED for these unresolved integrations. Nothing was signed,
 notarized, published, tagged or dispatched. No real profile/Keychain was used.
+
+
+## 2026-11-05 — beta3 verified media adapter
+
+The beta3 worker adapter is `pm-first-launch::media::FileMedia`, re-exported by
+`pm-services::media`. It reads main c7f46a056's actual `Media Store/Index` by stable
+key, preserves the complete raw record, and resolves owned files or source links
+to a fully SHA-256-verified descriptor. Range reads use that descriptor with
+bounded arithmetic and before/after identity checks. Admission attaches the
+existing kernel `MediaTable` with explicit linked/owned provenance. Real kernel
+Save/Save As and portable save/reopen tests verify the distinction; source bytes
+remain unchanged. This is read/admission plumbing, not a decoder or new renderer.
+
+The real first-launch closure now uses full main source-link identity when no
+sampled fingerprint exists. Revision and authored fingerprint checks still apply;
+proxy metadata never grants original status. The local source capability uses
+metadata-only residency checks (Darwin SF_DATALESS on Mac), with an injectable
+Linux double. Missing/offloaded links stay offline, denied access remains an
+error, and no download is requested. A sandboxed application's security-scoped
+lease must remain alive alongside admitted media. Shell/actor import-command
+wiring remains outside this lane: the adapter does not acquire a second writer.
+
+Decisions: full digest verification even for unchanged mtime (N2/N3); descriptor
+range reads and no main-thread I/O in Rust (N1/N8); explicit source/owned
+provenance and proxy refusal (N3/N4); retain raw metadata and all original inputs
+(N4/N6/prune rule). No visual or interaction choice was introduced.

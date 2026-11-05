@@ -430,7 +430,10 @@ pub fn migrate_many_with_disk(
         let mut original = None;
         if !reference.poster {
             if let Some(path) = &reference.source_path
-                && path.is_file()
+                && crate::library_media::SourceAccess::resident(
+                    &mut crate::library_media::ResidentSources,
+                    path,
+                )?
                 && identity_matches(path, reference)?
             {
                 let size = fs::metadata(path)?.len();

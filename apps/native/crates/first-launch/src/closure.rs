@@ -123,9 +123,12 @@ pub(crate) fn inventory(
     }
     let mut seen = BTreeSet::new();
     for r in &mut out.references {
-        let disk = disk_records
-            .iter()
-            .find(|d| d.key == r.key || r.legacy_id.as_deref() == Some(&d.key));
+        let disk = disk_records.iter().find(|d| {
+            (d.key == r.key || r.legacy_id.as_deref() == Some(&d.key))
+                && r.revision
+                    .as_ref()
+                    .is_none_or(|revision| revision == &d.revision)
+        });
         if let Some(disk) = disk {
             if r.source_path.is_none() {
                 r.source_path = disk.source_path.clone();
@@ -139,6 +142,18 @@ pub(crate) fn inventory(
                 } else {
                     r.before = Availability::ProxyOnly;
                 }
+            } else if !r.is_proxy()
+                && let Some(mut file) =
+                    disk.open_verified(&mut pm_native_migrate::library_media::ResidentSources)?
+                && (r.fingerprint.is_none() && r.original_blake3.is_none()
+                    || matches_original(disk.source_path.as_ref().unwrap(), r)?)
+            {
+                // Main's full SHA-256 index is a stronger identity than a sampled
+                // fingerprint. Never read an offloaded source to establish it.
+                let mut hash = blake3::Hasher::new();
+                std::io::copy(&mut file, &mut hash)?;
+                r.original_blake3 = Some(hash.finalize().to_hex().to_string());
+                r.before = Availability::Original;
             }
         }
     }
@@ -264,7 +279,10 @@ fn add(
             "ambiguous media identity in checkpoint"
         );
         if let Some(path) = &r.source_path
-            && path.is_file()
+            && pm_native_migrate::library_media::SourceAccess::resident(
+                &mut pm_native_migrate::library_media::ResidentSources,
+                path,
+            )?
             && matches_original(path, &r)?
         {
             r.original_blake3 = Some(disk::hash(path)?.0);
