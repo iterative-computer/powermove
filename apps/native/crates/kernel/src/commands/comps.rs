@@ -66,6 +66,9 @@ pub struct NewComp {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum CompCommand {
+    /// Open a composition by id. Hosts use Call::OpenComposition for navigation
+    /// without an undo entry; the canonical tree needs only its compId changed.
+    Open { comp_id: String },
     /// `set_composition` (`setComposition`) on the open composition (`name`
     /// and `colorDepth` are the project's, as in the old command). Label
     /// "Composition Settings".
@@ -133,6 +136,7 @@ pub enum CompCommand {
 impl CompCommand {
     pub fn label(&self) -> String {
         match self {
+            CompCommand::Open { .. } => "Open Composition",
             CompCommand::Set { .. } | CompCommand::Settings { .. } => "Composition Settings",
             CompCommand::SetWorkArea { .. } => "Set Work Area",
             CompCommand::ResetWorkArea { .. } => "Reset Work Area",
@@ -147,6 +151,10 @@ impl CompCommand {
 
     pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
         match self {
+            CompCommand::Open { comp_id } => {
+                cx.comp_node(Some(comp_id))?;
+                cx.set(vec!["compId".into()], values::s(comp_id))
+            }
             CompCommand::Set { patch } => set_composition(cx, patch),
             CompCommand::Settings { comp_id, settings } => write_settings(cx, comp_id, settings),
             CompCommand::SetWorkArea { comp, start, end } => {

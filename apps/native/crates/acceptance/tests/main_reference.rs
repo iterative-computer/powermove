@@ -43,7 +43,7 @@ fn source_snapshots_pin_main_without_discarding_legacy_rosters() {
 fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separate() {
     let r =
         main_reference::run(&Catalog::embedded().unwrap(), &Filter::default(), &[], None).unwrap();
-    assert_eq!(r.exit_code(true), 1);
+    assert_eq!(r.exit_code(true), 2);
     let retired = r
         .cases
         .iter()
@@ -54,7 +54,7 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
         retired.blocked_by.as_deref(),
         Some("delta-data:archived-web-export-preferences")
     );
-    assert_eq!(r.counts(), (1672, 10, 2662));
+    assert_eq!(r.counts(), (1682, 0, 2662));
     assert_eq!(r.specs.len(), 397);
     assert_eq!(r.specs.iter().filter(|s| s.in_legacy_396).count(), 396);
     assert_eq!(r.specs.iter().filter(|s| s.in_370_roster).count(), 370);
@@ -76,13 +76,21 @@ fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separat
     for id in ["MAIN.MCP.edit_3d.catalog", "MAIN.MCP.tools.identity"] {
         assert_eq!(
             r.cases.iter().find(|c| c.id == id).unwrap().status,
-            Status::Fail,
+            Status::Pass,
             "{id}"
         );
     }
     for id in [
         "MAIN.curve.set",
         "MAIN.KEY.133.definition",
+        "MAIN.KEY.196.definition",
+        "MAIN.KEY.196.route-normal",
+        "MAIN.KEY.196.route-held",
+        "MAIN.KEY.196.route-extra-modifier",
+        "MAIN.KEY.196.route-input",
+        "MAIN.KEY.196.route-contenteditable",
+        "MAIN.KEY.196.route-prior-decline",
+        "MAIN.KEY.196.route-key-up",
         "MAIN.KEY.198.definition",
         "MAIN.MCP.export_video.catalog",
         "MAIN.MCP.get_project_state.catalog",
@@ -234,4 +242,61 @@ fn old_ui_gates_stay_historical_while_required_legacy_inputs_gate_strict_mode() 
     assert_eq!(main.exit_code(true), 2);
     main.compatibility.as_mut().unwrap().cases[0].status = Status::Fail;
     assert_eq!(main.exit_code(false), 1);
+}
+
+#[test]
+fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
+    let bare = &main_reference::snapshot()["catalog"];
+    let expected = main_reference::expected_catalog();
+    assert_eq!(
+        bare["tools"].as_array().unwrap().len(),
+        expected["tools"].as_array().unwrap().len()
+    );
+    for tool in bare["tools"].as_array().unwrap() {
+        let actual = expected["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == tool["name"])
+            .unwrap();
+        if tool["name"] == "edit_3d" {
+            let base = &tool["inputSchema"];
+            let studio = &actual["inputSchema"];
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                if field == "operation" {
+                    for operation in schema["enum"].as_array().unwrap() {
+                        assert!(
+                            studio["properties"][field]["enum"]
+                                .as_array()
+                                .unwrap()
+                                .contains(operation)
+                        );
+                    }
+                } else {
+                    assert_eq!(schema, &studio["properties"][field], "{field}");
+                }
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], studio[field]);
+            }
+            assert_eq!(
+                studio["properties"]["operation"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                19
+            );
+        } else {
+            assert_eq!(tool, actual);
+        }
+    }
+    for field in [
+        "inspection",
+        "app",
+        "instructions",
+        "commandFields",
+        "easePresets",
+    ] {
+        assert_eq!(bare[field], expected[field]);
+    }
 }

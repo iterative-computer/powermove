@@ -91,7 +91,7 @@ fn keymap_matches_every_w1_cell() {
         .filter(|s| s.starts_with("| K") && s.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
         .collect();
     let bindings = shipped();
-    assert_eq!(bindings.len(), 197);
+    assert_eq!(bindings.len(), 198);
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
@@ -324,4 +324,31 @@ fn current_main_actions_keep_the_exact_registration_metadata() {
         assert!(binding.args.is_empty());
         assert!(!binding.in_fields && !binding.repeat && !binding.loose);
     }
+}
+
+#[test]
+fn composition_tab_enters_fields_but_declines_back_to_focus_navigation() {
+    let binding = shipped()
+        .into_iter()
+        .find(|b| b.command == "composition.flowchart")
+        .unwrap();
+    assert_eq!(binding.chord, "tab");
+    assert_eq!(binding.priority, 0);
+    assert!(binding.in_fields);
+    assert!(!binding.repeat && !binding.loose);
+    assert!(binding.args.is_empty());
+    let mut resolver = Resolver::new();
+    let key = Key {
+        token: 90,
+        chord: "tab".into(),
+        field: true,
+        repeat: false,
+        up: false,
+        compat: false,
+    };
+    assert!(
+        matches!(resolver.submit(key).as_slice(), [Effect::Dispatch { command, .. }]
+        if command == "composition.flowchart")
+    );
+    assert_eq!(resolver.resolve(90, false), [Effect::Replay(90)]);
 }

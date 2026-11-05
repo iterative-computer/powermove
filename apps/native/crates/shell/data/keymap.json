@@ -2032,5 +2032,15 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "main.viewer.tab",
+    "chord": "tab",
+    "command": "composition.flowchart",
+    "args": [],
+    "priority": 0,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
   }
 ]

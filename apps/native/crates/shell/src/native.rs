@@ -1,4 +1,8 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "flowchart.rs"]
+mod flowchart;
+pub use flowchart::FlowchartRow;
+
 use crate::{
     keyboard::{Class, Effect, Key, Resolver},
     menu,
@@ -810,6 +814,8 @@ pub struct Host {
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
+    pub canvas_focus: Cell<bool>,
+    flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>)>,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
@@ -981,6 +987,8 @@ impl Host {
             viewer_rect: Rc::new(Cell::new(None)),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
+            canvas_focus: Cell::new(false),
+            flowchart: None,
             layer,
             viewer_transform: None,
             last_geometry: None,
@@ -1059,6 +1067,21 @@ impl Host {
                             return std::ptr::null_mut();
                         }
                     }
+                    if e.r#type() == NSEventType::KeyDown {
+                        let key = chord(e);
+                        let mut h = host.borrow_mut();
+                        if h.flowchart.as_ref().is_some_and(|p| {
+                            p.owns_event(e)
+                                || (h.flowchart_open() && e.windowNumber() == window.windowNumber())
+                        }) && (key == "escape"
+                            || (key == "tab"
+                                && !NSApplication::sharedApplication(h.window.mtm())
+                                    .isFullKeyboardAccessEnabled()))
+                        {
+                            h.close_flowchart();
+                            return std::ptr::null_mut();
+                        }
+                    }
                     for popup in [&palette, &fields] {
                         let mut p = popup.borrow_mut();
                         if e.windowNumber() == p.window.windowNumber() && p.model.open {
@@ -1120,7 +1143,12 @@ impl Host {
                             );
                             return std::ptr::null_mut();
                         }
-                        if matches!(chord.as_str(), "tab" | "shift+tab") && !name.contains("Text") {
+                        let canvas_tab =
+                            chord == "tab" && host.borrow().composition_canvas_focused();
+                        if matches!(chord.as_str(), "tab" | "shift+tab")
+                            && !name.contains("Text")
+                            && !canvas_tab
+                        {
                             let h = host.borrow();
                             let reverse = chord == "shift+tab";
                             if !h.advance_toolbar(reverse) {

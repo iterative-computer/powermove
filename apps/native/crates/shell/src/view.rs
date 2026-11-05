@@ -476,6 +476,13 @@ impl Editor {
                 h.borrow().select_tool(&cmd.name);
             }
         }
+        if let Some(host) = &self.host {
+            host.borrow().canvas_focus.set(
+                window.focused(cx).is_none_or(|f| {
+                    f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
+                }) && self.layout.open_panels().contains(&"viewer"),
+            );
+        }
         if self
             .integration
             .clone()
@@ -878,6 +885,12 @@ impl Render for Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
+            h.canvas_focus.set(
+                viewer.is_some()
+                    && w.focused(cx).is_none_or(|f| {
+                        f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
+                    }),
+            );
             h.publish_menu_state(&self.menu_state());
             h.keyboard_control_focus.set(
                 w.focused(cx).is_some_and(|f| {

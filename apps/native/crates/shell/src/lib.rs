@@ -1,6 +1,8 @@
 //! Phase 1 application shell. Kernel and engine are deliberately integration seams.
 pub mod integration;
-pub use native::{Command, Host, MenuEntry, accent_color, document_subtitle, system_accent};
+pub use native::{
+    Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, system_accent,
+};
 pub mod keyboard;
 pub mod layout;
 pub mod menu;

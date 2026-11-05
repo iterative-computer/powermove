@@ -38,9 +38,9 @@ fn corpus_pmv4() {
     fixture::corpus_fixture("pmv4").unwrap();
 }
 #[test]
-fn all_197_real_bindings_under_seven_routing_contexts() {
+fn all_198_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
-    assert_eq!(keyboard::production::shipped().len(), 197);
+    assert_eq!(keyboard::production::shipped().len(), 198);
     for binding in &c.bindings {
         for context in keyboard::CONTEXTS {
             keyboard::check(binding, context).unwrap();
