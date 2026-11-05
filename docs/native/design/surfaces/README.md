@@ -19,6 +19,11 @@ are those of panels/README §1.
 | [mixer-3d.md](mixer-3d.md) | Mixer strips and meters; shipped 3D layers, inspector and viewer controls | S097 S098 |
 | [workspaces.md](workspaces.md) | Workspaces panel, save and JSON sheets, Panel Library, generated panels | S099–S102 |
 | [takes-notes-mods.md](takes-notes-mods.md) | Takes, Notes, Mods, arbitrary extension UI hosting | S103–S106 |
+| [onboarding.md](onboarding.md) | Welcome window, timeline, agent, speech model, Bring My Workspace | S107–S110 |
+| [updates.md](updates.md) | App updates, What's New, About | S111–S113 |
+| [diagnostics.md](diagnostics.md) | Performance panel | S115 |
+| [os-authorization.md](os-authorization.md) | Notifications, OS permission outcomes, usage strings | S114 N007 |
+| [migration.md](migration.md) | Native first-launch gate, Keychain consent, outcomes and report | N001–N003 |
 
 The cheapest correct design wins: **a standard AppKit alert, sheet, panel or
 menu wherever HIG has one.** Custom drawing is only allowed where a spec
@@ -124,3 +129,5 @@ says *do not build*. Reverse a default here and in the owning family file.
 | 2 | Native archives what v1.2.0 deleted (threads, and later takes and presets). Should people be able to restore those archives from the UI? | Archive is kept, copy says so, no restore UI | S060, S095, S103 |
 | 3 | v1.2.0 silently adds Powermove to the Claude desktop app's settings at launch. Keep that, or ask first? | Keep automatic registration, and make it visible and reversible in Settings | S070 |
 | 4 | v1.2.0 ships a `3D Layers` extension, but the 2026-10-29 product decision replaces it with a new 3D system. Does native v1 show the old 3D controls, and when does the new system get its design? | The shipped surfaces are specified so old projects stay editable; the new system is not designed here | S098 |
+| 5 | v1.2.0 plays its 9.8 s first-run animation as a full-screen overlay. Native plays it inside the Welcome window. Is that acceptable? | Inside the window; the overlay is not ported | S107 |
+| 6 | Reverse migration isn't built. What do beta users get promised about going back? | Original app stays untouched; work done in Native leaves only as `.pmv` files | N003 |
