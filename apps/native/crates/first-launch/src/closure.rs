@@ -123,11 +123,15 @@ pub(crate) fn inventory(
     }
     let mut seen = BTreeSet::new();
     for r in &mut out.references {
-        let disk = disk_records
-            .iter()
-            .find(|d| d.key == r.key || r.legacy_id.as_deref() == Some(&d.key));
+        let disk = disk_records.iter().find(|d| {
+            (d.key == r.key || r.legacy_id.as_deref() == Some(&d.key))
+                && r.revision
+                    .as_ref()
+                    .is_none_or(|revision| revision == &d.revision)
+        });
         if let Some(disk) = disk {
-            if r.source_path.is_none() {
+            // A linked rendition stays a proxy: it never gains source provenance.
+            if r.source_path.is_none() && !r.is_proxy() {
                 r.source_path = disk.source_path.clone();
             }
             use pm_native_migrate::library_media::SourceStatus;
@@ -273,7 +277,7 @@ fn add(
             "ambiguous media identity in checkpoint"
         );
         if let Some(path) = &r.source_path
-            && path.is_file()
+            && pm_native_migrate::library_media::is_resident(path)?
             && matches_original(path, &r)?
         {
             r.original_blake3 = Some(disk::hash(path)?.0);

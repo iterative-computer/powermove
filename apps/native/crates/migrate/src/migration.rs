@@ -447,7 +447,12 @@ pub fn migrate_many_with_disk(
         copied.owned_path = Some(object_path(root, &key.hash)?);
         copied.source_path = None;
         copied.verify_owned()?;
-        key.source = "main-disk".into();
+        key.source = if r.source_path.is_some() {
+            "main-source-link"
+        } else {
+            "main-disk"
+        }
+        .into();
         pass.disk_records.insert(r.key.clone(), key.clone());
         save(&mut state, &id, &pass, &state_file)?;
         hook(Checkpoint::ObjectPublished)?;
@@ -496,7 +501,7 @@ pub fn migrate_many_with_disk(
                 .any(|r| r.key == reference.key || reference.legacy_id.as_deref() == Some(&r.key));
             if !indexed_source
                 && let Some(path) = &reference.source_path
-                && path.is_file()
+                && crate::library_media::is_resident(path)?
                 && identity_matches(path, reference)?
             {
                 let size = fs::metadata(path)?.len();

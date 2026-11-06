@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Headless synthetic signature proof, or read-only owner candidate verification.
+"""Headless synthetic signature proof. A real candidate uses scripts/prove-signed-build.py.
 No application execution, Keychain identity lookup, notarization submission or upload.
 Outputs can contain private paths and belong outside Git in a new directory.
 """
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -76,31 +75,14 @@ def synthetic(root):
             "passed": sum(checks.values()), "failed": sum(not v for v in checks.values()),
             "limits": ["No Developer ID/Team continuity proof", "No notarization/Gatekeeper proof", "No application/helper execution", "No updater replacement/power-loss proof", "No Keychain proof"]}
 
-def verify(root, bundle, requirement, notarized):
-    bundle = Path(bundle).resolve(strict=True)
-    if not requirement or requirement.strip() in ("true", "anchor apple generic"):
-        raise ValueError("supply the exact reviewed designated requirement")
-    checks = {"signed_requirement_all_slices_nested": require(bundle, requirement)}
-    details = run(["codesign", "-d", "--verbose=4", bundle]).stderr.decode()
-    checks["developer_id_and_runtime"] = "Authority=Developer ID Application:" in details and "runtime" in details and "Timestamp=" in details
-    if notarized:
-        checks["stapled"] = run(["xcrun", "stapler", "validate", bundle], accepts_failure=True).returncode == 0
-        checks["gatekeeper"] = run(["spctl", "--assess", "--type", "execute", bundle], accepts_failure=True).returncode == 0
-    files = {str(p.relative_to(bundle)): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob("*") if p.is_file() and not p.is_symlink()}
-    return {"schema": 1, "mode": "owner-candidate-read-only", "checks": checks, "passed": sum(checks.values()), "failed": sum(not v for v in checks.values()), "files": files}
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["adhoc", "verify"])
+    parser.add_argument("mode", choices=["adhoc"])
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--bundle", type=Path)
-    parser.add_argument("--requirement")
-    parser.add_argument("--notarized", action="store_true")
     args = parser.parse_args()
     if sys.platform != "darwin": raise ValueError("requires macOS")
-    if args.mode == "verify" and (not args.bundle or not args.requirement): raise ValueError("verify requires bundle and requirement")
     root = output_root(args.output)
-    report = synthetic(root) if args.mode == "adhoc" else verify(root, args.bundle, args.requirement, args.notarized)
+    report = synthetic(root)
     (root / "proof.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"{report['passed']} signature checks passed / {report['failed']} failed ({report['mode']})")
     return bool(report["failed"])

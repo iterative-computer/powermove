@@ -76,12 +76,9 @@ requirement. Build with `--features pm-update-policy/sparkle-macos` and
 `sign` and `notarize` commands only when authorized, then run:
 
 ```sh
-python3 apps/native/packaging/prove-signatures.py verify \
-  --bundle "$SIGNED_APP" --requirement "$REVIEWED_DESIGNATED_REQUIREMENT" \
-  --notarized --output "$NEW_PRIVATE_SIGNATURE_REPORT"
-python3 apps/native/scripts/audit-native-bundle.py \
+python3 apps/native/scripts/prove-signed-build.py \
   --bundle "$SIGNED_APP" --requirements "$REVIEWED_REQUIREMENTS" \
-  --output "$NEW_PRIVATE_RESOURCE_REPORT"
+  --output "$NEW_PRIVATE_SIGNATURE_REPORT"
 ```
 
 Real Sparkle replacement/relaunch and interruptions, signed two-DR Keychain

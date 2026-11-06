@@ -277,3 +277,86 @@ fn private_tempdir() -> tempfile::TempDir {
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
     directory
 }
+
+#[test]
+fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let config = main_profile(&root);
+    let records: Value = serde_json::from_str(include_str!("fixtures/main-media.json")).unwrap();
+    let entry = &records[0];
+    let mut record = entry["record"].clone();
+    let source = root.join("external-original.mov");
+    fs::rename(
+        config
+            .electron_profile
+            .join("Media Store")
+            .join(record["file"].as_str().unwrap()),
+        &source,
+    )
+    .unwrap();
+    record.as_object_mut().unwrap().remove("file");
+    record["sourcePath"] = json!(source);
+    write(
+        &config
+            .electron_profile
+            .join("Media Store/Index")
+            .join(entry["index"].as_str().unwrap()),
+        &record,
+    );
+    let mut proxy = records[1]["record"].clone();
+    let proxy_source = root.join("external-proxy.mov");
+    fs::rename(
+        config
+            .electron_profile
+            .join("Media Store")
+            .join(proxy["file"].as_str().unwrap()),
+        &proxy_source,
+    )
+    .unwrap();
+    proxy.as_object_mut().unwrap().remove("file");
+    proxy["sourcePath"] = json!(proxy_source);
+    write(
+        &config
+            .electron_profile
+            .join("Media Store/Index")
+            .join(records[1]["index"].as_str().unwrap()),
+        &proxy,
+    );
+    let project_path = config.electron_profile.join("store/project.p.json");
+    let mut project: Value = read(&project_path);
+    project["proj"]["assets"]["clip"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fingerprint");
+    write(&project_path, &project);
+    let before = files(&config.electron_profile);
+    run(&config, |_| Ok(())).unwrap();
+    let manifest: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    let pass = manifest["passes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    let closure = pass["closure"].as_array().unwrap();
+    assert!(
+        closure
+            .iter()
+            .any(|e| e["reference"]["key"] == "media:original"
+                && e["reference"]["poster"] == false
+                && e["status"] == "verified-original")
+    );
+    assert!(
+        closure
+            .iter()
+            .any(|e| e["reference"]["key"] == "media:proxy" && e["status"] == "proxy-only")
+    );
+    assert_eq!(before, files(&config.electron_profile));
+    assert_eq!(fs::read(source).unwrap(), b"synthetic original");
+    assert_eq!(fs::read(proxy_source).unwrap(), b"synthetic playback proxy");
+    assert_eq!(
+        pass["diskRecords"]["media:proxy"]["source"],
+        "main-source-link"
+    );
+}

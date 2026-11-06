@@ -184,6 +184,26 @@ impl DiskMediaRecord {
     }
 }
 
+/// Metadata-only check before identifying a source link. Returns false for a
+/// missing or cloud-only file; reading one would start a download.
+pub fn is_resident(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        // Darwin SF_DATALESS, as checked by `open_regular`.
+        if metadata.st_flags() & 0x4000_0000 != 0 {
+            return Ok(false);
+        }
+    }
+    ensure!(metadata.is_file(), "source link is not a regular file");
+    Ok(true)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceStatus {
