@@ -344,9 +344,7 @@ fn chromium_rewriting_its_files_costs_one_capture_and_keeps_nothing() {
     let config = ready(t.path());
     let base = state(&config).delta_base;
     // The original app ran: same content, new files.
-    let log = config
-        .electron_profile
-        .join("Local Storage/leveldb/LOG");
+    let log = config.electron_profile.join("Local Storage/leveldb/LOG");
     fs::write(&log, b"opened").unwrap();
     assert!(matches!(
         delta_if_changed(&config, |_| Ok(())).unwrap(),
@@ -386,9 +384,7 @@ fn a_local_storage_change_alone_moves_the_base() {
         .value = "native".into();
     storage.replace_local_storage(&entries).unwrap();
     drop(writer);
-    let log = config
-        .electron_profile
-        .join("Local Storage/leveldb/LOG");
+    let log = config.electron_profile.join("Local Storage/leveldb/LOG");
     fs::write(&log, b"opened").unwrap();
     delta(&config, |_| Ok(())).unwrap();
     assert_eq!(state(&config).conflicts, Default::default());

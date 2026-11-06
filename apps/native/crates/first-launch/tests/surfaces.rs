@@ -20,6 +20,12 @@ fn n001_raw_progress_pause_resume_and_announcement_are_bounded() {
         Some("Copying media · 2 of 7")
     );
     model.pause_at_boundary();
+    // Not paused until the worker says so; until then nothing can be resumed.
+    assert_eq!(model.view().default, None);
+    assert_eq!(model.view().status.as_deref(), Some("Pausing…"));
+    model.resume();
+    assert_eq!(model.gate, m::Gate::Pausing);
+    model.gate = m::Gate::Paused;
     assert_eq!(model.view().default, Some("resume"));
     let frozen = model.progress.clone();
     model.resume();
@@ -28,18 +34,10 @@ fn n001_raw_progress_pause_resume_and_announcement_are_bounded() {
         model.view().status.as_deref(),
         Some("Picking up where it stopped…")
     );
-    assert!(model.announce_progress(0));
-    assert!(!model.announce_progress(4999));
-    assert!(model.announce_progress(5000));
 }
 #[test]
-fn n001_later_delta_waits_silently_and_never_opens_gate() {
+fn n001_low_disk_says_how_much_and_a_stranger_asks_for_a_check() {
     let mut model = m::Model::default();
-    model.later_launch = true;
-    assert!(!model.gate_visible());
-    assert_eq!(model.background_task(), Some("Bringing in new media"));
-    model.event(&Event::WaitingForElectron);
-    assert_eq!(model.background_task(), None);
     model.gate = m::Gate::WaitingUnknown;
     assert_eq!(model.view().default, Some("check_again"));
     model.gate = m::Gate::LowDisk;

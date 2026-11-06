@@ -37,10 +37,14 @@ impl WelcomeView {
         if frame.surface != self.frame.surface {
             self.details_open = false;
         }
+        // The animation plays from its start whenever it comes into view.
+        if frame.animate && !self.frame.animate {
+            self.started = Instant::now();
+        }
         self.frame = frame;
         cx.notify();
     }
-    fn time(&self) -> f64 {
+    pub fn time(&self) -> f64 {
         self.clock
             .unwrap_or_else(|| self.started.elapsed().as_secs_f64())
     }
@@ -49,7 +53,7 @@ impl WelcomeView {
     }
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
-            "enter" => {
+            "enter" if !event.is_held => {
                 if let Some(id) = self.frame.default_action().map(str::to_owned) {
                     self.act(&id, cx);
                 }

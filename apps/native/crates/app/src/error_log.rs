@@ -14,8 +14,18 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Log {
     pub entries: Vec<Entry>,
+    /// Waiting for the status bar of the next project to open.
+    notice: Option<String>,
 }
 impl Log {
+    /// A row, plus one status bar line: for failures nothing else would show.
+    pub fn tell(&mut self, source: &str, message: &str) {
+        self.push(source, message);
+        self.notice = Some(message.into());
+    }
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
     /// Repeats of the newest row collapse: a stuck failure is one row.
     pub fn push(&mut self, source: &str, message: &str) {
         if self
@@ -42,6 +52,13 @@ fn age(at: SystemTime) -> String {
     }
 }
 pub type Shared = Rc<RefCell<Log>>;
+#[derive(Default)]
+struct AppLog(Shared);
+impl Global for AppLog {}
+/// One log per app: failures before any editor window opens are in it too.
+pub fn shared(cx: &mut App) -> Shared {
+    cx.default_global::<AppLog>().0.clone()
+}
 struct ErrorLogWindow(Shared);
 impl Render for ErrorLogWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

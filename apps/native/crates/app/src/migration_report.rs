@@ -123,6 +123,7 @@ impl Render for ReportWindow {
             .child(footer)
     }
 }
+const UNREADABLE: &str = "The Migration Report couldn’t be read.";
 pub fn open(profile: PathBuf, cx: &mut App) {
     if let Some(window) = cx
         .windows()
@@ -137,7 +138,19 @@ pub fn open(profile: PathBuf, cx: &mut App) {
         async move { pm_first_launch::report::load(&profile) }
     });
     cx.spawn(async move |cx| {
-        let report = work.await.unwrap_or_default();
+        let report = match work.await {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("Could not read the Migration Report: {error:#}");
+                cx.update(|cx| {
+                    crate::error_log::shared(cx)
+                        .borrow_mut()
+                        .push("Library", UNREADABLE);
+                });
+                crate::platform::note(UNREADABLE, "Your library wasn’t changed.");
+                return;
+            }
+        };
         let t = cx.update(|_| tokens());
         let _ = cx.update(|cx| {
             cx.open_window(

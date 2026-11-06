@@ -10,7 +10,7 @@ use pm_first_launch::{
     Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused,
     onboarding_completed,
     secrets::MacKeychain,
-    surfaces::migration::{Failure, Gate, Model},
+    surfaces::migration::{Failure, Gate, Model, Report},
 };
 use pm_kernel::locks::{ElectronOwner, electron_owner};
 use pm_services::surface_backing::onboarding::{Choice as Chosen, Onboarding, Step as Onboard};
@@ -85,6 +85,8 @@ pub enum Run {
 #[derive(Clone, Debug)]
 pub enum Finished {
     Outcome(Outcome),
+    /// A finished copy and its report, read on the worker.
+    Ready(Outcome, Result<Report, String>),
     Paused,
     LowDisk(LowDisk),
     ProfileRefused(String),
@@ -97,6 +99,13 @@ pub enum Message {
     Finished(Finished),
     /// The waiting original app has gone; the copy can start.
     ElectronClosed,
+}
+/// Leaving the gate for the editor. `Enter` happens at most once per attempt.
+#[derive(Debug)]
+enum Entry {
+    Waiting,
+    Entering { updating: bool },
+    Failed { details: String },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -121,9 +130,12 @@ pub struct Flow {
     choices: Choices,
     details: Option<String>,
     low_disk: Option<(String, String)>,
-    report_rows: usize,
+    report_unread: bool,
     error: Option<String>,
     consent_run: bool,
+    entry: Entry,
+    /// Onboarding's choices, kept so a failed attach can be tried again.
+    chosen: Option<serde_json::Value>,
 }
 fn bytes(value: u64) -> String {
     let mut amount = value as f64;
@@ -157,31 +169,55 @@ impl Flow {
             },
             details: None,
             low_disk: None,
-            report_rows: 0,
+            report_unread: false,
             error: None,
             consent_run: false,
+            entry: Entry::Waiting,
+            chosen: None,
             plan,
         }
     }
-    /// Where the window starts. `None` means no Welcome window at all.
-    pub fn start(&mut self) -> Option<Effect> {
+    /// Where the launch starts.
+    pub fn start(&mut self) -> Vec<Effect> {
         if self.plan.launch == Launch::Migrate {
-            return Some(Effect::Run(Run::Ordinary));
+            return vec![Effect::Run(Run::Ordinary)];
         }
         if self.plan.onboard {
             self.onboarding = Some(Onboarding::new(true));
+            return vec![];
         }
-        None
+        self.enter()
     }
+    /// Whether this launch has a Welcome window to show.
     pub fn visible(&self) -> bool {
-        self.plan.launch == Launch::Migrate || self.onboarding.is_some()
+        self.plan.launch == Launch::Migrate
+            || self.onboarding.is_some()
+            || matches!(
+                self.entry,
+                Entry::Failed { .. } | Entry::Entering { updating: true }
+            )
     }
     fn after_migration(&mut self) -> Vec<Effect> {
         if self.plan.onboard && !onboarding_completed(&self.plan.profile) {
             self.onboarding = Some(Onboarding::new(true));
             return vec![];
         }
-        vec![Effect::Enter(None)]
+        self.enter()
+    }
+    fn enter(&mut self) -> Vec<Effect> {
+        self.entry = Entry::Entering { updating: false };
+        vec![Effect::Enter(self.chosen.clone())]
+    }
+    /// The merge before the library attaches passed a second.
+    pub fn updating(&mut self) {
+        if let Entry::Entering { updating } = &mut self.entry {
+            *updating = true;
+        }
+    }
+    /// The library didn't open. The editor stays closed and the person can retry.
+    pub fn enter_failed(&mut self, details: String) -> Vec<Effect> {
+        self.entry = Entry::Failed { details };
+        vec![]
     }
     pub fn message(&mut self, message: Message) -> Vec<Effect> {
         match message {
@@ -214,24 +250,33 @@ impl Flow {
                             vec![]
                         }
                     }
-                    Outcome::NeedsSecretConsent { .. } => vec![],
-                    Outcome::Complete { .. } => {
-                        if let Ok(report) = pm_first_launch::report::load(&self.plan.profile) {
-                            self.report_rows = report.rows.len();
-                            self.model.report(&report);
-                        }
-                        let clean = self.report_rows == 0
-                            && self
-                                .model
-                                .summary
-                                .as_ref()
-                                .is_none_or(|s| s.rows().is_empty());
-                        if clean {
-                            self.after_migration()
-                        } else {
-                            vec![]
-                        }
+                    Outcome::NeedsSecretConsent { .. } | Outcome::Complete { .. } => vec![],
+                }
+            }
+            Finished::Ready(outcome, report) => {
+                self.model.outcome(&outcome);
+                // An unread report may hide conflicts, so it can't count as clean.
+                let reported = match &report {
+                    Ok(report) => {
+                        self.model.report(report);
+                        report.rows.is_empty()
                     }
+                    Err(_) => {
+                        self.report_unread = true;
+                        self.model.report_needs_review = true;
+                        false
+                    }
+                };
+                let clean = reported
+                    && self
+                        .model
+                        .summary
+                        .as_ref()
+                        .is_none_or(|s| s.rows().is_empty());
+                if clean {
+                    self.after_migration()
+                } else {
+                    vec![]
                 }
             }
             Finished::Paused => {
@@ -303,7 +348,10 @@ impl Flow {
                     raw["workspaceImport"] = "after-effects".into();
                 }
                 match Chosen::parse(raw.clone()).and_then(|choice| onboarding.begin(choice)) {
-                    Ok(_) => return vec![Effect::Enter(Some(raw))],
+                    Ok(_) => {
+                        self.chosen = Some(raw);
+                        return self.enter();
+                    }
                     Err(_) => {
                         self.error =
                             Some("Couldn’t open your workspace. Try again, or start fresh.".into())
@@ -317,6 +365,13 @@ impl Flow {
     }
     pub fn action(&mut self, id: &str) -> Vec<Effect> {
         self.error = None;
+        match (&self.entry, id) {
+            (Entry::Waiting, _) => {}
+            (Entry::Entering { .. } | Entry::Failed { .. }, "quit") => return vec![Effect::Quit],
+            (Entry::Failed { .. }, "try_again") => return self.enter(),
+            // Already on its way: a second click or a held Return does nothing.
+            _ => return vec![],
+        }
         if self.onboarding.is_some() {
             return self.onboarding_action(id);
         }
@@ -324,9 +379,14 @@ impl Flow {
             "quit" => vec![Effect::Quit],
             "pause" => {
                 self.model.pause_at_boundary();
-                vec![Effect::Pause]
+                if self.model.gate == Gate::Pausing {
+                    vec![Effect::Pause]
+                } else {
+                    vec![]
+                }
             }
-            "resume" => {
+            // Only once the worker has stopped: a second one would lose the lock.
+            "resume" if self.model.gate == Gate::Paused => {
                 self.model.resume();
                 vec![Effect::Run(Run::Ordinary)]
             }
@@ -359,13 +419,23 @@ impl Flow {
             .model
             .progress
             .as_ref()
-            .filter(|_| matches!(self.model.gate, Gate::Copying | Gate::Paused))
+            .filter(|_| {
+                matches!(
+                    self.model.gate,
+                    Gate::Copying | Gate::Pausing | Gate::Paused
+                )
+            })
             .map(|p| {
                 p.determinate()
                     .map_or(Progress::Indeterminate, |(done, total)| {
                         Progress::Determinate { done, total }
                     })
             });
+        let unread = self.report_unread.then(|| Row {
+            symbol: "exclamationmark.triangle.fill",
+            severity: Severity::Warning,
+            text: "The Migration Report couldn’t be read, so this list may be incomplete.".into(),
+        });
         let rows = self.model.summary.as_ref().map_or(vec![], |summary| {
             summary
                 .rows()
@@ -384,6 +454,7 @@ impl Flow {
                         text,
                     }
                 })
+                .chain(unread)
                 .collect()
         });
         Frame {
@@ -514,13 +585,36 @@ impl Flow {
         }
     }
     pub fn frame(&self) -> Frame {
-        match &self.onboarding {
-            Some(onboarding) => self.onboarding_frame(onboarding),
-            None => self.migration_frame(),
+        match (&self.entry, &self.onboarding) {
+            (Entry::Failed { details }, _) => library_failed_frame(details),
+            (Entry::Entering { updating: true }, _) => updating_frame(),
+            (Entry::Entering { updating: false }, None) => Frame {
+                surface: "N003".into(),
+                title: "Your Library Is Ready".into(),
+                status: Some("Opening Powermove…".into()),
+                spinner: true,
+                ..Frame::default()
+            },
+            (_, Some(onboarding)) => self.onboarding_frame(onboarding),
+            (Entry::Waiting, None) => self.migration_frame(),
         }
     }
 }
 
+fn library_failed_frame(details: &str) -> Frame {
+    Frame {
+        surface: "N001".into(),
+        title: "Your Library Couldn’t Open".into(),
+        line: "Nothing was changed. If Powermove Native is open in another window or on another account, quit it, then try again.".into(),
+        details: Some(details.to_owned()),
+        buttons: vec![
+            Button::new("quit", "Quit Powermove Native").leading(),
+            Button::new("try_again", "Try Again"),
+        ],
+        default: Some("try_again".into()),
+        ..Frame::default()
+    }
+}
 fn updating_frame() -> Frame {
     Frame {
         surface: "N001".into(),
@@ -532,13 +626,15 @@ fn updating_frame() -> Frame {
         ..Frame::default()
     }
 }
-/// Runs the coordinator on a worker. Pausing lands on the next durable boundary.
+/// Runs the coordinator on a worker, and reads the report there too: it walks the
+/// store and replays journals. Pausing lands on the next durable boundary.
 pub fn spawn_run(
     config: Config,
     run: Run,
     pause: Arc<AtomicBool>,
     tx: async_channel::Sender<Message>,
 ) {
+    let native = config.native_profile.clone();
     std::thread::spawn(move || {
         let events = tx.clone();
         let stop = pause.clone();
@@ -557,7 +653,14 @@ pub fn spawn_run(
                 hook,
             ),
         };
-        let _ = tx.send_blocking(Message::Finished(classify(result)));
+        let finished = match classify(result) {
+            Finished::Outcome(outcome @ Outcome::Complete { .. }) => {
+                let report = pm_first_launch::report::load(&native).map_err(|e| format!("{e:#}"));
+                Finished::Ready(outcome, report)
+            }
+            finished => finished,
+        };
+        let _ = tx.send_blocking(Message::Finished(finished));
     });
 }
 #[derive(Debug)]
@@ -628,22 +731,18 @@ pub fn write_marker(profile: &Path, choices: &serde_json::Value) -> std::io::Res
     std::fs::rename(temporary, target)
 }
 /// A later launch: merge what changed in the original app before the library
-/// attaches. An error never stops the app; the capture resumes next launch.
-pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> bool {
+/// attaches. The caller logs an error and carries on; the capture resumes next launch.
+pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> Result<bool> {
     let Some(config) = &plan.config else {
-        return false;
+        return Ok(false);
     };
     if plan.launch != Launch::Later || !config.electron_profile.is_dir() {
-        return false;
+        return Ok(false);
     }
-    match pm_first_launch::delta_if_changed(config, events) {
-        Ok(DeltaPrepared::MediaPending) => true,
-        Ok(_) => false,
-        Err(error) => {
-            eprintln!("Bringing in later changes stopped: {error:#}");
-            false
-        }
-    }
+    Ok(matches!(
+        pm_first_launch::delta_if_changed(config, events)?,
+        DeltaPrepared::MediaPending
+    ))
 }
 
 /// One window, one flow. With nothing to show, a later launch merges and opens.
@@ -654,19 +753,22 @@ pub fn gate(
     server: Server,
 ) -> pm_shell::Gate {
     Box::new(move |finish, cx| {
-        let mut flow = Flow::new(plan.clone());
-        let first = flow.start();
+        let (tx, rx) = async_channel::unbounded();
         let driver = Driver {
             library: Library {
-                plan,
+                plan: plan.clone(),
                 kernel,
                 mcp_host,
                 server,
+                attached: Default::default(),
             },
             finish,
             pause: Default::default(),
+            flow: Rc::new(RefCell::new(Flow::new(plan))),
+            window: Rc::default(),
+            tx,
         };
-        driver.begin(flow, first, cx);
+        driver.begin(rx, cx);
     })
 }
 pub type Server = Arc<std::sync::Mutex<Option<pm_mcp::transport::LoopbackServer>>>;
@@ -676,155 +778,195 @@ struct Library {
     kernel: pm_kernel::KernelHandle,
     mcp_host: Arc<crate::mcp::Host>,
     server: Server,
+    /// A retry after a later step failed must not attach a second time.
+    attached: Arc<AtomicBool>,
 }
+struct Opened {
+    /// A pending capture still has media to bring in.
+    media: bool,
+    /// The merge before the attach stopped.
+    later_failed: bool,
+}
+const LATER_FAILED: &str = "Recent changes from the original app couldn’t be brought in. Powermove will try again next launch.";
 #[derive(Clone)]
 struct Driver {
     library: Library,
     finish: pm_shell::Finish,
     pause: Arc<AtomicBool>,
+    flow: Rc<RefCell<Flow>>,
+    window: Rc<RefCell<Option<gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>>>>,
+    tx: async_channel::Sender<Message>,
 }
-type Window = Rc<RefCell<Option<gpui::WindowHandle<pm_shell::welcome_view::WelcomeView>>>>;
 impl Driver {
-    fn begin(self, flow: Flow, first: Option<Effect>, cx: &mut gpui::App) {
-        let (tx, rx) = async_channel::unbounded();
-        let window: Window = Rc::default();
-        let flow = Rc::new(RefCell::new(flow));
-        let visible = flow.borrow().visible();
-        if visible {
-            let on_action: pm_shell::welcome_view::OnAction = Rc::new({
-                let (driver, flow, window, tx) =
-                    (self.clone(), flow.clone(), window.clone(), tx.clone());
-                move |id, cx| {
-                    let effects = flow.borrow_mut().action(id);
-                    let frame = flow.borrow().frame();
-                    show(&window, frame, cx);
-                    driver.apply(effects, &window, &tx, cx);
-                }
-            });
-            let frame = flow.borrow().frame();
-            let chime = frame.animate;
-            match pm_shell::welcome_view::open_welcome(pm_shell::tokens(), frame, on_action, cx) {
-                Ok(handle) => {
-                    *window.borrow_mut() = Some(handle);
-                    if chime {
-                        play_chime();
-                    }
-                }
-                Err(error) => eprintln!("Could not open Welcome: {error:#}"),
-            }
-        }
+    fn begin(self, rx: async_channel::Receiver<Message>, cx: &mut gpui::App) {
+        let effects = self.flow.borrow_mut().start();
+        self.show(cx);
         cx.spawn({
-            let (driver, flow, window, tx) = (self.clone(), flow, window.clone(), tx.clone());
+            let driver = self.clone();
             async move |cx| {
                 while let Ok(message) = rx.recv().await {
                     cx.update(|cx| {
-                        let effects = flow.borrow_mut().message(message);
-                        let frame = flow.borrow().frame();
-                        show(&window, frame, cx);
-                        driver.apply(effects, &window, &tx, cx);
+                        if let Message::Finished(Finished::Failed(_, details)) = &message {
+                            crate::error_log::shared(cx)
+                                .borrow_mut()
+                                .push("Library", details);
+                        }
+                        driver.step(|flow| flow.message(message), cx);
                     });
                 }
             }
         })
         .detach();
-        let effects = first.into_iter().collect::<Vec<_>>();
-        if visible {
-            self.apply(effects, &window, &tx, cx);
-        } else {
-            self.enter(None, &window, cx);
+        self.apply(effects, cx);
+    }
+    fn step(&self, change: impl FnOnce(&mut Flow) -> Vec<Effect>, cx: &mut gpui::App) {
+        let effects = change(&mut self.flow.borrow_mut());
+        self.show(cx);
+        self.apply(effects, cx);
+    }
+    /// Puts the flow's frame on screen. The first frame that needs a window opens it.
+    fn show(&self, cx: &mut gpui::App) {
+        let (frame, visible) = {
+            let flow = self.flow.borrow();
+            (flow.frame(), flow.visible())
+        };
+        if !frame.animate {
+            stop_chime();
+        }
+        let handle = *self.window.borrow();
+        let animating = frame.animate;
+        let began = match handle {
+            Some(handle) => handle
+                .update(cx, |view, _, cx| {
+                    let began = animating && !view.frame.animate;
+                    view.set_frame(frame, cx);
+                    began
+                })
+                .unwrap_or(false),
+            None if visible => {
+                let on_action: pm_shell::welcome_view::OnAction = Rc::new({
+                    let driver = self.clone();
+                    move |id, cx| driver.step(|flow| flow.action(id), cx)
+                });
+                let opened =
+                    pm_shell::welcome_view::open_welcome(pm_shell::tokens(), frame, on_action, cx);
+                match opened {
+                    Ok(handle) => {
+                        *self.window.borrow_mut() = Some(handle);
+                        animating
+                    }
+                    Err(error) => {
+                        eprintln!("Could not open Welcome: {error:#}");
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
+        if began {
+            play_chime();
         }
     }
-    fn apply(
-        &self,
-        effects: Vec<Effect>,
-        window: &Window,
-        tx: &async_channel::Sender<Message>,
-        cx: &mut gpui::App,
-    ) {
+    fn apply(&self, effects: Vec<Effect>, cx: &mut gpui::App) {
         for effect in effects {
             match effect {
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {
-                        spawn_run(config, run, self.pause.clone(), tx.clone());
+                        spawn_run(config, run, self.pause.clone(), self.tx.clone());
                     }
                 }
                 Effect::Pause => self.pause.store(true, Ordering::Release),
                 Effect::Watch => {
                     if let Some(config) = &self.library.plan.config {
-                        spawn_watch(config.electron_profile.clone(), tx.clone());
+                        spawn_watch(config.electron_profile.clone(), self.tx.clone());
                     }
                 }
                 Effect::Quit => cx.quit(),
                 Effect::ShowReport => {
                     crate::migration_report::open(self.library.plan.profile.clone(), cx)
                 }
-                Effect::Enter(choices) => self.enter(choices, window, cx),
+                Effect::Enter(choices) => self.enter(choices, cx),
             }
         }
     }
     /// Library first, then the MCP server, then windows. Off main until the last.
-    fn enter(&self, choices: Option<serde_json::Value>, window: &Window, cx: &mut gpui::App) {
-        let (driver, window) = (self.clone(), window.clone());
+    fn enter(&self, choices: Option<serde_json::Value>, cx: &mut gpui::App) {
         let library = self.library.clone();
         let work = cx
             .background_executor()
             .spawn(async move { library.open(choices) });
         // Merging later changes normally finishes unseen. If it doesn't, say so.
         let done = Rc::new(std::cell::Cell::new(false));
-        let late = window.borrow().is_none().then(|| {
-            let (done, window) = (done.clone(), window.clone());
+        let late = self.window.borrow().is_none().then(|| {
+            let (done, driver) = (done.clone(), self.clone());
             cx.spawn(async move |cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 cx.update(|cx| {
                     if !done.get() {
-                        let on_action = Rc::new(|_: &str, cx: &mut gpui::App| cx.quit());
-                        let frame = updating_frame();
-                        *window.borrow_mut() = pm_shell::welcome_view::open_welcome(
-                            pm_shell::tokens(),
-                            frame,
-                            on_action,
+                        driver.step(
+                            |flow| {
+                                flow.updating();
+                                vec![]
+                            },
                             cx,
-                        )
-                        .ok();
+                        );
                     }
                 });
             })
         });
+        let driver = self.clone();
         cx.spawn(async move |cx| {
             let result = work.await;
             done.set(true);
             drop(late);
-            let media = *result.as_ref().unwrap_or(&false);
-            cx.update(|cx| {
-                if let Err(error) = &result {
-                    eprintln!("Could not open the library: {error:#}");
-                }
-                (driver.finish)(cx);
-                if let Some(handle) = window.borrow_mut().take() {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+            cx.update(|cx| match result {
+                Ok(opened) => driver.opened(opened, cx),
+                Err(error) => {
+                    let details = format!("{error:#}");
+                    crate::error_log::shared(cx)
+                        .borrow_mut()
+                        .push("Library", &details);
+                    driver.step(|flow| flow.enter_failed(details), cx);
                 }
             });
-            if media {
-                driver.library.finish_media();
-            }
         })
         .detach();
     }
+    fn opened(&self, opened: Opened, cx: &mut gpui::App) {
+        let log = crate::error_log::shared(cx);
+        if opened.later_failed {
+            log.borrow_mut().tell("Library", LATER_FAILED);
+        }
+        (self.finish)(cx);
+        if let Some(handle) = self.window.borrow_mut().take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        if opened.media {
+            self.library.finish_media(log, cx);
+        }
+    }
 }
 impl Library {
-    /// Returns whether a pending capture still has media to bring in.
-    fn open(&self, choices: Option<serde_json::Value>) -> Result<bool> {
-        let media = later_store(&self.plan, |_| Ok(()));
-        crate::mcp::attach(&self.kernel, &self.plan.profile)?;
-        let host = self.mcp_host.clone();
-        let server =
-            pm_mcp::transport::LoopbackServer::start_with(&self.plan.profile, move || {
-                crate::mcp::Connection::new(host.clone())
-            })?;
-        *self.server.lock().unwrap() = Some(server);
+    fn open(&self, choices: Option<serde_json::Value>) -> Result<Opened> {
+        let later = later_store(&self.plan, |_| Ok(()));
+        if let Err(error) = &later {
+            eprintln!("Bringing in later changes stopped: {error:#}");
+        }
+        if !self.attached.load(Ordering::Acquire) {
+            crate::mcp::attach(&self.kernel, &self.plan.profile)?;
+            self.attached.store(true, Ordering::Release);
+        }
+        if self.server.lock().unwrap().is_none() {
+            let host = self.mcp_host.clone();
+            let server =
+                pm_mcp::transport::LoopbackServer::start_with(&self.plan.profile, move || {
+                    crate::mcp::Connection::new(host.clone())
+                })?;
+            *self.server.lock().unwrap() = Some(server);
+        }
         if let Some(choices) = choices {
             std::fs::create_dir_all(&self.plan.profile)?;
             if let Some(provider) = choices["agent"]["provider"].as_str() {
@@ -840,17 +982,29 @@ impl Library {
             }
             write_marker(&self.plan.profile, &choices)?;
         }
-        Ok(media)
+        Ok(Opened {
+            media: *later.as_ref().unwrap_or(&false),
+            later_failed: later.is_err(),
+        })
     }
-    fn finish_media(&self) {
+    /// Lands behind the open library, on its own thread.
+    fn finish_media(&self, log: crate::error_log::Shared, cx: &mut gpui::App) {
         let Some(config) = self.plan.config.clone() else {
             return;
         };
+        let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             if let Err(error) = pm_first_launch::delta_media(&config, |_| Ok(())) {
                 eprintln!("Bringing in new media stopped: {error:#}");
+                let _ = tx.send_blocking(());
             }
         });
+        cx.spawn(async move |_| {
+            if rx.recv().await.is_ok() {
+                log.borrow_mut().tell("Library", LATER_FAILED);
+            }
+        })
+        .detach();
     }
 }
 thread_local! {
@@ -882,16 +1036,6 @@ fn stop_chime() {
         }
     });
 }
-fn show(window: &Window, frame: Frame, cx: &mut gpui::App) {
-    if !frame.animate {
-        stop_chime();
-    }
-    let handle = *window.borrow();
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |view, _, cx| view.set_frame(frame, cx));
-    }
-}
-
 #[cfg(test)]
 #[path = "first_run_tests.rs"]
 mod tests;

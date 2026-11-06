@@ -56,7 +56,7 @@ fn drive(flow: &mut Flow, effects: Vec<Effect>) -> Vec<Effect> {
     left
 }
 fn start(flow: &mut Flow) -> Vec<Effect> {
-    let first = flow.start().into_iter().collect();
+    let first = flow.start();
     drive(flow, first)
 }
 fn titled(frame: &Frame, title: &str) {
@@ -382,11 +382,11 @@ fn a_finished_launch_opens_without_a_gate_and_brings_later_changes_in() {
     assert_eq!(later.launch, Launch::Later);
     assert!(!later.onboard);
     let mut flow = Flow::new(later.clone());
-    assert_eq!(flow.start(), None);
+    assert_eq!(flow.start(), vec![Effect::Enter(None)]);
     assert!(!flow.visible());
-    assert!(!later_store(&later, |_| panic!("nothing changed")));
+    assert!(!later_store(&later, |_| panic!("nothing changed")).unwrap());
     write(&support.join("Powermove/store/theme.json"), &json!("light"));
-    assert!(later_store(&later, |_| Ok(())));
+    assert!(later_store(&later, |_| Ok(())).unwrap());
     let config = later.config.unwrap();
     pm_first_launch::delta_media(&config, |_| Ok(())).unwrap();
     assert_eq!(
@@ -416,8 +416,132 @@ fn the_kernel_can_start_before_the_copy_without_spoiling_the_destination() {
 }
 #[test]
 fn a_slow_merge_explains_itself_with_a_way_out() {
-    let frame = updating_frame();
+    let (_temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    flow.plan.onboard = false;
+    flow.plan.launch = Launch::Later;
+    flow.start();
+    assert!(!flow.visible());
+    flow.updating();
+    assert!(flow.visible());
+    let frame = flow.frame();
     assert!(frame.spinner);
     assert_eq!(frame.buttons[0].id, "quit");
     assert_eq!(frame.default_action(), None);
+    assert_eq!(flow.action("quit"), vec![Effect::Quit]);
+}
+/// A finished copy with something to review, as the worker sends it.
+fn review(flow: &mut Flow, report: Result<pm_first_launch::surfaces::migration::Report, String>) {
+    flow.message(Message::Finished(Finished::Ready(
+        Outcome::Complete {
+            projects: 1,
+            history_refusals: 1,
+            missing_projects: 0,
+            blocked_owners: 0,
+            proxy_only: 0,
+            already_offline: 0,
+        },
+        report,
+    )));
+}
+fn finished_onboarding(home: &Path) -> Flow {
+    let mut plan = plan(home);
+    plan.launch = Launch::Migrate;
+    plan.onboard = false;
+    Flow::new(plan)
+}
+#[test]
+fn opening_from_the_summary_happens_once_however_often_it_is_asked() {
+    let (_temp, home) = home();
+    let mut flow = finished_onboarding(&home);
+    review(&mut flow, Ok(Default::default()));
+    titled(&flow.frame(), "Your Library Is Ready");
+    assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
+    // A double click, or Return held down.
+    assert!(flow.action("open_native").is_empty());
+    assert!(flow.action("show_report").is_empty());
+    let frame = flow.frame();
+    assert!(frame.spinner);
+    assert!(frame.buttons.is_empty());
+    assert_eq!(frame.default_action(), None);
+}
+#[test]
+fn an_unread_report_stops_on_the_summary_and_says_so() {
+    let (_temp, home) = home();
+    let mut flow = finished_onboarding(&home);
+    flow.message(Message::Finished(Finished::Ready(
+        Outcome::Complete {
+            projects: 1,
+            history_refusals: 0,
+            missing_projects: 0,
+            blocked_owners: 0,
+            proxy_only: 0,
+            already_offline: 0,
+        },
+        Err("unreadable".into()),
+    )));
+    let frame = flow.frame();
+    titled(&frame, "Your Library Is Ready");
+    assert!(frame.rows[0].text.contains("couldn’t be read"));
+    assert!(frame.buttons.iter().any(|b| b.id == "show_report"));
+}
+#[test]
+fn a_failed_library_stays_on_a_gate_and_retries_with_the_same_choices() {
+    let (_temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    flow.start();
+    flow.action("begin");
+    flow.action("continue");
+    flow.action("choose:claude");
+    flow.action("continue");
+    flow.action("continue");
+    let effects = flow.action("fresh");
+    let [Effect::Enter(Some(chosen))] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert!(flow.enter_failed("locked".into()).is_empty());
+    assert!(flow.visible());
+    let frame = flow.frame();
+    titled(&frame, "Your Library Couldn’t Open");
+    assert_eq!(frame.details.as_deref(), Some("locked"));
+    assert_eq!(frame.default_action(), Some("try_again"));
+    assert!(flow.action("begin").is_empty());
+    assert_eq!(
+        flow.action("try_again"),
+        vec![Effect::Enter(Some(chosen.clone()))]
+    );
+    assert!(flow.frame().spinner);
+}
+#[test]
+fn a_later_launch_that_fails_to_attach_gets_a_window() {
+    let (_temp, home) = home();
+    let mut plan = plan(&home);
+    plan.onboard = false;
+    plan.launch = Launch::Later;
+    let mut flow = Flow::new(plan);
+    assert_eq!(flow.start(), vec![Effect::Enter(None)]);
+    assert!(!flow.visible());
+    flow.enter_failed("locked".into());
+    assert!(flow.visible());
+    assert_eq!(flow.action("quit"), vec![Effect::Quit]);
+}
+#[test]
+fn pause_waits_for_the_worker_and_resume_cannot_start_a_second_one() {
+    let (_temp, home) = home();
+    let mut flow = finished_onboarding(&home);
+    flow.start();
+    flow.message(Message::Event(Event::Started(
+        pm_first_launch::Step::Library,
+    )));
+    assert_eq!(flow.action("pause"), vec![Effect::Pause]);
+    let frame = flow.frame();
+    titled(&frame, "Copying Your Library");
+    assert_eq!(frame.status.as_deref(), Some("Pausing…"));
+    // The worker's next event must not read as running again.
+    flow.message(Message::Event(Event::Started(pm_first_launch::Step::Media)));
+    assert_eq!(flow.model.gate, Gate::Pausing);
+    assert!(flow.action("resume").is_empty());
+    flow.message(Message::Finished(Finished::Paused));
+    titled(&flow.frame(), "Copying Is Paused");
+    assert_eq!(flow.action("resume"), vec![Effect::Run(Run::Ordinary)]);
 }

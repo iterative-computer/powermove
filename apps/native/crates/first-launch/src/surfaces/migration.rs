@@ -9,6 +9,8 @@ pub enum Gate {
     WaitingUnknown,
     Copying,
     Resuming,
+    /// Asked to stop; the worker is still running to its next durable boundary.
+    Pausing,
     Paused,
     LowDisk,
     Failed,
@@ -30,9 +32,7 @@ impl Failure {
         match self {
             Self::Permission => "Check its sharing and permissions in Finder.",
             Self::InvalidData => "The file may be damaged.",
-            Self::Unknown => {
-                "Try again. If it keeps happening, choose Window ▸ Error Log for details."
-            }
+            Self::Unknown => "Try again. If it keeps happening, the Details below can help.",
         }
     }
 }
@@ -79,9 +79,7 @@ pub struct Model {
     /// Includes sign-ins not copied and kept-aside/conflict rows, without
     /// exposing a secret count on the gate.
     pub report_needs_review: bool,
-    pub later_launch: bool,
     pub failure: Failure,
-    last_announcement_ms: Option<u64>,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -91,15 +89,22 @@ impl Default for Model {
             progress: None,
             summary: None,
             report_needs_review: false,
-            later_launch: false,
             failure: Failure::Unknown,
-            last_announcement_ms: None,
         }
     }
 }
 impl Model {
     pub fn event(&mut self, event: &Event) {
         match event {
+            Event::Started(step) if self.gate == Gate::Pausing => {
+                self.progress = Some(Progress {
+                    step: *step,
+                    done: None,
+                    total: None,
+                });
+            }
+            Event::WaitingForElectron | Event::SecretPromptRequired
+                if self.gate == Gate::Pausing => {}
             Event::WaitingForElectron => {
                 self.gate = if self.electron_owner_local {
                     Gate::WaitingLocal
@@ -166,33 +171,11 @@ impl Model {
             }
         }
     }
-    /// Later deltas never reopen the gate; wait silently if the original is open.
-    pub fn background_task(&self) -> Option<&'static str> {
-        (self.later_launch
-            && self.gate != Gate::WaitingLocal
-            && self.gate != Gate::WaitingUnknown
-            && self.gate != Gate::Complete)
-            .then_some("Bringing in new media")
-    }
-    pub fn gate_visible(&self) -> bool {
-        !self.later_launch
-    }
-    pub fn announce_progress(&mut self, now_ms: u64) -> bool {
-        if self
-            .last_announcement_ms
-            .is_none_or(|last| now_ms.saturating_sub(last) >= 5000)
-        {
-            self.last_announcement_ms = Some(now_ms);
-            true
-        } else {
-            false
-        }
-    }
     /// Host pauses only at the next durable callback boundary, preserving the
     /// active checkpoint. This does not abort a publication half way through.
     pub fn pause_at_boundary(&mut self) {
         if matches!(self.gate, Gate::Copying | Gate::Resuming) {
-            self.gate = Gate::Paused;
+            self.gate = Gate::Pausing;
         }
     }
     pub fn resume(&mut self) {
@@ -205,6 +188,7 @@ impl Model {
             Gate::WaitingLocal => ("Quit Powermove to Continue", "Powermove Native copies your library while the original app is closed. Save your work there and quit it.".into(),Some("Waiting for Powermove to quit…".into()),vec![],None),
             Gate::WaitingUnknown => ("Powermove Might Still Be Open","It looks like the original app is using this library, possibly on another Mac. Close it there, then check again.".into(),None,vec![Button::new("check_again","Check Again")],Some("check_again")),
             Gate::Copying|Gate::Resuming => ("Copying Your Library","Your original app stays unchanged, and this copy never replaces it.".into(),if self.gate==Gate::Resuming {Some("Picking up where it stopped…".into())} else {self.progress.as_ref().map(Progress::status)},vec![Button::new("pause","Pause")],None),
+            Gate::Pausing => ("Copying Your Library","Your original app stays unchanged, and this copy never replaces it.".into(),Some("Pausing…".into()),vec![Button{id:"pause",label:"Pause",enabled:false}],None),
             Gate::Paused => ("Copying Is Paused","It picks up where it stopped. You can quit and come back.".into(),self.progress.as_ref().map(Progress::status),vec![Button::new("resume","Resume")],Some("resume")),
             Gate::LowDisk => ("Not Enough Space",String::new(),None,vec![Button::new("check_again","Check Again")],Some("check_again")),
             Gate::Failed => ("Copying Stopped",format!("Your original app and library weren’t changed. {}",self.failure.informative()),None,vec![Button::new("try_again","Try Again")],Some("try_again")),
@@ -371,7 +355,7 @@ pub struct ReportRow {
     pub display_name: String,
     pub kind: ReportKind,
 }
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Report {
     pub rows: Vec<ReportRow>,
 }

@@ -77,7 +77,7 @@ impl Checkpoint {
         ensure!(!root.exists(), "checkpoint already exists");
         let stage = root.with_extension("capture");
         // Only our fixed private staging directory, while the coordinator lock
-        // is held. A completed checkpoint is never removed or rewritten.
+        // is held. An adopted checkpoint is never removed or rewritten.
         if stage.exists() {
             disk::archive(&stage)?;
         }

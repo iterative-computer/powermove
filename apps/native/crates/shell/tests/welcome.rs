@@ -74,6 +74,31 @@ fn return_and_a_click_reach_the_default_action() {
     assert_eq!(*log.borrow(), ["continue", "continue"]);
 }
 #[test]
+fn a_held_return_acts_once() {
+    let mut cx = TestAppContext::single();
+    let (_, cx, log) = open(&mut cx, frame());
+    let held = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: true,
+        prefer_character_input: false,
+    };
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(held);
+    assert_eq!(*log.borrow(), ["continue"]);
+}
+#[test]
+fn the_animation_starts_from_its_top_when_it_comes_into_view() {
+    let mut cx = TestAppContext::single();
+    let (view, cx, _) = open(&mut cx, frame());
+    view.update(cx, |view, _| view.clock = None);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert!(view.read_with(cx, |view, _| view.time()) >= 0.06);
+    let mut animated = frame();
+    animated.animate = true;
+    view.update(cx, |view, cx| view.set_frame(animated, cx));
+    assert!(view.read_with(cx, |view, _| view.time()) < 0.06);
+}
+#[test]
 fn the_leading_button_and_back_are_separate_actions() {
     let mut cx = TestAppContext::single();
     let (_, cx, log) = open(&mut cx, frame());
