@@ -164,6 +164,7 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                         ShellCall::SaveAs {
                             session: session.clone(),
                             path: save.clone()
+                            replace: false,
                         }
                     )?,
                     ShellReply::Saved {

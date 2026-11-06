@@ -32,6 +32,9 @@ pub struct KernelConfig {
     /// journal (tests, headless tools that never edit).
     pub journal_root: Option<PathBuf>,
     pub journal: JournalConfig,
+    /// Previous versions (`<root>/<project id>/`). Every production host sets
+    /// this: a save without it deletes the file it replaces.
+    pub backup_root: Option<PathBuf>,
 }
 
 /// Where an opened project comes from.
@@ -331,6 +334,20 @@ impl Kernel {
         self.slots.remove(id).is_some()
     }
 
+    /// `ProjectFiles.commit`: a save keeps the version it replaces, whichever
+    /// format that was, so upgrading PMV3 or JSON preserves the original.
+    pub(crate) fn save_options(&self, project: &str) -> crate::SaveOptions {
+        // Project ids are validated path components at open.
+        let backups = self
+            .config
+            .backup_root
+            .as_ref()
+            .map(|root| crate::project_io::BackupPolicy::new(root.join(project)));
+        crate::SaveOptions {
+            backups,
+            ..Default::default()
+        }
+    }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()
     }

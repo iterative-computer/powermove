@@ -119,6 +119,7 @@ impl Automation {
         std::fs::create_dir_all(&profile)?;
         let mut kernel = Kernel::new(KernelConfig {
             journal_root: Some(profile.join("journals")),
+            backup_root: Some(profile.join("backups")),
             ..Default::default()
         });
         match kernel
@@ -912,7 +913,7 @@ impl ActorAutomation {
         self.shell(ShellCall::Save(session)).await
     }
     pub async fn save_as(&self, session: SessionHandle, path: PathBuf) -> Result<ShellReply> {
-        self.shell(ShellCall::SaveAs { session, path }).await
+        self.shell(ShellCall::SaveAs { session, path, replace: false }).await
     }
     async fn shell(&self, call: ShellCall) -> Result<ShellReply> {
         self.kernel

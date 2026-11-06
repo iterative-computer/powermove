@@ -115,6 +115,7 @@ fn main() -> Result<()> {
     let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
+            backup_root: Some(worker_profile.join("backups")),
             ..Default::default()
         });
         mcp::attach(&actor.handle(), &worker_profile)?;

@@ -786,13 +786,6 @@ impl Controller {
         self.message = SAVING.into();
         cx.notify();
         self.persist_ui();
-        let call = as_path.clone().map_or_else(
-            || ShellCall::Save(session.clone()),
-            |path| ShellCall::SaveAs {
-                session: session.clone(),
-                path,
-            },
-        );
         let kernel = self.kernel.clone();
         let file_save = as_path.is_some()
             || self.published.as_ref().is_some_and(|p| {
@@ -802,7 +795,12 @@ impl Controller {
             });
         cx.spawn(async move |this, cx| {
             let result = if file_save {
-                match kernel.prepare_save(session, as_path.clone()).await {
+                // The save panel already confirmed replacing an existing file.
+                let prepared = match as_path.clone() {
+                    Some(path) => kernel.prepare_save_replacing(session, path),
+                    None => kernel.prepare_save(session, None),
+                };
+                match prepared.await {
                     Some(Ok(save)) => {
                         let completion = cx
                             .background_executor()
@@ -814,7 +812,7 @@ impl Controller {
                     None => None,
                 }
             } else {
-                kernel.shell(call).await
+                kernel.shell(ShellCall::Save(session)).await
             };
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;

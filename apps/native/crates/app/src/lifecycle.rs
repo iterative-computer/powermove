@@ -429,6 +429,7 @@ mod tests {
             ShellCall::SaveAs {
                 session: session.clone(),
                 path: path.clone(),
+                replace: false,
             },
         );
         let base = std::fs::read(&path).unwrap();

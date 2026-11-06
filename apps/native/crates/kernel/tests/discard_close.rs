@@ -96,6 +96,7 @@ fn lifecycle_defer_prepare_discard_defer_200_times() {
             k.shell(ShellCall::SaveAs {
                 session: s.clone(),
                 path: root.path("project.pmv"),
+                replace: false,
             })
             .unwrap();
         }
@@ -143,6 +144,7 @@ fn dont_save(file: bool) {
         k.shell(ShellCall::SaveAs {
             session: s.clone(),
             path: root.path("project.pmv"),
+            replace: false,
         })
         .unwrap();
     }
