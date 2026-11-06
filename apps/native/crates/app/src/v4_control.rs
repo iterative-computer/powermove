@@ -236,6 +236,9 @@ impl NativeControl {
             height,
         }
     }
+    pub fn keep(&self) {
+        self.slot.keep();
+    }
     pub fn update(&mut self, value: &Value, disabled: bool, cx: &mut Context<Self>) {
         self.control.value(value, &self.options);
         self.control.enabled(!disabled);

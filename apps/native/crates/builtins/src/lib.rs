@@ -12,7 +12,6 @@ mod models;
 mod properties;
 mod settings;
 mod timeline_easing;
-pub mod timeline_scene;
 pub mod virtualization;
 use data::Backend;
 use pm_kernel::KernelHandle;
@@ -44,7 +43,6 @@ pub struct Publication {
     pub panel: String,
     pub generation: u64,
     pub surface: Arc<Surface>,
-    pub timeline: Option<Arc<timeline_scene::Scene>>,
 }
 #[derive(Clone, Debug)]
 pub struct PlatformRequest {
@@ -414,6 +412,133 @@ impl Builtins {
             .ok_or(Error::Closed)?
             .eval(format!("__pmBuiltin.event({wire})"))
     }
+    /// A press may republish before its click lands. Activation still reaches
+    /// a node only while it carries the same semantic identity as the one hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn activate(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        semantic: Option<&str>,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        let revision = {
+            let entries = self.broker.entries.lock().unwrap();
+            let surface = &entries.get(panel).ok_or(Error::Closed)?.surface;
+            let same = semantic.is_some_and(|id| {
+                surface
+                    .node(target)
+                    .and_then(|n| n.props.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+            });
+            if same { surface.revision() } else { revision }
+        };
+        self.event(panel, generation, revision, target, event, detail)
+    }
+    /// Pointer stream events address the current tree. A publication landing
+    /// mid-gesture must not drop a release.
+    pub fn pointer_event(
+        &self,
+        panel: &str,
+        generation: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        let revision = self
+            .broker
+            .entries
+            .lock()
+            .unwrap()
+            .get(panel)
+            .ok_or(Error::Closed)?
+            .surface
+            .revision();
+        self.event(panel, generation, revision, target, event, detail)
+    }
+    /// One kernel gesture for a dragged number field, so a scrub is one undo step.
+    /// Runs off the main thread; no sample passes through V8.
+    pub fn scrub_begin(
+        &self,
+        panel: &str,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.lock().unwrap().caller;
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(
+                caller,
+                pm_kernel::GestureCall::Begin {
+                    label: "Change Property".into(),
+                },
+            ),
+        ))
+    }
+    pub fn scrub_step(
+        &self,
+        panel: &str,
+        handle: &str,
+        gesture: u64,
+        value: Value,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let backend = self.backend(panel)?;
+        let (caller, command) = {
+            let mut backend = backend.lock().unwrap();
+            let command = backend
+                .native_command("panel.binding", &json!({"handle":handle,"value":value}))
+                .map_err(Error::Host)?;
+            (backend.caller, command)
+        };
+        let models::NativeCommand::Kernel(request) = command else {
+            return Err(Error::Invalid("binding is not a document property"));
+        };
+        let pm_kernel::Call::Transact { body, .. } = request.call else {
+            return Err(Error::Invalid("binding is not a scrubbable edit"));
+        };
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(
+                caller,
+                pm_kernel::GestureCall::Step {
+                    gesture,
+                    body,
+                    replace: true,
+                },
+            ),
+        ))
+    }
+    pub fn scrub_finish(
+        &self,
+        panel: &str,
+        gesture: u64,
+        commit: bool,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.lock().unwrap().caller;
+        let call = if commit {
+            pm_kernel::GestureCall::Commit { gesture }
+        } else {
+            pm_kernel::GestureCall::Cancel { gesture }
+        };
+        Ok(self
+            .broker
+            .kernel
+            .call(&self.broker.project, pm_kernel::Request::new(caller, call)))
+    }
+    fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
+        self.broker
+            .entries
+            .lock()
+            .unwrap()
+            .get(panel)
+            .map(|e| e.backend.clone())
+            .ok_or(Error::Closed)
+    }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
     /// revokes its writer on the isolate owner, including after a failed mount.
     pub fn close_panel(&self, id: &str) {
@@ -622,13 +747,6 @@ impl EngineProxy for Broker {
                                 panel: panel.into(),
                                 generation: generation.number,
                                 surface: Arc::new(entry.surface.clone()),
-                                timeline: entry
-                                    .backend
-                                    .lock()
-                                    .unwrap()
-                                    .native
-                                    .timeline_scene
-                                    .clone(),
                             },
                         );
                         (self.wake)();

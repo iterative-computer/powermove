@@ -48,6 +48,7 @@ pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
+pm-panel-timeline = { path = "../panel-timeline" }
 
 [[test]]
 name = "text_commands"

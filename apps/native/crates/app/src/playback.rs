@@ -5,12 +5,37 @@ use objc2::{MainThreadMarker, msg_send};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use pm_engine_service::layers::PlaybackLayers;
 use pm_shell::layout::Rect;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 thread_local! {static TIMELINES: RefCell<HashMap<EntityId,(Rect,f32,f32)>>=RefCell::new(HashMap::new());}
 pub fn set_timeline(id: EntityId, r: Rect, x: f32, y: f32) {
     TIMELINES.with(|t| {
         t.borrow_mut().insert(id, (r, x, y));
     });
+}
+thread_local! {static VIEW: Cell<(f64, f64, f64)> = const { Cell::new((100., 0., 0.)) };}
+/// Timeline time mapping for the native playhead: pps, first second, column.
+pub fn set_view(pps: f64, scroll_time: f64, column: f64) {
+    VIEW.with(|v| v.set((pps, scroll_time, column)));
+}
+
+/// When panels hear about the transport: every paused time change, and only
+/// the start and end of playback (S3: no GPUI repaint while playing).
+#[derive(Default)]
+pub struct PanelClock {
+    time: f64,
+    playing: bool,
+}
+impl PanelClock {
+    pub fn due(&mut self, time: f64, playing: bool) -> bool {
+        let due = playing != self.playing || (!playing && time != self.time);
+        self.time = time;
+        self.playing = playing;
+        due
+    }
 }
 
 /// Playhead head size, points (language §11).
@@ -180,6 +205,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let scale=v.host.borrow().window.backingScaleFactor();
                 if let Some(clock)=status.clock { v.sync_popout(&clock); }
                 if let Some(clock)=status.clock {
+                    let playing=clock.state==pm_protocol::clock::TransportState::Playing;
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
                     let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();
@@ -196,16 +222,22 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*head,setBackgroundColor:&*cg!(colors.accent)];
                         let _:()=msg_send![&*head,setContentsScale:scale];
                         let geometry=TIMELINES.with(|t|t.borrow().get(&cx.entity_id()).copied());
-                        let _:()=msg_send![&*layers.timecode,setHidden:true];
-                        let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none()];
-                        if let Some((r,x,y))=geometry {
+                        let (pps,scroll_time,column)=VIEW.with(Cell::get);
+                        let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
+                        let offset=column+(seconds-scroll_time)*pps;
+                        // Opaque on the header's colour: it covers the panel's paused text
+                        // while playing, so that text never repaints.
+                        let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*cg!(colors.panel)];
+                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
+                        let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_,_)|offset<column||offset>r.w as f64)];
+                        if let Some((r,_,y))=geometry {
                             // Timecode sits in the timeline header (the shell's) after the play button.
                             let slot=timecode_slot(&host.tokens);
                             let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let line=metrics.playhead as f64;
                             let tall=(r.h-y-metrics.inset).max(0.) as f64;
-                            let at=r.x as f64+x as f64+(r.w-x-metrics.inset)as f64*fraction-line/2.;
+                            let at=r.x as f64+offset-line/2.;
                             let _:()=msg_send![&*layers.playhead,setFrame:NSRect::new(NSPoint::new(at,height-(r.y+r.h-metrics.inset)as f64),NSSize::new(line,tall))];
                             let size=HEAD as f64;
                             let _:()=msg_send![&*head,setFrame:NSRect::new(NSPoint::new((line-size)/2.,tall-size),NSSize::new(size,size))];

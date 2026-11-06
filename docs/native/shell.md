@@ -59,6 +59,20 @@ Palette and field menu are separate pre-created NSPanel child windows, with nati
 
 Entry uses the **0.32-second / 0.15-bounce** public CASpringAnimation initializer and scale **0.96 → 1**. Opacity exit is **0.12 seconds**; Reduce Motion uses a **0.15-second** fade. A presentation-layer value and a sampled damped-oscillator velocity seed interrupted spring entries. No per-frame JS or idle polling timer is introduced.
 
+### Command routing
+
+`Controller::command` asks `layer_commands::route` first. Layer commands plan off
+the main thread and run as one Undo step; Timeline commands use the model's own
+route; Cut, Copy and Paste use an app-local clipboard and try a focused text field
+first. `layer_commands::disabled` recomputes on every publication and feeds
+`MenuState.disabled`: menu rows and toolbar tools dim, the palette drops them, and
+`Editor::command` declines them so their key reaches the focused control.
+`UNAVAILABLE` lists rows with no working path yet, and
+`every_keymap_and_menu_command_has_an_owner` keeps the tables complete.
+
+Playback publishes to panels only at its start and end (`PanelClock`). In between
+the playhead and timecode are CALayers, so no GPUI view repaints.
+
 ## Decisions and their picking rules
 
 | Choice | Picking rule |

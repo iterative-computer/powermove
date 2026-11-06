@@ -68,6 +68,7 @@ struct State {
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     geometry: Cell<Option<(NSRect, NSRect)>>,
+    staged: Cell<Option<(NSRect, NSRect)>>,
 }
 impl State {
     fn emit(&self, event: TextEvent) {
@@ -226,6 +227,7 @@ impl NativeTextSlot {
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
             geometry: Cell::new(None),
+            staged: Cell::new(None),
         });
         let delegate = TextDelegate::alloc(mtm).set_ivars(state.clone());
         let delegate: Retained<TextDelegate> = unsafe { msg_send![super(delegate), init] };
@@ -287,6 +289,11 @@ impl NativeTextSlot {
     /// Top-left point bounds and inherited rectangular content clip, in GPUI coordinates.
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
         self.state.geometry.set(Some((bounds, clip)));
+        self.state.staged.set(Some((bounds, clip)));
+    }
+    /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
+    pub fn keep(&self) {
+        self.state.geometry.set(self.state.staged.get());
     }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {

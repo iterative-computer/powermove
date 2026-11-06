@@ -5102,6 +5102,7 @@ dependencies = [
  "pm-native-migrate",
  "pm-node",
  "pm-panel-media",
+ "pm-panel-timeline",
  "pm-panel-viewerchrome",
  "pm-promedia",
  "pm-protocol",

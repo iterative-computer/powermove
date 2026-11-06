@@ -84,6 +84,24 @@ this lane. JS checkpoints alone are not a crash-persistent data store.
 
 ## Primitives and style
 
+### Native host elements (additive)
+
+A `canvas` or `frame` node's `surface` lease may name a host element, such as
+`surface="timeline"`. The host mounts its native view inside that node. Pointer
+input on the element runs a Rust gesture session against the kernel on a worker,
+so a hot gesture never waits on V8 (N8). JS keeps the JSX around it, receives
+state through its ordinary subscriptions, and still gets events from ordinary
+controls. The timeline's JSX outline stays the row contract; these metadata keys
+tie it to the native surface: `nativeColumn` (width follows the resizable column),
+`nativeFirstRow` (row offset follows native scroll) and `nativeWindow`
+(`[first, count]`, used to page rows by `rangechange`). Style validation gains
+the structural keywords `position`, `inset: "fill"`, and numeric `flexGrow` and
+`flexShrink`. No existing shape, event or prop changed.
+
+The viewer mounts `surface="viewer.gizmos"` the same way. Its transform handles
+are drawn by the engine in the frame's own pass, and pointer drags run as kernel
+gestures on a worker.
+
 All primitives have native tree representations: `div`, `text`, `img`, `input`,
 `textarea`, `button`, `scroll`, `virtual-list`, `anchored`, `path`, `canvas`,
 `frame`, `markdown`, `code`, `Glass`, `material`, `webview`. Resource IDs/data stay

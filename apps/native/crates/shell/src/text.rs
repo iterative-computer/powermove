@@ -63,6 +63,9 @@ impl TextField {
             tokens,
         }
     }
+    pub fn keep(&self) {
+        self.slot.keep();
+    }
     pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
         self.slot.accessibility_item()
     }

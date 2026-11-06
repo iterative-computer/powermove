@@ -120,8 +120,17 @@ pub fn overlay_lines(safe: bool, guides: bool) -> Vec<OverlayLine> {
     }
     lines
 }
-pub fn overlay_geometry(safe: bool, guides: bool) -> OverlayGeometry {
-    OverlayGeometry::new(overlay_lines(safe, guides)).expect("fixed overlay geometry is valid")
+/// The Resolution pop-up (Preview Resolution), read from the same view state
+/// the panel writes. The engine renders at it; `Auto` adapts while playing.
+pub fn engine_quality(chosen: pm_panel_viewerchrome::state::Quality) -> pm_engine_service::Quality {
+    use pm_engine_service::Quality as Q;
+    use pm_panel_viewerchrome::state::Quality as Chosen;
+    match chosen {
+        Chosen::Auto => Q::Auto,
+        Chosen::Full => Q::Full,
+        Chosen::Half => Q::Half,
+        Chosen::Quarter => Q::Quarter,
+    }
 }
 
 /// Menu tags. Stable: automation names the same actions.
@@ -642,19 +651,44 @@ impl Controller {
         self.apply_viewer_options();
         cx.notify();
     }
+    /// Selection gizmos draw in the engine's own pass, with the safe areas.
+    pub fn set_gizmos(&mut self, lines: Vec<OverlayLine>) {
+        self.gizmo_lines = lines;
+        if let Some(viewer) = &self.viewer
+            && let Err(error) = viewer.safe_areas(self.overlay())
+        {
+            self.message = error.to_string();
+        }
+    }
+    /// Guides first; a huge selection loses its last boxes, never the guides.
+    fn overlay(&self) -> OverlayGeometry {
+        let mut lines = overlay_lines(self.safe_areas, self.guides);
+        let room = OverlayGeometry::MAX_LINES.saturating_sub(lines.len());
+        lines.extend(self.gizmo_lines.iter().take(room).copied());
+        OverlayGeometry::new(lines).expect("bounded overlay geometry")
+    }
     /// Re-applies output mode, media, Preview Resolution and overlays to
     /// every viewer of this editor (after any viewer is created or an option
     /// changes).
     pub fn apply_viewer_options(&mut self) {
         let mtm = MainThreadMarker::new().unwrap();
-        let geometry = overlay_geometry(self.safe_areas, self.guides);
         let popout = self.popout.as_ref().and_then(|p| p.viewer.borrow().clone());
-        for viewer in self.viewer.iter().chain(popout.as_ref()) {
+        // Selection gizmos belong to the editing viewer alone.
+        let geometries = [
+            (self.viewer.as_ref(), self.overlay()),
+            (
+                popout.as_ref(),
+                OverlayGeometry::new(overlay_lines(self.safe_areas, self.guides))
+                    .expect("bounded overlay geometry"),
+            ),
+        ];
+        for (viewer, geometry) in geometries {
+            let Some(viewer) = viewer else { continue };
             if let Err(e) = viewer
                 .mastering(mtm, self.output_mode.mastering())
                 .and_then(|_| viewer.media_mode(self.media_mode))
                 .and_then(|_| viewer.quality(self.quality))
-                .and_then(|_| viewer.safe_areas(geometry.clone()))
+                .and_then(|_| viewer.safe_areas(geometry))
             {
                 self.message = format!("Viewer: {e}");
             }
@@ -785,12 +819,12 @@ mod tests {
         }
         let all = overlay_lines(true, true);
         assert_eq!(all.len(), 8 + 4 + 2);
-        assert!(all.len() <= 64);
+        assert!(all.len() <= OverlayGeometry::MAX_LINES);
         assert!(
             all.iter()
                 .all(|l| l.ends.iter().all(|v| (0. ..=1.).contains(v)))
         );
-        overlay_geometry(true, true);
+        OverlayGeometry::new(all).unwrap();
     }
     #[test]
     fn menu_tags_round_trip() {

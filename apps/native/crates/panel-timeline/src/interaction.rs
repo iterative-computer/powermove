@@ -88,7 +88,7 @@ impl Plan {
             ..Self::default()
         }
     }
-    fn seek(time: f64) -> Self {
+    pub(crate) fn seek(time: f64) -> Self {
         Self {
             calls: Vec::new(),
             effects: vec![HostEffect::Seek(time)],
@@ -1686,4 +1686,42 @@ pub fn playhead_targets(index: &TimelineIndex) -> Vec<f64> {
     times.sort_by(f64::total_cmp);
     times.dedup();
     times
+}
+
+/// Menu row titles, shared by every surface that shows the model's menus.
+pub fn menu_label(id: &str) -> &'static str {
+    match id {
+        "marker.add" => "Add Marker",
+        "marker.remove" => "Remove Marker",
+        "work.start" => "Set Work Area Start",
+        "work.end" => "Set Work Area End",
+        "work.reset" => "Reset Work Area",
+        "mode.toggle" => "Toggle Layers and Tracks",
+        "keys.value" => "Edit Value…",
+        "keys.velocity" => "Keyframe Velocity…",
+        "keys.scale" => "Scale Keyframes…",
+        "keys.hold" => "Toggle Hold Keyframe",
+        "keys.delete" => "Delete Keyframes",
+        "keys.copy" => "Copy Keyframes",
+        "ease.linear" => "Linear",
+        "ease.easeIn" => "Ease In",
+        "ease.easeOut" => "Ease Out",
+        "ease.easeInOut" => "Ease In and Out",
+        "ease.swish" => "Swish",
+        "ease.power" => "Power",
+        "ease.expoOut" => "Expo Out",
+        "ease.backOut" => "Back Out",
+        "ease.snap" => "Snap",
+        "ease.glide" => "Glide",
+        "track.add" => "Add Keyframe",
+        "track.paste" => "Paste Keyframes",
+        "track.clear" => "Remove All Keyframes",
+        "layer.shared-menu" => "Layer Options…",
+        "graph.value" => "Value Graph",
+        "graph.speed" => "Speed Graph",
+        "graph.fit" => "Fit Curves",
+        "graph.merge" => "Merge Curves",
+        "graph.combined" => "Show Dope Sheet",
+        _ => "",
+    }
 }

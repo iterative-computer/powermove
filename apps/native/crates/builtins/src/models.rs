@@ -29,7 +29,6 @@ type TimelineJob = Pin<
 pub(crate) struct Models {
     pub properties: Properties,
     pub timeline: Option<TimelineClient>,
-    pub timeline_scene: Option<std::sync::Arc<crate::timeline_scene::Scene>>,
     pub viewer: pm_panel_viewerchrome::v4::Session,
     viewer_projection: Option<(
         pm_panel_viewerchrome::Stamp,
@@ -54,6 +53,7 @@ pub(crate) struct Models {
     timeline_job: Option<TimelineJob>,
     pub(crate) timeline_effect_pending: usize,
     pub(crate) timeline_effect_result: Option<Result<(), String>>,
+    timeline_editor: Option<TimelineEditor>,
 }
 impl Models {
     pub fn new(
@@ -86,7 +86,6 @@ impl Models {
         Ok(Self {
             properties: Properties::default(),
             timeline,
-            timeline_scene: None,
             viewer: Default::default(),
             viewer_projection: None,
             project: ProjectBridge::default(),
@@ -101,6 +100,7 @@ impl Models {
             timeline_job: None,
             timeline_effect_pending: 0,
             timeline_effect_result: None,
+            timeline_editor: None,
             project_reply: None,
             media_runtime: Default::default(),
             originals: Default::default(),
@@ -220,18 +220,21 @@ impl Backend {
         let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
             .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
-        let mut scene = crate::timeline_scene::Scene {
-            duration: client.model.index.duration,
-            fps,
-            time,
-            rows: Default::default(),
-        };
         let mut display = vec![];
+        let editor_field = format!(
+            "builtin:{}:{}:edit",
+            self.panel_id, self.identity.generation
+        );
         for row in frame["window"]["rows"].as_array().ok_or("timeline rows")? {
             let mut row = row.clone();
-            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
             row["focused"] = json!(false);
             row["hovered"] = json!(false);
+            if row["kind"] == "track" {
+                row["accessibilityLabel"] = row["label"].clone();
+                display.push(row);
+                continue;
+            }
+            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
             if row["kind"] == "layer" {
                 let l = client.model.index.layer(&layer).ok_or("layer")?;
                 row["accessibilityLabel"] = json!(format!(
@@ -242,6 +245,12 @@ impl Backend {
                 row["canOpen"] = json!(!l.channels.is_empty() || l.kind == "group");
                 row["transformable"] = json!(l.kind != "audio");
                 row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|client.model.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
+                    row["nameEditor"] = json!({
+                        "value": l.name.to_string_lossy(),
+                        "binding": editor_field.clone(),
+                    });
+                }
                 row["media"] = json!(if matches!(l.kind.as_str(), "video" | "audio" | "image") {
                     "loading"
                 } else {
@@ -293,59 +302,8 @@ impl Backend {
                     row["readout"].as_str().unwrap_or("")
                 ));
             }
-            let layer_id = row["layer"].as_str().ok_or("layer")?;
-            if let Some(layer) = client.model.index.layer(layer_id) {
-                let property = row["kind"] == "property";
-                let path = row["path"].as_str();
-                let mut keys = vec![];
-                for channel in &layer.channels {
-                    if property
-                        && path.is_some_and(|p| {
-                            !client
-                                .model
-                                .track_channels(&layer.id, p)
-                                .iter()
-                                .any(|axis| axis.path == channel.path)
-                        })
-                    {
-                        continue;
-                    }
-                    for key in &channel.keys {
-                        let time = layer.from + key.time;
-                        keys.push(crate::timeline_scene::Key {
-                            id: key.id.clone(),
-                            channel: channel.path.clone(),
-                            time,
-                            selected: client.model.selection.keys().contains(&key.id),
-                            interpolation: key
-                                .stored
-                                .get("e")
-                                .and_then(pm_model::Value::as_str)
-                                .unwrap_or("linear")
-                                .into(),
-                        });
-                    }
-                }
-                keys.sort_by(|a, b| a.time.total_cmp(&b.time));
-                // Retain every authored identity. The native renderer culls and
-                // groups using the actual viewport, never an invented 2048px grid.
-                scene.rows.insert(
-                    row["id"].as_str().ok_or("row id")?.into(),
-                    crate::timeline_scene::Row {
-                        layer: layer.id.clone(),
-                        name: layer.name.to_string_lossy(),
-                        kind: layer.kind.clone(),
-                        from: layer.from,
-                        duration: layer.duration,
-                        property,
-                        selected: row["selected"].as_bool().unwrap_or(false),
-                        keys,
-                    },
-                );
-            }
             display.push(row);
         }
-        self.native.timeline_scene = Some(std::sync::Arc::new(scene));
         frame["window"]["rows"] = json!(display);
         let frames = (time * fps).round().max(0.) as u64;
         let nominal = fps.round().max(1.) as u64;
@@ -367,6 +325,9 @@ impl Backend {
             frames % nominal
         ));
         frame["spokenTime"] = json!(format!("{sec} seconds, {} frames", frames % nominal));
+        if self.native.timeline_editor == Some(TimelineEditor::Time) {
+            frame["timeEditor"] = json!({"value":frame["timecode"],"binding":editor_field});
+        }
         frame["frameRate"] = json!(format!("{fps} fps"));
 
         let title = p
@@ -710,6 +671,12 @@ fn property_label(path: &str) -> &str {
     }
 }
 
+/// A timeline row's name, or the header time, open for typing.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TimelineEditor {
+    Name(String),
+    Time,
+}
 pub(crate) enum NativeCommand {
     Value(Value),
     Kernel(Request),
@@ -717,6 +684,109 @@ pub(crate) enum NativeCommand {
     Timeline(Value),
 }
 impl Backend {
+    /// Name and time editing live here, next to the fields they open. The
+    /// committed value becomes an ordinary kernel edit or seek.
+    fn timeline_intent(&mut self, args: &Value) -> Result<NativeCommand, String> {
+        use pm_panel_timeline::{RowId, v4};
+        let done = |v: Value| Ok(NativeCommand::Value(v));
+        match args["type"].as_str() {
+            Some("rename") => {
+                let RowId::Layer(id) =
+                    v4::parse_row(args["id"].as_str().ok_or("row")?).map_err(|e| e.to_string())?
+                else {
+                    return Err("Only layers can be renamed".into());
+                };
+                self.native.timeline_editor = Some(TimelineEditor::Name(id));
+                done(Value::Null)
+            }
+            Some("timeEdit") => {
+                self.native.timeline_editor = Some(TimelineEditor::Time);
+                done(Value::Null)
+            }
+            Some("editDone") => {
+                let editor = self.native.timeline_editor.take();
+                // Empty closes the field, as Escape does; nothing has a blank name.
+                let value = args["value"].as_str().unwrap_or("");
+                if value.trim().is_empty() {
+                    return done(Value::Null);
+                }
+                match editor {
+                    Some(TimelineEditor::Name(id)) => {
+                        let id = v4::row_id(&RowId::Layer(id));
+                        Ok(NativeCommand::Timeline(
+                            json!({"type":"setName","id":id,"name":value}),
+                        ))
+                    }
+                    Some(TimelineEditor::Time) => {
+                        let fps = self
+                            .native
+                            .timeline
+                            .as_ref()
+                            .map_or(30., |c| c.model.index.fps);
+                        match v4::parse_timecode(value, fps) {
+                            Some(time) => {
+                                Ok(NativeCommand::Timeline(json!({"type":"seek","time":time})))
+                            }
+                            None => Err("Enter a timecode like 00:00:02:15".into()),
+                        }
+                    }
+                    None => done(Value::Null),
+                }
+            }
+            _ => Ok(NativeCommand::Timeline(args.clone())),
+        }
+    }
+    /// Rows for a native menu the Timeline header opens, and the intent each
+    /// row sends back. Graph options come from the model's own menu.
+    fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
+        use pm_panel_timeline::v4;
+        let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
+        if args["type"] == "graphOptions" {
+            let context = pm_panel_timeline::Context::Graph { series: 0 };
+            let rows: Vec<Value> = client
+                .model
+                .menu(&context)
+                .into_iter()
+                .filter(|item| item.enabled)
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "label": pm_panel_timeline::menu_label(item.id),
+                        "checked": item.checked,
+                        "intent": {"type":"graphMenu","action":item.id},
+                    })
+                })
+                .collect();
+            return Ok(json!(rows));
+        }
+        let row = args["id"].as_str().ok_or("row")?;
+        let pm_panel_timeline::RowId::Layer(id) = v4::parse_row(row).map_err(|e| e.to_string())?
+        else {
+            return Err("Only layers have parents".into());
+        };
+        let current = client.model.index.layer(&id).and_then(|l| l.parent.clone());
+        let mut rows = vec![json!({
+            "id": "none", "label": "None", "checked": current.is_none(),
+            "intent": {"type":"parent","ids":[id],"parent":null},
+        })];
+        rows.extend(
+            client
+                .model
+                .index
+                .layers
+                .iter()
+                .filter(|l| l.id != id)
+                .map(|l| {
+                    json!({
+                        "id": l.id,
+                        "label": l.name.to_string_lossy(),
+                        "checked": current.as_deref() == Some(l.id.as_str()),
+                        "intent": {"type":"parent","ids":[id],"parent":l.id},
+                    })
+                }),
+        );
+        Ok(json!(rows))
+    }
     pub(crate) fn export_snapshot(&mut self) -> Result<Value, String> {
         self.sync()?;
         let p = self.published().ok_or("closed")?;
@@ -902,7 +972,10 @@ impl Backend {
                 )?;
                 return Ok(NativeCommand::Kernel(request));
             }
-            "panel.timeline" => return Ok(NativeCommand::Timeline(args.clone())),
+            "panel.timeline" => {
+                return self.timeline_intent(args);
+            }
+            "panel.timeline.menu" => self.timeline_menu(args)?,
             "panel.timeline.dispose" => {
                 return Ok(NativeCommand::Timeline(json!({"type":"dispose"})));
             }

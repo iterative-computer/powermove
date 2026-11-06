@@ -8,10 +8,13 @@ pub mod dialogs;
 mod error_log;
 mod export_coordinator;
 mod first_run;
+mod gizmo;
 mod keyframe_sheets;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
+#[cfg(test)]
+mod gizmo_tests;
 mod layer_commands;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
@@ -34,9 +37,15 @@ mod smoke;
 mod surface_routes;
 mod surfaces;
 mod text_host;
+mod timeline_surface;
+#[cfg(test)]
+mod timeline_tests;
+mod v4_compile;
 mod v4_control;
 mod v4_native;
 mod v4_view;
+#[cfg(test)]
+mod v4_view_tests;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;

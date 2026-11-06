@@ -538,8 +538,36 @@ impl Scene {
         let i = self.positions.get(id)?.checked_add_signed(delta)?;
         self.rows.get(i)
     }
+    pub fn navigate_first(&self, ordinal: usize) -> Option<String> {
+        self.rows.get(ordinal).map(|r| r.id.clone())
+    }
     pub fn scroll_for(&self, id: &str) -> Option<f64> {
         self.positions.get(id).map(|i| self.tops[*i])
+    }
+    /// Content height of all rows, for scroll clamping.
+    pub fn content_height(&self) -> f64 {
+        self.tops.last().copied().unwrap_or(0.)
+    }
+    /// The row at a content-space y. Variable heights use the same index as paint.
+    pub fn row_at(&self, y: f64) -> Option<&PaintRow> {
+        if y < 0. {
+            return None;
+        }
+        self.rows
+            .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
+    }
+    /// Ordinal window covering a scroll offset, for the outline's row request.
+    pub fn visible_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
+        let first = self
+            .tops
+            .partition_point(|y| *y <= scroll_y)
+            .saturating_sub(1)
+            .min(self.total());
+        let end = self
+            .tops
+            .partition_point(|y| *y < scroll_y + height)
+            .min(self.total());
+        first..end.max(first)
     }
     pub fn anchor(&self, v: Viewport) -> Option<(&str, f64)> {
         let i = self
@@ -1056,6 +1084,12 @@ fn paint_keys(
         }
     }
 }
+fn key_identity(op: &Op) -> Option<(String, String)> {
+    serde_json::from_str(op.id.strip_prefix("key:")?).ok()
+}
+fn intersects(a: Rect, b: Rect) -> bool {
+    a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
+}
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub viewport: Viewport,
@@ -1171,6 +1205,43 @@ impl Frame {
             ),
             head,
         ])
+    }
+    /// Topmost op of a family under the point. Native hit testing follows paint order.
+    pub fn hit_op(&self, prefix: &str, x: f64, y: f64, slop: f64) -> Option<&Op> {
+        self.ops.iter().rev().find(|o| {
+            let b = o.bounds;
+            o.id.starts_with(prefix)
+                && Rect::new(
+                    b.x - slop,
+                    b.y - slop,
+                    b.width + 2. * slop,
+                    b.height + 2. * slop,
+                )
+                .contains(x, y)
+                && o.clip.is_none_or(|clip| clip.contains(x, y))
+        })
+    }
+    /// `(row id, key id)` of the key under the point, with a hit target padded
+    /// to the design's minimum; the painted diamond stays `metrics.keyframe`.
+    pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
+        key_identity(self.hit_op("key:", x, y, slop)?)
+    }
+    /// Every key whose diamond meets the rectangle, for marquee selection.
+    pub fn keys_in(&self, area: Rect) -> Vec<String> {
+        self.ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && intersects(o.bounds, area))
+            .filter_map(key_identity)
+            .map(|(_, key)| key)
+            .collect()
+    }
+    /// Every clip whose painted body meets the rectangle.
+    pub fn clips_in(&self, area: Rect) -> Vec<String> {
+        self.ops
+            .iter()
+            .filter(|o| o.id.starts_with("clip:") && intersects(o.bounds, area))
+            .map(|o| o.id[5..].to_owned())
+            .collect()
     }
     pub fn hit_clip(&self, x: f64, y: f64) -> Option<(&str, Option<Edge>)> {
         if y < 0.

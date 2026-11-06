@@ -24,6 +24,24 @@ use super::channels::{self, Step};
 use super::{Cx, new_id, properties, track, values};
 use crate::error::CommandError;
 
+/// Where each numeric key's direction handles sit, as `[in, out]` points in
+/// layer-local seconds and value units: the points `SetHandle` takes back.
+/// `None` where a hold, the track's ends or a non-numeric key hides one.
+pub fn handle_points(keys: &[Value]) -> Vec<[Option<(f64, f64)>; 2]> {
+    let mut eased: Vec<_> = keys.iter().map(track::ease_key).collect();
+    pm_eval::temporal::refresh_auto_bezier(&mut eased);
+    (0..eased.len())
+        .map(|i| {
+            [Side::In, Side::Out].map(|side| {
+                eased[i].v?;
+                pm_eval::temporal::handle_control_point(&eased, i, side)
+                    .filter(|p| p.t.is_finite() && p.v.is_finite())
+                    .map(|p| (p.t, p.v))
+            })
+        })
+        .collect()
+}
+
 /// An easing preset name (`PM.Ease.PRESETS`: `linear`, `ease`, `easeIn`,
 /// `easeOut`, `easeInOut`, `quadIn` … `glide`) or a unit-square cubic
 /// `[x1, y1, x2, y2]` (x clamped to 0–1, y to −4–4).

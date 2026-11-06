@@ -43,6 +43,21 @@ pub struct Context<'a> {
     pub property_facts: &'a PropertyFacts,
 }
 
+/// Timecode typed in the timeline header: `HH:MM:SS:FF` with any leading fields
+/// omitted, or a bare frame count. The inverse of the header, which counts
+/// whole seconds of the nominal rate (30 at 29.97), so typed text lands on the
+/// frame it names.
+pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
+    let fields: Vec<f64> = text
+        .trim()
+        .split([':', ';', '.'])
+        .map(|field| field.parse::<u32>().ok().map(f64::from))
+        .collect::<Option<_>>()?;
+    let (frames, seconds) = fields.split_last()?;
+    let seconds = seconds.iter().fold(0., |sum, field| sum * 60. + field);
+    let nominal = fps.round().max(1.);
+    (fps > 0.).then(|| (seconds * nominal + frames) / fps)
+}
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {
     match row {
@@ -226,10 +241,38 @@ pub async fn dispatch(
                 "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
                 "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
                 "mute" => client.model.mute(&id, context.time)?,
-                "parent" => return Err(Error::MissingHost("native parent menu")),
                 _ => return Err(Error::InvalidIntent("switch")),
             }
         }
+        "setName" => {
+            let draft = crate::Draft::Name {
+                layer_id: layer_row(intent)?,
+                text: string(intent, "name")?.to_owned(),
+            };
+            draft.finish(true, client.model.index.revision)
+        }
+        "seek" => {
+            let time = intent
+                .get("time")
+                .and_then(Value::as_f64)
+                .filter(|t| t.is_finite())
+                .ok_or(Error::InvalidIntent("time"))?;
+            Plan::seek(time.clamp(0., client.model.index.duration))
+        }
+        "graphMenu" => {
+            persist = true;
+            client.model.menu_action(
+                &crate::Context::Graph { series: 0 },
+                string(intent, "action")?,
+                context.time,
+            )?
+        }
+        "tab" if !boolean(intent, "close")? => Plan {
+            effects: vec![HostEffect::OpenComposition(
+                string(intent, "id")?.to_owned(),
+            )],
+            ..Plan::default()
+        },
         "keyToggle" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;
@@ -319,15 +362,8 @@ pub async fn dispatch(
             effects: vec![client.model.import_drop(context.time, None, false)?],
             ..Plan::default()
         },
-        "graphOptions" => return Err(Error::MissingHost("native graph menu")),
-        "open" | "tab" => return Err(Error::MissingHost("composition/project services")),
-        "timeEdit" | "rename" => return Err(Error::MissingHost("native field bindings")),
-        "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel" | "doubleClick" | "wheel"
-        | "keyUp" | "dragEnter" | "dragOver" | "dragLeave" | "drop" => {
-            return Err(Error::MissingHost(
-                "native timeline geometry/gesture adapter",
-            ));
-        }
+        "tab" => return Err(Error::MissingHost("composition tab closing")),
+        // Pointer gestures on tracks run in the native surface, never through V8.
         _ => return Err(Error::InvalidIntent("action")),
     };
     let effects = client.dispatch(plan).await?;
@@ -364,7 +400,7 @@ pub fn project_window(
         return Err(Error::InvalidIntent("visible rows"));
     }
     if model.mode == TimelineMode::Tracks {
-        return Err(Error::MissingHost("track lane presentation"));
+        return track_window(model, first, visible);
     }
     let window = model.window(first, visible, visible);
     let selected = model
@@ -436,15 +472,75 @@ pub fn project_window(
             Ok(value)
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    Ok(json!({
+    Ok(frame_facts(model, window.first, window.total, rows))
+}
+/// Lanes in the renderer's order, so outline rows and painted rows share ordinals.
+fn track_window(
+    model: &crate::TimelineModel,
+    first: usize,
+    visible: usize,
+) -> Result<Value, Error> {
+    use crate::tracks::Area;
+    let layout = crate::tracks::layout(&model.index, &model.reveal);
+    let mut rows = vec![];
+    for (area, count, short, audio) in [
+        (Area::Video, layout.video, "V", false),
+        (Area::Audio, layout.audio, "A", true),
+        (Area::Captions, layout.captions, "C", false),
+    ] {
+        for lane in 0..count {
+            let clips: Vec<_> = layout
+                .items
+                .iter()
+                .filter(|i| i.area == area && i.lane == lane)
+                .filter_map(|i| model.index.layer(&i.id))
+                .collect();
+            let label = format!("{short}{}", lane + 1);
+            let enabled = clips
+                .iter()
+                .all(|l| if audio { !l.audio_muted } else { l.visible });
+            rows.push(json!({
+                "id": json!(["track", format!("{area:?}"), lane]).to_string(),
+                "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
+                "enabled": enabled, "expanded": false, "selected": false,
+                "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
+            }));
+            for row in model.rows() {
+                let RowId::Property { layer_id, channel } = &row.id else {
+                    continue;
+                };
+                if clips.iter().any(|l| l.id == *layer_id) {
+                    rows.push(json!({
+                        "id": row_id(&row.id), "depth": row.depth, "kind": "property",
+                        "layer": layer_id, "path": channel, "selected": false,
+                        "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
+                        "channels": model.track_channels(layer_id, channel).iter()
+                            .map(|c| c.path.as_str()).collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+    let total = rows.len();
+    let start = first.min(total).saturating_sub(visible);
+    let end = first.saturating_add(visible.saturating_mul(2)).min(total);
+    Ok(frame_facts(model, start, total, rows[start..end].to_vec()))
+}
+fn frame_facts(
+    model: &crate::TimelineModel,
+    first: usize,
+    total: usize,
+    rows: Vec<Value>,
+) -> Value {
+    json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
         "hasComposition": model.index.comp_id.is_some(),
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,
-        "window": { "first": window.first, "total": window.total, "rows": rows },
+        "window": { "first": first, "total": total, "rows": rows },
         "indexDigits": model.index.layers.len().max(1).to_string().len(),
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
             else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
-    }))
+    })
 }

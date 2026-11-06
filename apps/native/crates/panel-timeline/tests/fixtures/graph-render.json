@@ -211,7 +211,7 @@
       ]
     },
     "fontSize": 0.0,
-    "id": "graph-tangent:key:0",
+    "id": "graph-tangent:key:out",
     "opacity": 1.0,
     "radius": 0.0,
     "shape": "line",
@@ -234,7 +234,7 @@
     "color": 16736281,
     "detail": null,
     "fontSize": 0.0,
-    "id": "graph-handle:key:0",
+    "id": "graph-handle:key:out",
     "opacity": 1.0,
     "radius": 0.0,
     "shape": "circle",

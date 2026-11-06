@@ -107,18 +107,6 @@ pub fn fit_scale(body_w: f32, body_h: f32, comp: [f64; 2], margin: f32) -> f64 {
     w.min(h).max(0.01)
 }
 
-/// Clip label colour by layer kind (tokens.md, `colors.labels.*`).
-pub fn label_color(kind: &str, labels: &pm_design::Labels) -> u32 {
-    match kind {
-        "text" | "shape" => labels.blue,
-        "video" | "image" | "sequence" => labels.teal,
-        "audio" => labels.green,
-        "solid" => labels.orange,
-        "adjustment" | "effect" => labels.violet,
-        _ => labels.gray,
-    }
-}
-
 /// Display name of a layer kind (`Video`, `Text`, …).
 #[cfg(test)]
 pub fn kind_name(kind: &str) -> String {
@@ -132,15 +120,6 @@ pub fn kind_name(kind: &str) -> String {
                 .unwrap_or_default()
         }
     }
-}
-
-/// `a` moved towards `b` by `t` (sRGB, per channel).
-pub fn mix(a: u32, b: u32, t: f32) -> u32 {
-    let ch = |v: u32, s: u32| ((v >> s) & 255) as f32;
-    [16, 8, 0].iter().fold(0, |acc, &s| {
-        let v = ch(a, s) + (ch(b, s) - ch(a, s)) * t;
-        acc | ((v.round().clamp(0., 255.) as u32) << s)
-    })
 }
 
 /// The comp frame gets a separator outline when its background is
@@ -172,35 +151,6 @@ pub fn parse_background(text: &str) -> Option<u32> {
     }
 }
 
-/// Major ruler interval in frames: the smallest "nice" step at least
-/// `min_px` wide.
-pub fn ruler_step(fps: f64, px_per_second: f64, min_px: f64) -> f64 {
-    let fps = fps.max(1.);
-    let frames = [1., 2., 5., 10.];
-    let seconds = [
-        1., 2., 5., 10., 15., 30., 60., 120., 300., 600., 1800., 3600.,
-    ];
-    frames
-        .into_iter()
-        .chain(seconds.into_iter().map(|s| s * fps))
-        .find(|f| f / fps * px_per_second >= min_px)
-        .unwrap_or(3600. * fps)
-}
-
-/// Ruler label for a frame: `0:05` on whole seconds, else `0:05:12`.
-pub fn ruler_label(frame: f64, fps: f64) -> String {
-    let fps = fps.max(1.).round();
-    let frame = frame.round();
-    let total = (frame / fps).floor() as i64;
-    let rest = (frame - total as f64 * fps) as i64;
-    let (m, s) = (total / 60, total % 60);
-    if rest == 0 {
-        format!("{m}:{s:02}")
-    } else {
-        format!("{m}:{s:02}:{rest:02}")
-    }
-}
-
 fn plural(n: usize, one: &str) -> String {
     format!("{n} {one}{}", if n == 1 { "" } else { "s" })
 }
@@ -223,8 +173,8 @@ pub fn status_line(dirty: bool, saved_path: bool, layers: usize, keyframes: usiz
 mod tests {
     // Not `super::*`: gpui's `test` attribute macro would shadow `#[test]`.
     use super::{
-        CHANNELS, channel_label, display_value, fit_scale, kind_name, label_color, mix,
-        needs_frame_outline, parse_background, ruler_label, ruler_step, status_line, zoom_title,
+        CHANNELS, channel_label, display_value, fit_scale, kind_name, needs_frame_outline,
+        parse_background, status_line, zoom_title,
     };
 
     #[test]
@@ -252,30 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn clips_use_label_colours_never_the_accent() {
-        for (scheme, increase_contrast) in [
-            (pm_design::Scheme::Light, false),
-            (pm_design::Scheme::Dark, false),
-            (pm_design::Scheme::Light, true),
-            (pm_design::Scheme::Dark, true),
-        ] {
-            let accessibility = pm_design::Accessibility {
-                reduce_transparency: false,
-                increase_contrast,
-                reduce_motion: false,
-            };
-            let c = pm_design::Tokens::new(scheme, accessibility).colors;
-            for kind in [
-                "text", "shape", "video", "image", "audio", "solid", "null", "group",
-            ] {
-                let fill = label_color(kind, &c.labels);
-                assert_ne!(fill, c.accent, "{kind}");
-                assert_ne!(mix(fill, c.text, 0.12), c.accent, "{kind}");
-            }
-            assert_eq!(label_color("text", &c.labels), c.labels.blue);
-            assert_eq!(label_color("video", &c.labels), c.labels.teal);
-        }
-        assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+    fn kind_names_read_as_words() {
         assert_eq!(kind_name("video"), "Video");
         assert_eq!(kind_name("precomp"), "Composition");
     }
@@ -289,16 +216,6 @@ mod tests {
         assert!(needs_frame_outline(parse_background("#ffffff80"), 0x0e0e0e));
         assert_eq!(parse_background("#abc"), Some(0xaabbcc));
         assert_eq!(parse_background("transparent"), None);
-    }
-
-    #[test]
-    fn ruler_steps_are_readable_and_labels_are_short() {
-        assert_eq!(ruler_step(30., 300., 72.), 10.);
-        assert_eq!(ruler_step(30., 60., 72.), 60.);
-        assert_eq!(ruler_label(0., 30.), "0:00");
-        assert_eq!(ruler_label(150., 30.), "0:05");
-        assert_eq!(ruler_label(160., 30.), "0:05:10");
-        assert_eq!(ruler_label(30. * 75., 30.), "1:15");
     }
 
     #[test]

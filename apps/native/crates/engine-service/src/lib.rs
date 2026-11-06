@@ -69,11 +69,17 @@ pub(crate) struct OverlayParams {
     canvas: [f32; 4],
     drawable: [f32; 2],
     pad2: [f32; 2],
-    lines: [OverlayLine; 64],
+    lines: [OverlayLine; OverlayGeometry::MAX_LINES],
 }
 impl OverlayGeometry {
+    /// Must match `viewer.metal`; the parameters stay inside Metal's 4 KiB inline limit.
+    pub const MAX_LINES: usize = 120;
     pub fn new(lines: Vec<OverlayLine>) -> Result<Self> {
-        ensure!(lines.len() <= 64, "at most 64 locked overlay lines");
+        ensure!(
+            lines.len() <= Self::MAX_LINES,
+            "at most {} locked overlay lines",
+            Self::MAX_LINES
+        );
         ensure!(
             lines
                 .iter()
@@ -92,7 +98,7 @@ impl OverlayGeometry {
             canvas: [0.; 4],
             drawable: [0.; 2],
             pad2: [0.; 2],
-            lines: [OverlayLine::default(); 64],
+            lines: [OverlayLine::default(); Self::MAX_LINES],
         };
         p.lines[..self.lines.len()].copy_from_slice(&self.lines);
         p

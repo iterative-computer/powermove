@@ -1,0 +1,657 @@
+//! Viewer gizmos: real pointer input through the mounted viewer panel into kernel
+//! gestures. The scene is real; the engine overlay is observed at its entry point.
+use crate::gizmo::{GizmoSurface, Host, Navigate, Tool, ViewFrame};
+use crate::v4_view::{Natives, SurfaceView};
+use crate::v4_view_tests::{
+    PROJECT, Rig, bounds, publication, rig, rig_project, settle, tokens, window,
+};
+use gpui::{
+    App, AppContext, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
+    VisualTestContext, point, px,
+};
+use pm_engine_service::OverlayLine;
+use pm_kernel::{Call, Caller, HistoryCall, Request, SelectionCall};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
+#[derive(Default)]
+struct Recorder {
+    lines: RefCell<Vec<OverlayLine>>,
+    reports: RefCell<Vec<String>>,
+    tool: Cell<Option<Tool>>,
+    navigation: RefCell<Vec<Navigate>>,
+    menus: Cell<usize>,
+}
+struct Recording(Rc<Recorder>);
+impl Host for Recording {
+    fn time(&self, _: &App) -> f64 {
+        0.5
+    }
+    fn playing(&self, _: &App) -> bool {
+        false
+    }
+    fn frame(&self, bounds: Bounds<Pixels>, _: &App) -> Option<ViewFrame> {
+        Some(ViewFrame {
+            origin: bounds.origin + point(px(20.), px(20.)),
+            scale: 1.,
+            size: [640., 360.],
+        })
+    }
+    fn tool(&self, _: &App) -> Tool {
+        self.0.tool.get().unwrap_or(Tool::Select)
+    }
+    fn overlay(&self, lines: Vec<OverlayLine>, _: &mut App) {
+        *self.0.lines.borrow_mut() = lines;
+    }
+    fn navigate(&self, change: Navigate, _: &mut App) {
+        self.0.navigation.borrow_mut().push(change);
+    }
+    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {
+        self.0.menus.set(self.0.menus.get() + 1);
+    }
+    fn report(&self, message: String, _: &mut App) {
+        self.0.reports.borrow_mut().push(message);
+    }
+}
+struct Stage {
+    rig: Rig,
+    surface: Entity<GizmoSurface>,
+    recorder: Rc<Recorder>,
+    vcx: VisualTestContext,
+    _view: Entity<SurfaceView>,
+}
+/// One visible square with a real transform at its anchor.
+pub(crate) fn project() -> String {
+    project_of("image")
+}
+fn project_of(kind: &str) -> String {
+    let channel = |key: &str, v: f64| format!(r#""{key}":{{"v":{v},"kf":[]}}"#);
+    let channels = [
+        ("opacity", 100.),
+        ("position.x", 200.),
+        ("position.y", 150.),
+        ("scale.x", 100.),
+        ("scale.y", 100.),
+        ("anchor.x", 0.),
+        ("anchor.y", 0.),
+        ("rotation", 0.),
+    ]
+    .map(|(key, v)| channel(key, v))
+    .join(",");
+    format!(
+        r##"{{"id":"integration","name":"Square","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{{"id":"l0","type":"{kind}","name":"Square","from":0,"dur":2,"on":true,"p":{{{channels}}},"d":{{"w":100,"h":100}},"fx":[]}}]}}"##
+    )
+}
+#[gpui::test]
+fn a_corner_resizes_a_shape_instead_of_scaling_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.drag(cx, at, point(px(50.), px(20.)), Modifiers::none());
+    let after = s.pose();
+    assert_eq!(after.scale, before.scale);
+    assert_eq!(after.corners[0], before.corners[0]);
+    assert_eq!(
+        after.corners[2],
+        [before.corners[2][0] + 50., before.corners[2][1] + 20.]
+    );
+    s.undo(cx);
+    assert_eq!(s.pose().corners, before.corners);
+}
+/// Two side-by-side squares for picking.
+fn pair() -> String {
+    project().replace(
+        r#""fx":[]}]}"#,
+        r#""fx":[]},{"id":"l1","type":"shape","name":"Other","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":450,"kf":[]},"position.y":{"v":150,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"#,
+    )
+}
+fn stage(cx: &mut TestAppContext) -> Stage {
+    stage_on(cx, &project())
+}
+fn stage_on(cx: &mut TestAppContext, project: &str) -> Stage {
+    let rig = rig_project("viewer", project);
+    rig.kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let first = publication(&rig);
+    let natives = Natives::default();
+    let recorder = Rc::new(Recorder::default());
+    let host = Rc::new(Recording(recorder.clone()));
+    let kernel = rig.kernel.clone();
+    let surface = cx.new(|_| GizmoSurface::new(kernel, PROJECT.into(), tokens(), host));
+    natives
+        .views
+        .borrow_mut()
+        .insert("viewer.gizmos".into(), surface.clone().into());
+    let (view, vcx) = window(cx, &rig, first, natives);
+    let mut stage = Stage {
+        rig,
+        surface,
+        recorder,
+        vcx,
+        _view: view,
+    };
+    stage.refresh(cx);
+    stage
+}
+impl Stage {
+    fn refresh(&mut self, cx: &mut TestAppContext) {
+        self.surface.update(&mut self.vcx, |s, cx| s.refresh(cx));
+        let surface = self.surface.clone();
+        settle(cx, move |cx| {
+            surface.read_with(cx, |s, _| s.idle() && !s.poses().is_empty())
+        });
+    }
+    fn point_of(&mut self, comp: [f64; 2]) -> Point<Pixels> {
+        let origin = bounds(&mut self.vcx, "viewer.gizmos").origin;
+        origin + point(px(20. + comp[0] as f32), px(20. + comp[1] as f32))
+    }
+    fn drag(
+        &mut self,
+        cx: &mut TestAppContext,
+        from: Point<Pixels>,
+        by: Point<Pixels>,
+        m: Modifiers,
+    ) {
+        let surface = self.surface.clone();
+        self.vcx.simulate_mouse_down(from, MouseButton::Left, m);
+        for step in 1..=3 {
+            let at = from + point(by.x * (step as f32 / 3.), by.y * (step as f32 / 3.));
+            self.vcx.simulate_mouse_move(at, MouseButton::Left, m);
+            let s = surface.clone();
+            settle(cx, move |cx| s.read_with(cx, |s, _| s.idle()));
+        }
+        self.vcx.simulate_mouse_up(from + by, MouseButton::Left, m);
+        let s = surface.clone();
+        settle(cx, move |cx| s.read_with(cx, |s, _| s.idle()));
+        assert!(
+            self.recorder.reports.borrow().is_empty(),
+            "{:?}",
+            self.recorder.reports.borrow()
+        );
+        self.refresh(cx);
+    }
+    fn undo(&mut self, cx: &mut TestAppContext) {
+        self.rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(Caller::native(), Call::History(HistoryCall::Undo)),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        self.refresh(cx);
+    }
+    fn pose(&self) -> crate::gizmo::Pose {
+        self.surface
+            .read_with(&self.vcx, |s, _| s.poses()[0].clone())
+    }
+    fn points(&self) -> ([f64; 2], [f64; 2], [f64; 2]) {
+        self.surface
+            .read_with(&self.vcx, |s, _| s.points().unwrap())
+    }
+}
+#[gpui::test]
+fn the_engine_receives_a_box_and_handles_for_the_selection(cx: &mut TestAppContext) {
+    let s = stage(cx);
+    let lines = s.recorder.lines.borrow();
+    assert!(lines.len() >= 4 + 8 * 4, "{} lines", lines.len());
+    assert!(lines.iter().all(|l| l.ends.iter().all(|v| v.is_finite())));
+}
+#[gpui::test]
+fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (body, ..) = s.points();
+    let at = s.point_of([body[0] + 30., body[1] + 30.]);
+    s.drag(cx, at, point(px(40.), px(-10.)), Modifiers::none());
+    let after = s.pose();
+    assert_eq!(after.position[0], before.position[0] + 40.);
+    assert_eq!(after.position[1], before.position[1] - 10.);
+    s.undo(cx);
+    assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn dragging_a_corner_scales_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.drag(cx, at, point(px(50.), px(50.)), Modifiers::none());
+    let after = s.pose();
+    assert!(after.scale[0] > before.scale[0], "{:?}", after.scale);
+    assert!(after.scale[1] > before.scale[1]);
+    s.undo(cx);
+    assert_eq!(s.pose().scale, before.scale);
+}
+#[gpui::test]
+fn the_rotate_handle_turns_about_the_anchor_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (.., rotate) = s.points();
+    let at = s.point_of(rotate);
+    s.drag(cx, at, point(px(60.), px(20.)), Modifiers::none());
+    assert!(s.pose().rotation > before.rotation, "{}", s.pose().rotation);
+    s.undo(cx);
+    assert_eq!(s.pose().rotation, before.rotation);
+}
+#[gpui::test]
+fn the_anchor_tool_moves_the_anchor_and_keeps_the_picture(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Anchor));
+    let before = s.pose();
+    let at = s.point_of(before.anchor);
+    s.drag(cx, at, point(px(16.), px(12.)), Modifiers::none());
+    let after = s.pose();
+    assert_eq!(after.local_anchor[0], before.local_anchor[0] + 16.);
+    assert_eq!(after.position[0], before.position[0] + 16.);
+    for (a, b) in after.corners.iter().zip(before.corners.iter()) {
+        assert!((a[0] - b[0]).abs() < 1e-6, "{a:?} {b:?}");
+    }
+    s.undo(cx);
+    assert_eq!(s.pose().local_anchor, before.local_anchor);
+}
+#[gpui::test]
+fn the_opposite_corner_stays_fixed_while_scaling(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.drag(cx, at, point(px(50.), px(30.)), Modifiers::none());
+    let after = s.pose();
+    assert_eq!(after.scale, [140., 140.], "pictures keep their aspect");
+    assert_eq!(after.corners[0], before.corners[0]);
+}
+#[gpui::test]
+fn a_solid_scales_each_axis_freely(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("solid"));
+    let (_, corner, _) = s.points();
+    let width = s.pose().corners[1][0] - s.pose().corners[0][0];
+    let height = s.pose().corners[3][1] - s.pose().corners[0][1];
+    let at = s.point_of([corner[0] - 2., corner[1] - 2.]);
+    s.drag(
+        cx,
+        at,
+        point(px(width as f32 / 2.), px(height as f32 / 4.)),
+        Modifiers::none(),
+    );
+    assert_eq!(s.pose().scale, [150., 125.]);
+}
+#[gpui::test]
+fn option_scales_from_the_centre_and_shift_keeps_the_aspect(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    let both = Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    s.drag(cx, at, point(px(50.), px(10.)), both);
+    let after = s.pose();
+    assert_eq!(after.scale[0], after.scale[1]);
+    assert!(after.scale[0] > before.scale[0]);
+    assert_eq!(after.position, before.position);
+}
+#[gpui::test]
+fn shift_locks_a_move_to_its_dominant_axis(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let at = s.point_of([210., 160.]);
+    s.drag(cx, at, point(px(40.), px(10.)), Modifiers::shift());
+    let after = s.pose();
+    assert_eq!(
+        after.position,
+        [before.position[0] + 40., before.position[1]]
+    );
+}
+#[gpui::test]
+fn shift_rotates_in_fifteen_degree_steps(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let (.., rotate) = s.points();
+    let at = s.point_of(rotate);
+    s.drag(cx, at, point(px(60.), px(20.)), Modifiers::shift());
+    assert_eq!(s.pose().rotation.rem_euclid(15.), 0.);
+    assert_ne!(s.pose().rotation, 0.);
+}
+#[gpui::test]
+fn option_moves_the_anchor_and_lets_the_picture_shift(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Anchor));
+    let before = s.pose();
+    let at = s.point_of(before.anchor);
+    s.drag(cx, at, point(px(16.), px(12.)), Modifiers::alt());
+    let after = s.pose();
+    assert_eq!(after.local_anchor, [16., 12.]);
+    assert_eq!(after.position, before.position);
+    assert_eq!(after.corners[0][0], before.corners[0][0] - 16.);
+}
+#[gpui::test]
+fn pressing_another_layer_selects_it_and_the_same_drag_moves_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let at = s.point_of([460., 160.]);
+    s.drag(cx, at, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(s.pose().id, "l1");
+    assert_eq!(s.pose().position, [420., 150.]);
+    let selected = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec();
+    assert_eq!(selected, vec!["l1".to_string()]);
+}
+#[gpui::test]
+fn a_click_on_empty_canvas_clears_the_selection(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let at = s.point_of([20., 20.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .is_empty()
+    });
+}
+#[gpui::test]
+fn escape_during_a_move_restores_through_the_kernel(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let at = s.point_of([210., 160.]);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(30.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    let surface = s.surface.clone();
+    let idle = surface.clone();
+    settle(cx, move |cx| idle.read_with(cx, |g, _| g.idle()));
+    assert!(surface.read_with(&s.vcx, |g, _| g.gesture_active()));
+    assert!(surface.update(&mut s.vcx, |g, cx| g.cancel(cx)));
+    let idle = surface.clone();
+    settle(cx, move |cx| idle.read_with(cx, |g, _| g.idle()));
+    s.refresh(cx);
+    assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn the_hand_tool_drags_the_view_without_editing(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Hand));
+    let before = s.pose();
+    let at = s.point_of([210., 160.]);
+    s.drag(cx, at, point(px(30.), px(-12.)), Modifiers::none());
+    let moved: Vec<_> = s.recorder.navigation.borrow().clone();
+    assert_eq!(moved.len(), 3);
+    let total = moved
+        .iter()
+        .fold(point(px(0.), px(0.)), |sum, change| match change {
+            Navigate::Pan(by) => sum + *by,
+            other => panic!("{other:?}"),
+        });
+    assert_eq!(total, point(px(30.), px(-12.)));
+    assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Zoom));
+    let at = s.point_of([300., 100.]);
+    s.vcx.simulate_click(at, Modifiers::alt());
+    let [Navigate::Zoom { factor, .. }] = s.recorder.navigation.borrow().clone()[..] else {
+        panic!("one zoom step");
+    };
+    assert_eq!(factor, 0.8);
+    let center = point(px(500.), px(300.));
+    let pointer = point(px(700.), px(400.));
+    let change = Navigate::Zoom {
+        factor: 2.,
+        at: pointer,
+    };
+    let (zoom, pan) = crate::gizmo::navigated(change, 1., [0., 0.], center, 8.);
+    assert_eq!(zoom, 2.);
+    // 200, 100 from centre now lands 400, 200 out: the view moves back by that.
+    assert_eq!(pan, [-200., -100.]);
+}
+/// The app's state and its delegate in the shape that panicked: the owner holds
+/// the surface, updates it during its own update, and the host reads the owner.
+struct Owner {
+    surface: Option<Entity<GizmoSurface>>,
+    overlays: usize,
+}
+struct OwnerHost(gpui::WeakEntity<Owner>);
+impl Host for OwnerHost {
+    fn time(&self, cx: &App) -> f64 {
+        self.0
+            .upgrade()
+            .map_or(0., |o| o.read(cx).overlays as f64 * 0.)
+    }
+    fn playing(&self, cx: &App) -> bool {
+        self.0.upgrade().is_some_and(|o| o.read(cx).overlays > 99)
+    }
+    fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame> {
+        self.0.upgrade()?.read(cx);
+        Some(ViewFrame {
+            origin: bounds.origin,
+            scale: 1.,
+            size: [640., 360.],
+        })
+    }
+    fn tool(&self, _: &App) -> Tool {
+        Tool::Select
+    }
+    fn overlay(&self, _: Vec<OverlayLine>, cx: &mut App) {
+        let _ = self.0.update(cx, |o, _| o.overlays += 1);
+    }
+    fn navigate(&self, _: Navigate, _: &mut App) {}
+    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {}
+    fn report(&self, _: String, _: &mut App) {}
+}
+#[gpui::test]
+fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
+    let rig = rig_project("viewer", &project());
+    let kernel = rig.kernel.clone();
+    let owner = cx.new(|_| Owner {
+        surface: None,
+        overlays: 0,
+    });
+    let weak = owner.downgrade();
+    let surface =
+        cx.new(|_| GizmoSurface::new(kernel, PROJECT.into(), tokens(), Rc::new(OwnerHost(weak))));
+    owner.update(cx, |o, _| o.surface = Some(surface));
+    // Controller::refresh, tick_builtins and toggleLayerControls, each under lease.
+    owner.update(cx, |o, cx| {
+        let surface = o.surface.clone().unwrap();
+        surface.update(cx, |s, cx| s.refresh(cx));
+    });
+    owner.update(cx, |o, cx| {
+        let surface = o.surface.clone().unwrap();
+        surface.update(cx, |s, cx| s.toggle_controls(cx));
+    });
+    let check = owner.clone();
+    settle(cx, move |cx| check.read_with(cx, |o, _| o.overlays >= 2));
+}
+#[gpui::test]
+fn zoom_stops_at_what_the_view_state_accepts_and_the_display_can_show(_: &mut TestAppContext) {
+    use pm_panel_viewerchrome::Navigation;
+    let at = point(px(0.), px(0.));
+    let zoom = |limit: f64| {
+        let change = Navigate::Zoom { factor: 10., at };
+        crate::gizmo::navigated(change, 4., [0., 0.], at, limit).0
+    };
+    assert_eq!(zoom(100.), 8.);
+    let limit = pm_shell::zoom_limit([1920., 1080.], 2.);
+    assert!((limit - 2.1333).abs() < 1e-3);
+    assert_eq!(zoom(limit), limit);
+    let stored = Navigation {
+        fit: false,
+        zoom: zoom(100.),
+        pan: Default::default(),
+    };
+    assert!(stored.checked().is_ok());
+}
+/// A hand drag under load: publications of earlier steps land between events.
+#[gpui::test]
+fn publications_never_undo_navigation_they_are_behind(_: &mut TestAppContext) {
+    use pm_panel_viewerchrome::{Navigation, Point as Pan};
+    let center = point(px(0.), px(0.));
+    let mut view = crate::gizmo::ViewPlacement::default();
+    let step = Navigate::Pan(point(px(10.), px(0.)));
+    view.navigate(step, center, 8.);
+    view.navigate(step, center, 8.);
+    let behind = Navigation {
+        fit: false,
+        zoom: 1.,
+        pan: Pan { x: 10., y: 0. },
+    };
+    view.adopt(&behind);
+    view.navigate(step, center, 8.);
+    assert_eq!(view.pan, [30., 0.]);
+    // Two wheel steps in one frame both count, without a render between them.
+    let at = point(px(0.), px(0.));
+    let wheel = Navigate::Zoom { factor: 2., at };
+    view.navigate(wheel, center, 8.);
+    view.navigate(wheel, center, 8.);
+    assert_eq!(view.scale.get(), 4.);
+    view.written();
+    view.adopt(&behind);
+    assert_eq!(view.pan, [10., 0.]);
+}
+/// Hand protection written by a nudge or Center Anchor must not stop the viewer.
+#[gpui::test]
+fn a_drag_edits_a_channel_a_previous_hand_edit_protected(cx: &mut TestAppContext) {
+    let protected = project().replace(
+        r#""fx":[]}]}"#,
+        r#""fx":[],"locked_intent":{"position.x":"human"}}]}"#,
+    );
+    let mut s = stage_on(cx, &protected);
+    let before = s.pose();
+    let (centre, _, _) = s.points();
+    let at = s.point_of(centre);
+    s.drag(cx, at, point(px(30.), px(0.)), Modifiers::none());
+    assert_eq!(s.pose().position[0], before.position[0] + 30.);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let root = p.snapshot.root().unwrap();
+    let layer = pm_kernel::model::find_layer(root, "l0")
+        .and_then(|at| pm_kernel::model::layer_at(root, &at))
+        .unwrap();
+    assert!(
+        layer
+            .get("locked_intent")
+            .and_then(|i| i.get("position.y"))
+            .is_some()
+    );
+}
+/// A selected group and its member: the member follows the group, once.
+#[gpui::test]
+fn dragging_a_group_with_its_member_moves_the_member_once(cx: &mut TestAppContext) {
+    let grouped = pair()
+        .replace(
+            r#""id":"l1","type":"shape""#,
+            r#""id":"l1","group":"g","type":"shape""#,
+        )
+        .replace(
+            r#""layers":[{"#,
+            r#""layers":[{"id":"g","type":"group","name":"Group","from":0,"dur":2,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        );
+    let mut s = stage_on(cx, &grouped);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["g".into(), "l1".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+    let at = s.point_of([460., 160.]);
+    s.drag(cx, at, point(px(40.), px(0.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let mut x = |id: &str| {
+        mirror
+            .queries()
+            .evaluate(None, id, "position.x", 0.5)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!((x("g"), x("l1")), (40., 450.));
+}
+#[gpui::test]
+fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let at = s.point_of([460., 160.]);
+    let (kernel, recorder) = (s.rig.kernel.clone(), s.recorder.clone());
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    settle(cx, move |_| recorder.menus.get() == 1);
+    let selected = kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec();
+    assert_eq!(selected, ["l1"]);
+}
+/// The Resolution pop-up reaches the quality the engine renders the viewer at.
+#[gpui::test]
+fn the_resolution_popup_changes_the_render_scale(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Natives::default());
+    vcx.run_until_parked();
+    let quality = |rig: &Rig| {
+        let ui = rig.kernel.published(PROJECT).unwrap().ui_state.clone();
+        crate::viewer2::engine_quality(pm_panel_viewerchrome::Chrome::read(&ui).unwrap().quality)
+    };
+    assert_eq!(quality(&rig), pm_engine_service::Quality::Auto);
+    let popup = view
+        .read_with(&vcx, |v, _| v.semantic_id_starting("viewer.quality"))
+        .expect("Resolution pop-up");
+    view.update(&mut vcx, |v, cx| {
+        v.change_semantic(&popup, serde_json::json!("0.5"), cx)
+    });
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        let ui = check.published(PROJECT).unwrap().ui_state.clone();
+        pm_panel_viewerchrome::Chrome::read(&ui).is_ok_and(|c| {
+            crate::viewer2::engine_quality(c.quality) == pm_engine_service::Quality::Half
+        })
+    });
+    assert_eq!(quality(&rig), pm_engine_service::Quality::Half);
+}

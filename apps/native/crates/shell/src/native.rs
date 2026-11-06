@@ -87,6 +87,8 @@ pub struct MenuState {
     pub sidebar: bool,
     pub inspector: bool,
     pub tool: String,
+    /// Commands that cannot run now: menu rows dim, the palette omits them.
+    pub disabled: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
 /// (a key palette/field-menu child panel is not an editor window).
@@ -130,6 +132,10 @@ pub fn settings() -> Accessibility {
         increase_contrast: w.accessibilityDisplayShouldIncreaseContrast(),
         reduce_motion: w.accessibilityDisplayShouldReduceMotion(),
     }
+}
+/// The highest zoom whose layer stays inside Metal's largest drawable.
+pub fn zoom_limit(dimensions: [f64; 2], backing: f64) -> f64 {
+    8192. / dimensions[0].max(dimensions[1]) / backing
 }
 pub fn native_color(rgb: u32) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -293,8 +299,10 @@ define_class!(
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                     _ => {}
                 }
+                !state.disabled.contains(name)
+            } else {
+                true
             }
-            true
         }
 
         #[unsafe(method(replayEvent:))]
@@ -817,25 +825,55 @@ struct SlotGeometry {
     crop: Option<[u32; 4]>,
 }
 /// The viewer layer's frame in a `slot` points wide and high, for a canvas
-/// zoomed to `canvas` points and centred on it, plus, when the canvas is
-/// larger than the slot, the drawable's window onto the whole canvas in
-/// device pixels: `[x, y, canvas width, canvas height]`. The engine renders
-/// only that window, so zooming in never renders pixels nobody sees.
-pub fn viewer_window(slot: [f64; 2], canvas: [f64; 2], scale: f64) -> (NSRect, Option<[u32; 4]>) {
-    let visible = [canvas[0].min(slot[0]), canvas[1].min(slot[1])];
+/// zoomed to `canvas` points, centred on the slot and moved by `pan` (points,
+/// y down), plus, when part of the canvas lies outside the slot, the
+/// drawable's window onto the whole canvas in device pixels:
+/// `[x, y, canvas width, canvas height]`. The engine renders only that
+/// window, so zooming in or panning away never renders pixels nobody sees.
+pub fn viewer_window(
+    slot: [f64; 2],
+    canvas: [f64; 2],
+    scale: f64,
+    pan: [f64; 2],
+) -> (NSRect, Option<[u32; 4]>) {
+    // Canvas edges in the slot, top-left origin.
+    let start = [
+        (slot[0] - canvas[0]) / 2. + pan[0],
+        (slot[1] - canvas[1]) / 2. + pan[1],
+    ];
+    // The part of the canvas inside the slot. A canvas panned wholly out keeps
+    // a sliver at its nearest edge (the slot clips it) so the window is never empty.
+    let span = |axis: usize| {
+        let (lo, hi) = (start[axis], start[axis] + canvas[axis]);
+        let (mut a, mut b) = (0f64.clamp(lo, hi), slot[axis].clamp(lo, hi));
+        let least = canvas[axis].min(1.);
+        if b - a < least {
+            if a + least <= hi {
+                b = a + least;
+            } else {
+                a = b - least;
+            }
+        }
+        (a, b)
+    };
+    let ((x0, x1), (y0, y1)) = (span(0), span(1));
     let frame = NSRect::new(
-        NSPoint::new((slot[0] - visible[0]) / 2., (slot[1] - visible[1]) / 2.),
-        NSSize::new(visible[0], visible[1]),
+        NSPoint::new(x0, slot[1] - y1),
+        NSSize::new(x1 - x0, y1 - y0),
     );
-    if visible == canvas {
+    if [x1 - x0, y1 - y0] == canvas {
         return (frame, None);
     }
     // The drawable is `visible × scale` rounded, as the layer sizes it; the
-    // window is centred in whole pixels so it always lies on its canvas.
+    // window starts on a whole pixel and always lies on its canvas.
     let px = |v: f64| (v * scale).round().max(1.) as u32;
     let (cw, ch) = (px(canvas[0]), px(canvas[1]));
-    let (w, h) = (px(visible[0]).min(cw), px(visible[1]).min(ch));
-    (frame, Some([(cw - w) / 2, (ch - h) / 2, cw, ch]))
+    let (w, h) = (px(x1 - x0).min(cw), px(y1 - y0).min(ch));
+    let at = |v: f64, room: u32| ((v * scale + 1e-6).floor().max(0.) as u32).min(room);
+    (
+        frame,
+        Some([at(x0 - start[0], cw - w), at(y0 - start[1], ch - h), cw, ch]),
+    )
 }
 pub struct Host {
     pub window: Retained<NSWindow>,
@@ -848,7 +886,7 @@ pub struct Host {
     pub canvas_focus: Cell<bool>,
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
-    viewer_transform: Option<([f64; 2], Option<f64>)>,
+    viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
     /// The drawable's window onto the zoomed canvas ([`viewer_window`]), set
     /// before the drawable size so its observers read the matching window.
     pub viewer_crop: Rc<Cell<Option<[u32; 4]>>>,
@@ -1047,7 +1085,6 @@ impl Host {
             subtitle,
         }));
         let weak = Rc::downgrade(&host);
-        let hit_rect = host.borrow().viewer_rect.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
@@ -1056,11 +1093,9 @@ impl Host {
                         h.borrow_mut().present()
                     })
             }),
-            Rc::new(move |p| {
-                !hit_rect
-                    .get()
-                    .is_some_and(|r| r.contains(p.x as f32, p.y as f32))
-            }),
+            // The viewer view below only shows pixels: GPUI paints a hole over it
+            // but owns the pointer there, for gizmos and viewer controls.
+            Rc::new(|_| true),
         );
         host.borrow_mut().registration = Some(reg);
         let weak = Rc::downgrade(&host);
@@ -1468,7 +1503,7 @@ impl Host {
     }
     /// Retained below-slot layer; the app configures the service presenter.
     /// Opt in to a clipped content layer. Standalone shell keeps its placeholder.
-    pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>) {
+    pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>, pan: [f64; 2]) {
         if self.viewer_transform.is_none() {
             let root = objc2_quartz_core::CALayer::new();
             root.setMasksToBounds(true);
@@ -1478,11 +1513,15 @@ impl Host {
                 let _: () = msg_send![&*root,addSublayer:self.layer.as_ptr() as *mut AnyObject];
             }
         }
-        if self.viewer_transform != Some((dimensions, zoom)) {
+        if self.viewer_transform != Some((dimensions, zoom, pan)) {
             // Re-place the content layer on the next composition frame.
             self.last_geometry = None;
         }
-        self.viewer_transform = Some((dimensions, zoom));
+        self.viewer_transform = Some((dimensions, zoom, pan));
+    }
+    /// The highest zoom the display can show `dimensions` at.
+    pub fn viewer_zoom_limit(&self, dimensions: [f64; 2]) -> f64 {
+        zoom_limit(dimensions, self.window.backingScaleFactor())
     }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
         self.resolver.bindings.extend(bindings);
@@ -1508,16 +1547,14 @@ impl Host {
         let h = self.content.bounds().size.height;
         let geometry = self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
-            let canvas = if let Some((dimensions, zoom)) = self.viewer_transform {
+            let (canvas, pan) = if let Some((dimensions, zoom, pan)) = self.viewer_transform {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
-                let zoom = zoom
-                    .unwrap_or(fit)
-                    .min(8192. / dimensions[0].max(dimensions[1]) / scale);
-                [dimensions[0] * zoom, dimensions[1] * zoom]
+                let zoom = zoom.unwrap_or(fit).min(zoom_limit(dimensions, scale));
+                ([dimensions[0] * zoom, dimensions[1] * zoom], pan)
             } else {
-                [r.w as f64, r.h as f64]
+                ([r.w as f64, r.h as f64], [0., 0.])
             };
-            let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale);
+            let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale, pan);
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
@@ -1647,9 +1684,25 @@ impl Host {
             let tip = format!("{} {label}", if on { "Hide" } else { "Show" });
             item.setToolTip(Some(&NSString::from_str(&tip)));
         }
+        self.enable_tools(&state.disabled);
         *self.menu_state.borrow_mut() = Some(state.clone());
     }
     /// Selects the toolbar tool for a `tool*` command (keyboard/menu/palette).
+    /// A tool with no gesture yet dims in the toolbar like its menu row.
+    fn enable_tools(&self, disabled: &std::collections::BTreeSet<String>) {
+        for item in self._toolbar.items().to_vec() {
+            if item.itemIdentifier().to_string() == "tools"
+                && let Some(view) = item.view()
+            {
+                for (index, (command, _, _)) in TOOLS.iter().enumerate() {
+                    let on = !disabled.contains(*command);
+                    unsafe {
+                        let _: () = msg_send![&*view,setEnabled:on,forSegment:index as isize];
+                    }
+                }
+            }
+        }
+    }
     pub fn select_tool(&self, command: &str) {
         let Some(index) = TOOLS.iter().position(|(c, _, _)| *c == command) else {
             return;
@@ -1667,6 +1720,7 @@ impl Host {
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
+        choices.retain(|c| !state.disabled.contains(&c.command));
         for id in crate::layout::PANELS {
             let open = state.open.iter().any(|o| o == id);
             if open && id == "viewer" {
@@ -2852,7 +2906,7 @@ mod viewer_window_tests {
 
     #[test]
     fn a_canvas_inside_its_slot_is_whole_and_centred() {
-        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2.);
+        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2., [0., 0.]);
         assert_eq!(crop, None);
         assert_eq!((frame.origin.x, frame.origin.y), (80., 120.));
         assert_eq!((frame.size.width, frame.size.height), (640., 360.));
@@ -2861,17 +2915,39 @@ mod viewer_window_tests {
     #[test]
     fn a_zoomed_canvas_draws_only_the_window_in_its_slot() {
         // 1920×1080 at 400 %, Retina, in an 800×600 pt slot.
-        let (frame, crop) = viewer_window([800., 600.], [7680., 4320.], 2.);
+        let (frame, crop) = viewer_window([800., 600.], [7680., 4320.], 2., [0., 0.]);
         assert_eq!((frame.origin.x, frame.origin.y), (0., 0.));
         assert_eq!((frame.size.width, frame.size.height), (800., 600.));
         let [x, y, cw, ch] = crop.unwrap();
         assert_eq!((cw, ch), (15360, 8640));
         assert_eq!((x, y), ((15360 - 1600) / 2, (8640 - 1200) / 2));
         // Wider than the slot only: the full height stays, centred across.
-        let (frame, crop) = viewer_window([800., 600.], [1000.5, 300.], 2.);
+        let (frame, crop) = viewer_window([800., 600.], [1000.5, 300.], 2., [0., 0.]);
         assert_eq!((frame.size.width, frame.size.height), (800., 300.));
         assert_eq!(frame.origin.y, 150.);
         let [x, y, cw, ch] = crop.unwrap();
         assert_eq!((x, y, cw, ch), ((2001 - 1600) / 2, 0, 2001, 600));
+    }
+
+    #[test]
+    fn a_panned_canvas_moves_its_layer_and_windows_what_leaves_the_slot() {
+        // Pan is in points, y down; the layer frame is in AppKit's y-up space.
+        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2., [50., 50.]);
+        assert_eq!(crop, None);
+        assert_eq!((frame.origin.x, frame.origin.y), (130., 70.));
+        // Pushed past the right edge: only the part still in the slot renders.
+        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2., [300., -200.]);
+        assert_eq!((frame.origin.x, frame.size.width), (380., 420.));
+        assert_eq!((frame.origin.y, frame.size.height), (320., 280.));
+        assert_eq!(crop, Some([0, 160, 1280, 720]));
+        // Zoomed and panned: the window follows the pan across the canvas.
+        let (_, crop) = viewer_window([800., 600.], [7680., 4320.], 2., [-1000., 0.]);
+        let [x, y, ..] = crop.unwrap();
+        assert_eq!((x, y), ((15360 - 1600) / 2 + 2000, (8640 - 1200) / 2));
+        // Panned wholly out: a sliver remains, still on its canvas.
+        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2., [2000., 0.]);
+        assert_eq!(frame.size.width, 1.);
+        let [x, _, cw, _] = crop.unwrap();
+        assert!(x + 2 <= cw);
     }
 }

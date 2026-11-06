@@ -3,6 +3,9 @@
 use crate::{Error, finite};
 
 pub const ZOOM_PRESETS: &[f64] = &[0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0];
+/// The range navigation reaches. Stored values may sit lower, down to 0.02.
+pub const ZOOM_MIN: f64 = 0.05;
+pub const ZOOM_MAX: f64 = 8.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -153,7 +156,7 @@ impl Navigation {
         self.checked()?;
         Ok(Self {
             fit: false,
-            zoom: zoom.clamp(0.05, 8.0),
+            zoom: zoom.clamp(ZOOM_MIN, ZOOM_MAX),
             pan: if self.fit { Point::default() } else { self.pan },
         })
     }
@@ -182,7 +185,7 @@ impl Navigation {
         pointer.checked()?;
         point.checked()?;
         finite(zoom)?;
-        let zoom = zoom.clamp(0.05, 8.0);
+        let zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
         let pan = Point {
             x: pointer.x
                 - viewport.stage.width / 2.0

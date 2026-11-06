@@ -34,6 +34,7 @@ pub struct TimelineClient {
     pub model: TimelineModel,
     active: Option<(u64, Drag)>,
     active_revision: Option<u64>,
+    adopted: Option<pm_model::Value>,
 }
 impl TimelineClient {
     pub fn new(
@@ -48,6 +49,7 @@ impl TimelineClient {
             model: TimelineModel::default(),
             active: None,
             active_revision: None,
+            adopted: None,
         };
         this.sync()?;
         Ok(this)
@@ -241,6 +243,21 @@ impl TimelineClient {
         self.active = None;
         self.active_revision = None;
         Ok(ack)
+    }
+    /// Adopt view facts another client of this project persisted. Rows depend
+    /// on them, so a native surface and the panel worker must agree.
+    pub fn adopt_view(&mut self) -> Result<bool, ClientError> {
+        let p = self
+            .kernel
+            .published(&self.project)
+            .ok_or(ClientError::Closed)?;
+        let view = p.ui_state.timeline.clone();
+        if self.adopted.as_ref() == Some(&view) {
+            return Ok(false);
+        }
+        self.adopted = Some(view);
+        self.model.restore_ui(&p.ui_state);
+        Ok(true)
     }
     pub async fn publish_view(&self) -> Result<(), ClientError> {
         use pm_kernel::state::{StateOp, StateTransaction};

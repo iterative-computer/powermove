@@ -60,7 +60,6 @@ pub struct Controller {
     pub rate: pm_time::Rate,
     pub duration: f64,
     pub dimensions: [f64; 2],
-    pub zoom: Option<f64>,
     /// Composition background (`bg`); `None` when transparent.
     pub background: Option<u32>,
     /// Keyframes in the open composition, for the status bar.
@@ -70,6 +69,15 @@ pub struct Controller {
     pub close_pending: bool,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
+    pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
+    /// The toolbar tool, mirrored from shell commands for native surfaces.
+    pub tool: String,
+    pub view: crate::gizmo::ViewPlacement,
+    /// The pending or running write of `view`.
+    pub(crate) view_write: Option<gpui::Task<()>>,
+    pub clipboard: crate::layer_commands::Clipboard,
+    /// Commands that cannot run now; menus and the palette show them off.
+    pub disabled: std::collections::BTreeSet<String>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
@@ -105,6 +113,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
+    }
+    fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        self.0.read(cx).disabled.clone()
     }
     fn panel(
         &self,
@@ -262,7 +273,6 @@ impl Controller {
             rate: pm_time::Rate::FPS_30,
             duration: 1.,
             dimensions: [1920., 1080.],
-            zoom: None,
             background: None,
             keyframes: 0,
             recovery_pending: false,
@@ -270,6 +280,12 @@ impl Controller {
             close_pending: false,
             close_window: None,
             close_operation: None,
+            gizmo_lines: vec![],
+            tool: "toolSelect".into(),
+            view: Default::default(),
+            view_write: None,
+            clipboard: Default::default(),
+            disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
             save_pending: false,
             close_after_save: None,
             imports: Default::default(),
@@ -330,9 +346,11 @@ impl Controller {
             } else {
                 0.
             };
-            self.zoom = pm_panel_viewerchrome::Chrome::read(&next.ui_state)
-                .ok()
-                .and_then(|c| (!c.navigation.fit).then_some(c.navigation.zoom));
+            self.view.written();
+            self.view_write = None;
+            if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&next.ui_state) {
+                self.view.adopt(&chrome.navigation);
+            }
             p = Arc::new(next);
             self.published = Some(p.clone());
             self.bind_composition();
@@ -369,16 +387,9 @@ impl Controller {
         self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
-            self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
+            self.view.adopt(&chrome.navigation);
             // Preview Resolution in the viewer bar: the engine renders at it.
-            use pm_engine_service::Quality as Q;
-            use pm_panel_viewerchrome::state::Quality as Chosen;
-            let quality = match chrome.quality {
-                Chosen::Auto => Q::Auto,
-                Chosen::Full => Q::Full,
-                Chosen::Half => Q::Half,
-                Chosen::Quarter => Q::Quarter,
-            };
+            let quality = crate::viewer2::engine_quality(chrome.quality);
             if self.quality != quality {
                 self.quality = quality;
                 self.apply_viewer_options();
@@ -414,6 +425,13 @@ impl Controller {
         );
         self.published = Some(p);
         self.update_builtins(cx);
+        if let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |t, cx| t.published(cx));
+        }
+        if let Some(gizmos) = &self.builtins.gizmos {
+            gizmos.update(cx, |g, cx| g.refresh(cx));
+        }
+        self.update_disabled();
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {
@@ -490,26 +508,116 @@ impl Controller {
         })
         .detach();
     }
+    /// Plans off the main thread: nudging reads layer matrices. Whether a plan
+    /// exists is known only there, after the key is spent, so an empty one says so.
+    fn run_plan(&mut self, name: &str, args: &[serde_json::Value], cx: &mut Context<Self>) -> bool {
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
+        cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::layer_commands::command_plan(&name, &args, &published, time)
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| match plan {
+                Some(plan) => v.run_layer_plan(plan, cx),
+                None => {
+                    v.message = "Nothing to change".into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
+    }
+    /// Selected keyframes take precedence over their layers, as Delete does.
+    fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::Clipboard;
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        let keys = self
+            .builtins
+            .timeline
+            .as_ref()
+            .map(|t| t.read(cx).copied_keys())
+            .unwrap_or_default();
+        let (clipboard, text) = if !keys.is_empty() {
+            (Clipboard::Keys(keys), "Powermove keyframes".to_owned())
+        } else {
+            let selected = published.selection.layers();
+            let root = published.snapshot.root();
+            let layers: Vec<pm_model::Value> = selected
+                .iter()
+                .filter_map(|id| {
+                    let root = root?;
+                    let at = pm_kernel::model::find_layer(root, id)?;
+                    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
+                })
+                .collect();
+            if layers.is_empty() {
+                return false;
+            }
+            let names: Vec<&str> = layers
+                .iter()
+                .filter_map(|l| l.get("name").and_then(pm_model::Value::as_str))
+                .collect();
+            let text = names.join("\n");
+            (Clipboard::Layers(layers), text)
+        };
+        self.clipboard = clipboard;
+        // Replaces any older system media, as a text copy does.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.update_disabled();
+        if cut && let Some(timeline) = self.builtins.timeline.clone() {
+            let time = self.time();
+            timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+        }
+        true
+    }
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::Clipboard;
+        let time = self.time();
+        match self.clipboard.clone() {
+            Clipboard::Empty => false,
+            Clipboard::Keys(tracks) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.paste_keys(tracks, time, cx));
+                true
+            }
+            Clipboard::Layers(layers) => {
+                self.run_layer_plan(crate::layer_commands::paste_plan(layers, time), cx);
+                true
+            }
+        }
+    }
+    /// Menus, palette and toolbar enablement for the current document state.
+    pub fn update_disabled(&mut self) {
+        self.disabled = crate::layer_commands::disabled(
+            self.published.as_deref(),
+            self.layers(),
+            &self.clipboard,
+        );
+    }
     /// One Undo step, then the selection it leads to.
     fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
-        let crate::layer_commands::Plan {
-            label,
-            commands,
-            select,
-        } = plan;
-        let Some(session) = &self.session else { return };
         let revision = self.published.as_ref().map(|p| p.revision());
-        let pending = self.kernel.call(
-            &session.project,
-            Request::new(
-                Caller::native(),
-                Call::Transact {
-                    label: Some(label),
-                    expected_revision: revision,
-                    body: WriteBody::Commands(commands),
-                },
-            ),
-        );
+        let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
+            if let Some(ids) = plan.select {
+                self.call(SelectionCall::Layers { ids, add: false }.into(), cx);
+            }
+            return;
+        };
+        let select = plan.select;
+        let Some(session) = &self.session else { return };
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
         cx.spawn(async move |this, cx| {
             let result = pending.await;
             let _ = this.update(cx, |v, cx| match result {
@@ -557,32 +665,44 @@ impl Controller {
         self.persist_ui();
     }
     pub fn persist_ui(&self) {
-        if let (Some(s), Some(p)) = (&self.session, &self.published) {
-            let mut ui = p.ui_state.clone();
-            if let pm_model::Value::Object(m) = &mut ui.transport {
-                m.insert("time", pm_model::Value::from(self.time()));
-                m.insert(
-                    "playing",
-                    pm_model::Value::from(
-                        self.viewer
-                            .as_ref()
-                            .and_then(|v| v.status().clock)
-                            .is_some_and(|c| c.state != TransportState::Stopped),
-                    ),
-                );
-            }
-            if let pm_model::Value::Object(m) = &mut ui.viewer {
-                m.insert("zoom", pm_model::Value::from(self.zoom.unwrap_or(1.)));
-                m.insert("fit", pm_model::Value::from(self.zoom.is_none()));
-            }
-            let _pending = self.kernel.state_transaction(StateTransaction {
-                ops: vec![StateOp::Ui {
-                    project: s.project.clone(),
-                    next: ui,
-                }],
-                ..Default::default()
-            });
+        let _ = self.write_ui();
+    }
+    /// Resolves once the kernel has taken the write.
+    pub(crate) fn write_ui(
+        &self,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        let (Some(s), Some(p)) = (&self.session, &self.published) else {
+            return None;
+        };
+        let mut ui = p.ui_state.clone();
+        if let pm_model::Value::Object(m) = &mut ui.transport {
+            m.insert("time", pm_model::Value::from(self.time()));
+            m.insert(
+                "playing",
+                pm_model::Value::from(
+                    self.viewer
+                        .as_ref()
+                        .and_then(|v| v.status().clock)
+                        .is_some_and(|c| c.state != TransportState::Stopped),
+                ),
+            );
         }
+        if let pm_model::Value::Object(m) = &mut ui.viewer {
+            m.insert("zoom", pm_model::Value::from(self.view.zoom.unwrap_or(1.)));
+            m.insert("fit", pm_model::Value::from(self.view.zoom.is_none()));
+            m.insert(
+                "pan",
+                pm_model::Value::Array(vec![self.view.pan[0].into(), self.view.pan[1].into()]),
+            );
+        }
+        Some(self.kernel.state_transaction(StateTransaction {
+            ops: vec![StateOp::Ui {
+                project: s.project.clone(),
+                next: ui,
+            }],
+            ..Default::default()
+        }))
     }
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open(SessionSource::File(path), cx);
@@ -1068,8 +1188,39 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            self.tool = cmd.name.clone();
+            return false;
+        }
+        // Edit menu items reach a focused text field before the document.
+        if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {
+            return true;
+        }
+        if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
+            return true;
+        }
+        use crate::layer_commands::Route;
+        match crate::layer_commands::route(&cmd.name, &cmd.args) {
+            Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
+            Some(Route::Copy { cut }) => return self.copy_selection(cut, cx),
+            Some(Route::Paste) => return self.paste_clipboard(cx),
+            Some(Route::Timeline { frames, shift }) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
+                return true;
+            }
+            None => {}
+        }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
+            "toggleLayerControls" => {
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    gizmos.update(cx, |g, cx| g.toggle_controls(cx));
+                }
+            }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
@@ -1125,21 +1276,6 @@ impl Controller {
                     }
                 })
                 .detach();
-            }
-            "releasePrecomp"
-            | "toggleContinuousRaster"
-            | "centerAnchor"
-            | "splitTextWords"
-            | "splitTextCharacters"
-            | "splitTextLines" => {
-                let Some(published) = self.published.as_ref() else {
-                    return false;
-                };
-                let Some(plan) = crate::layer_commands::plan(&cmd.name, published, self.time())
-                else {
-                    return false;
-                };
-                self.run_layer_plan(plan, cx);
             }
             "composition.flowchart" => {
                 let mut host = self.host.borrow_mut();
@@ -1249,21 +1385,19 @@ impl Controller {
                 })
                 .detach();
             }
-            "fit" | "fitComp" | "viewer.fit" => {
-                self.zoom = None;
-                self.persist_ui();
+            "fit" | "fitComp" | "fitComposition" | "viewer.fit" => {
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
             }
-            "zoomIn" => {
-                self.zoom = Some(self.zoom.unwrap_or(1.) * 1.25);
-                self.persist_ui();
+            "actualSize" => {
+                self.view.place(Some(1.), self.view.pan);
+                self.write_view(None, cx);
             }
-            "zoomOut" => {
-                self.zoom = Some(self.zoom.unwrap_or(1.) / 1.25);
-                self.persist_ui();
-            }
+            "zoomIn" => self.step_zoom(1.25, cx),
+            "zoomOut" => self.step_zoom(0.8, cx),
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
-            | "gotoWorkIn" | "gotoWorkOut" | "shuttleJ" | "shuttleK" | "shuttleL"
-            | "shuttleReverse" | "prevVisibleEvent" | "nextVisibleEvent" => {
+            | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
+            | "nextVisibleEvent" => {
                 let Some(v) = &self.viewer else { return false };
                 let command = match cmd.name.as_str() {
                     "play" => {
@@ -1283,11 +1417,11 @@ impl Controller {
                     "stepFrames" => TransportCommand::Step {
                         frames: cmd.args.first().and_then(|v| v.as_i64()).unwrap_or(1) as i32,
                     },
-                    "gotoStart" | "gotoWorkIn" => {
+                    "gotoStart" => {
                         self.seek(0.);
                         return true;
                     }
-                    "gotoEnd" | "gotoWorkOut" => {
+                    "gotoEnd" => {
                         self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }

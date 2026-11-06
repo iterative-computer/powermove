@@ -117,10 +117,15 @@ fn tracks_preserve_the_models_toggle_instead_of_layers_range_selection() {
     )
     .unwrap();
     assert!(c.model.selection.layers().is_empty());
-    assert!(matches!(
-        v4::window(&mut c, 0, 10),
-        Err(v4::Error::MissingHost("track lane presentation"))
-    ));
+    let frame = v4::window(&mut c, 0, 10).unwrap();
+    assert_eq!(frame["mode"], "Tracks");
+    assert!(
+        frame["window"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"] == "track")
+    );
 }
 #[test]
 fn modes_view_and_snap_publish_ui_without_document_history_or_dirtying() {
@@ -242,20 +247,38 @@ fn host_effects_are_requests_not_transport_or_import_success() {
     assert!(
         matches!(&dispatch(&mut c, json!({"type":"import"})).unwrap()[0], HostEffect::Import { time, before_layer: None, as_folder: false } if *time == 0.)
     );
-    for kind in [
-        "graphOptions",
-        "open",
-        "tab",
-        "timeEdit",
-        "rename",
-        "pointerDown",
-        "drop",
-    ] {
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"tab","id":"c","close":true})),
+        Err(v4::Error::MissingHost(_))
+    ));
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"tab","id":"c","close":false})).unwrap(),
+        [HostEffect::OpenComposition("c".into())]
+    );
+    assert_eq!(
+        dispatch(&mut c, json!({"type":"seek","time":1.5})).unwrap(),
+        [HostEffect::Seek(1.5)]
+    );
+    // Pointer gestures run on the native surface; JS cannot start one.
+    for kind in ["pointerDown", "drop"] {
         assert!(matches!(
             dispatch(&mut c, json!({"type":kind})),
-            Err(v4::Error::MissingHost(_))
+            Err(v4::Error::InvalidIntent(_))
         ));
     }
+}
+#[test]
+fn typed_timecode_takes_any_leading_fields_or_bare_frames() {
+    assert_eq!(v4::parse_timecode("00:00:02:15", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("2:15", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("75", 30.), Some(2.5));
+    assert_eq!(v4::parse_timecode("1:00:00", 30.), Some(60.));
+    assert_eq!(v4::parse_timecode("nonsense", 30.), None);
+    assert_eq!(v4::parse_timecode("", 30.), None);
+    // 29.97 shows frame 18000 as 00:10:00:00; typing it back lands there.
+    let fps = 30000. / 1001.;
+    let time = v4::parse_timecode("00:10:00:00", fps).unwrap();
+    assert_eq!((time * fps).round(), 18000.);
 }
 #[test]
 fn stale_surface_and_malformed_requests_fail_before_any_edit() {
