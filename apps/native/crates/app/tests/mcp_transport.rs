@@ -214,3 +214,55 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
 }
+
+/// A real audio file through the app's media tools: measured, not modelled.
+#[test]
+fn media_tools_measure_a_linked_original() {
+    let root = tempfile::tempdir().unwrap();
+    let rate = 8000u32;
+    let mut samples = vec![];
+    for i in 0..rate {
+        // One second of tone, then one of silence.
+        let tone = (i as f64 * 0.2).sin() * 0.5 * 32767.;
+        samples.extend_from_slice(&(tone as i16).to_le_bytes());
+    }
+    samples.resize(samples.len() * 2, 0);
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for field in [16u32, 1 | 1 << 16, rate, rate * 2, 2 | 16 << 16] {
+        wav.extend_from_slice(&field.to_le_bytes());
+    }
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    let audio = root.path().join("tone.wav");
+    std::fs::write(&audio, wav).unwrap();
+    let project = json!({"id":"synthetic","name":"Synthetic media","compId":"c","w":320,"h":180,
+        "fps":30,"dur":2,"bg":"#000000","comps":{},"layers":[],"params":{},"markers":[],
+        "assets":{"tone":{"id":"tone","kind":"audio","name":"Tone","sourcePath":audio}}});
+    let path = root.path().join("project.json");
+    std::fs::write(&path, project.to_string()).unwrap();
+    let mut client = Client::new(&root.path().join("profile"), Some(&path));
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool("start_session", json!({"prompt":"Synthetic media"}));
+    let probe = client.rpc(
+        "tools/call",
+        json!({"name":"probe_media","arguments":{"assetId":"tone"}}),
+    );
+    assert_eq!(probe["isError"], false, "{probe}");
+    let text = probe["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("8000"), "{text}");
+    let wave = client.rpc(
+        "tools/call",
+        json!({"name":"media_waveform","arguments":{"assetId":"tone"}}),
+    );
+    assert_eq!(wave["isError"], false, "{wave}");
+    let measured: Value =
+        serde_json::from_str(wave["content"][0]["text"].as_str().unwrap()).unwrap();
+    let silence = &measured["silences"][0];
+    assert!((silence[0].as_f64().unwrap() - 1.).abs() < 0.05, "{measured}");
+}

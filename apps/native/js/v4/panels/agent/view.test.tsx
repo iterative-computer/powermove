@@ -69,6 +69,7 @@ test("native supported focus order follows header, conversation and composer bar
     "agent-new",
     "agent-presentation",
     "agent-conversation",
+    "agent-composer",
     "agent-send",
   ]);
   expect(

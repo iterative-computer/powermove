@@ -3,10 +3,15 @@
 use anyhow::{Context, Result as AnyResult};
 use pm_engine_service::jobs::{ExportHandle, ExportRequest};
 use pm_kernel::{KernelHandle, Published};
+use pm_media::preview::PreviewReader;
 use pm_mcp::{
     CaptureRequest, EngineHook, Error, Result,
     export_jobs::Progress,
-    services::{ExportChild, FrozenProject, VideoExportRequest},
+    media_tools::{
+        FrameRequest, MediaSource, Probe, SheetOutput, SheetPlan, SheetRequest, Waveform,
+        WaveformRequest,
+    },
+    services::{ExportChild, FrozenProject, Image, MediaRequest, VideoExportRequest},
 };
 use pm_protocol::{
     color::{OutputColor, Precision},
@@ -269,4 +274,271 @@ impl EngineHook for EngineJobs {
         }
         Ok(json!({"times":request.times,"images":images}))
     }
+    fn resolve_media(&self, request: &MediaRequest) -> Result<MediaSource> {
+        if request.layer.is_some() {
+            return Err(Error::unavailable(
+                "evaluated clip timing for layer targets; pass the assetId instead",
+            ));
+        }
+        let path = self.original(request)?;
+        let timing = pm_media::probe::probe_timing(&path).map_err(failed)?;
+        Ok(MediaSource {
+            asset: request.asset.clone().unwrap_or_default(),
+            duration: seconds(timing.duration_us),
+            proxy: false,
+            layer: None,
+        })
+    }
+    fn probe(&self, request: &MediaRequest, _: &MediaSource) -> Result<Probe> {
+        let probe = pm_media::probe::probe(&self.original(request)?)
+            .map_err(failed)?
+            .probe;
+        let fps = probe.video.as_ref().and_then(|video| {
+            video
+                .nominal_rate
+                .as_ref()
+                .map(|rate| rate.rate.num() as f64 / rate.rate.den() as f64)
+        });
+        let video = probe
+            .video
+            .iter()
+            .map(|video| {
+                json!({"index":probe.video_stream,"codec":video.codec.codec,"width":video.width,
+                    "height":video.height,"fps":fps,"alpha":video.alpha.is_some()})
+            })
+            .collect();
+        let mut audio = vec![];
+        let mut other = 0;
+        for stream in &probe.streams {
+            match &stream.audio {
+                Some(a) => audio.push(json!({"index":stream.index,"codec":a.codec,
+                    "sampleRate":a.sample_rate,"channels":a.channels})),
+                None if Some(stream.index) != probe.video_stream => other += 1,
+                None => {}
+            }
+        }
+        let duration = seconds(probe.duration_us);
+        Ok(Probe {
+            format: Some(probe.container.clone()),
+            duration,
+            start: seconds(probe.start_us).unwrap_or(0.),
+            bitrate_kbps: duration
+                .filter(|d| *d > 0.)
+                .map(|d| probe.size as f64 * 8. / d / 1000.),
+            video,
+            audio,
+            other_streams: other,
+        })
+    }
+    fn sample(&self, request: &FrameRequest) -> Result<Vec<Image>> {
+        let mut reader = self.reader(&request.request)?;
+        request
+            .frames
+            .iter()
+            .map(|frame| {
+                let rgba = source_frame(&mut reader, frame.source).map_err(failed)?;
+                let pixels = fit(&rgba, request.width, request.height);
+                image(&pixels, request.width, request.height)
+            })
+            .collect()
+    }
+    fn sheet(&self, request: &SheetRequest) -> Result<Image> {
+        let mut reader = self.reader(&request.request)?;
+        let cells = request
+            .cells
+            .iter()
+            .map(|cell| source_frame(&mut reader, cell.source).map_err(failed))
+            .collect::<Result<Vec<_>>>()?;
+        sheet(&cells, &request.plan)
+    }
+    /// Each cell is a full engine job, so a long sheet returns a finished prefix.
+    fn composition_sheet(&self, request: &SheetRequest) -> Result<SheetOutput> {
+        let frozen = &request.request.snapshot;
+        let published = self.published(frozen)?;
+        let fps = frozen.project["fps"].as_f64().unwrap_or(30.);
+        let size = Size::new(request.plan.cell_width, request.plan.cell_height);
+        std::fs::create_dir_all(&self.cache)?;
+        let started = Instant::now();
+        let mut cells = vec![];
+        for cell in &request.cells {
+            if !cells.is_empty() && started.elapsed() > Duration::from_secs(45) {
+                break;
+            }
+            let bytes = frame(self, &published, fps, cell.source, size).map_err(failed)?;
+            cells.push(decode_png(&bytes).map_err(failed)?);
+        }
+        let aspect = request.plan.cell_width as f64 / request.plan.cell_height as f64;
+        let plan = pm_mcp::media_tools::plan_sheet(
+            cells.len(),
+            aspect,
+            Some(request.plan.columns).filter(|_| cells.len() == request.cells.len()),
+        );
+        Ok(SheetOutput {
+            image: sheet(&cells, &plan)?,
+            completed: cells.len(),
+        })
+    }
+    fn waveform(&self, request: &WaveformRequest) -> Result<Waveform> {
+        const BUCKETS_PER_SECOND: f64 = 100.;
+        let path = self.original(&request.request)?;
+        let rate = pm_media::probe::probe_timing(&path)
+            .map_err(failed)?
+            .streams
+            .iter()
+            .find_map(|stream| stream.audio.as_ref().map(|audio| audio.sample_rate))
+            .ok_or_else(|| Error::invalid("This media has no audio."))?;
+        let per_peak = (rate as f64 / BUCKETS_PER_SECOND).round() as usize;
+        let peaks = pm_media::probe::peaks::peaks(&path, None, per_peak.max(1), 0).map_err(failed)?;
+        let channels = peaks.channels.max(1);
+        let envelope = peaks
+            .data
+            .chunks(channels)
+            .map(|bucket| {
+                bucket
+                    .iter()
+                    .map(|[low, high]| low.abs().max(high.abs()) as f64)
+                    .fold(0., f64::max)
+            })
+            .collect::<Vec<f64>>();
+        let bucket_at = |time: f64| {
+            ((time * peaks.sample_rate as f64 / per_peak as f64) as usize).min(envelope.len())
+        };
+        let span = &envelope[bucket_at(request.start)..bucket_at(request.end)];
+        let peak = span.iter().copied().fold(0., f64::max);
+        let threshold = 10f64.powf(request.threshold_db / 20.);
+        let mut silences = vec![];
+        let mut quiet = None;
+        for (index, level) in span.iter().chain([&f64::MAX]).enumerate() {
+            let time = request.start + index as f64 / BUCKETS_PER_SECOND;
+            match (quiet, *level < threshold) {
+                (None, true) => quiet = Some(time),
+                (Some(start), false) => {
+                    if time - start >= request.min_silence {
+                        silences.push([start, time.min(request.end)]);
+                    }
+                    quiet = None;
+                }
+                _ => {}
+            }
+        }
+        let picture = if request.image && !span.is_empty() {
+            const HEIGHT: u32 = 120;
+            let mut pixels = vec![0u8; (request.width * HEIGHT * 4) as usize];
+            for x in 0..request.width as usize {
+                let level = span[x * span.len() / request.width as usize].min(1.);
+                let reach = (level * HEIGHT as f64 / 2.) as i64;
+                for offset in -reach..=reach {
+                    let y = (HEIGHT as i64 / 2 + offset).clamp(0, HEIGHT as i64 - 1) as usize;
+                    let at = (y * request.width as usize + x) * 4;
+                    pixels[at..at + 4].copy_from_slice(&[255; 4]);
+                }
+            }
+            Some(image(&pixels, request.width, HEIGHT)?)
+        } else {
+            None
+        };
+        Ok(Waveform {
+            loudness: json!({"peakDb":decibels(peak),"clipping":peak >= 1.}),
+            silences,
+            image: picture,
+        })
+    }
+}
+
+type Rgba = (Vec<u8>, u32, u32);
+fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> {
+    let mut bytes = vec![];
+    let mut encoder = ::png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(::png::ColorType::Rgba);
+    encoder.set_depth(::png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(pixels)?;
+    Ok(bytes)
+}
+fn decode_png(bytes: &[u8]) -> AnyResult<Rgba> {
+    let mut decoder = ::png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(::png::Transformations::ALPHA | ::png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info()?;
+    let mut pixels = vec![0; reader.output_buffer_size().context("Frame too large")?];
+    let info = reader.next_frame(&mut pixels)?;
+    pixels.truncate(info.buffer_size());
+    Ok((pixels, info.width, info.height))
+}
+/// Nearest-neighbour fit. These frames are for an agent to look at, not deliver.
+fn fit(source: &Rgba, width: u32, height: u32) -> Vec<u8> {
+    let (pixels, w, h) = source;
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let sx = (x as u64 * *w as u64 / width as u64) as usize;
+            let sy = (y as u64 * *h as u64 / height as u64) as usize;
+            let at = (sy * *w as usize + sx) * 4;
+            out.extend_from_slice(&pixels[at..at + 4]);
+        }
+    }
+    out
+}
+fn image(pixels: &[u8], width: u32, height: u32) -> Result<Image> {
+    let bytes = png(pixels, width, height).map_err(failed)?;
+    Ok(Image {
+        data: base64(&bytes),
+        mime_type: "image/png".into(),
+    })
+}
+fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
+    let (cell_w, cell_h) = (plan.cell_width, plan.cell_height);
+    let (width, height) = (cell_w * plan.columns as u32, cell_h * plan.rows as u32);
+    let mut canvas = vec![0u8; (width * height * 4) as usize];
+    for (index, cell) in cells.iter().enumerate() {
+        let (column, row) = (index % plan.columns, index / plan.columns);
+        let fitted = fit(cell, cell_w, cell_h);
+        for line in 0..cell_h as usize {
+            let start = ((row * cell_h as usize + line) * width as usize
+                + column * cell_w as usize)
+                * 4;
+            let source = line * cell_w as usize * 4;
+            canvas[start..start + cell_w as usize * 4]
+                .copy_from_slice(&fitted[source..source + cell_w as usize * 4]);
+        }
+    }
+    image(&canvas, width, height)
+}
+fn source_frame(reader: &mut PreviewReader, time: f64) -> AnyResult<Rgba> {
+    let frame = reader.frame_at(time)?;
+    let decoded = frame.decoded();
+    let (width, height) = (decoded.format.width as u32, decoded.format.height as u32);
+    let unit = pm_media::image::imageio::rgba_unit(decoded)?;
+    let pixels = unit
+        .iter()
+        .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
+        .collect();
+    Ok((pixels, width, height))
+}
+impl EngineJobs {
+    fn original(&self, request: &MediaRequest) -> Result<PathBuf> {
+        let asset = request
+            .asset
+            .as_ref()
+            .and_then(|asset| asset["id"].as_str())
+            .ok_or_else(|| Error::invalid("Supply assetId or layerId."))?;
+        let published = self.published(&request.snapshot)?;
+        crate::media::for_session(
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
+            &self.cache.join(&published.project),
+        )
+        .map_err(failed)?
+        .originals
+        .remove(asset)
+        .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
+    }
+    fn reader(&self, request: &MediaRequest) -> Result<PreviewReader> {
+        PreviewReader::open(&self.original(request)?).map_err(failed)
+    }
+}
+fn seconds(micros: Option<i64>) -> Option<f64> {
+    micros.map(|us| us as f64 / 1_000_000.)
+}
+fn decibels(level: f64) -> f64 {
+    (20. * level.max(1e-9).log10() * 10.).round() / 10.
 }
