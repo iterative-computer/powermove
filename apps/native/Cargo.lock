@@ -5105,6 +5105,7 @@ dependencies = [
  "pm-time",
  "raw-window-handle",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

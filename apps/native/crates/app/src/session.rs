@@ -264,6 +264,14 @@ impl Controller {
     }
     pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
         self.load_recent(cx);
+        let cache = crate::media::cache_root(&self.profile);
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = crate::media::sweep_cache(&cache) {
+                    eprintln!("Media cache cleanup: {error}");
+                }
+            })
+            .detach();
         if let Some(path) = launch {
             self.open_file(path, cx);
         }
@@ -538,10 +546,7 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
-        let cache = self
-            .profile
-            .join("media-cache")
-            .join(pm_kernel::new_id("app"));
+        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
@@ -621,11 +626,16 @@ impl Controller {
         self.session = Some(session);
         self.media_refresh.reset();
         self.media = MediaCatalog::default();
+        let mut offline = 0;
         if let Some(resolved) = media
-            && self.session.as_ref().and_then(|s| self.kernel.published(&s.project))
+            && self
+                .session
+                .as_ref()
+                .and_then(|s| self.kernel.published(&s.project))
                 .is_some_and(|p| resolved.inputs.matches(&p))
         {
-            self.media = resolved.catalog;
+            offline = resolved.resolution.failed.len();
+            self.media = resolved.resolution.catalog;
             self.media_refresh.adopt(resolved.inputs);
         }
         self.mirror = None;
@@ -633,8 +643,10 @@ impl Controller {
         self.refresh(cx);
         // The status bar shows document state and counts; only exceptions get words.
         self.message = [
-            copy_notice(&decision),
-            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+            copy_notice(&decision).map(str::to_owned),
+            history_rejected
+                .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
+            (offline > 0).then(|| crate::media::failure_note(offline)),
         ]
         .into_iter()
         .flatten()
@@ -710,18 +722,13 @@ impl Controller {
         let Some(p) = self.kernel.published(&session.project) else {
             return;
         };
-        let cache = self
-            .profile
-            .join("media-cache")
-            .join(pm_kernel::new_id("app"));
+        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
         cx.spawn(async move |this, cx| {
             let history_rejected = false;
             let media = cx
                 .background_executor()
-                .spawn(async move {
-                    crate::media_refresh::resolve(&p, &cache)
-                })
+                .spawn(async move { crate::media_refresh::resolve(&p, &cache) })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;

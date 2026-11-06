@@ -91,7 +91,8 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                 &p.media,
                 p.path.as_deref(),
                 &temp.path().join(format!("media-{index}")),
-            )?;
+            )?
+            .catalog;
             if let Some(paths) = row["media"].as_object() {
                 for (id, path) in paths {
                     media.originals.insert(

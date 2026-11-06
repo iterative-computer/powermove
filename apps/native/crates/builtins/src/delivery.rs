@@ -10,9 +10,12 @@ use pm_protocol::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 /// Kernel model numbers are f64; accept exactly integral dimensions without
@@ -503,11 +506,78 @@ mod tests {
 
 /// Native decoder probes; no metadata-only Ready state or proxy promotion.
 #[cfg(target_os = "macos")]
+/// Decode results by file identity. Proving that media decodes costs a real
+/// decode, so one file is probed once however many revisions observe it.
+#[derive(Default)]
+pub struct MediaProbes {
+    results: Mutex<HashMap<(PathBuf, String, (u64, i64, i64, u64)), Result<(), String>>>,
+    runs: AtomicU64,
+}
+impl MediaProbes {
+    /// Real decodes run so far.
+    pub fn runs(&self) -> u64 {
+        self.runs.load(Ordering::Relaxed)
+    }
+    fn result(&self, path: &Path, kind: &str) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        let key = (
+            path.to_path_buf(),
+            kind.to_owned(),
+            (
+                metadata.len(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ino(),
+            ),
+        );
+        if let Some(known) = self.results.lock().unwrap().get(&key) {
+            return known.clone();
+        }
+        self.runs.fetch_add(1, Ordering::Relaxed);
+        let result = probe_media(path, kind);
+        let mut results = self.results.lock().unwrap();
+        if results.len() >= 16_384 {
+            results.clear();
+        }
+        results.insert(key, result.clone());
+        result
+    }
+}
+fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
+    match kind {
+        "image" => pm_render::media::probe_image(path).map_err(|e| format!("{e:?}")),
+        "video" => pm_render::media::probe_video(path).and_then(|_| {
+            use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
+            let service = DecodeService::new(ServiceConfig {
+                cache_bytes: 0,
+                pool_free_bytes: 0,
+                threads: 1,
+                idle_sessions: 0,
+                session_window: 1,
+            });
+            let source = MediaSource::open(path).map_err(|e| e.to_string())?;
+            let mut decoder = service
+                .session(&source, 0, pm_media::vt::DecodePurpose::Display)
+                .map_err(|e| e.to_string())?;
+            // Indexing alone cannot prove that an original decodes.
+            decoder.frame(0).map(|_| ()).map_err(|e| e.to_string())
+        }),
+        _ => {
+            let cache = pm_audio::SourceCache::new(1024 * 1024, 1);
+            cache
+                .open(path, None)
+                .and_then(|source| cache.block(&source, 0, true).map(|_| ()))
+                .map_err(|e| e.to_string())
+        }
+    }
+}
 pub fn observe_media(
     project: &str,
     snapshot: &Snapshot,
     originals: &BTreeMap<String, PathBuf>,
     proxies: &BTreeMap<String, PathBuf>,
+    probes: &MediaProbes,
 ) -> Result<pm_panel_media::readiness::ObservedRuntime, String> {
     use pm_panel_media::{
         Availability, Catalog, ProxyStatus, RuntimeState, readiness::ObservedRuntime,
@@ -518,39 +588,11 @@ pub fn observe_media(
         let availability = match originals.get(id) {
             None => Availability::Offline,
             Some(path) => {
-                let probe = match asset.kind.as_str() {
-                    "image" => pm_render::media::probe_image(path).map_err(|e| format!("{e:?}")),
-                    "video" => pm_render::media::probe_video(path).and_then(|_| {
-                        use pm_media::decode::service::{
-                            DecodeService, MediaSource, ServiceConfig,
-                        };
-                        let service = DecodeService::new(ServiceConfig {
-                            cache_bytes: 0,
-                            pool_free_bytes: 0,
-                            threads: 1,
-                            idle_sessions: 0,
-                            session_window: 1,
-                        });
-                        let source = MediaSource::open(path).map_err(|e| e.to_string())?;
-                        let mut decoder = service
-                            .session(&source, 0, pm_media::vt::DecodePurpose::Display)
-                            .map_err(|e| e.to_string())?;
-                        // Indexing alone cannot prove that an original decodes.
-                        decoder.frame(0).map(|_| ()).map_err(|e| e.to_string())
-                    }),
-                    "audio" => {
-                        let cache = pm_audio::SourceCache::new(1024 * 1024, 1);
-                        cache
-                            .open(path, None)
-                            .and_then(|source| cache.block(&source, 0, true).map(|_| ()))
-                            .map_err(|e| e.to_string())
-                    }
-                    _ => {
-                        states.insert(id.clone(), RuntimeState::default());
-                        continue;
-                    }
-                };
-                match probe {
+                if !matches!(asset.kind.as_str(), "image" | "video" | "audio") {
+                    states.insert(id.clone(), RuntimeState::default());
+                    continue;
+                }
+                match probes.result(path, &asset.kind) {
                     Ok(()) => Availability::Ready,
                     Err(e) => Availability::Failed(e),
                 }
@@ -570,6 +612,31 @@ pub fn observe_media(
         );
     }
     Ok(ObservedRuntime::new(catalog.stamp, states))
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn a_revision_never_decodes_a_file_again_until_that_file_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("clip.png");
+        std::fs::write(&file, b"not an image").unwrap();
+        let project = pm_model::json::parse(
+            r##"{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{"a":{"name":"a.png","kind":"image"}},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let originals = BTreeMap::from([("a".to_owned(), file.clone())]);
+        let probes = MediaProbes::default();
+        for _ in 0..25 {
+            observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
+        }
+        assert_eq!(probes.runs(), 1);
+        std::fs::write(&file, b"replaced bytes").unwrap();
+        observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
+        assert_eq!(probes.runs(), 2, "a changed file is decoded again");
+    }
 }
 
 #[cfg(test)]

@@ -123,7 +123,8 @@ impl Backend {
         if self.application {
             None
         } else {
-            self.kernel.published(&self.identity.project)
+            self.kernel
+                .published(&self.identity.project)
                 .filter(|p| Some(p.snapshot.doc_id) == self.document)
         }
     }

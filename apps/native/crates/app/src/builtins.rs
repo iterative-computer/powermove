@@ -8,6 +8,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
+type MediaProbeInputs = (
+    crate::media_refresh::Inputs,
+    BTreeMap<String, std::path::PathBuf>,
+    BTreeMap<String, std::path::PathBuf>,
+);
 #[derive(Default)]
 pub struct Host {
     project: Option<String>,
@@ -29,9 +34,19 @@ pub struct Host {
     pub last_time: f64,
     pub last_playing: bool,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
-    media_probe_key: String,
+    media_probes: Arc<pm_builtins::delivery::MediaProbes>,
+    /// The media inputs behind `media_runtime`, and the worker observing them.
+    media_probed: Option<MediaProbeInputs>,
+    media_probe_serial: u64,
     updating: bool,
     again: bool,
+}
+fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
+    pm_panel_media::Stamp {
+        project: published.project.clone(),
+        document: published.snapshot.doc_id,
+        revision: published.revision(),
+    }
 }
 impl Controller {
     pub fn start_builtins(&mut self, cx: &mut Context<Self>) {
@@ -137,23 +152,29 @@ impl Controller {
         })
         .detach();
     }
+    /// Readiness depends only on the media inputs, so an edit that left them
+    /// alone moves the observation to its revision without any worker.
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
         let Some(published) = self.published.clone() else {
             return;
         };
+        let inputs = crate::media_refresh::Inputs::published(&published);
         let originals = self.media.originals.clone();
         let proxies = self.media.proxies.clone();
-        let key = format!(
-            "{}:{}:{:?}:{:?}",
-            published.snapshot.doc_id,
-            published.revision(),
-            originals,
-            proxies
-        );
-        if self.builtins.media_probe_key == key {
+        let stamp = media_stamp(&published);
+        if self
+            .builtins
+            .media_probed
+            .as_ref()
+            .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
+        {
+            self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
             return;
         }
-        self.builtins.media_probe_key = key.clone();
+        self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
+        self.builtins.media_probe_serial += 1;
+        let serial = self.builtins.media_probe_serial;
+        let probes = self.builtins.media_probes.clone();
         cx.spawn(async move |this, cx| {
             let observed = cx
                 .background_executor()
@@ -163,16 +184,20 @@ impl Controller {
                         &published.snapshot,
                         &originals,
                         &proxies,
+                        &probes,
                     )
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if v.builtins.media_probe_key != key {
+                if v.builtins.media_probe_serial != serial {
                     return;
                 }
                 match observed {
                     Ok(observed) => {
-                        v.builtins.media_runtime = observed;
+                        v.builtins.media_runtime = match &v.published {
+                            Some(p) => observed.rebound(media_stamp(p)),
+                            None => observed,
+                        };
                         v.update_builtins(cx);
                     }
                     Err(error) => {
