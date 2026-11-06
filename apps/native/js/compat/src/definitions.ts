@@ -49,51 +49,55 @@ const flags = (def: Data) => ({
 const FORK_OF = (kernel: Data, owner: string) =>
   kernel.ownerOrigin?.(owner) ?? "local";
 
-export function definitionSnapshots(kernel: Data): Data[] {
+/** One definition the generators cannot wrap is reported and left out; it never
+ * takes the others' definitions with it. */
+export function definitionSnapshots(
+  kernel: Data,
+  report: (id: string, error: unknown) => void = () => undefined,
+): Data[] {
   const out: Data[] = [];
-  for (const { id, ownerId, item } of kernel.effects.entries()) {
-    const legacy = toLegacyFx(item, GLSL_PRE);
-    out.push({
-      id,
-      kind: "effect",
-      version: 0,
-      origin: FORK_OF(kernel, ownerId),
-      renderer: null,
-      glsl: wrapped(legacy.frag, item.frag),
-      params: params(item.params),
-      flags: flags(item),
-    });
-  }
-  for (const { id, ownerId, item } of kernel.transitions.entries()) {
-    const legacy = toLegacyTransition(item, GLSL_PRE);
-    out.push({
-      id,
-      kind: "transition",
-      version: 0,
-      origin: FORK_OF(kernel, ownerId),
-      renderer: null,
-      glsl: wrapped(legacy.frag, item.frag),
-      params: params(item.params),
-      flags: flags(item),
-    });
-  }
-  for (const { id, ownerId, item } of kernel.layerTypes.entries()) {
-    const fragment = item.renderer?.kind === "fragment";
-    out.push({
-      id,
-      kind: "layer",
-      version: item.version ?? 1,
-      origin: FORK_OF(kernel, ownerId),
-      renderer: item.renderer,
-      glsl: fragment
+  const each = (registry: Data, build: (entry: Data) => Data) => {
+    for (const entry of registry.entries()) {
+      try {
+        out.push({
+          id: entry.id,
+          origin: FORK_OF(kernel, entry.ownerId),
+          ...build(entry),
+        });
+      } catch (error) {
+        report(entry.id, error);
+      }
+    }
+  };
+  each(kernel.effects, ({ item }) => ({
+    kind: "effect",
+    version: 0,
+    renderer: null,
+    glsl: wrapped(toLegacyFx(item, GLSL_PRE).frag, item.frag),
+    params: params(item.params),
+    flags: flags(item),
+  }));
+  each(kernel.transitions, ({ item }) => ({
+    kind: "transition",
+    version: 0,
+    renderer: null,
+    glsl: wrapped(toLegacyTransition(item, GLSL_PRE).frag, item.frag),
+    params: params(item.params),
+    flags: flags(item),
+  }));
+  each(kernel.layerTypes, ({ item }) => ({
+    kind: "layer",
+    version: item.version ?? 1,
+    renderer: item.renderer,
+    glsl:
+      item.renderer?.kind === "fragment"
         ? wrapped(
             extensionLayerFragment(item, SHADER_HEADER),
             item.renderer.fragment,
           )
         : null,
-      params: params(item.params),
-      flags: flags(item),
-    });
-  }
+    params: params(item.params),
+    flags: flags(item),
+  }));
   return out;
 }

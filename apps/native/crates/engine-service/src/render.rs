@@ -49,6 +49,8 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
+    /// Why a contributed definition cannot draw, for the viewer's status.
+    pub definition_failure: Option<String>,
 }
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
@@ -107,6 +109,7 @@ impl Engine {
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
+            definition_failure: None,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -127,9 +130,13 @@ impl Engine {
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
         if self.studio_content != Some(key) {
-            self.renderer
+            // A bad contribution draws nothing and is reported; frames carry on.
+            self.definition_failure = self
+                .renderer
                 .set_document_effects(&scene.doc, &scene.definitions.definitions)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::msg)?
+                .first()
+                .map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), &scene.media);
             self.studio_content = Some(key);
@@ -600,6 +607,39 @@ mod lifetime_tests {
             .export(&scene(&value, vec![definition]), Ticks::ZERO, size)
             .unwrap();
         assert_ne!(before, after, "the contributed program drew");
+        // A broken contribution fails alone: unused it costs nothing, and the
+        // valid one beside it still draws.
+        let mut broken = definition.clone();
+        broken.id = "synthetic.broken".into();
+        broken.glsl.as_mut().unwrap().source = "not glsl".into();
+        let mut invalid = definition.clone();
+        invalid.id = "synthetic.invalid".into();
+        invalid.params[0] = ParamSpec::Number {
+            key: "Not A Key".into(),
+            default: 1.,
+            min: 2.,
+            max: 1.,
+            step: None,
+        };
+        let mut engine = Engine::new(Gpu::new("contributed-effect-broken").unwrap()).unwrap();
+        let unused = engine
+            .export(
+                &scene(&plain, vec![broken.clone(), invalid.clone()]),
+                Ticks::ZERO,
+                size,
+            )
+            .unwrap();
+        assert_eq!(before, unused, "unused bad definitions change nothing");
+        assert!(engine.definition_failure.is_some());
+        let mut engine = Engine::new(Gpu::new("contributed-effect-beside").unwrap()).unwrap();
+        let beside = engine
+            .export(
+                &scene(&value, vec![broken, invalid, definition]),
+                Ticks::ZERO,
+                size,
+            )
+            .unwrap();
+        assert_eq!(after, beside, "a good definition is untouched beside a bad one");
     }
     #[test]
     fn encoded_hdr_outputs_match_independent_f64_reference() {

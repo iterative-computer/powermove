@@ -295,9 +295,16 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("cancelled");
         }
         let mut renderer = pm_render::Renderer::headless()?;
-        renderer
+        // An export never ships silently without an effect the project uses.
+        let failures = renderer
             .set_document_effects(&doc, &definitions)
             .map_err(anyhow::Error::msg)?;
+        if let Some(failure) = failures.iter().find(|failure| {
+            matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
+                if request.document.contains(&format!("\"{}\"", definition.as_str())))
+        }) {
+            anyhow::bail!("{}", failure.message);
+        }
         #[cfg(feature = "kernel")]
         crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
         fonts.sync(&mut renderer, &mut None);
