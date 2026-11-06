@@ -11,6 +11,10 @@
 //!   today's viewer draws its video element's last decoded picture) while
 //!   the worker decodes the exact one. [`ViewerDecode::landed`] changes when
 //!   it lands, and the presenter draws again.
+//! - [`Want::Playback`] (frames while playing) waits at most the frame's
+//!   decode allowance for the exact frame, then returns a stand-in as
+//!   `Scrub` does, so a slow frame costs picture accuracy and never the
+//!   render thread's deadline. Look-ahead normally has it cached already.
 //!
 //! The worker keeps one decoder session warm per source and instance (the
 //! decode service's pool), always serves the newest scrub target (older
@@ -34,7 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How the viewer wants a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +48,11 @@ pub enum Want {
     /// The exact frame if decoded, otherwise the nearest decoded frame now
     /// while the exact one decodes.
     Scrub,
+    /// The exact frame if it lands within this allowance, otherwise the
+    /// nearest decoded frame while the exact one keeps decoding. With nothing
+    /// decoded to stand in (the first frame of a source) it waits, as `Scrub`
+    /// does.
+    Playback(Duration),
 }
 
 /// A frame for the viewer.
@@ -323,6 +332,10 @@ impl ViewerDecode {
         *st.waiting.entry(n).or_default() += 1;
         st.ahead_from = None;
         shared.wake.notify_one();
+        let deadline = match want {
+            Want::Playback(allowance) => Instant::now().checked_add(allowance),
+            _ => None,
+        };
         loop {
             if let Some(frame) = st.delivered.get(&n).cloned() {
                 let left = st.waiting.get_mut(&n).map(|w| {
@@ -356,7 +369,27 @@ impl ViewerDecode {
                 // request: not an idle exit.
                 return Some(Err(MediaError::decode("the decode worker stopped")));
             }
-            st = shared.done.wait(st).unwrap();
+            let Some(deadline) = deadline else {
+                st = shared.done.wait(st).unwrap();
+                continue;
+            };
+            let now = Instant::now();
+            if now >= deadline {
+                if let Some((shown, frame)) = shared.nearest(n, &st) {
+                    // Keep decoding it as the newest target: a queue of late
+                    // exact frames would only ever fall further behind.
+                    st.leave(n);
+                    self.stats.lock().unwrap().stand_ins += 1;
+                    return Some(Ok(Fetched {
+                        frame,
+                        shown,
+                        exact: false,
+                    }));
+                }
+                st = shared.done.wait(st).unwrap();
+                continue;
+            }
+            st = shared.done.wait_timeout(st, deadline - now).unwrap().0;
         }
     }
 
@@ -440,6 +473,22 @@ impl Worker {
 }
 
 impl State {
+    /// A caller stops waiting for exact frame `n`; the frame remains the
+    /// worker's scrub target unless it is already being decoded.
+    fn leave(&mut self, n: usize) {
+        let left = self.waiting.get_mut(&n).map(|w| {
+            *w -= 1;
+            *w
+        });
+        if left == Some(0) {
+            self.waiting.remove(&n);
+            self.exact.retain(|&e| e != n);
+            if self.busy != Some(n) {
+                self.scrub = Some(n);
+            }
+        }
+    }
+
     fn moved_to(&mut self, n: usize) {
         if let Some(last) = self.last
             && last != n
@@ -742,5 +791,36 @@ mod tests {
         let f = viewer.fetch(&src, 1, 5, Want::Exact).unwrap();
         assert!(f.exact && f.shown == 5);
         assert_eq!(viewer.stats().workers, 2);
+    }
+
+    /// A playing viewer never waits out a decode: past the allowance it gets
+    /// a stand-in at once and the exact frame lands for the next render.
+    #[test]
+    fn playback_past_its_allowance_shows_a_stand_in_and_the_exact_frame_lands() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+        let src = MediaSource::open(&path).unwrap();
+        let service = Arc::new(DecodeService::new(Default::default()));
+        let viewer = ViewerDecode::new(service);
+        let first = viewer.fetch(&src, 1, 0, Want::Exact).unwrap();
+        assert!(first.exact && first.shown == 0);
+        let last = src.index.frames.len() - 1;
+        let late = viewer
+            .fetch(&src, 1, last, Want::Playback(Duration::ZERO))
+            .unwrap();
+        assert!(!late.exact, "a zero allowance cannot wait for a decode");
+        assert!(late.shown < last);
+        let t = std::time::Instant::now();
+        loop {
+            let f = viewer
+                .fetch(&src, 1, last, Want::Playback(Duration::ZERO))
+                .unwrap();
+            if f.exact {
+                assert_eq!(f.shown, last);
+                break;
+            }
+            assert!(t.elapsed().as_secs() < 20, "the exact frame never landed");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
