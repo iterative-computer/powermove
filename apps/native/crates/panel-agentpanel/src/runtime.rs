@@ -54,7 +54,7 @@ impl ProviderRuns {
             return Err(Error::Invalid("provider start effect"));
         };
         Self::validate(panel, &effect.target)?;
-        if self.runs.len() >= 8
+        if self.active() >= 8
             || self.runs.iter().any(|r| {
                 !r.finished
                     && r.target.thread == effect.target.thread
@@ -70,7 +70,7 @@ impl ProviderRuns {
                 let receipt = Receipt {
                     source: effect.target.run.clone().ok_or(Error::Stale)?,
                     sequence: 0,
-                    event: Event::Stopped(format!("{error:?}")),
+                    event: Event::Stopped(error.to_string()),
                 };
                 panel.provider_event(store, &effect.target.thread, &receipt, now)?;
                 return Err(error);
@@ -85,6 +85,42 @@ impl ProviderRuns {
             finished: false,
         });
         Ok(())
+    }
+    /// Settle an effect the host could not carry out, so the panel never waits
+    /// on a process that will not answer. A start that never launched fails its
+    /// run in the conversation; a refused Stop or answer is acknowledged as such.
+    pub fn refuse(
+        &mut self,
+        panel: &mut Panel,
+        store: &mut impl Store,
+        effect: &Effect,
+        now: u64,
+        error: &Error,
+    ) -> Result<()> {
+        match &effect.kind {
+            EffectKind::Send { steer: false, .. } => {
+                let run = effect.target.run.clone().ok_or(Error::Stale)?;
+                if self.runs.iter().any(|r| r.target.run.as_ref() == Some(&run)) {
+                    return Ok(());
+                }
+                let receipt = Receipt {
+                    source: run,
+                    sequence: 0,
+                    event: Event::Stopped(error.to_string()),
+                };
+                panel
+                    .provider_event(store, &effect.target.thread, &receipt, now)
+                    .map(drop)
+            }
+            EffectKind::Stop | EffectKind::Answer { .. } => {
+                match panel.acknowledge(effect.id, false) {
+                    Ok(()) | Err(Error::Stale) => {}
+                    Err(other) => return Err(other),
+                }
+                panel.save(store, now)
+            }
+            _ => Ok(()),
+        }
     }
     /// Cancel every unfinished run. Each settles through its usual events.
     pub fn cancel_all(&mut self) {
@@ -262,6 +298,7 @@ impl ProviderRuns {
                 }
             }
         }
+        panel.checkpoint(store, now)?;
         Ok(delivered)
     }
 }

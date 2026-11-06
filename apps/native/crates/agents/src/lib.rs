@@ -104,6 +104,17 @@ pub enum Event {
     Warning(String),
     Stopped(String),
 }
+impl Event {
+    /// A text fragment of a reply or its reasoning: one per provider token. Its
+    /// effect lives in the conversation, so hosts checkpoint it, not each one.
+    pub fn streamed(&self) -> bool {
+        match self {
+            Event::Trace { value, .. } => matches!(value["kind"].as_str(), Some("answer" | "thought")),
+            Event::Progress { .. } => true,
+            _ => false,
+        }
+    }
+}
 #[derive(Default, Debug)]
 pub struct Effects {
     pub outgoing: Vec<Value>,

@@ -376,9 +376,14 @@ pub struct Panel {
     pending: HashMap<u64, Pending>,
     archives_after_stop: HashMap<String, String>,
     retired_runs: HashSet<String>,
+    /// When the oldest change not yet saved was made: streamed reply text and
+    /// draft typing wait for a checkpoint instead of a durable write each.
+    unsaved_since: Option<u64>,
     pub save_error: Option<String>,
     pub follow: Follow,
 }
+/// How far streamed text and typing may run ahead of the durable archive.
+pub const CHECKPOINT_MS: u64 = 1000;
 impl Panel {
     /// Worker-only: storage IO is synchronous by trait contract. Never call from
     /// a main-thread input handler. Unknown archive fields remain in Threads.
@@ -434,6 +439,7 @@ impl Panel {
                 .flatten()
                 .filter_map(|v| v["lastRunId"].as_str().map(str::to_owned))
                 .collect(),
+            unsaved_since: None,
             save_error: None,
             follow: Follow::default(),
         })
@@ -542,6 +548,7 @@ impl Panel {
         match self.archive.save(store) {
             Ok(()) => {
                 self.save_error = None;
+                self.unsaved_since = None;
                 Ok(())
             }
             Err(e) => {
@@ -550,9 +557,28 @@ impl Panel {
             }
         }
     }
+    /// Keep a change in memory until the next checkpoint or save.
+    pub fn defer_save(&mut self, now: u64) {
+        self.unsaved_since.get_or_insert(now);
+    }
+    pub fn unsaved(&self) -> bool {
+        self.unsaved_since.is_some()
+    }
+    /// Save deferred changes once they are `CHECKPOINT_MS` old. True if it saved.
+    pub fn checkpoint(&mut self, store: &mut impl Store, now: u64) -> Result<bool> {
+        match self.unsaved_since {
+            Some(since) if now.saturating_sub(since) >= CHECKPOINT_MS => {
+                self.save(store, now).map(|()| true)
+            }
+            _ => Ok(false),
+        }
+    }
     /// Publish the provider observation and its panel projection together. This
     /// runs on the storage owner's serial worker, never on a UI callback.
     /// Failed publication leaves the original model intact for an exact retry.
+    /// Streamed fragments are the exception: they change the projection in
+    /// memory, keep no receipt, and reach the archive at the next checkpoint or
+    /// with the next event that saves.
     pub fn provider_event(
         &mut self,
         store: &mut impl Store,
@@ -560,9 +586,13 @@ impl Panel {
         receipt: &pm_agents::history::Receipt,
         now: u64,
     ) -> Result<bool> {
+        let streamed = receipt.event.streamed();
         // A process may finish reaping after its conversation was archived.
         // Retain those observations on that exact archived run, never a new thread.
         if self.archive.thread(thread).is_none() {
+            if streamed {
+                return Ok(false);
+            }
             let mut next = self.clone();
             next.archive
                 .update(store, |archive| {
@@ -639,6 +669,9 @@ impl Panel {
                 _ => None,
             }
         };
+        if streamed && !current {
+            return Ok(false);
+        }
         let archive_after = next.archives_after_stop.remove(thread);
         if let Some(update) = update {
             let sequence = next
@@ -649,6 +682,14 @@ impl Panel {
                 .sequence
                 + 1;
             next.receive(thread, &receipt.source, sequence, update, now)?;
+        }
+        if streamed {
+            if let Some(replacement) = archive_after {
+                next.archives_after_stop.insert(thread.into(), replacement);
+            }
+            next.defer_save(now);
+            *self = next;
+            return Ok(true);
         }
         next.capture(thread, now)?;
         pm_agents::history::append(

@@ -957,12 +957,8 @@ impl Backend {
                 let effect = {
                     let mut state = agent.lock().unwrap();
                     let thread = state.panel.active_id().to_owned();
-                    let provider = state
-                        .panel
-                        .session(&thread)
-                        .map_err(|e| format!("{e:?}"))?
-                        .settings
-                        .provider;
+                    let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
+                    let (provider, live) = (session.settings.provider, session.run.is_some());
                     let action = &args["action"];
                     if action["type"] == "retryConnection" {
                         if let Some(accounts) = link.accounts() {
@@ -972,7 +968,7 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
-                    crate::agent_host::admit(action, link.available(provider))?;
+                    crate::agent_host::admit(action, link.available(provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
@@ -994,15 +990,22 @@ impl Backend {
                         },
                     )
                     .map_err(|e| format!("{e:?}"))?;
-                    state
-                        .panel
-                        .save(
-                            &mut KernelStore::new(self.kernel.clone(), self.application),
-                            crate::agent_host::now_ms(),
-                        )
-                        .map_err(|e| format!("{e:?}"))?;
+                    let now = crate::agent_host::now_ms();
+                    // Typing reaches the archive at the next checkpoint, not per key.
+                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key")) {
+                        state.panel.defer_save(now);
+                    } else {
+                        state
+                            .panel
+                            .save(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                now,
+                            )
+                            .map_err(|e| format!("{e:?}"))?;
+                    }
                     effect
                 };
+                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
                 if let Some(effect) = effect {
                     use pm_panel_agentpanel::model::{EffectKind, ShellAction};
                     let operation = match effect.kind {

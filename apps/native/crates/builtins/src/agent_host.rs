@@ -188,14 +188,17 @@ pub fn now_ms() -> u64 {
     now()
 }
 const UNAVAILABLE: &str = "Agent provider or native action service is unavailable";
-pub fn admit(action: &Value, connected: bool) -> Result<(), String> {
+/// `live`: the thread has a run, which outlives its account's status.
+pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> {
     let allowed = match action["type"].as_str() {
         Some(
             "draft" | "focus" | "newThread" | "switchThread" | "disclose" | "removeAttachment"
             | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer" | "keepResult"
             | "openSettings",
         ) => true,
-        Some("submit" | "stop" | "answer") => connected,
+        Some("stop") => true,
+        Some("answer") => connected || live,
+        Some("submit") => connected,
         Some("setAccess") => matches!(
             action["access"].as_str(),
             Some("editor" | "supervised" | "auto")
@@ -267,8 +270,9 @@ fn prompt(panel: &Panel, thread: &str, text: &str) -> Result<String, Error> {
         )
     })
 }
-/// Run a panel effect that reaches a provider. Launch failures settle the run in
-/// its conversation; only refusals before the run started are errors here.
+/// Run a panel effect that reaches a provider. Anything that keeps it from the
+/// provider settles in the conversation: a start fails its run, a Stop or an
+/// answer is acknowledged as refused. Only an unsettled refusal is an error.
 pub fn run_effect(
     shared: &SharedAgent,
     link: &Arc<AgentLink>,
@@ -286,57 +290,80 @@ pub fn run_effect(
             steer: false,
             ..
         } => {
-            let environment = link
-                .environment
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or(UNAVAILABLE)?;
-            let thread = &effect.target.thread;
-            let directory = workspace(&environment.profile, &effect.target.project, thread)
-                .map_err(|e| e.to_string())?;
-            let prompt = prompt(&state.panel, thread, text).map_err(|e| format!("{e:?}"))?;
-            let request = Request {
-                run: effect.target.run.clone().ok_or(UNAVAILABLE)?,
-                prompt,
-                provider: settings.provider,
-                model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
-                effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
-                access: settings.access,
-                approval: settings.approval,
-                workspace: directory,
-            };
-            match state
-                .runs
-                .start(&mut state.panel, &mut store, effect, now(), || {
-                    launch::launch(&environment, request).map_err(Error::Host)
-                }) {
-                Err(Error::Host(_)) => Ok(()),
-                other => other,
-            }
+            let environment = link.environment.lock().unwrap().clone();
+            launch_request(state, environment, effect, text, settings).and_then(
+                |(environment, request)| {
+                    state
+                        .runs
+                        .start(&mut state.panel, &mut store, effect, now(), || {
+                            launch::launch(&environment, request).map_err(Error::Host)
+                        })
+                },
+            )
         }
         _ => state
             .runs
             .dispatch(&mut state.panel, &mut store, effect, now()),
     };
-    result.map_err(|e| format!("{e:?}"))?;
-    if !state.worker && !state.runs.is_empty() {
-        state.worker = true;
-        let (shared, link, kernel) = (shared.clone(), link.clone(), kernel.clone());
-        std::thread::Builder::new()
-            .name("pm-agent-runs".into())
-            .spawn(move || deliver(shared, link, kernel, application))
-            .map_err(|e| e.to_string())?;
+    let refused = result.err().and_then(|error| {
+        state
+            .runs
+            .refuse(&mut state.panel, &mut store, effect, now(), &error)
+            .err()
+            .map(|_| error.to_string())
+    });
+    drop(guard);
+    ensure_worker(shared, link, kernel, application);
+    refused.map_or(Ok(()), Err)
+}
+fn launch_request(
+    state: &AgentState,
+    environment: Option<Environment>,
+    effect: &Effect,
+    text: &str,
+    settings: &pm_panel_agentpanel::model::Settings,
+) -> Result<(Environment, Request), Error> {
+    let environment = environment.ok_or_else(|| Error::Host(UNAVAILABLE.into()))?;
+    let thread = &effect.target.thread;
+    let directory = workspace(&environment.profile, &effect.target.project, thread)
+        .map_err(|e| Error::Host(format!("The agent's workspace could not be created: {e}")))?;
+    let request = Request {
+        run: effect.target.run.clone().ok_or(Error::Stale)?,
+        prompt: prompt(&state.panel, thread, text)?,
+        provider: settings.provider,
+        model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
+        effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
+        access: settings.access,
+        approval: settings.approval,
+        workspace: directory,
+    };
+    Ok((environment, request))
+}
+/// Start the delivery worker if runs or deferred saves need one.
+pub(crate) fn ensure_worker(
+    shared: &SharedAgent,
+    link: &Arc<AgentLink>,
+    kernel: &KernelHandle,
+    application: bool,
+) {
+    let mut state = shared.lock().unwrap();
+    if state.worker || state.runs.is_empty() && !state.panel.unsaved() {
+        return;
     }
-    Ok(())
+    let (worker, link, kernel) = (shared.clone(), link.clone(), kernel.clone());
+    state.worker = std::thread::Builder::new()
+        .name("pm-agent-runs".into())
+        .spawn(move || deliver(worker, link, kernel, application))
+        .is_ok();
 }
 /// Durable delivery, one bounded batch at a time. A failed publication keeps the
-/// exact event for retry. Window close cancels what is left, then gives up.
+/// exact event for retry. Streamed text and typing are saved once they are a
+/// checkpoint old. Window close cancels what is left, saves, then gives up.
 fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, application: bool) {
     let mut store = KernelStore::new(kernel, application);
     let mut closed: Option<Instant> = None;
     loop {
-        let (delivered, failed, remaining) = {
+        let (changed, failed, done) = {
             let mut guard = shared.lock().unwrap();
             let state = &mut *guard;
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
@@ -346,21 +373,26 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             if closed.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
                 state.runs = ProviderRuns::default();
             }
+            let saved = state.panel.save_error.clone();
             let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
-            if state.runs.is_empty() {
+            let mut failed = polled.is_err();
+            if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {
+                failed |= state.panel.save(&mut store, now()).is_err();
+            }
+            let done = state.runs.is_empty() && !state.panel.unsaved();
+            if done {
                 state.worker = false;
             }
-            (
-                *polled.as_ref().unwrap_or(&0),
-                polled.is_err(),
-                state.runs.len(),
-            )
+            let changed = *polled.as_ref().unwrap_or(&0) > 0
+                || failed
+                || saved != state.panel.save_error;
+            (changed, failed, done)
         };
-        if delivered > 0 {
+        if changed {
             link.touch();
             link.publish();
         }
-        if remaining == 0 {
+        if done {
             return;
         }
         std::thread::sleep(Duration::from_millis(if failed { 250 } else { 16 }));
@@ -371,22 +403,22 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn absent_provider_rejects_submission_answers_and_steering_before_dispatch() {
+    fn absent_provider_rejects_submission_but_still_reaches_a_live_run() {
         for action in [
             json!({"type":"submit"}),
             json!({"type":"answer"}),
-            json!({"type":"stop"}),
             json!({"type":"setAccess","access":"full"}),
             json!({"type":"key","key":{"key":"Enter"}}),
         ] {
-            assert!(admit(&action, false).is_err());
+            assert!(admit(&action, false, false).is_err());
         }
         for action in [
+            json!({"type":"stop"}),
             json!({"type":"draft"}),
             json!({"type":"openSettings"}),
             json!({"type":"key","key":{"key":"Enter","composing":true}}),
         ] {
-            assert!(admit(&action, false).is_ok());
+            assert!(admit(&action, false, false).is_ok());
         }
     }
     #[test]
@@ -397,8 +429,10 @@ mod tests {
             json!({"type":"stop"}),
             json!({"type":"key","key":{"key":"Enter"}}),
         ] {
-            assert!(admit(&action, true).is_ok());
+            assert!(admit(&action, true, false).is_ok());
         }
-        assert!(admit(&json!({"type":"setAccess","access":"full"}), true).is_err());
+        assert!(admit(&json!({"type":"setAccess","access":"full"}), true, false).is_err());
+        // Signed out mid-run: the run still takes its answers.
+        assert!(admit(&json!({"type":"answer"}), false, true).is_ok());
     }
 }
