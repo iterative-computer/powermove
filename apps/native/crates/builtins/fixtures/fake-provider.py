@@ -110,6 +110,8 @@ def codex():
             if mode == 'stream':
                 threading.Thread(target=stream, args=(turn,), daemon=True).start()
             elif mode != 'hold':
+                if mode == 'slow':
+                    time.sleep(0.4)
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})

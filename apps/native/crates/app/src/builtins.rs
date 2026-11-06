@@ -40,6 +40,8 @@ pub struct Host {
     media_probe_serial: u64,
     updating: bool,
     again: bool,
+    /// The application Agent panel's runs while a project is open.
+    agent_carry: Option<pm_builtins::AgentCarry>,
 }
 fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
     pm_panel_media::Stamp {
@@ -66,12 +68,15 @@ impl Controller {
         if let Some(job) = &self.builtins.export_job {
             job.cancel.store(true, std::sync::atomic::Ordering::Release);
         }
+        let mut carry = self.builtins.agent_carry.take();
         if let Some(runtime) = self.builtins.runtime.take() {
+            carry = carry.or_else(|| runtime.carry_agent());
             runtime.close();
         }
         let windows = std::mem::take(&mut self.builtins.windows);
         self.builtins = Host::default();
         self.builtins.windows = windows;
+        self.builtins.agent_carry = carry;
         self.builtins.project = Some(project.clone());
         self.builtins.document = document;
         self.builtins.application = application;
@@ -80,7 +85,7 @@ impl Controller {
             let _ = tx.try_send(());
         };
         let created = if application {
-            Builtins::application(self.kernel.clone(), wake)
+            Builtins::application(self.kernel.clone(), wake, self.builtins.agent_carry.take())
         } else {
             Builtins::new(self.kernel.clone(), &project, wake)
         };

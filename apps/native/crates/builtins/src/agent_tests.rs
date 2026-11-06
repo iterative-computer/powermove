@@ -85,6 +85,22 @@ impl Agent {
     fn mount(actor: &KernelActor, environment: Environment) -> Self {
         Self::mount_recording(actor, environment, Default::default())
     }
+    /// The panel shown with no project open.
+    fn mount_application(
+        actor: &KernelActor,
+        environment: Environment,
+        carry: Option<AgentCarry>,
+    ) -> Self {
+        let panels = Builtins::application(actor.handle(), || {}, carry).unwrap();
+        panels.set_agent_environment(environment, std::sync::Arc::new(|_| Ok(())));
+        let mut panels = panels;
+        finish(panels.mount("agent").unwrap());
+        finish(panels.show("agent").unwrap());
+        Self {
+            panels,
+            latest: None,
+        }
+    }
     /// Sign-in status arrives from a worker; a run needs it.
     fn connected(&mut self, provider: Provider) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -298,6 +314,58 @@ fn stop_lands_while_a_stream_republishes_the_panel() {
     assert!(receipts.as_array().unwrap().len() < 10, "{receipts}");
     drop(state);
     panel.panels.close();
+}
+#[test]
+fn an_application_run_outlives_its_window_and_shows_on_return() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut home = Agent::mount_application(&actor, environment(root.path(), "slow"), None);
+    home.connected(Provider::Chatgpt);
+    home.send("Make a project");
+    // The run opens a project: the application window goes, its run stays.
+    let carry = home.panels.carry_agent().expect("a live run");
+    home.panels.close();
+    drop(home);
+    let state = carry.0.as_ref().unwrap().1.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !state.lock().unwrap().runs.is_empty() {
+        assert!(Instant::now() < deadline, "the carried run stopped delivering");
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(state);
+    let mut back = Agent::mount_application(&actor, environment(root.path(), "slow"), Some(carry));
+    back.connected(Provider::Chatgpt);
+    assert!(back.text().contains("Saw: Make a project"), "{}", back.text());
+    let agent = back.agent();
+    assert_eq!(
+        agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "completed"
+    );
+    drop(agent);
+    back.panels.close();
+}
+#[test]
+fn dropping_a_carried_run_cancels_it() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut home = Agent::mount_application(&actor, environment(root.path(), "hold"), None);
+    home.connected(Provider::Chatgpt);
+    home.send("Wait");
+    let state = home.agent();
+    let carry = home.panels.carry_agent().expect("a live run");
+    home.panels.close();
+    drop(home);
+    assert!(!state.lock().unwrap().runs.is_empty(), "closing kept the run");
+    drop(carry);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !state.lock().unwrap().runs.is_empty() {
+        assert!(Instant::now() < deadline, "the run was not cancelled");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        state.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
 }
 #[test]
 fn signing_out_during_a_run_keeps_its_conversation_and_stop() {

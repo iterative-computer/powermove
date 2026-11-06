@@ -68,6 +68,7 @@ impl AgentLink {
         self.realms.lock().unwrap().push(realm);
     }
     pub fn close(&self) {
+        self.realms.lock().unwrap().clear();
         self.closing.store(true, Ordering::Release);
         if let Some(accounts) = self.accounts() {
             accounts.close();
@@ -161,6 +162,31 @@ impl AgentLink {
     fn publish(&self) {
         for realm in self.realms.lock().unwrap().iter() {
             let _ = realm.eval("__pmBuiltin.publish()");
+        }
+    }
+}
+/// The application Agent panel's live runs, kept while a project is open. A run
+/// that opens or creates a project keeps going, and the application panel shows
+/// it again on return. Dropping this cancels whatever is still running.
+pub struct AgentCarry(pub(crate) Option<(Arc<AgentLink>, SharedAgent)>);
+impl AgentCarry {
+    /// The window giving these up stops publishing to its realms.
+    pub(crate) fn take(link: &Arc<AgentLink>, state: &SharedAgent) -> Option<Self> {
+        if state.lock().unwrap().runs.active() == 0 {
+            return None;
+        }
+        link.realms.lock().unwrap().clear();
+        Some(Self(Some((link.clone(), state.clone()))))
+    }
+    /// Hand the runs to a new application window; nothing is cancelled.
+    pub(crate) fn adopt(mut self) -> (Arc<AgentLink>, SharedAgent) {
+        self.0.take().expect("carried once")
+    }
+}
+impl Drop for AgentCarry {
+    fn drop(&mut self) {
+        if let Some((link, _)) = self.0.take() {
+            link.close();
         }
     }
 }

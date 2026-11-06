@@ -279,7 +279,7 @@ fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer()
 #[test]
 fn application_agent_and_settings_mount_without_creating_a_project() {
     let actor = KernelActor::spawn(KernelConfig::default());
-    let mut panels = Builtins::application(actor.handle(), || {}).unwrap();
+    let mut panels = Builtins::application(actor.handle(), || {}, None).unwrap();
     assert!(panels.mount("inspector").is_err());
     for id in ["agent", "settings"] {
         finish(panels.mount(id).unwrap());
