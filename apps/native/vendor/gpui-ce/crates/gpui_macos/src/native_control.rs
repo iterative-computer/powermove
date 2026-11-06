@@ -13,6 +13,7 @@ struct State {
     wrapper: Retained<NSView>,
     control: Retained<NSView>,
     geometry: Cell<Option<(NSRect, NSRect)>>,
+    staged: Cell<Option<(NSRect, NSRect)>>,
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}
 pub struct NativeControlSlot {
@@ -33,6 +34,7 @@ impl NativeControlSlot {
             wrapper,
             control,
             geometry: Cell::new(None),
+            staged: Cell::new(None),
         });
         if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
             content.addSubview_positioned_relativeTo(
@@ -51,6 +53,11 @@ impl NativeControlSlot {
     }
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
         self.state.geometry.set(Some((bounds, clip)));
+        self.state.staged.set(Some((bounds, clip)));
+    }
+    /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
+    pub fn keep(&self) {
+        self.state.geometry.set(self.state.staged.get());
     }
 }
 impl Drop for NativeControlSlot {

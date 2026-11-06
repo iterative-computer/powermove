@@ -351,6 +351,54 @@ impl Builtins {
             .ok_or(Error::Closed)?
             .eval(format!("__pmBuiltin.event({wire})"))
     }
+    /// A press may republish before its click lands. Activation still reaches
+    /// a node only while it carries the same semantic identity as the one hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn activate(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        semantic: Option<&str>,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        let revision = {
+            let entries = self.broker.entries.lock().unwrap();
+            let surface = &entries.get(panel).ok_or(Error::Closed)?.surface;
+            let same = semantic.is_some_and(|id| {
+                surface
+                    .node(target)
+                    .and_then(|n| n.props.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+            });
+            if same { surface.revision() } else { revision }
+        };
+        self.event(panel, generation, revision, target, event, detail)
+    }
+    /// Pointer stream events address the current tree. A publication landing
+    /// mid-gesture must not drop a release.
+    pub fn pointer_event(
+        &self,
+        panel: &str,
+        generation: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+    ) -> Result<Ticket<Evaluation>> {
+        let revision = self
+            .broker
+            .entries
+            .lock()
+            .unwrap()
+            .get(panel)
+            .ok_or(Error::Closed)?
+            .surface
+            .revision();
+        self.event(panel, generation, revision, target, event, detail)
+    }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
     /// revokes its writer on the isolate owner, including after a failed mount.
     pub fn close_panel(&self, id: &str) {

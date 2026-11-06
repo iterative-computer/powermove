@@ -59,3 +59,8 @@ path = "../../../../engine/crates/pm-audio"
 path = "../../../../engine/crates/pm-eval"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"
+[dev-dependencies.gpui]
+package = "gpui-ce"
+path = "../../vendor/gpui-ce/crates/gpui"
+default-features = false
+features = ["test-support"]

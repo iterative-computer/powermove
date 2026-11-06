@@ -15,6 +15,7 @@ pub struct Host {
     pub runtime: Option<Arc<Builtins>>,
     pending: BTreeMap<String, Publication>,
     pub views: BTreeMap<String, Entity<SurfaceView>>,
+    pub natives: crate::v4_view::Natives,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -263,8 +264,14 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
+        let mut mounted = false;
         for p in runtime.take_publications() {
-            self.builtins.pending.insert(p.panel.clone(), p);
+            if let Some(view) = self.builtins.views.get(&p.panel) {
+                view.update(cx, |v, cx| v.publish(p, cx));
+            } else {
+                self.builtins.pending.insert(p.panel.clone(), p);
+                mounted = true;
+            }
         }
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
@@ -275,7 +282,10 @@ impl Controller {
         if !self.builtins.requests.is_empty() {
             self.host.borrow().send_command("v4.platform", vec![]);
         }
-        cx.notify();
+        // Existing panels notify themselves; only a first mount needs the shell.
+        if mounted {
+            cx.notify();
+        }
     }
     pub fn builtin_panel(
         &mut self,
@@ -288,20 +298,21 @@ impl Controller {
             return None;
         }
         let runtime = self.builtins.runtime.clone()?;
+        let t = self.host.borrow().tokens.clone();
         if let Some(publication) = self.builtins.pending.remove(id) {
-            if let Some(view) = self.builtins.views.get(id) {
-                view.update(cx, |v, cx| {
-                    v.tokens = self.host.borrow().tokens.clone();
-                    v.publish(publication, window, cx);
-                });
-            } else {
-                let tokens = self.host.borrow().tokens.clone();
-                let view = cx.new(|cx| SurfaceView::new(runtime, publication, tokens, window, cx));
-                self.builtins.views.insert(id.into(), view);
-            }
+            let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
+            let view =
+                cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
+            self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();
-        let t = self.host.borrow().tokens.clone();
+        let handle = window.window_handle();
+        view.update(cx, |v, cx| {
+            v.attach(handle);
+            if *v.tokens() != t {
+                v.retheme(t.clone(), cx);
+            }
+        });
         if id == "timeline" {
             crate::playback::set_timeline(
                 cx.entity_id(),
@@ -328,7 +339,18 @@ impl Controller {
                 .w_full()
                 .h(px((bounds.h - t.metrics.header).max(0.)))
                 .overflow_hidden()
-                .child(view)
+                .child(
+                    view.clone()
+                        .cached(StyleRefinement::default().size_full()),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
+                    )
+                    .absolute()
+                    .size_0(),
+                )
                 .into_any_element(),
         )
     }
@@ -342,12 +364,14 @@ impl Controller {
         // Ensure the accepted header and body refer to the same native publication.
         let _ = self.builtin_panel(id, bounds, window, cx);
         let view = self.builtins.views.get(id)?.clone();
-        view.read(cx).header_id()?;
+        if !view.read(cx).has_header() {
+            return None;
+        }
         let header = self
             .builtins
             .headers
             .entry(id.into())
-            .or_insert_with(|| cx.new(|_| crate::v4_view::HeaderView(view)));
+            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)));
         Some(div().w_full().child(header.clone()).into_any_element())
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {

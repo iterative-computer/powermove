@@ -21,9 +21,12 @@ mod rows;
 mod session;
 mod smoke;
 mod surfaces;
+mod v4_compile;
 mod v4_control;
 mod v4_native;
 mod v4_view;
+#[cfg(test)]
+mod v4_view_tests;
 mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;
