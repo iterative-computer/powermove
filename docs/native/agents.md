@@ -6,10 +6,11 @@ A panel run is real, from keystroke to durable reply:
 
 1. `panels/agent/view.tsx` sends composer keys as `{type:"key"}`. The Rust panel
    edits the draft. The v4 host reports keys, not composed text, so IME and
-   shifted punctuation need a real text input there.
+   shifted punctuation need a real text input there. Typing, Send, Stop and
+   answers name their own target, so they don't depend on the latest publication.
 2. `panel.agent.dispatch` in `builtins/src/models.rs` admits the action
-   (`agent_host::admit`) before touching the panel. No runtime means no consumed
-   draft.
+   (`agent_host::admit`) before touching the panel. No runtime or no signed-in
+   account means no consumed draft.
 3. `agent_host::run_effect` builds the prompt with bounded thread context and
    calls `ProviderRuns::start`, which saves intent before launch.
 4. `pm_agents::launch` finds the binary: `CODEX_BINARY`/`CLAUDE_BINARY`, then a
@@ -21,22 +22,34 @@ A panel run is real, from keystroke to durable reply:
    lock is not held while it does. A failed save keeps the event for retry.
 6. Window close sets `AgentLink::close`; the worker cancels runs and exits.
 
+Sign-in is `pm_agents::account`, on `pm-agent-account` workers. ChatGPT uses App
+Server's `account/*` and `model/list`; Claude uses `auth status|login|logout` and
+an `initialize` control request. Status drives the panel's connection and the live
+rows in Settings › Accounts. Each provider's runtime owns its credentials.
+
+The composer has Access, provider, model and effort pop-ups, filled from the same
+workers. Access has no Full choice, because no consent alert exists. Question and
+approval cards answer through their own buttons.
+
+Composition-only runs differ from main on purpose. Main returns a structured plan
+that the renderer applies. Here the run edits through its MCP session, limited to
+`catalog::composition_names()`: `enabled_tools` on Codex, `--allowedTools` on Claude.
+
 Proof is `builtins/src/agent_tests.rs`: real V8 panel, real kernel actor and a fake
-provider over real pipes, for reply and reopen, Stop, and a question answered back
-into the process. No real provider has run. `live-provider-check` is still
-unexecuted.
+provider over real pipes, for reply and reopen, Stop, question and approval cards,
+pickers reaching the argv, and sign-in and sign-out. The sign-in test calls
+`panel.settings` directly, not through the rendered button. No real provider has
+run: `live-provider-check` is unexecuted, and the Claude model request is unproven
+against the real binary.
 
 Open:
 
-- Sign-in. Accounts in Settings has no provider login, so a real run reports the
-  runtime's own auth error in its conversation.
-- Provider, model and Access pickers are still disabled in the panel view.
-  ChatGPT is the effective default.
+- Provider `model` efforts aren't per model; the pop-up shows the provider's union.
 - `Compatible` refuses at launch: `compatible` and `completion` have no HTTP or
   Keychain host. Computer access stays refused because no consent alert exists.
 - Attachments refuse with an explanation.
 - `INSTRUCTIONS` in `launch.rs` is a short stand-in for main's generated workspace
-  instructions.
+  instructions, and user MCP servers and skills aren't shared into the homes.
 - Project access has no OS confinement host for Compatible-only workspace tools.
 
 The sections below are older dated notes.

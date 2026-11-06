@@ -2,20 +2,20 @@
 //! export workers. Exports and frames use the same child job as the Export panel.
 use crate::mcp::Tools;
 use anyhow::{Context, Result as AnyResult};
-use pm_kernel::media_archive::Archive;
 use pm_engine_service::jobs::{ExportHandle, ExportRequest};
+use pm_kernel::media_archive::Archive;
 use pm_kernel::{KernelHandle, Published};
 use pm_mcp::{
     CaptureRequest, EngineHook, Error, Result,
     export_jobs::Progress,
+    media::{MediaRegistry, MediaState},
     media_tools::{
         FrameRequest, MediaSource, Probe, SheetOutput, SheetPlan, SheetRequest, Waveform,
         WaveformRequest,
     },
-    media::{MediaRegistry, MediaState},
     services::{
-        ExportChild, FrozenProject, Image, ImportedMedia, MediaImport, MediaImporter,
-        MediaRequest, VideoExportRequest,
+        ExportChild, FrozenProject, Image, ImportedMedia, MediaImport, MediaImporter, MediaRequest,
+        VideoExportRequest,
     },
 };
 use pm_media::preview::PreviewReader;
@@ -465,8 +465,8 @@ impl MediaImporter for EngineJobs {
         let metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
             "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
             "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
-        let catalog = pm_panel_media::Catalog::published(&published)
-            .map_err(|e| failed(format!("{e:?}")))?;
+        let catalog =
+            pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog
             .prepare_import(
                 &catalog.stamp,

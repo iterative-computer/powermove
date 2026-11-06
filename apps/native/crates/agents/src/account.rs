@@ -63,7 +63,7 @@ struct Slot {
     worker: bool,
     cancel: Arc<AtomicBool>,
 }
-type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 /// The browser hop, a parameter because it is the one step a test must not take.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
     Command::new("/usr/bin/open")

@@ -165,7 +165,7 @@ impl Builtins {
     pub fn set_agent_environment(
         &self,
         environment: pm_agents::launch::Environment,
-        open: std::sync::Arc<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>,
+        open: std::sync::Arc<pm_agents::account::Opener>,
     ) {
         self.broker.agent.set_environment(environment, open);
     }

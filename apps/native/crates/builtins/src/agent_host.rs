@@ -4,7 +4,7 @@
 use crate::models::KernelStore;
 use pm_agents::{
     Provider,
-    account::{Accounts, State},
+    account::{Accounts, Opener, State},
     launch::{self, Environment, Request},
     runtime::Runtime,
 };
@@ -47,11 +47,7 @@ impl Default for AgentLink {
 }
 impl AgentLink {
     /// Reads who is signed in on workers; the panel updates when they answer.
-    pub fn set_environment(
-        self: &Arc<Self>,
-        environment: Environment,
-        open: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
-    ) {
+    pub fn set_environment(self: &Arc<Self>, environment: Environment, open: Arc<Opener>) {
         let weak = Arc::downgrade(self);
         let accounts = Accounts::new(
             environment.clone(),

@@ -361,9 +361,10 @@ impl McpSession {
                         ));
                     }
                     if args["missingOnly"] == true
-                        && host.media_registry.as_ref().is_some_and(|registry| {
-                            registry.state(&id, asset).available
-                        })
+                        && host
+                            .media_registry
+                            .as_ref()
+                            .is_some_and(|registry| registry.state(&id, asset).available)
                     {
                         return Ok(json!({"status":"already_available","assetId":asset,
                             "persisted":frozen.project["assets"][asset]["persisted"] == true}));
@@ -398,8 +399,7 @@ impl McpSession {
                             result["layerId"] = json!(layer);
                         }
                         None => {
-                            result["note"] =
-                                json!("Imported. Place 3D models with edit_3d.");
+                            result["note"] = json!("Imported. Place 3D models with edit_3d.");
                         }
                     }
                 }
