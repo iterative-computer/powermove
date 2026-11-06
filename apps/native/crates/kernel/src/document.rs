@@ -985,6 +985,17 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
+        for command in commands {
+            if let Command::Media(crate::MediaCommand::AdmitImport { prepared }) = command
+                && prepared
+                    .expected_document()
+                    .is_some_and(|id| id != self.doc_id())
+            {
+                return Err(TransactionError::Invalid(
+                    "Import belongs to an earlier document session".into(),
+                ));
+            }
+        }
         let revision = self.revision() + 1;
         let mut root = start.cloned();
         let mut forward = Vec::new();
@@ -1043,17 +1054,45 @@ impl DocumentStore {
         validate(&document, &forward)?;
         let media = commands
             .iter()
-            .flat_map(crate::commands::scene3d::import_media)
+            .flat_map(|c| {
+                crate::commands::scene3d::import_media(c)
+                    .into_iter()
+                    .chain(crate::commands::media::import_media(c))
+            })
             .collect::<Vec<_>>();
+        let imported_ids: std::collections::HashSet<_> = commands
+            .iter()
+            .flat_map(crate::commands::media::import_media)
+            .filter_map(|m| m.id.as_str().map(str::to_owned))
+            .collect();
         for item in &media {
             if self
                 .file
                 .media
                 .get(item.id.as_str().unwrap_or(""))
-                .is_some_and(|old| old.revision != item.revision || old.length() != item.length())
+                .is_some_and(|old| {
+                    let imported = imported_ids.contains(item.id.as_str().unwrap_or(""));
+                    let same_hash = match (&old.source, &item.source) {
+                        (
+                            project_io::MediaSource::File {
+                                sha256: Some(a), ..
+                            }
+                            | project_io::MediaSource::Embedded {
+                                sha256: Some(a), ..
+                            },
+                            project_io::MediaSource::File {
+                                sha256: Some(b), ..
+                            },
+                        ) => a == b,
+                        _ => false,
+                    };
+                    old.revision != item.revision
+                        || old.length() != item.length()
+                        || (imported && (old.media_type != item.media_type || !same_hash))
+                })
             {
                 return Err(TransactionError::Invalid(
-                    "A retained 3D import already owns this asset ID".into(),
+                    "Retained media already owns this asset ID".into(),
                 ));
             }
         }

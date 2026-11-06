@@ -8,6 +8,7 @@ pub mod entrypoints;
 pub mod fonts;
 pub mod library;
 pub mod media;
+pub mod media_adapter;
 pub mod settings;
 pub mod storage;
 pub mod store;

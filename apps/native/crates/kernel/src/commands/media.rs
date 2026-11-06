@@ -15,6 +15,11 @@ use crate::error::CommandError;
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum MediaCommand {
+    /// One verified worker result, one Undo entry. A persisted job receipt makes
+    /// crash/retry admission idempotent and refuses a reused id with other data.
+    AdmitImport {
+        prepared: std::sync::Arc<crate::import::PreparedImport>,
+    },
     /// Point a media layer (`image`, `video`, `audio`) at another asset,
     /// keeping its timing, trim and transform. Label "Replace Media".
     Replace { layer_id: String, asset_id: String },
@@ -39,7 +44,7 @@ impl MediaCommand {
     pub fn label(&self) -> String {
         match self {
             MediaCommand::Replace { .. } => "Replace Media",
-            MediaCommand::AddAsset { .. } => "Import",
+            MediaCommand::AddAsset { .. } | MediaCommand::AdmitImport { .. } => "Import",
             MediaCommand::RemoveAsset { .. } => "Remove Media",
             MediaCommand::RenameAsset { .. } => "Rename Media",
             MediaCommand::SetAssetFolder { .. } => "Move to Folder",
@@ -94,8 +99,98 @@ impl MediaCommand {
                 }
                 cx.set(path, values::s(t))
             }
-            MediaCommand::SetAssetFolder { .. } => {
-                Err(CommandError::NotImplemented("set_asset_folder"))
+            MediaCommand::SetAssetFolder { asset_ids, folder } => {
+                let valid = |cx: &Cx<'_>, id: &str| {
+                    cx.lookup(&["assetFolders".into(), id.into()])
+                        .is_some_and(|n| n.to_value().as_object().is_some())
+                };
+                let to = folder.as_deref().filter(|id| valid(cx, id));
+                for id in asset_ids {
+                    let path = vec!["assets".into(), id.as_str().into()];
+                    let Some(asset) = cx.lookup(&path).map(|n| n.to_value()) else {
+                        continue;
+                    };
+                    if asset.as_object().is_none() {
+                        continue;
+                    }
+                    let from = asset
+                        .get("folder")
+                        .and_then(Value::as_str)
+                        .filter(|id| valid(cx, id));
+                    if from == to {
+                        continue;
+                    }
+                    let mut path = path;
+                    path.push("folder".into());
+                    if let Some(to) = to {
+                        cx.set(path, values::s(to))?;
+                    } else {
+                        cx.remove(path)?;
+                    }
+                }
+                Ok(())
+            }
+            MediaCommand::AdmitImport { prepared } => {
+                let receipt = vec!["importReceipts".into(), prepared.job().into()];
+                if let Some(old) = cx.lookup(&receipt) {
+                    return if old.to_value().as_str() == Some(prepared.identity()) {
+                        Ok(())
+                    } else {
+                        Err(CommandError::Invalid(
+                            "Import job was reused with different data".into(),
+                        ))
+                    };
+                }
+                let folders = prepared.folders().as_object().expect("prepared folder map");
+                for (id, folder) in folders.iter() {
+                    if let Some(existing) = cx.lookup(&["assetFolders".into(), id.clone().into()])
+                        && existing.to_value() != *folder
+                    {
+                        return Err(CommandError::Invalid(
+                            "Imported folder already exists with different metadata".into(),
+                        ));
+                    }
+                }
+                if !folders.is_empty() && cx.lookup(&["assetFolders".into()]).is_none() {
+                    cx.set(vec!["assetFolders".into()], Value::Object(Map::new()))?;
+                }
+                for (id, folder) in folders.iter() {
+                    cx.set(
+                        vec!["assetFolders".into(), id.clone().into()],
+                        folder.clone(),
+                    )?;
+                }
+                for a in prepared.assets() {
+                    if ["originals", "baselines", "owners"].iter().any(|field| {
+                        cx.lookup(&[
+                            crate::media_versions::FIELD.into(),
+                            (*field).into(),
+                            a.asset_id.as_str().into(),
+                        ])
+                        .is_some()
+                    }) {
+                        return Err(CommandError::Invalid(
+                            "Imported asset ID belongs to retained media history".into(),
+                        ));
+                    }
+                    if cx
+                        .lookup(&["assets".into(), a.asset_id.as_str().into()])
+                        .is_some()
+                    {
+                        return Err(CommandError::Invalid(
+                            "Imported asset already exists".into(),
+                        ));
+                    }
+                    MediaCommand::AddAsset {
+                        asset_id: a.asset_id.clone(),
+                        asset: a.asset.clone(),
+                    }
+                    .plan(cx)?;
+                }
+                if cx.lookup(&["importReceipts".into()]).is_none() {
+                    cx.set(vec!["importReceipts".into()], Value::Object(Map::new()))?;
+                }
+                cx.set(receipt, values::s(prepared.identity()))
             }
         }
     }
@@ -142,4 +237,12 @@ fn remove_asset(cx: &mut Cx<'_>, asset_id: &str) -> Result<(), CommandError> {
         super::layers::write_layers(cx, Some(&comp), next)?;
     }
     cx.remove(vec!["assets".into(), asset_id.into()])
+}
+
+/// Media participates in the same staged publication as its document metadata.
+pub(crate) fn import_media(command: &super::Command) -> Vec<crate::project_io::MediaEntry> {
+    match command {
+        super::Command::Media(MediaCommand::AdmitImport { prepared }) => prepared.media(),
+        _ => Vec::new(),
+    }
 }

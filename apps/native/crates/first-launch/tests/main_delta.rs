@@ -64,7 +64,7 @@ fn main_profile(root: &std::path::Path) -> pm_first_launch::Config {
 
 #[test]
 fn main_disk_media_receipts_recovery_and_project_workspaces_migrate_without_browser_storage() {
-    let t = tempfile::tempdir().unwrap();
+    let t = private_tempdir();
     let root = t.path().canonicalize().unwrap();
     let config = main_profile(&root);
     let before = files(&config.electron_profile);
@@ -128,7 +128,7 @@ fn main_disk_media_receipts_recovery_and_project_workspaces_migrate_without_brow
 
 #[test]
 fn checksum_failure_keeps_source_and_checkpoint_recoverable_and_retries_exact_bytes() {
-    let t = tempfile::tempdir().unwrap();
+    let t = private_tempdir();
     let config = main_profile(&t.path().canonicalize().unwrap());
     let records: Value = serde_json::from_str(include_str!("fixtures/main-media.json")).unwrap();
     let path = config
@@ -155,7 +155,7 @@ fn checksum_failure_keeps_source_and_checkpoint_recoverable_and_retries_exact_by
 #[test]
 fn verified_main_index_does_not_admit_unindexed_or_unknown_payloads() {
     for relative in ["unindexed.bin", "Index/future-record.json"] {
-        let t = tempfile::tempdir().unwrap();
+        let t = private_tempdir();
         let config = main_profile(&t.path().canonicalize().unwrap());
         let path = config.electron_profile.join("Media Store").join(relative);
         fs::write(&path, b"synthetic unrecognized media").unwrap();
@@ -179,4 +179,101 @@ fn verified_main_index_does_not_admit_unindexed_or_unknown_payloads() {
         assert!(!config.native_profile.join("Media Store/keys").exists());
         assert!(run(&config, |_| Ok(())).is_err());
     }
+}
+
+#[test]
+fn checkpoint_restore_is_isolated_retains_interruption_and_refuses_corruption() {
+    let t = private_tempdir();
+    let root = t.path().canonicalize().unwrap();
+    let config = main_profile(&root);
+    run(&config, |_| Ok(())).unwrap();
+    let source = config.native_profile.join("first-launch-checkpoint");
+    let before = files(&source);
+    let original = files(&config.electron_profile);
+    let dest = root.join("recovered-checkpoint");
+    assert!(
+        pm_first_launch::recovery::restore_checkpoint(&source, &dest, || anyhow::bail!(
+            "synthetic crash"
+        ))
+        .is_err()
+    );
+    let partial = root.join(".recovered-checkpoint.checkpoint-restoring");
+    assert!(partial.is_dir());
+    let retained = files(&partial);
+    pm_first_launch::recovery::restore_checkpoint(&source, &dest, || Ok(())).unwrap();
+    assert_eq!(files(&source), before);
+    assert_eq!(files(&dest), before);
+    assert_eq!(files(&config.electron_profile), original);
+    assert!(
+        fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".recovered-checkpoint.checkpoint-restoring")
+                && e.path() != partial
+                && files(&e.path()) == retained)
+    );
+    assert!(pm_first_launch::recovery::restore_checkpoint(&source, &dest, || Ok(())).is_err());
+    assert!(
+        pm_first_launch::recovery::restore_checkpoint(
+            &source,
+            &config.electron_profile.join("unsafe"),
+            || Ok(())
+        )
+        .is_err()
+    );
+    let path = dest.join("profile/store/project.p.json");
+    fs::write(&path, b"changed").unwrap();
+    assert!(
+        pm_first_launch::recovery::restore_checkpoint(&dest, &root.join("refused"), || Ok(()))
+            .is_err()
+    );
+    assert_eq!(files(&config.electron_profile), original);
+}
+
+#[test]
+fn checkpoint_recovery_refuses_foreign_stage_linked_parent_and_destination_collision() {
+    let t = private_tempdir();
+    let root = t.path().canonicalize().unwrap();
+    let config = main_profile(&root);
+    run(&config, |_| Ok(())).unwrap();
+    let source = config.native_profile.join("first-launch-checkpoint");
+    let before = files(&source);
+    let dest = root.join("foreign");
+    let stage = root.join(".foreign.checkpoint-restoring");
+    fs::create_dir(&stage).unwrap();
+    fs::write(stage.join("unrelated"), b"keep").unwrap();
+    assert!(pm_first_launch::recovery::restore_checkpoint(&source, &dest, || Ok(())).is_err());
+    assert_eq!(fs::read(stage.join("unrelated")).unwrap(), b"keep");
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    assert!(
+        pm_first_launch::recovery::restore_checkpoint(&source, &alias.join("linked"), || Ok(()))
+            .is_err()
+    );
+    assert!(!root.join("linked").exists());
+    let collision = root.join("collision");
+    let mut once = false;
+    assert!(
+        pm_first_launch::recovery::restore_checkpoint(&source, &collision, || {
+            if !once {
+                fs::create_dir(&collision)?;
+                fs::write(collision.join("foreign"), b"keep")?;
+                once = true;
+            }
+            Ok(())
+        })
+        .is_err()
+    );
+    assert_eq!(fs::read(collision.join("foreign")).unwrap(), b"keep");
+    assert_eq!(files(&source), before);
+}
+
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    directory
 }

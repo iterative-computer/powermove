@@ -1,5 +1,15 @@
 # Native distribution plumbing
 
+Current implementation: see [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation).
+`pm-update-policy::sparkle` now owns the supported asynchronous public-API bridge
+behind `sparkle-macos`; the synchronous `Installer` contract below remains for
+older consumers and tests, not the production Sparkle integration route. Policy
+readiness now requires `installer_recovery_verified`, not reverse migration.
+The owner has ruled out reverse migration and archive Restore UI; older Restore
+requirements below do not override that decision. Application termination/import
+leases and real signed installer/Keychain/notarization proofs remain required.
+
+
 Status: Linux-tested code and local packaging commands, **not cutover approval**.
 No app was published, signed, submitted for notarization, installed, tagged or
 released. No production feed, credential, Keychain item, profile or release
@@ -152,7 +162,8 @@ Unknown or duplicate structured fields are errors. Payload fields are:
 | --- | --- |
 | `schema` | Exactly 1. |
 | `channel` | `cutover` or `beta`, matched to bundled config. |
-| `version` | SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `version` | Display SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `sparkleVersion` | Optional signed numeric `CFBundleVersion` / appcast `sparkle:version`, independent of display SemVer. New packaging uses this build number; absent legacy fields fall back to `version`. |
 | `architecture` | `arm64` or `x86_64`, matched to the running app. |
 | `bundleId` | Exact production or beta id for the channel. |
 | `minimumMacos` | At least 14 and no newer than this host for an offer. |

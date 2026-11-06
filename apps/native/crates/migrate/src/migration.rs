@@ -148,6 +148,9 @@ pub struct Pass {
     /// Main's filesystem-backed media keys, separate from browser origins.
     #[serde(default)]
     pub disk_records: BTreeMap<String, KeyRecord>,
+    /// Full main records and typed source availability remain private and durable.
+    #[serde(default)]
+    pub disk_sources: BTreeMap<String, (Value, crate::library_media::SourceStatus)>,
     pub closure: Vec<ClosureEntry>,
     pub blocked_owners: BTreeSet<String>,
     pub mapping_conflicts: BTreeSet<String>,
@@ -200,6 +203,10 @@ pub fn migrate_many_with_disk(
     root: &Path,
     mut hook: impl FnMut(Checkpoint) -> Result<()>,
 ) -> Result<Pass> {
+    let source_states = disk_records
+        .iter()
+        .map(|r| Ok((r.key.clone(), (r.raw.clone(), r.source_status()?))))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let mut disk_keys = BTreeSet::new();
     for record in disk_records {
         ensure!(
@@ -267,15 +274,6 @@ pub fn migrate_many_with_disk(
         .to_hex()
         .to_string()
     };
-    let mut base_bytes = serde_json::to_vec(&(records, closure))?;
-    // Preserve existing pass identities when the extra format is absent.
-    if !disk_records.is_empty() {
-        base_bytes.extend(serde_json::to_vec(
-            &disk_records.iter().map(|r| &r.raw).collect::<Vec<_>>(),
-        )?);
-    }
-    let base_hash = blake3::hash(&base_bytes).to_hex().to_string();
-    let id = format!("{snapshot_id}:{base_hash}");
     let state_file = root.join("migration.json");
     let mut state: State = if state_file.exists() {
         serde_json::from_reader(open_regular(&state_file)?)?
@@ -286,12 +284,62 @@ pub fn migrate_many_with_disk(
         }
     };
     ensure!(state.version == 1, "unsupported migration checkpoint");
+    let mut fallbacks = BTreeMap::new();
+    for r in disk_records {
+        if matches!(
+            source_states[&r.key].1,
+            crate::library_media::SourceStatus::Owned
+                | crate::library_media::SourceStatus::Verified
+        ) {
+            continue;
+        }
+        let path = root
+            .join("keys")
+            .join(format!("{}.json", sha256(r.key.as_bytes())));
+        let mut candidates = state
+            .passes
+            .values()
+            .filter_map(|p| p.disk_records.get(&r.key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if path.exists() {
+            candidates.push(serde_json::from_reader(open_regular(&path)?)?);
+        }
+        for old in candidates {
+            verify_key(root, &old)?;
+            if old.key != r.key
+                || old.revision != r.revision
+                || old.size != r.size
+                || old.mime != r.mime
+            {
+                continue;
+            }
+            let mut owned = r.clone();
+            owned.owned_path = Some(object_path(root, &old.hash)?);
+            owned.source_path = None;
+            if owned.verify_owned().is_ok() {
+                fallbacks.insert(r.key.clone(), old);
+                break;
+            }
+        }
+    }
+    let mut base_bytes = serde_json::to_vec(&(records, closure))?;
+    if !fallbacks.is_empty() {
+        base_bytes.extend(serde_json::to_vec(&fallbacks)?);
+    }
+    // Preserve existing pass identities when the extra format is absent.
+    if !disk_records.is_empty() {
+        base_bytes.extend(serde_json::to_vec(&source_states)?);
+    }
+    let base_hash = blake3::hash(&base_bytes).to_hex().to_string();
+    let id = format!("{snapshot_id}:{base_hash}");
     let mut pass = state.passes.get(&id).cloned().unwrap_or(Pass {
         phase: Phase::Copying,
         snapshot: snapshot_id,
         base_hash,
         records: BTreeMap::new(),
         disk_records: BTreeMap::new(),
+        disk_sources: source_states.clone(),
         closure: Vec::new(),
         blocked_owners: BTreeSet::new(),
         mapping_conflicts: BTreeSet::new(),
@@ -364,10 +412,23 @@ pub fn migrate_many_with_disk(
         }
     }
     for r in disk_records {
-        let Some(path) = &r.owned_path else {
+        use crate::library_media::SourceStatus;
+        if !matches!(
+            source_states[&r.key].1,
+            SourceStatus::Owned | SourceStatus::Verified
+        ) {
+            if let Some(key) = fallbacks.get(&r.key) {
+                pass.disk_records.insert(r.key.clone(), key.clone());
+                publish_key(root, key, &mut pass.mapping_conflicts)?;
+            }
             continue;
-        };
-        r.verify_owned()?;
+        }
+        let path = r
+            .owned_path
+            .as_ref()
+            .or(r.source_path.as_ref())
+            .context("missing media path")?;
+        r.open_verified()?;
         let mut key = import_file(
             root,
             path,
@@ -384,6 +445,7 @@ pub fn migrate_many_with_disk(
         // full SHA-256, in addition to the native BLAKE3 verification.
         let mut copied = r.clone();
         copied.owned_path = Some(object_path(root, &key.hash)?);
+        copied.source_path = None;
         copied.verify_owned()?;
         key.source = "main-disk".into();
         pass.disk_records.insert(r.key.clone(), key.clone());
@@ -429,7 +491,11 @@ pub fn migrate_many_with_disk(
         // even if a sampled legacy fingerprint happens to collide.
         let mut original = None;
         if !reference.poster {
-            if let Some(path) = &reference.source_path
+            let indexed_source = disk_records
+                .iter()
+                .any(|r| r.key == reference.key || reference.legacy_id.as_deref() == Some(&r.key));
+            if !indexed_source
+                && let Some(path) = &reference.source_path
                 && path.is_file()
                 && identity_matches(path, reference)?
             {
@@ -454,6 +520,16 @@ pub fn migrate_many_with_disk(
                     k.source = "import".into();
                 }
             }
+            // Main's index binds each original to its full SHA-256.
+            // Only the exact key/revision, verified again after copying, qualifies.
+            if original.is_none()
+                && !reference.is_proxy()
+                && reference.original_blake3.is_none()
+                && reference.fingerprint.is_none()
+                && let Some(key) = disk
+            {
+                original = Some(key.clone());
+            }
             if original.is_none()
                 && !reference.is_proxy()
                 && let Some(key) = &stored
@@ -462,7 +538,17 @@ pub fn migrate_many_with_disk(
                 original = Some(key.clone());
             }
         }
-        let status = if reference.poster {
+        let unavailable_disk = source_states.iter().any(|(key, (_, status))| {
+            (key == &reference.key || reference.legacy_id.as_ref() == Some(key))
+                && !matches!(
+                    status,
+                    crate::library_media::SourceStatus::Owned
+                        | crate::library_media::SourceStatus::Verified
+                )
+        });
+        let status = if unavailable_disk && stored.is_none() && !reference.poster {
+            Status::NewlyMissing
+        } else if reference.poster {
             if stored.is_some() {
                 Status::VerifiedOriginal
             } else {

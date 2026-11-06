@@ -5,6 +5,7 @@ mod checkpoint;
 mod closure;
 mod disk;
 pub mod integration;
+pub mod recovery;
 pub mod secrets;
 pub mod sparkle;
 pub mod store_preparation;

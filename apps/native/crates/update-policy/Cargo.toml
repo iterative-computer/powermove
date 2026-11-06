@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base64 = "0.22"
+ed25519-dalek = "2.2"
+memmap2 = "0.9"
 anyhow = "1"
 fs2 = "0.4"
 semver = "1"
@@ -13,3 +16,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 url = "2.5"
+
+[features]
+default = []
+# Requires an operator-supplied, verified Sparkle 2.10.1 framework. No download.
+sparkle-macos = []
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
