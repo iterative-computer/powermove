@@ -222,7 +222,7 @@ impl Controller {
         pm_engine_service::layers::configure_layer(
             objc2::MainThreadMarker::new().unwrap(),
             &layer,
-            engine.metal_device(),
+            &engine.metal_device(),
         )
         .expect("viewer layer");
         host.borrow().set_viewer_label("Composition viewer");

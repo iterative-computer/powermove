@@ -144,9 +144,12 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
-    /// Set by the device's lost callback, or an error that is not a
-    /// validation error: the worker rebuilds the engine on a new device.
+    /// Set by the device's lost callback or an internal GPU error: the
+    /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
+    /// A validation or out-of-memory error raised since the last frame. The
+    /// device is fine; the frame that raised it fails and is never shown.
+    failed: Arc<std::sync::Mutex<Option<String>>>,
     /// Wakes an idle worker when the device is lost ([`Engine::set_waker`]).
     waker: Waker,
     resources: Arc<crate::resources::ResourceSnapshot>,
@@ -195,10 +198,23 @@ impl Engine {
     pub fn lost(&self) -> bool {
         self.lost.load(std::sync::atomic::Ordering::Acquire)
     }
+    pub fn metal(&self) -> &metal::DeviceRef {
+        &self.metal
+    }
     /// Test hook: lose the device as a removed or reset GPU does.
     #[cfg(test)]
     pub fn destroy_device(&self) {
         self.gpu.device.destroy();
+    }
+    /// Test hook: a real validation error, as a bad pipeline or texture raises.
+    #[cfg(test)]
+    pub fn raise_validation_error(&self) {
+        let _invalid = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("invalid"),
+            size: 4,
+            usage: wgpu::BufferUsages::empty(),
+            mapped_at_creation: false,
+        });
     }
     pub fn new(gpu: Gpu) -> Result<Self> {
         let lost = Arc::new(AtomicBool::new(false));
@@ -209,14 +225,19 @@ impl Engine {
             lose(&flag, &wake);
         });
         // wgpu's default handler panics, which would stop every viewer. A
-        // validation error fails one frame; anything else rebuilds.
-        let (flag, wake) = (lost.clone(), waker.clone());
+        // validation or out-of-memory error fails the frame; an internal
+        // error rebuilds.
+        let failed = Arc::<std::sync::Mutex<Option<String>>>::default();
+        let (flag, wake, frame) = (lost.clone(), waker.clone(), failed.clone());
         gpu.device
             .on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
-                if !matches!(error, wgpu::Error::Validation { .. }) {
-                    lose(&flag, &wake);
-                }
                 eprintln!("Viewer GPU error: {error}");
+                match error {
+                    wgpu::Error::Validation { .. } | wgpu::Error::OutOfMemory { .. } => {
+                        *frame.lock().unwrap() = Some(error.to_string());
+                    }
+                    wgpu::Error::Internal { .. } => lose(&flag, &wake),
+                }
             }));
         let metal = metal_device(&gpu);
         let library = metal
@@ -265,6 +286,7 @@ impl Engine {
             cache_enabled: true,
             studio_content: None,
             lost,
+            failed,
             waker,
             resources: Arc::default(),
         })
@@ -353,6 +375,9 @@ impl Engine {
         );
         self.renderer.set_draw_reuse(true);
         let f = f?;
+        if let Some(error) = self.failed.lock().unwrap().take() {
+            bail!("The GPU refused this frame: {error}");
+        }
         if !f.failures.is_empty() {
             bail!("export layer failures: {:?}", f.failures);
         }
@@ -457,6 +482,9 @@ impl Engine {
             self.renderer.set_playback(None);
             self.renderer.set_isolate_layers(false);
             let rendered = rendered?;
+            if let Some(error) = self.failed.lock().unwrap().take() {
+                bail!("The GPU refused this frame: {error}");
+            }
             if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
                 return Err(FontsPending(error.to_string()).into());
             }

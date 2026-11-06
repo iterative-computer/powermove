@@ -673,7 +673,7 @@ impl Controller {
             return;
         }
         let title = format!("{} — Viewer", self.host.borrow().window.title());
-        match Popout::open(self.engine.metal_device(), &title) {
+        match Popout::open(&self.engine.metal_device(), &title) {
             Ok((popout, closed)) => {
                 self.popout = Some(popout);
                 self.rebuild_popout_viewer();

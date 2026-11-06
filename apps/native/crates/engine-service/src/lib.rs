@@ -282,10 +282,14 @@ struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
+    /// The worker engine's current Metal device; a GPU loss replaces it.
+    device: Mutex<metal::Device>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     lose_device: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    invalid_call: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -623,7 +627,6 @@ impl Viewer {
 pub struct EngineService {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
-    device: metal::Device,
 }
 impl EngineService {
     /// Start off the UI thread: renderer/shader initialization may take time.
@@ -647,10 +650,13 @@ impl EngineService {
             state: Mutex::new(State::default()),
             wake,
             interactive: Arc::default(),
+            device: Mutex::new(device),
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
             lose_device: Default::default(),
+            #[cfg(test)]
+            invalid_call: Default::default(),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -659,7 +665,6 @@ impl EngineService {
         Ok(Self {
             shared,
             thread: Some(thread),
-            device,
         })
     }
     /// Call after the main-thread font broker's generation changes.
@@ -682,8 +687,10 @@ impl EngineService {
         self.shared.state.lock().unwrap().subscribers.push(tx);
         rx
     }
-    pub fn metal_device(&self) -> &metal::DeviceRef {
-        &self.device
+    /// The device viewer layers and popouts must use. It changes after a
+    /// GPU loss; the worker re-points layers it already draws into.
+    pub fn metal_device(&self) -> metal::Device {
+        self.shared.device.lock().unwrap().clone()
     }
     pub fn viewer(&self, config: ViewerConfig) -> Result<Viewer> {
         config.output.validate()?;
@@ -701,7 +708,7 @@ impl EngineService {
                 objc2::msg_send![layer.as_ptr() as *mut objc2::runtime::AnyObject, device]
             };
             ensure!(
-                attached.cast::<metal::MTLDevice>() == self.device.as_ref().as_ptr(),
+                attached.cast::<metal::MTLDevice>() == self.metal_device().as_ptr(),
                 "viewer layer must use the engine Metal device"
             );
             ensure!(
@@ -840,6 +847,9 @@ const PREPARE_AHEAD_SECONDS: f64 = 0.75;
 const PREPARE_EVERY_SECONDS: f64 = 0.25;
 /// A transient refusal (fonts, GPU watchdog) waits this long to try again.
 const RETRY_SECONDS: f64 = 0.016;
+/// A GPU lost again within this long of a rebuild backs off between these.
+const LOSS_WINDOW: Duration = Duration::from_secs(10);
+const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -862,6 +872,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
         #[cfg(test)]
         if shared
@@ -870,17 +881,53 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         {
             engine.destroy_device();
         }
+        #[cfg(test)]
+        if shared
+            .invalid_call
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.raise_validation_error();
+        }
         // Delivers a pending device-lost callback even while idle.
         engine.poll();
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
-            // and draw every viewer again on the new device.
+            // and draw every viewer again on the new device. A device lost
+            // again soon after a rebuild waits longer each time, and says so.
             flights.clear();
+            backoff = if rebuilt_at.is_some_and(|t| t.elapsed() < LOSS_WINDOW) {
+                (backoff * 2).clamp(LOSS_BACKOFF.0, LOSS_BACKOFF.1)
+            } else {
+                Duration::ZERO
+            };
+            if !backoff.is_zero() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.status.error = Some(format!(
+                        "The GPU keeps failing. Trying again in {} s.",
+                        backoff.as_secs_f64()
+                    ));
+                }
+                state.notify();
+                drop(state);
+                // Wakes do not cut the wait short; quitting does.
+                let until = std::time::Instant::now() + backoff;
+                while let Some(left) = until.checked_duration_since(std::time::Instant::now())
+                    && !shared.state.lock().unwrap().stop
+                {
+                    let _ = wakes.recv_timeout(left);
+                }
+            }
             let rebuilt = engine.rebuild();
             let mut state = shared.state.lock().unwrap();
+            if state.stop {
+                break;
+            }
             match rebuilt {
                 Ok(next) => {
                     engine = next;
+                    rebuilt_at = Some(std::time::Instant::now());
+                    *shared.device.lock().unwrap() = engine.metal().to_owned();
                     for (id, v) in state.views.iter_mut() {
                         v.status.device_losses += 1;
                         v.status.error = None;
@@ -1539,6 +1586,7 @@ impl Headless {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+    use foreign_types::ForeignTypeRef;
     #[test]
     fn revision_and_output_change_while_encoding_reject_the_submission() {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
@@ -1610,10 +1658,7 @@ mod worker_tests {
         }
     }
 
-    /// A removed or reset GPU: the worker rebuilds its device and the
-    /// viewer draws again without anyone reopening it.
-    #[test]
-    fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+    fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
         #[cfg(feature = "kernel")]
         let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
@@ -1626,8 +1671,7 @@ mod worker_tests {
                 1,
             )),
         };
-        let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
-        let v = service
+        service
             .viewer(ViewerConfig {
                 composition: snapshot.open_comp().unwrap(),
                 snapshot,
@@ -1639,27 +1683,42 @@ mod worker_tests {
                     headroom: 1.,
                     crop: None,
                 },
-                layer: None,
+                layer,
                 rate: pm_time::Rate::FPS_30,
                 end: None,
                 audio: false,
             })
-            .unwrap();
-        let drawn = |v: &Viewer| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            loop {
-                let status = v.status();
-                if let Some(frame) = &status.frame
-                    && frame.gpu_ok
-                    && frame.pixels.is_some()
-                    && Some(frame.stamp) == v.stamp()
-                {
-                    return status;
-                }
-                assert!(std::time::Instant::now() < deadline, "{status:?}");
-                std::thread::sleep(Duration::from_millis(2));
+            .unwrap()
+    }
+    fn drawn(v: &Viewer) -> ViewerStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = v.status();
+            if let Some(frame) = &status.frame
+                && frame.gpu_ok
+                && frame.pixels.is_some()
+                && Some(frame.stamp) == v.stamp()
+            {
+                return status;
             }
-        };
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A removed or reset GPU: the worker rebuilds its device, points the
+    /// viewer's layer and the service's device at it, and the viewer draws
+    /// again without anyone reopening it.
+    #[test]
+    fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let v = shapes_viewer(&service, Some(layer.clone()));
+        let old = service.metal_device();
         v.capture_next().unwrap();
         let before = drawn(&v).frame.unwrap().pixels.unwrap();
         service
@@ -1681,5 +1740,71 @@ mod worker_tests {
             before,
             "same picture on the new device"
         );
+        // Metal hands back the same system device object for the same GPU,
+        // so here the rebuilt engine's device equals the old one; a removed
+        // GPU gives a new one, which the layer and the service then report.
+        let new = service.metal_device();
+        assert_eq!(new.as_ptr(), old.as_ptr());
+        assert_eq!(
+            layer.device().as_ptr(),
+            new.as_ptr(),
+            "the layer follows the rebuild"
+        );
+    }
+
+    /// A validation error fails the frame that raised it, visibly, without a
+    /// rebuild, and that frame is never cached or reused.
+    #[test]
+    fn a_gpu_validation_error_fails_its_frame_and_never_caches_it() {
+        let service = EngineService::start(pm_gpu::Gpu::new("validation-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let good = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .invalid_call
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while service
+            .shared
+            .invalid_call
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        let refused = v.stamp().unwrap();
+        let error = loop {
+            let status = v.status();
+            if let Some(error) = status.error {
+                break error;
+            }
+            assert!(
+                status.frame.as_ref().is_none_or(|f| f.stamp != refused),
+                "the refused frame was shown"
+            );
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(error.contains("refused this frame"), "{error}");
+        assert_eq!(
+            v.status().device_losses,
+            0,
+            "a validation error is not a loss"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        v.capture_next().unwrap();
+        let again = drawn(&v);
+        assert_eq!(again.error, None);
+        assert!(
+            !again.frame.as_ref().unwrap().cache_hit,
+            "the refused frame was cached"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
     }
 }
