@@ -216,9 +216,7 @@ duration it implies, as one Undo step.
 
 ## How sources are drawn
 
-What the renderer does with each kind of source. Several are drawn only for
-assets with `interpret` until they are compared with today's viewer (see
-Routing below).
+What the renderer does with each kind of source (see Routing below).
 
 - **HDR in Standard projects.** PQ and HLG sources decode per BT.2100 and
   tone map with the BT.2390 EETF (`pm_color::tonemap`, the WGSL
@@ -259,16 +257,16 @@ match and only what the renderer cannot draw at all is refused.
 | Source | Without `interpret` | With `interpret` |
 |---|---|---|
 | Progressive, unrotated, square-pixel Rec.709 or BT.601 video (VFR included) | drawn | drawn |
-| HDR video (PQ, HLG, Dolby Vision with a base layer) | the compared classes are drawn with the BT.2390 EETF; others legacy | drawn, tone mapped with the BT.2390 EETF |
-| Interlaced video | legacy (today's viewer shows the woven frame; bwdif is a look change) | drawn, bwdif at field or frame rate |
-| Quarter-turn rotation, non-square pixels, a cropping clean aperture | legacy (exact against FFmpeg, not compared with today's viewer) | drawn |
-| Wide-gamut SDR video (Display P3, BT.2020) | legacy (today's viewer clips at upload: the open decision of P3 stills) | drawn, converted in linear light |
+| HDR video (PQ, HLG, Dolby Vision with a base layer) | drawn with the BT.2390 EETF | drawn with the BT.2390 EETF, or kept in an HDR project ([hdr.md](hdr.md)) |
+| Interlaced video | drawn, bwdif at field or frame rate | drawn, bwdif at field or frame rate |
+| Quarter-turn rotation, non-square pixels, a cropping clean aperture | drawn; the clean aperture crops when interpreted | drawn |
+| Wide-gamut video (Display P3, BT.2020, DCI-P3, camera gamuts by override) | drawn, converted in linear light | drawn, converted in linear light |
 | Stills with other ICC profiles | legacy | drawn through ColorSync |
 | CMYK, Lab, and indexed stills (converted to sRGB by ImageIO) | legacy (Chromium converts CMYK itself; not compared) | drawn from the converted samples |
 | AVIF, BMP, ICO, GIF, EXR, DPX, 16-bit PNG, PNG with `gAMA`/`cHRM`, and other still classes `pm_render::stills` has not proven against the legacy look | legacy | drawn (decoded and tested against reference decoders in `pm-media`) |
 | Image sequences and animated images | legacy | legacy |
 | HDR stills (a PQ or HLG reading, from the file or an override); OpenEXR chromaticities other than Rec.709 (no primaries override) | legacy | legacy |
-| Other rotation angles, Dolby Vision profile 5, unknown primaries | legacy | legacy |
+| Other rotation angles, Dolby Vision profile 5, primaries with no chromaticities | refused | refused |
 
 Routing asks at every document revision, so its media probes keep their
 facts per path, size, and modification time: `probe_image` and
@@ -289,15 +287,6 @@ field table, so a new native-only field must be classified first.
 
 ### Open decisions
 
-- **HDR in Standard projects.** HDR footage the video gate covers
-  ([video-parity.md](video-parity.md)) is drawn with the BT.2390 EETF;
-  other HDR (mastering metadata, Dolby Vision, other codecs) keeps the
-  legacy renderer unless interpreted.
-- **Interlaced, rotated, non-square-pixel, cropping-clean-aperture
-  video.** Exact against FFmpeg (bwdif within 2.5e-7, rotations and crops
-  bit-exact), not compared with today's viewer, which shows interlaced
-  frames woven. They need legacy captures and parity cases before they are
-  drawn without `interpret`.
 - **Wide-gamut SDR video and ICC stills** shown unclipped versus today's
   clipping at upload: drawn only with `interpret`.
 

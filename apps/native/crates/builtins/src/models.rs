@@ -698,6 +698,7 @@ impl Backend {
                 "alpha",
                 "captionsBurn",
                 "captionsSidecar",
+                "dynamicRange",
                 "preset",
                 "presetName"
             ]))?;
@@ -708,7 +709,7 @@ impl Backend {
         let options: pm_promedia::export_panel::Options =
             crate::delivery::options(&self.native.export["options"])?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"summary":plan.summary});
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_render::composite::project_color(root).is_ok_and(|c|c.mode==pm_protocol::color::ColorMode::Hdr),"summary":plan.summary});
         self.native.export["presets"] = json!(
             self.kernel
                 .state()

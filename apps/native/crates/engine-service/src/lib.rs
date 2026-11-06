@@ -7,6 +7,7 @@ pub mod policy;
 mod present;
 mod render;
 pub mod resources;
+mod scopes;
 pub mod studio;
 pub mod trace;
 pub mod transport;
@@ -219,6 +220,8 @@ struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
+    /// The viewer the Scopes panel analyzes, and where results go.
+    scopes: Mutex<Option<(u64, async_channel::Sender<pm_render::scopes::ScopeFrame>)>>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -478,6 +481,19 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Sends this viewer's scope analysis to `frames` while it is set. Results
+    /// arrive off the main thread, at most ten a second.
+    pub fn scopes(
+        &self,
+        frames: Option<async_channel::Sender<pm_render::scopes::ScopeFrame>>,
+    ) -> Result<()> {
+        *self.shared.scopes.lock().unwrap() = frames.map(|frames| (self.id, frames));
+        self.edit(|v| {
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
     pub fn capture_next(&self) -> Result<()> {
         self.edit(|v| {
             v.capture = true;
@@ -543,6 +559,7 @@ impl EngineService {
             state: Mutex::new(State::default()),
             wake,
             interactive: Arc::default(),
+            scopes: Mutex::new(None),
             #[cfg(test)]
             before_submit: Mutex::new(None),
         });
@@ -1087,6 +1104,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 ..Default::default()
             }));
             engine.mastering = mastering;
+            let tap = shared
+                .scopes
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(viewer, _)| *viewer == id)
+                .map(|(_, frames)| frames.clone());
+            if tap.is_some() && engine.scope_frames.is_none() {
+                engine.scopes_changed();
+            }
+            engine.scope_frames = tap;
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, time))
                 .and_then(|overlays| {

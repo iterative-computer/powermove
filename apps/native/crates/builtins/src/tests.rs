@@ -509,6 +509,43 @@ fn select_layer(kernel: &pm_kernel::KernelHandle, id: &str) {
 }
 
 #[test]
+fn the_hdr_setting_reaches_the_kernel_and_unlocks_its_peak() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings-hdr".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "settings", false).unwrap();
+    let row = |publication: &serde_json::Value, id: &str| {
+        publication["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let publication = backend.settings_snapshot().unwrap();
+    assert_eq!(row(&publication, "project.hdr")["value"], json!(false));
+    assert_eq!(row(&publication, "project.masteringPeak")["disabled"], json!(true));
+    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.hdr","value":true}})).unwrap() else { panic!("actor request") };
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let root = kernel.published("synthetic").unwrap();
+    let root = root.snapshot.root().unwrap();
+    assert_eq!(
+        pm_render::composite::project_color(root).unwrap().mode,
+        pm_protocol::color::ColorMode::Hdr
+    );
+    let publication = backend.settings_snapshot().unwrap();
+    assert_eq!(row(&publication, "project.hdr")["value"], json!(true));
+    assert_eq!(row(&publication, "project.masteringPeak")["disabled"], json!(false));
+    assert_eq!(row(&publication, "project.colorDepth")["value"], json!(32));
+}
+
+#[test]
 fn project_color_depth_uses_real_kernel_receipts_and_one_undo() {
     let actor = actor();
     let kernel = actor.handle();

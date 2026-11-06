@@ -10,6 +10,7 @@ import {
   formats,
   kinds,
   kindOf,
+  dynamicRanges,
   qualities,
   rates,
   rows,
@@ -124,7 +125,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             : undefined
         }
         binding={s.bindings[key]}
-        value={o[key]}
+        value={key === "dynamicRange" ? (o[key] ?? "sdr") : o[key]}
         options={options}
         disabled={busy}
         onChange={(e) => edit(key, e.value as Options[typeof key])}
@@ -393,6 +394,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   : null}
                 {fields[o.format].includes("quality")
                   ? select("quality", qualities)
+                  : null}
+                {p.hdr && (o.format === "prores" || o.format === "mp4")
+                  ? select("dynamicRange", dynamicRanges)
                   : null}
               </Group>
               <Group label="Rendering">

@@ -23,7 +23,9 @@ impl Backend {
             "project.fps",
             "project.duration",
             "project.background",
-            "project.colorDepth"
+            "project.colorDepth",
+            "project.hdr",
+            "project.masteringPeak"
         ]))?;
         let mut rows = vec![];
         for (id, group, label, control, value, detail) in [
@@ -86,6 +88,22 @@ impl Backend {
             "options":[{"v":8,"label":"8-bit"},{"v":16,"label":"16-bit"},{"v":32,"label":"32-bit float"}],
             "detail":"Precision per color channel. Applies to every composition in this project.",
             "binding":fields["project.colorDepth"],"disabled":false}));
+        let color = root.get("color");
+        let hdr = color
+            .and_then(|c| c.get("mode"))
+            .is_some_and(|m| m.to_value() == pm_model::Value::from("hdr"));
+        rows.push(json!({"id":"project.hdr","section":"project","group":"Color",
+            "label":"HDR","control":"switch","value":hdr,
+            "detail":"Keeps PQ and HLG light in the project for HDR delivery. Off, HDR footage is tone mapped to SDR white as it comes in.",
+            "binding":fields["project.hdr"],"disabled":false}));
+        rows.push(json!({"id":"project.masteringPeak","section":"project","group":"Color",
+            "label":"Mastering Peak","control":"choice","value":color
+                .and_then(|c| c.get("masteringPeak"))
+                .map(|n| wire(&n.to_value())).unwrap_or(json!(1000)),
+            "options":[{"v":600,"label":"600 nits"},{"v":1000,"label":"1000 nits"},
+                {"v":2000,"label":"2000 nits"},{"v":4000,"label":"4000 nits"}],
+            "detail":"The brightest light HDR delivery keeps. Brighter sources roll off to it.",
+            "binding":fields["project.masteringPeak"],"disabled":!hdr}));
         let memory = self.fields(&json!(["memory.enabled"]))?;
         rows.push(json!({"id":"memory.enabled","section":"memory","group":"Project Memory",
             "label":"Use Project Memory","control":"switch", "disabled":false,
@@ -136,6 +154,12 @@ impl Backend {
                                 .filter(|n| [8, 16, 32].contains(n))
                                 .ok_or("Invalid color depth")? as u32,
                         );
+                    }
+                    Some("project.hdr") => {
+                        patch.hdr = Some(value.as_bool().ok_or("HDR must be on or off")?);
+                    }
+                    Some("project.masteringPeak") => {
+                        patch.mastering_peak = Some(number(value, 400., 10000.)?);
                     }
                     Some("project.background") => {
                         let s = value.as_str().ok_or("Background must be a colour")?;

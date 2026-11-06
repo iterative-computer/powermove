@@ -983,6 +983,11 @@ pub fn empty_state(
             "Notes you add to this project appear here.",
             None,
         ),
+        "scopes" => (
+            "No Picture",
+            "Open a composition to read its levels.",
+            None,
+        ),
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
@@ -999,11 +1004,12 @@ pub fn panel_title(id: &str) -> &str {
         "shader" => "Shader",
         "perf" => "Performance",
         "notes" => "Notes",
+        "scopes" => "Scopes",
         _ => id,
     }
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 11] = [
+pub const PANELS: [&str; 12] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1015,6 +1021,7 @@ pub const PANELS: [&str; 11] = [
     "shader",
     "perf",
     "notes",
+    "scopes",
 ];
 /// Window edges that can receive a docked panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

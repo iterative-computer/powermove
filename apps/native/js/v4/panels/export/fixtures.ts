@@ -29,6 +29,7 @@ export function initial(): ExportSnapshot {
       alpha: false,
       captionsBurn: true,
       captionsSidecar: "none",
+      dynamicRange: "sdr",
       future: { keep: true },
     },
     bindings: Object.fromEntries(
@@ -45,6 +46,7 @@ export function initial(): ExportSnapshot {
         "alpha",
         "captionsBurn",
         "captionsSidecar",
+        "dynamicRange",
         "preset",
         "presetName",
       ].map((k) => [k, `fixture:export:${k}`]),

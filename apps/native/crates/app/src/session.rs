@@ -38,6 +38,9 @@ pub struct Controller {
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
     pub output_mode: crate::viewer2::OutputMode,
+    /// The open project keeps HDR light.
+    pub project_hdr: bool,
+    pub scopes: crate::colour::Scopes,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -102,7 +105,9 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::library(v, id, bounds, cx).or_else(|| v.builtin_panel(id, bounds, w, cx))
+            panels::library(v, id, bounds, cx)
+                .or_else(|| panels::scopes(v, id, cx))
+                .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
     fn header(
@@ -235,6 +240,8 @@ impl Controller {
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
+            project_hdr: false,
+            scopes: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -337,6 +344,7 @@ impl Controller {
             }
         }
         self.sync_rows(&p, cx);
+        self.follow_project_hdr();
         let saving = p.saving || self.save_pending;
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
             self.message = note.into();

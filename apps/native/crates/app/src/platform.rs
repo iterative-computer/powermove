@@ -4,6 +4,31 @@ use objc2_app_kit::*;
 use objc2_foundation::NSString;
 use std::path::PathBuf;
 
+/// An open sheet that takes `.cube` files.
+pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setMessage(Some(&NSString::from_str("Choose a .cube LUT")));
+    #[allow(deprecated)]
+    panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(&[
+        NSString::from_str("cube"),
+    ])));
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let path = (result == NSModalResponseOK)
+            .then(|| retained.URL())
+            .flatten()
+            .and_then(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()));
+        let _ = tx.try_send(path);
+    });
+    panel.beginSheetModalForWindow_completionHandler(window, &done);
+    rx
+}
+
 pub fn paths(window: &NSWindow, save: bool) -> async_channel::Receiver<Option<PathBuf>> {
     paths_named(window, save, "Project.pmv")
 }

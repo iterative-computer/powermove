@@ -48,6 +48,12 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
+    /// The peaks of the content on screen, and the output tone of its frames.
+    hdr: Option<((u64, u64), Option<crate::color::HdrView>)>,
+    output_tone: Option<pm_render::OutputTone>,
+    /// Where the viewer's analysis goes, while a Scopes panel is showing.
+    pub scope_frames: Option<async_channel::Sender<pm_render::scopes::ScopeFrame>>,
+    scopes: Option<crate::scopes::Tap>,
 }
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
@@ -106,6 +112,10 @@ impl Engine {
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
+            hdr: None,
+            output_tone: None,
+            scope_frames: None,
+            scopes: None,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -134,6 +144,26 @@ impl Engine {
             self.studio_content = Some(key);
         }
         Ok(())
+    }
+    /// The HDR view of this content, and the frame cache kept to its tone.
+    fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
+        let key = (scene.content, scene.doc.revision());
+        if self.hdr.is_none_or(|(k, _)| k != key) {
+            self.hdr = Some((key, crate::color::HdrView::of(&scene.doc, &scene.media)));
+        }
+        let view = self.hdr.and_then(|(_, view)| view);
+        let tone = view.and_then(|v| v.tone(self.mastering));
+        if tone != self.output_tone {
+            self.output_tone = tone;
+            self.cache.clear();
+        }
+        view
+    }
+    /// A new tap analyzes the very next frame.
+    pub fn scopes_changed(&mut self) {
+        if let Some(tap) = &mut self.scopes {
+            tap.reset();
+        }
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
         self.sync_studio(scene)?;
@@ -186,6 +216,7 @@ impl Engine {
         self.sync_studio(scene)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
+        let hdr = self.sync_hdr(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
             revision: scene.doc.revision(),
@@ -240,6 +271,7 @@ impl Engine {
             let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
             request.export = true;
             request.output_kind = pm_render::OutputKind::Final;
+            request.output_tone = self.output_tone;
             trace.lock().unwrap().render_start = now();
             let rendered = self.renderer.render_into(
                 &scene.doc,
@@ -262,6 +294,17 @@ impl Engine {
             }
             surface
         };
+        if let Some(frames) = &self.scope_frames {
+            self.scopes
+                .get_or_insert_with(|| crate::scopes::Tap::new(self.gpu.device.clone()))
+                .frame(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &surface.texture,
+                    hdr.is_some() && self.output_tone.is_none(),
+                    frames,
+                );
+        }
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();
             metal::TextureRef::from_ptr(
@@ -315,7 +358,11 @@ impl Engine {
         pass.set_render_pipeline_state(&self.pipeline);
         pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
-        params.output = self.mastering.params()?;
+        params.output = hdr
+            .map_or(self.mastering, |v| {
+                self.mastering.with_peaks(v.source_peak, v.mastering_peak)
+            })
+            .params()?;
         pass.set_fragment_bytes(
             0,
             size_of_val(&params) as u64,

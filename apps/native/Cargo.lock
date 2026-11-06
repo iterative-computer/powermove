@@ -5084,6 +5084,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pm-audio",
  "pm-builtins",
+ "pm-color",
  "pm-design",
  "pm-engine-service",
  "pm-eval",

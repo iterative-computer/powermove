@@ -26,6 +26,20 @@ impl Format {
         }
     }
 }
+/// How a delivery carries light. HDR needs an HDR project and a 10-bit codec.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DynamicRange {
+    #[default]
+    Sdr,
+    Pq,
+    Hlg,
+}
+impl DynamicRange {
+    pub fn is_sdr(&self) -> bool {
+        *self == Self::Sdr
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scale {
@@ -47,6 +61,8 @@ pub struct Options {
     pub alpha: bool,
     pub captions_burn: bool,
     pub captions_sidecar: String,
+    #[serde(default, skip_serializing_if = "DynamicRange::is_sdr")]
+    pub dynamic_range: DynamicRange,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -72,6 +88,9 @@ impl Options {
             || !["none", "srt", "vtt"].contains(&self.captions_sidecar.as_str())
         {
             return Err("invalid export settings".into());
+        }
+        if !self.dynamic_range.is_sdr() && !matches!(self.format, Format::Prores | Format::Mp4) {
+            return Err("HDR delivery needs ProRes or MP4".into());
         }
         Ok(())
     }
@@ -125,12 +144,22 @@ impl Intent {
             Format::Prores => ExportFormat::ProRes {
                 profile: ProResProfile::P4444,
             },
+            // H.264 has no HDR profile on VideoToolbox.
+            Format::Mp4 if !self.options.dynamic_range.is_sdr() => ExportFormat::Hevc {
+                ten_bit: true,
+                container: pm_protocol::priority::Container::Mp4,
+            },
             Format::Mp4 => ExportFormat::H264,
             Format::Webm => ExportFormat::Webm {
                 codec: WebmCodec::Vp9,
             },
             Format::Png => ExportFormat::PngSequence { sixteen_bit: false },
             Format::Still => ExportFormat::PngStill { sixteen_bit: false },
+        };
+        planned.color = match self.options.dynamic_range {
+            DynamicRange::Sdr => planned.color,
+            DynamicRange::Pq => pm_protocol::color::OutputColor::Rec2100Pq,
+            DynamicRange::Hlg => pm_protocol::color::OutputColor::Rec2100Hlg,
         };
         planned.alpha = if self.straight_alpha {
             AlphaOutput::Straight

@@ -271,7 +271,7 @@ fn video_facts(
     if let Some(t) = &r.tone_map {
         facts.push(line(
             "Tone mapping",
-            format!("BT.2446 Method A from {} cd/m²", t.peak_nits),
+            format!("BT.2390 from {} cd/m²", t.peak_nits),
         ));
     }
     if let Some(icc) = &c.icc {

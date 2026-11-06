@@ -39,6 +39,11 @@ pub struct CompPatch {
     pub color_depth: Option<u32>,
     /// Master gain, 0–4.
     pub audio_gain: Option<f64>,
+    /// HDR working light (`color.mode`). Turning it on moves the project to
+    /// 32-bit float, where BT.2020 colours survive Rec.709 working primaries.
+    pub hdr: Option<bool>,
+    /// The HDR mastering display peak in cd/m² (`color.masteringPeak`).
+    pub mastering_peak: Option<f64>,
 }
 
 /// How Pre-compose treats the selection (`PM.Comps.precompose`).
@@ -287,6 +292,26 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
             ));
         }
         cx.set(vec!["colorDepth".into()], n(f64::from(depth)))?;
+    }
+    if p.hdr.is_some() || p.mastering_peak.is_some() {
+        if cx.lookup(&["color".into()]).is_none() {
+            cx.set(vec!["color".into()], Value::Object(Map::new()))?;
+        }
+        let color = |key: &str| vec!["color".into(), key.into()];
+        if let Some(hdr) = p.hdr {
+            cx.set(color("mode"), values::s(if hdr { "hdr" } else { "standard" }))?;
+            if hdr && p.color_depth.is_none() {
+                cx.set(vec!["colorDepth".into()], n(32.0))?;
+            }
+        }
+        if let Some(peak) = p.mastering_peak {
+            if !(400.0..=10000.0).contains(&peak) {
+                return Err(CommandError::Invalid(
+                    "Mastering peak must be 400 to 10000 nits".into(),
+                ));
+            }
+            cx.set(color("masteringPeak"), n(peak))?;
+        }
     }
     if let Some(name) = &p.name {
         let t = values::js_trim(name);

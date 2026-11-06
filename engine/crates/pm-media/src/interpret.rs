@@ -358,8 +358,8 @@ fn field<T: Clone>(automatic: T, origin: Origin, over: Option<T>) -> Field<T> {
     }
 }
 
-/// HDR input tone mapping for Standard projects (section 9): BT.2446
-/// Method A from the source's HDR signal to SDR.
+/// HDR input tone mapping for Standard projects (section 9): the BT.2390
+/// EETF from the source's HDR signal to SDR white.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToneMap {

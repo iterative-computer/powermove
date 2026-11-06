@@ -164,6 +164,12 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         draft_from_proxies: false,
         delivery: Default::default(),
     };
+    // A remembered HDR choice waits for an HDR project.
+    let mut options = options.clone();
+    let color = pm_render::composite::project_color(root)?;
+    if color.mode != pm_protocol::color::ColorMode::Hdr {
+        options.dynamic_range = pm_promedia::export_panel::DynamicRange::Sdr;
+    }
     let settings = options
         .intent(has_audio, captions)?
         .engine_settings(base)?
@@ -406,6 +412,27 @@ mod tests {
     }
     fn options() -> Options {
         serde_json::from_value(json!({"format":"mp4","scale":1,"width":640,"height":360,"fps":29.97,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":true,"captionsSidecar":"none"})).unwrap()
+    }
+    #[test]
+    fn hdr_delivery_follows_the_project_and_the_panel() {
+        use pm_protocol::color::ColorMode;
+        let mut o = options();
+        o.dynamic_range = pm_promedia::export_panel::DynamicRange::Pq;
+        // A remembered choice waits for an HDR project.
+        let sdr = plan(&fixture(""), &o, 0.).unwrap().settings.unwrap();
+        assert!(matches!(sdr.format, ExportFormat::H264));
+        let hdr_project = fixture(r#","color":{"mode":"hdr"},"colorDepth":32"#);
+        let root = hdr_project.root().unwrap();
+        assert_eq!(
+            pm_render::composite::project_color(root).unwrap().mode,
+            ColorMode::Hdr
+        );
+        let hdr = plan(&hdr_project, &o, 0.).unwrap().settings.unwrap();
+        assert_eq!(hdr.color, OutputColor::Rec2100Pq);
+        assert!(matches!(
+            hdr.format,
+            ExportFormat::Hevc { ten_bit: true, .. }
+        ));
     }
     #[test]
     fn rational_work_range_and_frame_count_match_engine_half_up_rule() {

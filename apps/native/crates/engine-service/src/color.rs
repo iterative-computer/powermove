@@ -100,12 +100,15 @@ mod tests {
     }
 }
 
-/// Explicit mastering output. Default linear P3 preserves working values.
-/// Encoded modes use BT.2020, 203-nit reference white and a stated source peak.
+/// Explicit mastering output. Default linear P3 shows an SDR project's values
+/// and an HDR project's SDR delivery. [`Self::Edr`] shows an HDR project's light
+/// up to the display's headroom. Encoded modes use BT.2020, 203-nit reference
+/// white and a stated source peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Mastering {
     #[default]
     LinearP3,
+    Edr,
     Pq {
         source_peak: f32,
         target_peak: f32,
@@ -118,7 +121,7 @@ pub enum Mastering {
 impl Mastering {
     pub fn params(self) -> anyhow::Result<[f32; 4]> {
         let (mode, source, target) = match self {
-            Self::LinearP3 => return Ok([0.; 4]),
+            Self::LinearP3 | Self::Edr => return Ok([0.; 4]),
             Self::Pq {
                 source_peak,
                 target_peak,
@@ -136,5 +139,54 @@ impl Mastering {
             "invalid mastering peaks"
         );
         Ok([mode, source, target, 203.])
+    }
+
+    /// The same output with an HDR project's peaks.
+    pub fn with_peaks(self, source_peak: f32, target_peak: f32) -> Self {
+        match self {
+            Self::Pq { .. } => Self::Pq {
+                source_peak,
+                target_peak,
+            },
+            Self::Hlg { .. } => Self::Hlg {
+                source_peak,
+                target_peak,
+            },
+            other => other,
+        }
+    }
+}
+
+/// What an HDR project's viewer needs: its content and mastering peaks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrView {
+    pub source_peak: f32,
+    pub mastering_peak: f32,
+}
+
+impl HdrView {
+    /// The project's peaks, or `None` for an SDR project. Probes are per file
+    /// stamp, so this reads the disk once per media change.
+    pub fn of(
+        document: &pm_model::Document,
+        media: &pm_export::render::MediaPaths,
+    ) -> Option<HdrView> {
+        let color = pm_render::composite::project_color(document.root()?).ok()?;
+        (color.mode == pm_protocol::color::ColorMode::Hdr).then(|| {
+            let mastering_peak = f32::from(color.mastering_peak);
+            HdrView {
+                source_peak: mastering_peak
+                    .max(pm_render::media::hdr_content(document, media).peak_nits as f32),
+                mastering_peak,
+            }
+        })
+    }
+
+    /// BT.2390 for the SDR view; EDR and encoded modes keep the light.
+    pub fn tone(self, mastering: Mastering) -> Option<pm_render::OutputTone> {
+        (mastering == Mastering::LinearP3).then_some(pm_render::OutputTone {
+            source_peak: self.source_peak,
+            target_peak: 203.,
+        })
     }
 }

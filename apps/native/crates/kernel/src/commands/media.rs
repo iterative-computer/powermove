@@ -27,6 +27,12 @@ pub enum MediaCommand {
     RemoveAsset { asset_id: String },
     /// Rename an asset. Label "Rename Media".
     RenameAsset { asset_id: String, name: String },
+    /// Set or clear an asset's Interpret Footage overrides (`interpret`).
+    /// Label "Interpret Footage".
+    SetInterpretation {
+        asset_id: String,
+        interpret: Option<Value>,
+    },
     /// Move assets into a library folder (`None`: the root). Label "Move
     /// to Folder".
     SetAssetFolder {
@@ -42,6 +48,7 @@ impl MediaCommand {
             MediaCommand::AddAsset { .. } => "Import",
             MediaCommand::RemoveAsset { .. } => "Remove Media",
             MediaCommand::RenameAsset { .. } => "Rename Media",
+            MediaCommand::SetInterpretation { .. } => "Interpret Footage",
             MediaCommand::SetAssetFolder { .. } => "Move to Folder",
         }
         .to_owned()
@@ -93,6 +100,25 @@ impl MediaCommand {
                     return Ok(());
                 }
                 cx.set(path, values::s(t))
+            }
+            MediaCommand::SetInterpretation {
+                asset_id,
+                interpret,
+            } => {
+                let asset = vec!["assets".into(), asset_id.as_str().into()];
+                if cx.lookup(&asset).is_none() {
+                    return Err(CommandError::Invalid("Media not found".into()));
+                }
+                let mut path = asset;
+                path.push("interpret".into());
+                match interpret {
+                    Some(value) if value.as_object().is_some() => cx.set(path, value.clone()),
+                    Some(_) => Err(CommandError::Invalid(
+                        "An interpretation must be an object".into(),
+                    )),
+                    None if cx.lookup(&path).is_some() => cx.remove(path),
+                    None => Ok(()),
+                }
             }
             MediaCommand::SetAssetFolder { .. } => {
                 Err(CommandError::NotImplemented("set_asset_folder"))

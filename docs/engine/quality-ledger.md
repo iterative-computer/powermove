@@ -538,3 +538,24 @@ of an unconditional media refusal. The added per-sample f64 reference test
 `native_exr_dpx_and_png_metadata_are_supported` needs the Mac run. Until it
 passes, Gate E records the admission as unqualified; no numerical bound or
 pending corpus fingerprint was relaxed.
+
+## HDR, camera log, LUTs and video readings
+
+**Reference:** `pm_reference::color` (ST 2084, BT.2100, H.273) and
+`pm_reference::camera_log` in f64, written from the vendors' documents; `pm_color::lut`
+and `pm_color::scopes` in f64 for tables and scopes. **Gate:**
+`pm-render` `media::source_storage_tests`, `footage`, `advanced_effects` (run serially:
+`RUST_TEST_THREADS=1`) and `scopes`; `pm-export` `hdr_delivery`; `pm-reference`
+`engine_formulas`; native `engine-service` `colour`. **Units:** as each row states.
+
+| Correction (standard) | Today vs reference | Engine vs reference | Cases |
+|---|---|---|---|
+| Interlaced video deinterlaces by default (bwdif, field or frame rate by composition rate) | today's viewer shows the woven frame | equal to FFmpeg's bwdif on the same decode, the bound `footage` always held for interpreted sources | every interlaced source; no project stores a field choice for it |
+| Anamorphic video and a cropping clean aperture draw by default; pixel aspect moves no authored geometry | refused in the engine, drawn by the browser | pictures equal the same source with the file's reading restated | non-square and cropped-aperture sources |
+| HDR10 with ST 2086, ProRes HDR, Dolby Vision with a base layer, 4:2:2 HDR draw by default | refused unless interpreted | tone mapped with the BT.2390 EETF in SDR projects; identical path to the compared classes | HDR sources outside the former compared classes |
+| An HDR project keeps BT.2100 light, SDR white 1.0 at 203 cd/m² (BT.2408) | all light tone mapped at input | PQ HEVC and ProRes delivery of an HDR10 source: median Y′ error 0.29 and 0.15 of 1,000 at 32-bit depth, against BT.2100's clipped signal | new `color.mode: "hdr"` projects only; SDR projects render as before |
+| BT.2390 at output for an HDR project's SDR delivery and SDR viewer | none | within 1/255 of input tone mapping in an SDR project, clipped to SDR | HDR projects |
+| HDR delivery states mastering and content light (ST 2086, CTA-861.3) | HDR export unreachable | `mdcv` and `clli` in MP4 and MOV, verified on the delivered file; the sources' values, held to the project's mastering peak | HDR deliveries |
+| Apple Log, S-Log3, V-Log, LogC3, LogC4 and vendor gamuts in linear light | absent | relative GPU error at most 4e-6 against the f64 vendor curves; f64 curves equal to 1e-12, published code values within 0.5 of a 10-bit code | sources interpreted as camera log; a curve's input is the code after the file's range is removed |
+| Apply Color LUT revision 2: tetrahedral cubes, shapers, cubes to 129 points, stated spaces | trilinear, 64 points, working values only | within 1e-5 of the f64 table at 32-bit depth; through every camera space within 2e-3 | new effects. Saved revision 1 stays trilinear and exact |
+| DCI-P3, EBU 3213, BT.470 M and generic film primaries read | refused as unknown | white adapts with Bradford and maps to white within 1e-9 | sources with those tags |

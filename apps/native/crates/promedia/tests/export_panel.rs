@@ -294,3 +294,79 @@ fn every_render_format_maps_to_real_engine_contract_and_pmv_does_not_render() {
         assert!(mapped.delivery.hide_captions);
     }
 }
+
+#[test]
+fn hdr_delivery_picks_a_ten_bit_codec_and_bt2100_tags() {
+    use pm_promedia::export_panel::DynamicRange;
+    use pm_protocol::color::OutputColor;
+    use pm_protocol::priority::{Container, ExportFormat};
+    let mut options: Options = serde_json::from_value(serde_json::json!({
+        "format":"mp4","scale":1,"width":640,"height":360,"fps":30,"range":"all",
+        "quality":"high","mblur":false,"audio":false,"alpha":false,
+        "captionsBurn":false,"captionsSidecar":"none","dynamicRange":"pq"
+    }))
+    .unwrap();
+    assert_eq!(options.dynamic_range, DynamicRange::Pq);
+    let saved = serde_json::to_value(&options).unwrap();
+    assert_eq!(saved["dynamicRange"], "pq");
+    let planned = hdr_base();
+    let settings = options
+        .intent(false, 0)
+        .unwrap()
+        .engine_settings(planned.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(settings.color, OutputColor::Rec2100Pq);
+    assert!(matches!(
+        settings.format,
+        ExportFormat::Hevc {
+            ten_bit: true,
+            container: Container::Mp4
+        }
+    ));
+    options.format = Format::Prores;
+    options.dynamic_range = DynamicRange::Hlg;
+    let settings = options
+        .intent(false, 0)
+        .unwrap()
+        .engine_settings(planned)
+        .unwrap()
+        .unwrap();
+    assert_eq!(settings.color, OutputColor::Rec2100Hlg);
+    options.format = Format::Webm;
+    assert!(options.validate().is_err());
+    options.dynamic_range = DynamicRange::Sdr;
+    assert!(options.validate().is_ok());
+    assert!(
+        serde_json::to_value(&options)
+            .unwrap()
+            .get("dynamicRange")
+            .is_none()
+    );
+}
+
+fn hdr_base() -> pm_protocol::priority::ExportSettings {
+    use pm_protocol::common::{FrameRate, Size, TickRange, Ticks};
+    use pm_protocol::priority::*;
+    ExportSettings {
+        format: ExportFormat::H264,
+        alpha: AlphaOutput::None,
+        quality: QualityTier::High,
+        size: Size::new(640, 360),
+        frame_rate: FrameRate::new(30, 1),
+        range: TickRange {
+            start: Ticks::ZERO,
+            end: Ticks::from_whole_seconds(1),
+        },
+        audio: false,
+        audio_index_playhead: None,
+        motion_blur: false,
+        color: pm_protocol::color::OutputColor::Rec709QuickTime {
+            candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+        },
+        precision: pm_protocol::color::Precision::Float16,
+        dither: false,
+        draft_from_proxies: false,
+        delivery: Default::default(),
+    }
+}

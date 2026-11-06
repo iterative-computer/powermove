@@ -25,6 +25,8 @@ export interface Options {
   alpha: boolean;
   captionsBurn: boolean;
   captionsSidecar: "none" | "srt" | "vtt";
+  /** Absent from options saved before HDR delivery: read as SDR. */
+  dynamicRange: "sdr" | "pq" | "hlg";
 }
 export type Run =
   | {
@@ -59,6 +61,8 @@ export interface ExportSnapshot {
     hasAudio: boolean;
     captionLayers: number;
     hasWorkArea: boolean;
+    /** The project keeps HDR light, so HDR delivery is on offer. */
+    hdr?: boolean;
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;
     note?: string;

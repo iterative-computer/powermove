@@ -67,6 +67,11 @@ export const rates = [
   { v: 60000 / 1001, label: "59.94 fps" },
   { v: 60, label: "60 fps" },
 ];
+export const dynamicRanges = [
+  { v: "sdr", label: "SDR" },
+  { v: "pq", label: "HDR · PQ" },
+  { v: "hlg", label: "HDR · HLG" },
+];
 export const qualities = [
   { v: "draft", label: "Draft · 4 Mbps" },
   { v: "high", label: "High · 16 Mbps" },
@@ -78,6 +83,10 @@ export const sidecars = [
   { v: "vtt", label: "WebVTT (.vtt)" },
 ];
 export const rows = {
+  dynamicRange: [
+    "Dynamic Range",
+    "HDR keeps the project's light. SDR tone maps it to SDR white.",
+  ],
   format: ["Format", "Container and codec of the exported file."],
   scale: [
     "Resolution",
