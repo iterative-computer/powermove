@@ -452,6 +452,48 @@ impl Controller {
         })
         .detach();
     }
+    /// One Undo step, then the selection and composition it leads to.
+    fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
+        let crate::layer_commands::Plan {
+            label,
+            commands,
+            select,
+            open,
+        } = plan;
+        let Some(session) = &self.session else { return };
+        let revision = self.published.as_ref().map(|p| p.revision());
+        let pending = self.kernel.call(
+            &session.project,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some(label),
+                    expected_revision: revision,
+                    body: WriteBody::Commands(commands),
+                },
+            ),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        v.message = e.to_string();
+                        return;
+                    }
+                    if let Some(ids) = select {
+                        v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
+                    }
+                    if let (Some(comp_id), Some(p)) = (open, v.published.as_ref()) {
+                        let document = p.snapshot.doc_id;
+                        v.call(Call::OpenComposition { comp_id, document }, cx);
+                    }
+                }
+                other => v.message = format!("Edit failed: {other:?}"),
+            });
+        })
+        .detach();
+    }
     pub fn time(&self) -> f64 {
         self.viewer
             .as_ref()
@@ -875,6 +917,44 @@ impl Controller {
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
+            "precompose" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                let Some(draft) = crate::layer_commands::precompose_draft(&published) else {
+                    return false;
+                };
+                let time = self.time();
+                let sheet = crate::dialogs::appkit::precompose_sheet(
+                    &self.host.borrow().window,
+                    &draft,
+                    &pm_shell::tokens(),
+                    objc2::MainThreadMarker::new().expect("menu commands run on the main thread"),
+                );
+                cx.spawn(async move |this, cx| {
+                    let answer = sheet.result.recv().await;
+                    drop(sheet.target);
+                    if let Ok(Some(draft)) = answer {
+                        let _ = this.update(cx, |v, cx| {
+                            let plan =
+                                crate::layer_commands::precompose_plan(&published, &draft, time);
+                            v.run_layer_plan(plan, cx);
+                        });
+                    }
+                })
+                .detach();
+            }
+            "releasePrecomp" | "toggleContinuousRaster" | "centerAnchor" | "splitTextWords"
+            | "splitTextCharacters" | "splitTextLines" => {
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let Some(plan) = crate::layer_commands::plan(&cmd.name, published, self.time())
+                else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
+            }
             "composition.flowchart" => {
                 let mut host = self.host.borrow_mut();
                 if cmd.token.is_some()

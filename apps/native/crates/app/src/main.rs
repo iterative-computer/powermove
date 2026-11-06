@@ -17,6 +17,7 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod layer_commands;
 mod rows;
 mod session;
 mod smoke;
@@ -110,10 +111,12 @@ fn main() -> Result<()> {
         let _ = wake_tx.try_send(());
     }));
     let fonts = RenderFonts::new(broker.clone());
+    let text_fonts = fonts.clone();
     let worker_profile = profile.clone();
     let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
+            text: Some(layer_commands::text_host(&text_fonts)),
             ..Default::default()
         });
         mcp::attach(&actor.handle(), &worker_profile)?;
