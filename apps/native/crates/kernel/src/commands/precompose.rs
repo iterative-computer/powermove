@@ -140,7 +140,8 @@ fn boundary_rig(members: &[Value], source: &[Value], shared: &HashSet<String>) -
         }
         index += 1;
     }
-    let resolved = |layer: &Value, field: &str| link(layer, field).and_then(|id| local.get(&id).cloned());
+    let resolved =
+        |layer: &Value, field: &str| link(layer, field).and_then(|id| local.get(&id).cloned());
     let links = queue[..members.len()]
         .iter()
         .map(|l| {
@@ -219,12 +220,9 @@ fn shared_style(
     for group in &chain {
         let matte = values::text(group, "matteSource").unwrap_or_default();
         let keyed = TRANSFORM_KEYS.iter().any(|key| {
-            group
-                .get("p")
-                .and_then(|p| p.get(key))
-                .is_some_and(|c| {
-                    c.get("expr").is_some_and(Value::is_truthy) || !track::keys_of(c).is_empty()
-                })
+            group.get("p").and_then(|p| p.get(key)).is_some_and(|c| {
+                c.get("expr").is_some_and(Value::is_truthy) || !track::keys_of(c).is_empty()
+            })
         });
         safe &= !values::flag(group, "threeD")
             && link(group, "parent").is_none()
@@ -326,7 +324,8 @@ fn move_all(
     let mut moved = inner.layers;
     for layer in &mut moved {
         let links = inner.links.get(id_of(layer)).cloned();
-        let outside = link(layer, "matteSource").is_some_and(|id| !picked_ids.contains(id.as_str()));
+        let outside =
+            link(layer, "matteSource").is_some_and(|id| !picked_ids.contains(id.as_str()));
         let from = values::num(layer, "from").unwrap_or(0.);
         let m = values::obj(layer);
         if let Some((parent, group)) = links {

@@ -25,10 +25,13 @@ fn layer(id: &str, kind: &str, x: f64, y: f64, rotation: f64, color: &str, extra
     )
 }
 fn open(layers: &[String]) -> (KernelActor, KernelHandle) {
+    open_on(r#"{"type":"none","angle":0,"stops":[]}"#, layers)
+}
+fn open_on(background: &str, layers: &[String]) -> (KernelActor, KernelHandle) {
     let actor = KernelActor::spawn(KernelConfig::default());
     let project = pm_model::json::parse(&format!(
         r##"{{"id":"synthetic","name":"Commands","compId":"root","w":{W},"h":{H},"fps":30,"dur":3,
-        "colorDepth":16,"bg":"#000000","backgroundFill":{{"type":"none","angle":0,"stops":[]}},
+        "colorDepth":16,"bg":"#000000","backgroundFill":{background},
         "assets":{{}},"comps":{{}},"layers":[{}]}}"##,
         layers.join(",")
     ))
@@ -100,7 +103,10 @@ fn frame(kernel: &KernelHandle, renderer: &mut pm_render::Renderer, time: f64) -
 }
 fn same(a: &[f32], b: &[f32], what: &str) {
     assert_eq!(a.len(), b.len());
-    assert!(a.iter().any(|v| *v > 0.1), "{what}: the fixture draws something");
+    assert!(
+        a.iter().any(|v| *v > 0.1),
+        "{what}: the fixture draws something"
+    );
     let worst = a
         .iter()
         .zip(b)
@@ -150,7 +156,11 @@ fn precompose_move_keeps_the_picture_and_releases_back() {
     run(&kernel, plan_);
     let after = kernel.published("synthetic").unwrap();
     assert_eq!(after.selection.layers(), [precomp.clone()]);
-    same(&original, &frame(&kernel, &mut renderer, 0.), "pre-composed");
+    same(
+        &original,
+        &frame(&kernel, &mut renderer, 0.),
+        "pre-composed",
+    );
     let released = plan("releasePrecomp", &after, 0.).unwrap();
     run(&kernel, released);
     same(&original, &frame(&kernel, &mut renderer, 0.), "released");
@@ -177,7 +187,11 @@ fn precompose_leave_keeps_an_effect_on_the_outer_layer() {
     let kept = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
     assert_eq!(kind(&kept), Some("precomp"));
     assert_eq!(kept.get("fx").unwrap().as_array().unwrap().len(), 1);
-    same(&original, &frame(&kernel, &mut renderer, 0.), "leave attributes");
+    same(
+        &original,
+        &frame(&kernel, &mut renderer, 0.),
+        "leave attributes",
+    );
 }
 
 #[test]
@@ -185,10 +199,8 @@ fn toggle_continuous_raster_turns_every_selected_precomp_on_then_off() {
     let d = r##""d":{"w":24,"h":12,"color":"#FF0000"}"##;
     let sub = r##""d":{"comp":"sub","w":24,"h":12}"##;
     let (_actor, kernel) = open(&[
-        layer("a", "precomp", 40., 20., 0., "", "").replace(
-            r##""d":{"w":24,"h":12,"color":""}"##,
-            sub,
-        ),
+        layer("a", "precomp", 40., 20., 0., "", "")
+            .replace(r##""d":{"w":24,"h":12,"color":""}"##, sub),
         layer("b", "solid", 40., 20., 0., "#FF0000", "").replace(d, d),
     ]);
     let flag = |kernel: &KernelHandle| {
@@ -202,10 +214,16 @@ fn toggle_continuous_raster_turns_every_selected_precomp_on_then_off() {
             .and_then(Value::as_bool)
     };
     let published = select(&kernel, &["a", "b"]);
-    run(&kernel, plan("toggleContinuousRaster", &published, 0.).unwrap());
+    run(
+        &kernel,
+        plan("toggleContinuousRaster", &published, 0.).unwrap(),
+    );
     assert_eq!(flag(&kernel), Some(true));
     let published = kernel.published("synthetic").unwrap();
-    run(&kernel, plan("toggleContinuousRaster", &published, 0.).unwrap());
+    run(
+        &kernel,
+        plan("toggleContinuousRaster", &published, 0.).unwrap(),
+    );
     assert_eq!(flag(&kernel), Some(false));
 }
 
@@ -216,7 +234,12 @@ fn commands_with_nothing_to_act_on_are_not_handled() {
     assert!(plan("centerAnchor", &none, 0.).is_none());
     assert!(precompose_draft(&none).is_none());
     let published = select(&kernel, &["a"]);
-    for name in ["releasePrecomp", "toggleContinuousRaster", "splitTextWords", "other"] {
+    for name in [
+        "releasePrecomp",
+        "toggleContinuousRaster",
+        "splitTextWords",
+        "other",
+    ] {
         assert!(plan(name, &published, 0.).is_none(), "{name}");
     }
 }
@@ -262,4 +285,103 @@ fn a_font_registry_that_cannot_answer_refuses_the_split_and_writes_nothing() {
         .unwrap();
     assert!(matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
     assert_eq!(kernel.published("synthetic").unwrap().revision(), before);
+}
+
+/// What the viewer draws: the engine service's own frame path, not a test
+/// renderer. Every seeded definition applies at its defaults and draws.
+#[test]
+fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
+    let _pixels = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
+    // A grey ground: a black shadow has to be visible beside the solid.
+    let (_actor, kernel) = open_on(
+        r##"{"type":"solid","color":"#808080","angle":0,"stops":[]}"##,
+        &[layer("a", "solid", 40., 20., 0., "#A04020", "")],
+    );
+    let mut headless = pm_engine_service::Headless::new().unwrap();
+    let size = Size::new(W, H);
+    let draw = |headless: &mut pm_engine_service::Headless, kernel: &KernelHandle| {
+        let p = kernel.published("synthetic").unwrap();
+        let scene = pm_engine_service::Scene {
+            doc: p.snapshot.document.clone(),
+            comp: "root".into(),
+            media: Default::default(),
+            content: p.revision(),
+        };
+        headless
+            .frame(&scene, Ticks::ZERO, size, &Default::default())
+            .unwrap()
+    };
+    let plain = draw(&mut headless, &kernel);
+    assert!(plain.iter().any(|p| p[0] > 0.1), "the fixture draws");
+    let state = kernel.state();
+    let seeded = state.registries.get("effects").unwrap();
+    assert_eq!(seeded.len(), 43);
+    let mut changed = Vec::new();
+    for entry in seeded {
+        let p = kernel.published("synthetic").unwrap();
+        let version = entry.definition.get("version").cloned();
+        let definition = pm_kernel::commands::effects::saved_builtin_definition(
+            &p.snapshot.document,
+            &entry.id,
+            version.as_ref(),
+            24.,
+            12.,
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", entry.id));
+        let effect_id = new_id("f");
+        run(
+            &kernel,
+            Plan {
+                label: "Add Effect".into(),
+                commands: vec![
+                    pm_kernel::EffectCommand::Add(Box::new(
+                        pm_kernel::commands::effects::AddEffect {
+                            layer_id: "a".into(),
+                            effect_id: effect_id.clone(),
+                            definition,
+                            parameters: Default::default(),
+                            inputs: None,
+                            open: true,
+                            enabled: true,
+                            enabled_animation: None,
+                            index: None,
+                        },
+                    ))
+                    .into(),
+                ],
+                select: None,
+                open: None,
+            },
+        );
+        if draw(&mut headless, &kernel) != plain {
+            changed.push(entry.id.clone());
+        }
+        send(&kernel, HistoryCall::Undo.into());
+    }
+    // Definitions whose defaults are not an identity on a flat, opaque solid.
+    for id in [
+        "motionblurDir",
+        "sharpen",
+        "duotone",
+        "grain",
+        "chroma",
+        "pixelate",
+        "posterize",
+        "displace",
+        "shadow",
+        "invert",
+        "gradient",
+        "tint",
+        "threshold",
+        "findEdges",
+        "tritone",
+        "blackWhite",
+        "channelCombiner",
+        "hdrCompander",
+    ] {
+        assert!(
+            changed.iter().any(|c| c == id),
+            "{id} drew nothing: {changed:?}"
+        );
+    }
 }

@@ -165,11 +165,8 @@ fn reset(
             width: values::num(&comp, "w")?,
             height: values::num(&comp, "h")?,
         };
-        let value = pm_fx_defs::builtins().reset_default(
-            values::text(&layer, "type")?,
-            &key,
-            context,
-        )?;
+        let value =
+            pm_fx_defs::builtins().reset_default(values::text(&layer, "type")?, &key, context)?;
         pm_model::json::parse(&value.to_string()).ok()
     });
     keyframes::KeyframeCommand::Replace(Box::new(keyframes::ReplaceKeyframes {

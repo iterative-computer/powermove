@@ -215,9 +215,11 @@ fn sanitize(raw: &Value) -> Option<Transform> {
         if !path_allowed(&path) {
             continue;
         }
-        let raw = edit.get("value").cloned().unwrap_or(Value::Null);
         let mut nodes = 0;
-        if let Some(value) = sanitize_expression(&raw, &mut nodes, 0) {
+        if let Some(value) = edit
+            .get("value")
+            .and_then(|raw| sanitize_expression(raw, &mut nodes, 0))
+        {
             edits.push(Edit { path, value });
         }
     }
@@ -255,7 +257,6 @@ fn stable_hash(text: &str) -> u32 {
         (hash ^ unit).wrapping_mul(16_777_619)
     })
 }
-
 
 struct Context<'a> {
     current: Value,
@@ -356,7 +357,11 @@ fn evaluate(expression: &Value, c: &Context<'_>) -> Value {
         }
         "if" => {
             return args
-                .get(if args.first().is_some_and(truthy) { 1 } else { 2 })
+                .get(if args.first().is_some_and(truthy) {
+                    1
+                } else {
+                    2
+                })
                 .cloned()
                 .unwrap_or_default();
         }
@@ -375,7 +380,11 @@ fn ordered(targets: &mut [Target], name: &str, selection: &[String], seed: &str)
             .unwrap_or(missing)
     };
     let from = |t: &Target| values::num(&t.layer, "from").unwrap_or(0.);
-    let label = |t: &Target| values::text(&t.layer, "name").unwrap_or_default().to_owned();
+    let label = |t: &Target| {
+        values::text(&t.layer, "name")
+            .unwrap_or_default()
+            .to_owned()
+    };
     match name {
         "reverseStack" => targets.reverse(),
         "selection" => targets.sort_by_key(|t| picked(t, usize::MAX)),
@@ -386,7 +395,9 @@ fn ordered(targets: &mut [Target], name: &str, selection: &[String], seed: &str)
         "reverseStart" => targets.sort_by(|a, b| from(b).total_cmp(&from(a))),
         "name" => targets.sort_by(|a, b| {
             let (a, b) = (label(a), label(b));
-            a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(&a))
+            a.to_lowercase()
+                .cmp(&b.to_lowercase())
+                .then_with(|| b.cmp(&a))
         }),
         "random" => targets.sort_by_key(|t| stable_hash(&format!("{seed}:{}", id(t)))),
         _ => {}
@@ -394,7 +405,12 @@ fn ordered(targets: &mut [Target], name: &str, selection: &[String], seed: &str)
 }
 
 /// `getPath`: `None` when the layer has no such source.
-fn read_path(cx: &mut Cx<'_>, layer: &Value, path: &str, time: f64) -> Result<Option<Value>, CommandError> {
+fn read_path(
+    cx: &mut Cx<'_>,
+    layer: &Value,
+    path: &str,
+    time: f64,
+) -> Result<Option<Value>, CommandError> {
     if let Some(key) = path.strip_prefix("layer.") {
         let key = match key {
             "duration" => "dur",
@@ -465,11 +481,14 @@ pub(super) fn run(
 ) -> Result<(), CommandError> {
     let invalid = |message: &str| CommandError::Invalid(message.into());
     let time = values::finite(time, "time")?;
-    let transform = sanitize(raw).ok_or_else(|| invalid("The generated transformation is invalid"))?;
-    let visible = |l: &Value| l.get("on").is_some_and(|on| match on.get("v") {
-        Some(v) => v.is_truthy(),
-        None => on.is_truthy(),
-    });
+    let transform =
+        sanitize(raw).ok_or_else(|| invalid("The generated transformation is invalid"))?;
+    let visible = |l: &Value| {
+        l.get("on").is_some_and(|on| match on.get("v") {
+            Some(v) => v.is_truthy(),
+            None => on.is_truthy(),
+        })
+    };
     let mut targets = Vec::new();
     for layer in cx.layers(None) {
         let id = values::text(&layer, "id").unwrap_or_default();
@@ -478,14 +497,18 @@ pub(super) fn run(
             "visible" => visible(&layer),
             _ => true,
         } && (transform.types.is_empty()
-            || values::text(&layer, "type").is_some_and(|t| transform.types.iter().any(|x| x == t)))
+            || values::text(&layer, "type")
+                .is_some_and(|t| transform.types.iter().any(|x| x == t)))
             && !values::flag(&layer, "lock");
         if !included {
             continue;
         }
         let mut before = HashMap::new();
         for path in transform.edits.iter().map(|e| e.path.as_str()).chain(
-            transform.edits.iter().flat_map(|e| aggregate_paths(&e.value)),
+            transform
+                .edits
+                .iter()
+                .flat_map(|e| aggregate_paths(&e.value)),
         ) {
             if !before.contains_key(path)
                 && let Some(value) = read_path(cx, &layer, path, time)?
@@ -503,7 +526,7 @@ pub(super) fn run(
         }));
     }
     let order = match &transform.order {
-        Value::String(_) => values::js_trim(transform.order.as_str().unwrap_or("stack")).to_owned(),
+        Value::String(name) => name.to_string_lossy(),
         object => {
             let key = values::text(object, "state").unwrap_or_default();
             state
@@ -521,7 +544,9 @@ pub(super) fn run(
     let duration = cx.duration(None);
     let mut commands: Vec<Command> = Vec::new();
     for (index, target) in targets.iter().enumerate() {
-        let id = values::text(&target.layer, "id").unwrap_or_default().to_owned();
+        let id = values::text(&target.layer, "id")
+            .unwrap_or_default()
+            .to_owned();
         let mut layer_patch = LayerPatch {
             time,
             ..Default::default()

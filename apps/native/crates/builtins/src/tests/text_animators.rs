@@ -17,7 +17,10 @@ fn setup() -> KernelActor {
     });
     actor
         .handle()
-        .open("synthetic", OpenSource::Untitled(data::model(&project).unwrap()))
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
         .wait()
         .unwrap()
         .unwrap();

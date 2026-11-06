@@ -39,9 +39,6 @@ pub enum CommandError {
     EffectNotFound(String),
     /// No composition has this id.
     CompNotFound(String),
-    /// The command is in the catalog but not ported yet (see
-    /// docs/gpui/core-api.md for its status). Nothing changed.
-    NotImplemented(&'static str),
 }
 
 impl fmt::Display for CommandError {
@@ -68,9 +65,6 @@ impl fmt::Display for CommandError {
             }
             CommandError::EffectNotFound(e) => write!(f, "Effect not found: {e}"),
             CommandError::CompNotFound(_) => f.write_str("Composition not found"),
-            CommandError::NotImplemented(c) => {
-                write!(f, "“{c}” is not available in this version yet")
-            }
         }
     }
 }

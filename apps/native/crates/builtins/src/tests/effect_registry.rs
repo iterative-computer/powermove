@@ -18,7 +18,10 @@ fn setup(fx: Value) -> KernelActor {
     });
     actor
         .handle()
-        .open("synthetic", OpenSource::Untitled(data::model(&project).unwrap()))
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
         .wait()
         .unwrap()
         .unwrap();
@@ -54,11 +57,13 @@ fn pixel(kernel: &pm_kernel::KernelHandle, renderer: &mut pm_render::Renderer) -
 fn effects(kernel: &pm_kernel::KernelHandle) -> Vec<Value> {
     let p = kernel.published("synthetic").unwrap();
     let root = p.snapshot.root().unwrap();
-    let layer =
-        pm_kernel::model::layer_at(root, &pm_kernel::model::find_layer(root, "a").unwrap())
-            .unwrap()
-            .to_value();
-    data::wire(&layer)["fx"].as_array().cloned().unwrap_or_default()
+    let layer = pm_kernel::model::layer_at(root, &pm_kernel::model::find_layer(root, "a").unwrap())
+        .unwrap()
+        .to_value();
+    data::wire(&layer)["fx"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 fn texts(surface: &Surface) -> Vec<String> {
     surface.nodes().values().map(|n| n.text.clone()).collect()
@@ -70,7 +75,10 @@ fn effects_panel_lists_seeded_builtins_in_registration_order() {
     let kernel = actor.handle();
     let state = kernel.state();
     let seeded = state.registries.get("effects").unwrap();
-    assert_eq!(seeded.len(), pm_fx_defs::catalog::main_effects().effects.len());
+    assert_eq!(
+        seeded.len(),
+        pm_fx_defs::catalog::main_effects().effects.len()
+    );
     assert_eq!(seeded[0].id, "blur");
     let mut panels = Builtins::new(kernel, "synthetic", || {}).unwrap();
     finish(panels.mount("fxbrowser").unwrap());
@@ -136,7 +144,9 @@ fn add_effect_uses_the_seeded_definition_and_renders_with_undo() {
     }
     let added = &effects(&kernel)[0];
     assert_eq!(added["type"], "invert");
-    let current = pm_fx_defs::catalog::main_catalog().current("invert").unwrap();
+    let current = pm_fx_defs::catalog::main_catalog()
+        .current("invert")
+        .unwrap();
     assert_eq!(added["version"], current.metadata["version"]);
     let inverted = pixel(&kernel, &mut renderer);
     assert_ne!(inverted, plain, "Invert must change the rendered picture");
@@ -156,8 +166,10 @@ fn add_effect_uses_the_seeded_definition_and_renders_with_undo() {
 
 #[test]
 fn saved_effect_resolves_in_effect_controls_and_renders() {
-    let actor = setup(json!([{"id":"f1","type":"invert","on":true,"open":true,"version":2,
-        "p":{"channel":{"v":0,"kf":[]},"blendWithOriginal":{"v":0,"kf":[]}}}]));
+    let actor = setup(
+        json!([{"id":"f1","type":"invert","on":true,"open":true,"version":2,
+        "p":{"channel":{"v":0,"kf":[]},"blendWithOriginal":{"v":0,"kf":[]}}}]),
+    );
     let kernel = actor.handle();
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
     finish(panels.mount("layer-effects").unwrap());
@@ -170,5 +182,60 @@ fn saved_effect_resolves_in_effect_controls_and_renders() {
     );
     let mut renderer = pm_render::Renderer::headless().unwrap();
     assert_ne!(pixel(&kernel, &mut renderer), [1., 0., 0., 1.]);
+    assert!(panels.take_errors().is_empty());
+}
+
+#[test]
+fn effects_panel_add_button_applies_to_the_selected_layer() {
+    let actor = setup(json!([]));
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("fxbrowser").unwrap());
+    let row = |panels: &Builtins, text: &str| {
+        let publication = panels.take_publications().pop().unwrap();
+        let id = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| n.props.get("label").and_then(Value::as_str) == Some(text))
+            .unwrap_or_else(|| panic!("no {text} row"))
+            .id;
+        (publication, id)
+    };
+    let (publication, blur) = row(&panels, "Gaussian Blur, effect, Blur & Sharpen");
+    finish(
+        panels
+            .event(
+                "fxbrowser",
+                publication.generation,
+                publication.surface.revision(),
+                blur,
+                "click",
+                EventDetail::default(),
+            )
+            .unwrap(),
+    );
+    let (publication, add) = row(&panels, "Add Gaussian Blur");
+    finish(
+        panels
+            .event(
+                "fxbrowser",
+                publication.generation,
+                publication.surface.revision(),
+                add,
+                "click",
+                EventDetail::default(),
+            )
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while effects(&kernel).is_empty() {
+        assert!(Instant::now() < deadline, "{:?}", panels.take_errors());
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(effects(&kernel)[0]["type"], "blur");
     assert!(panels.take_errors().is_empty());
 }

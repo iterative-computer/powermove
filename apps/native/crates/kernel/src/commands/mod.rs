@@ -37,9 +37,7 @@
 //! | [`Command::Transform`] | [`transform`] | nudge, center anchor, align, distribute |
 //!
 //! Every variant is typed and documented (parameters, validation, undo
-//! label, the old function it ports) even before it is implemented; an
-//! unported one returns [`CommandError::NotImplemented`] and is listed with
-//! its status in `docs/gpui/core-api.md`.
+//! label, the old function it ports).
 //!
 //! The four spine commands ([`Command::SetStaticOpacity`],
 //! [`Command::SetLayerName`], [`Command::SetLayerVisible`],
@@ -78,8 +76,8 @@ use pm_model::{Node, Op};
 use crate::error::CommandError;
 
 pub mod capabilities;
-pub mod pro_edit;
 pub mod precompose;
+pub mod pro_edit;
 pub mod pro_links;
 pub mod pro_source;
 mod pro_support;

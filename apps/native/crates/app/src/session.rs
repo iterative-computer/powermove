@@ -944,8 +944,12 @@ impl Controller {
                 })
                 .detach();
             }
-            "releasePrecomp" | "toggleContinuousRaster" | "centerAnchor" | "splitTextWords"
-            | "splitTextCharacters" | "splitTextLines" => {
+            "releasePrecomp"
+            | "toggleContinuousRaster"
+            | "centerAnchor"
+            | "splitTextWords"
+            | "splitTextCharacters"
+            | "splitTextLines" => {
                 let Some(published) = self.published.as_ref() else {
                     return false;
                 };

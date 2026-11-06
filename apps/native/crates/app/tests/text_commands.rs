@@ -30,7 +30,15 @@ fn project(text: &str) -> Value {
     .unwrap()
 }
 fn number(layer: &Value, channel: &str) -> f64 {
-    layer.get("p").unwrap().get(channel).unwrap().get("v").unwrap().as_f64().unwrap()
+    layer
+        .get("p")
+        .unwrap()
+        .get(channel)
+        .unwrap()
+        .get("v")
+        .unwrap()
+        .as_f64()
+        .unwrap()
 }
 fn find<'a>(layers: &'a [Value], id: &str) -> &'a Value {
     layers
@@ -71,7 +79,10 @@ fn run(fonts: RenderFonts) {
     let layers = || {
         let p = kernel.published("synthetic").unwrap();
         let root = p.snapshot.root().unwrap().to_value();
-        let comp = root.get("comps").and_then(|c| c.get("root")).unwrap_or(&root);
+        let comp = root
+            .get("comps")
+            .and_then(|c| c.get("root"))
+            .unwrap_or(&root);
         comp.get("layers").unwrap().as_array().unwrap().clone()
     };
     let _ = kernel
@@ -110,7 +121,10 @@ fn run(fonts: RenderFonts) {
         .into(),
     );
     let aligned = number(&layers()[0], "position.x");
-    assert!((aligned - 320.).abs() < 1., "centred on the frame: {aligned}");
+    assert!(
+        (aligned - 320.).abs() < 1.,
+        "centred on the frame: {aligned}"
+    );
     edit(
         TextCommand::Split {
             layer_ids: vec!["t".into()],
@@ -129,7 +143,11 @@ fn run(fonts: RenderFonts) {
         .collect();
     assert_eq!(pieces.len(), 3, "two words and the hidden source");
     let word = |l: &Value| {
-        l.get("d").unwrap().get("text").and_then(Value::as_str).map(str::to_owned)
+        l.get("d")
+            .unwrap()
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     };
     assert_eq!(word(pieces[0]).as_deref(), Some("One"));
     assert_eq!(word(pieces[1]).as_deref(), Some("Two"));

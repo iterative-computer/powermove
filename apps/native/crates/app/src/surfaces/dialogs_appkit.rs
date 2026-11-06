@@ -210,10 +210,7 @@ pub fn precompose_sheet(
     tokens: &pm_design::Tokens,
     mtm: MainThreadMarker,
 ) -> PrecomposeSheet {
-    let surface = draft.surface(
-        DialogId("precompose".into()),
-        WindowId("editor".into()),
-    );
+    let surface = draft.surface(DialogId("precompose".into()), WindowId("editor".into()));
     let field = |id: &str| surface.fields.iter().find(|f| f.id == id).expect("field");
     let mut sheet = Sheet::new(&surface.title, 9, tokens, true, mtm);
     sheet.text("name", &field("name").label, &draft.name, false, true);
@@ -251,7 +248,10 @@ pub fn precompose_sheet(
         button
     };
     let leave = draft.leave && draft.can_leave;
-    for (id, button) in [("leave", radio("leave", leave)), ("move", radio("move", !leave))] {
+    for (id, button) in [
+        ("leave", radio("leave", leave)),
+        ("move", radio("move", !leave)),
+    ] {
         sheet.option(id, button.into_super());
         if let Some(text) = &field(id).description {
             sheet.line(text, tokens.typography.minimum.into(), tokens.colors.muted);

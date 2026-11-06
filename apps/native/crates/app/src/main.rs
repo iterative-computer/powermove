@@ -8,6 +8,7 @@ mod export_coordinator;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
+mod layer_commands;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
 mod lifecycle;
@@ -17,7 +18,6 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
-mod layer_commands;
 mod rows;
 mod session;
 mod smoke;

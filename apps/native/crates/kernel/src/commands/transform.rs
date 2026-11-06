@@ -187,8 +187,11 @@ fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(),
         if cx.check_lock(&loc, id).is_err() {
             continue;
         }
-        let is_text =
-            cx.layer_node(&loc)?.get("type").and_then(crate::model::str_of) == Some("text");
+        let is_text = cx
+            .layer_node(&loc)?
+            .get("type")
+            .and_then(crate::model::str_of)
+            == Some("text");
         let mut measure = cx.measure(is_text)?;
         let index = loc.index;
         let centered = cx.kernel(loc.comp_id.as_deref(), |edit| {

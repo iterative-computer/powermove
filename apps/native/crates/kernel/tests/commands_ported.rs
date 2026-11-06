@@ -76,7 +76,14 @@ fn num(v: &Value, key: &str) -> f64 {
     v.get(key).and_then(Value::as_f64).unwrap()
 }
 fn channel(l: &Value, key: &str) -> f64 {
-    l.get("p").unwrap().get(key).unwrap().get("v").unwrap().as_f64().unwrap()
+    l.get("p")
+        .unwrap()
+        .get(key)
+        .unwrap()
+        .get("v")
+        .unwrap()
+        .as_f64()
+        .unwrap()
 }
 
 fn precompose(ids: &[&str], mode: PrecomposeMode, adjust: bool) -> Command {
@@ -94,15 +101,28 @@ fn precompose(ids: &[&str], mode: PrecomposeMode, adjust: bool) -> Command {
 
 #[test]
 fn precompose_moves_layers_and_keeps_stack_slot_and_settings() {
-    let mut s = store(&[layer("a", "solid", ""), layer("b", "solid", ""), layer("c", "solid", "")]);
-    apply(&mut s, precompose(&["b", "a"], PrecomposeMode::MoveAll, false));
+    let mut s = store(&[
+        layer("a", "solid", ""),
+        layer("b", "solid", ""),
+        layer("c", "solid", ""),
+    ]);
+    apply(
+        &mut s,
+        precompose(&["b", "a"], PrecomposeMode::MoveAll, false),
+    );
     let host = host_layers(&s);
     let ids: Vec<&str> = host.iter().map(|l| text(l, "id")).collect();
     assert_eq!(ids, ["P", "c"]);
     let precomp = find(&host, "P");
     assert_eq!(text(precomp, "type"), "precomp");
     assert_eq!(text(precomp, "name"), "Pre-comp 1");
-    assert_eq!(precomp.get("d").and_then(|d| d.get("comp")).and_then(Value::as_str), Some("C2"));
+    assert_eq!(
+        precomp
+            .get("d")
+            .and_then(|d| d.get("comp"))
+            .and_then(Value::as_str),
+        Some("C2")
+    );
     assert_eq!(num(precomp, "dur"), 10.);
     for (key, value) in [
         ("anchor.x", 100.),
@@ -113,7 +133,10 @@ fn precompose_moves_layers_and_keeps_stack_slot_and_settings() {
         assert_eq!(channel(precomp, key), value, "{key}");
     }
     let inner = comp(&s, "C2");
-    assert_eq!((num(&inner, "w"), num(&inner, "h"), num(&inner, "fps")), (200., 100., 30.));
+    assert_eq!(
+        (num(&inner, "w"), num(&inner, "h"), num(&inner, "fps")),
+        (200., 100., 30.)
+    );
     assert_eq!(num(&inner, "dur"), 10.);
     assert_eq!(text(&inner, "bg"), "#101010");
     let moved = inner.get("layers").unwrap().as_array().unwrap();
@@ -132,7 +155,10 @@ fn precompose_adjust_duration_shifts_moved_layers_to_zero() {
     assert_eq!(num(find(&host, "P"), "dur"), 5.);
     let inner = comp(&s, "C2");
     assert_eq!(num(&inner, "dur"), 5.);
-    assert_eq!(num(&inner.get("layers").unwrap().as_array().unwrap()[0], "from"), 0.);
+    assert_eq!(
+        num(&inner.get("layers").unwrap().as_array().unwrap()[0], "from"),
+        0.
+    );
 }
 
 #[test]
@@ -140,7 +166,12 @@ fn precompose_splits_a_rig_across_the_boundary_and_clears_mattes() {
     let child = layer("kid", "solid", r#","matteSource":"out""#)
         .replace(r#""parent":null"#, r#""parent":"rig""#);
     let keeper = layer("keep", "solid", "").replace(r#""parent":null"#, r#""parent":"kid""#);
-    let mut s = store(&[child, layer("rig", "null", ""), layer("out", "solid", ""), keeper]);
+    let mut s = store(&[
+        child,
+        layer("rig", "null", ""),
+        layer("out", "solid", ""),
+        keeper,
+    ]);
     apply(&mut s, precompose(&["kid"], PrecomposeMode::MoveAll, false));
     let inner = comp(&s, "C2");
     let moved = inner.get("layers").unwrap().as_array().unwrap();
@@ -148,10 +179,16 @@ fn precompose_splits_a_rig_across_the_boundary_and_clears_mattes() {
     let copy = text(kid, "parent");
     assert_ne!(copy, "rig", "the rig is a copy inside");
     assert_eq!(text(find(moved, copy), "type"), "null");
-    assert!(kid.get("matteSource").unwrap().is_null(), "matte left behind");
+    assert!(
+        kid.get("matteSource").unwrap().is_null(),
+        "matte left behind"
+    );
     let host = host_layers(&s);
     let outside = text(find(&host, "keep"), "parent");
-    assert_ne!(outside, "kid", "the outer child follows a copy of the moved parent");
+    assert_ne!(
+        outside, "kid",
+        "the outer child follows a copy of the moved parent"
+    );
     assert_eq!(text(find(&host, outside), "type"), "null");
     assert!(find(&host, "rig").get("parent").unwrap().is_null());
 }
@@ -162,8 +199,8 @@ fn precompose_refuses_a_partial_styled_group() {
         l.replace(r#""position.x":{"v":100"#, r#""position.x":{"v":0"#)
             .replace(r#""position.y":{"v":50"#, r#""position.y":{"v":0"#)
     };
-    let group = at_origin(layer("g", "group", ""))
-        .replace(r#""opacity":{"v":100"#, r#""opacity":{"v":40"#);
+    let group =
+        at_origin(layer("g", "group", "")).replace(r#""opacity":{"v":100"#, r#""opacity":{"v":40"#);
     let member = layer("m", "solid", "").replace(r#""group":null"#, r#""group":"g""#);
     let other = layer("n", "solid", "").replace(r#""group":null"#, r#""group":"g""#);
     let mut s = store(&[group, member, other]);
@@ -183,16 +220,25 @@ fn precompose_refuses_a_partial_styled_group() {
         layer("m", "solid", "").replace(r#""group":null"#, r#""group":"g""#),
     ]);
     let e = s
-        .execute(precompose(&["m"], PrecomposeMode::MoveAll, false), Origin::Interface)
+        .execute(
+            precompose(&["m"], PrecomposeMode::MoveAll, false),
+            Origin::Interface,
+        )
         .unwrap_err();
-    assert!(e.to_string().contains("Select the whole styled group"), "{e}");
+    assert!(
+        e.to_string().contains("Select the whole styled group"),
+        "{e}"
+    );
 }
 
 #[test]
 fn leave_attributes_keeps_the_layer_and_moves_only_its_source() {
     let fx = r#","trim":1"#;
     let mut s = store(&[layer("a", "solid", fx)]);
-    apply(&mut s, precompose(&["a"], PrecomposeMode::LeaveAttributes, false));
+    apply(
+        &mut s,
+        precompose(&["a"], PrecomposeMode::LeaveAttributes, false),
+    );
     let host = host_layers(&s);
     assert_eq!(host.len(), 1);
     let kept = find(&host, "a");
@@ -201,10 +247,20 @@ fn leave_attributes_keeps_the_layer_and_moves_only_its_source() {
     assert_eq!(d.get("comp").and_then(Value::as_str), Some("C2"));
     assert_eq!((num(d, "w"), num(d, "h")), (40., 20.));
     // A solid's layer space already starts at its corner, like a pre-comp's.
-    assert_eq!((channel(kept, "anchor.x"), channel(kept, "anchor.y")), (0., 0.));
-    assert_eq!(channel(kept, "position.x"), 100., "the transform stays outside");
+    assert_eq!(
+        (channel(kept, "anchor.x"), channel(kept, "anchor.y")),
+        (0., 0.)
+    );
+    assert_eq!(
+        channel(kept, "position.x"),
+        100.,
+        "the transform stays outside"
+    );
     let inner = comp(&s, "C2");
-    assert_eq!((num(&inner, "w"), num(&inner, "h"), num(&inner, "dur")), (40., 20., 5.));
+    assert_eq!(
+        (num(&inner, "w"), num(&inner, "h"), num(&inner, "dur")),
+        (40., 20., 5.)
+    );
     let source = &inner.get("layers").unwrap().as_array().unwrap()[0];
     assert_eq!(text(source, "type"), "solid");
     assert_eq!(text(source.get("d").unwrap(), "color"), "#FF0000");
@@ -254,7 +310,11 @@ fn center_anchor_moves_the_anchor_and_keeps_the_rotated_picture_still() {
     close(channel(a, "anchor.y"), 10., "anchor y");
     close(channel(a, "position.x"), 90., "position x");
     close(channel(a, "position.y"), 70., "position y");
-    assert_eq!(channel(find(&host, "lock"), "anchor.x"), 0., "locked layers stay");
+    assert_eq!(
+        channel(find(&host, "lock"), "anchor.x"),
+        0.,
+        "locked layers stay"
+    );
 }
 
 #[test]
@@ -295,8 +355,17 @@ fn reset_clears_keys_and_expression_then_writes_the_shipped_default() {
     let mut s = store(&[keyed]);
     apply(&mut s, reset("position.x", None));
     let host = host_layers(&s);
-    let p = find(&host, "a").get("p").unwrap().get("position.x").unwrap().clone();
-    assert_eq!(p.get("v").and_then(Value::as_f64), Some(100.), "half the comp width");
+    let p = find(&host, "a")
+        .get("p")
+        .unwrap()
+        .get("position.x")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        p.get("v").and_then(Value::as_f64),
+        Some(100.),
+        "half the comp width"
+    );
     assert!(p.get("kf").unwrap().as_array().unwrap().is_empty());
     assert!(!p.get("expr").is_some_and(Value::is_truthy));
 }
@@ -350,7 +419,11 @@ fn set_asset_folder_moves_media_and_unknown_folders_mean_the_top_level() {
     apply(&mut s, folder(&["a2"], Some("missing")));
     assert_eq!(asset_folder(&s, "a2"), None);
     let same = root(&s);
-    assert!(s.execute(folder(&["a2"], None), Origin::Interface).unwrap().is_none());
+    assert!(
+        s.execute(folder(&["a2"], None), Origin::Interface)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(root(&s), same);
 }
 
@@ -386,14 +459,19 @@ fn transform_layers_staggers_in_order_with_frames_and_state() {
     let host = host_layers(&s);
     assert_eq!(num(find(&host, "a"), "from"), 0.1, "3 frames at 30 fps");
     assert_eq!(num(find(&host, "b"), "from"), 0.);
-    assert_eq!(num(find(&host, "c"), "from"), 0., "generated tools skip locked layers");
+    assert_eq!(
+        num(find(&host, "c"), "from"),
+        0.,
+        "generated tools skip locked layers"
+    );
     assert_eq!(channel(find(&host, "a"), "opacity"), 50.);
     assert_eq!(channel(find(&host, "c"), "opacity"), 100.);
 }
 
 #[test]
 fn transform_layers_aggregates_over_every_target_before_editing() {
-    let late = layer("b", "solid", "").replace(r#""position.x":{"v":100"#, r#""position.x":{"v":160"#);
+    let late =
+        layer("b", "solid", "").replace(r#""position.x":{"v":100"#, r#""position.x":{"v":160"#);
     let mut s = store(&[layer("a", "solid", ""), late]);
     apply(
         &mut s,
@@ -416,17 +494,31 @@ fn transform_layers_reports_main_refusals_and_changes_nothing() {
         s.execute(c, Origin::Interface).unwrap_err().to_string()
     };
     assert_eq!(
-        refused(&mut s, transform(r#"{"edits":[{"path":"layer.id","value":1}]}"#, "{}", &["a"])),
+        refused(
+            &mut s,
+            transform(r#"{"edits":[{"path":"layer.id","value":1}]}"#, "{}", &["a"])
+        ),
         "The generated transformation is invalid"
     );
     assert_eq!(
-        refused(&mut s, transform(r#"{"edits":[{"path":"layer.name","value":"x"}]}"#, "{}", &[])),
+        refused(
+            &mut s,
+            transform(
+                r#"{"edits":[{"path":"layer.name","value":"x"}]}"#,
+                "{}",
+                &[]
+            )
+        ),
         "Select at least one unlocked layer"
     );
     assert_eq!(
         refused(
             &mut s,
-            transform(r#"{"edits":[{"path":"layer.from","value":{"ref":"current"}}]}"#, "{}", &["a"])
+            transform(
+                r#"{"edits":[{"path":"layer.from","value":{"ref":"current"}}]}"#,
+                "{}",
+                &["a"]
+            )
         ),
         "This transformation would not change the selected source"
     );
@@ -457,7 +549,10 @@ fn animators_and_styles_append_and_remove_as_structured_content() {
     let host = host_layers(&s);
     let d = find(&host, "t").get("d").unwrap().clone();
     let list = d.get("animators").unwrap().as_array().unwrap();
-    assert_eq!((text(&list[0], "id"), text(&list[0], "name")), ("ta1", "Fade"));
+    assert_eq!(
+        (text(&list[0], "id"), text(&list[0], "name")),
+        ("ta1", "Fade")
+    );
     apply(
         &mut s,
         TextCommand::RemoveAnimator {
@@ -467,7 +562,16 @@ fn animators_and_styles_append_and_remove_as_structured_content() {
         .into(),
     );
     let host = host_layers(&s);
-    assert!(find(&host, "t").get("d").unwrap().get("animators").unwrap().as_array().unwrap().is_empty());
+    assert!(
+        find(&host, "t")
+            .get("d")
+            .unwrap()
+            .get("animators")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let e = s
         .execute(
             TextCommand::RemoveAnimator {
@@ -570,15 +674,31 @@ fn split_text_makes_grouped_pieces_beside_the_hidden_source() {
     let members: Vec<&Value> = host.iter().filter(|l| text(l, "group") == "G").collect();
     assert_eq!(members.len(), 3, "two words and the source");
     let source = find(&host, "t");
-    assert_eq!(source.get("on").and_then(|on| on.get("v")), Some(&Value::Bool(false)));
+    assert_eq!(
+        source.get("on").and_then(|on| on.get("v")),
+        Some(&Value::Bool(false))
+    );
     let first = members[0];
     let second = members[1];
-    assert_eq!(first.get("d").unwrap().get("text").and_then(Value::as_str), Some("Hi"));
-    assert_eq!(second.get("d").unwrap().get("text").and_then(Value::as_str), Some("yo"));
+    assert_eq!(
+        first.get("d").unwrap().get("text").and_then(Value::as_str),
+        Some("Hi")
+    );
+    assert_eq!(
+        second.get("d").unwrap().get("text").and_then(Value::as_str),
+        Some("yo")
+    );
     assert_eq!(text(first, "name"), "t · 1 · Hi");
     // "Hi " is 30 units wide; the second piece's anchor moves left by that.
-    assert_eq!(channel(first, "anchor.x") - channel(second, "anchor.x"), 30.);
-    assert_eq!(text(host.last().unwrap(), "id"), "under", "the stack below is untouched");
+    assert_eq!(
+        channel(first, "anchor.x") - channel(second, "anchor.x"),
+        30.
+    );
+    assert_eq!(
+        text(host.last().unwrap(), "id"),
+        "under",
+        "the stack below is untouched"
+    );
 }
 
 #[test]
