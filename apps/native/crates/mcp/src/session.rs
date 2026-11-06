@@ -78,6 +78,7 @@ impl McpSession {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
+        catalog::validate("project_memory", args)?;
         self.retire_replaced_document()?;
         let session = self
             .active
