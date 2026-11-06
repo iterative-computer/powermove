@@ -32,6 +32,7 @@ async-channel = "2"
 serde_json = "1"
 tempfile = "3"
 sha2 = "0.10"
+base64 = "0.22"
 
 pm-builtins = { path = "../builtins" }
 pm-agents = { path = "../agents" }

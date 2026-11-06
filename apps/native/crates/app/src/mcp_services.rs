@@ -293,52 +293,23 @@ fn first_png(directory: &Path) -> AnyResult<Vec<u8>> {
     )?)
 }
 fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16
-            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
-            | *chunk.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= chunk.len() {
-                text.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                text.push('=');
-            }
-        }
-    }
-    text
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 const IMPORT_LIMIT: u64 = 512 << 20;
-/// The kind main gives a file, and the type its bytes are served as.
-fn media_type(path: &Path) -> Option<(&'static str, &'static str)> {
+/// Import Media's kinds and types, plus the 3D models only agents import.
+fn media_type(path: &Path) -> Option<(&'static str, String)> {
+    if let Some(found) = pm_builtins::media_import::classify(path) {
+        return Some(found);
+    }
     let extension = path.extension()?.to_str()?.to_lowercase();
-    Some(match extension.as_str() {
-        "png" => ("image", "image/png"),
-        "jpg" | "jpeg" => ("image", "image/jpeg"),
-        "webp" => ("image", "image/webp"),
-        "gif" => ("image", "image/gif"),
-        "bmp" => ("image", "image/bmp"),
-        "tif" | "tiff" => ("image", "image/tiff"),
-        "heic" | "heif" => ("image", "image/heic"),
-        "avif" => ("image", "image/avif"),
-        "mp4" | "m4v" => ("video", "video/mp4"),
-        "mov" => ("video", "video/quicktime"),
-        "webm" => ("video", "video/webm"),
-        "mkv" => ("video", "video/x-matroska"),
-        "avi" => ("video", "video/x-msvideo"),
-        "mxf" => ("video", "application/mxf"),
-        "wav" => ("audio", "audio/wav"),
-        "mp3" => ("audio", "audio/mpeg"),
-        "m4a" | "aac" => ("audio", "audio/mp4"),
-        "flac" => ("audio", "audio/flac"),
-        "ogg" | "opus" => ("audio", "audio/ogg"),
-        "aif" | "aiff" => ("audio", "audio/aiff"),
-        "glb" => ("model", "model/gltf-binary"),
-        "gltf" => ("model", "model/gltf+json"),
-        "obj" => ("model", "model/obj"),
+    let mime = match extension.as_str() {
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
         _ => return None,
-    })
+    };
+    Some(("model", mime.into()))
 }
 /// Main's identity: stable across renames, sampled so it never reads a whole file.
 fn fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
@@ -416,7 +387,7 @@ impl MediaImporter for EngineJobs {
             .is_some_and(|probe| probe.streams.iter().any(|stream| stream.audio.is_some()));
         let archive = Archive::open(&self.profile).map_err(failed)?;
         let original = archive
-            .retain_path(path, mime, &AtomicBool::new(false))
+            .retain_path(path, &mime, &AtomicBool::new(false))
             .map_err(failed)?;
         let name = path
             .file_name()

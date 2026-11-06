@@ -4,14 +4,11 @@ Reference: main at `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. Merged from
 `feat/na-cloud-agents3` (`595434b97`) on 2026-11-05. Code is the truth; see
 [agents.md](agents.md) for the process and panel path.
 
-| Module | Row | State |
-|---|---|---|
-| `compatible`, `completion` | A01 | Address rules, presets, discovery and SSE parser. Real HTTP and Keychain hosts are open. |
-| `markdown` | A04 | Inert block and inline trees for replies. |
-| `media` | A04 | Rooted file grants, ranges and bound reads. |
-| `visual` | A05 | `publish_visual_reply` input and limits; viewer isolation is open. |
-| `session` | A09 | Owner/lease gate. `McpSession` retires replaced documents itself. |
-| `review` | A10 | Frozen settings and one-use repairs. No review orchestration caller yet. |
+None of that branch's modules remain. `compatible`, `completion`,
+`markdown`, `media`, `visual`, `session` and `review` were merged, then removed
+on 2026-11-06 because no production code called them. They stay in history at
+`595434b97` for the Compatible provider (A01), reply markdown and local media
+(A04), `publish_visual_reply` (A05), the session gate (A09) and review (A10).
 
 ## Not merged from that branch
 
@@ -28,8 +25,6 @@ Reference: main at `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`. Merged from
 
 ## Fixtures
 
-`fixtures/main/contracts.json` and `provider.json` come from executing main's
-source. Regenerate with `capture-main-contracts.cjs --check` and
-`capture-main-provider.cjs --check`; they need Node and TypeScript 5.9.3 in
-`work/oracle/node_modules`. The contract recorder was not re-run after its
-sections for superseded modules were filtered out.
+`fixtures/main/contracts.json` comes from executing main's source. Regenerate it
+with `capture-main-contracts.cjs --check`, which needs Node and TypeScript 5.9.3
+in `work/oracle/node_modules`. Only its Claude permission cases are still read.

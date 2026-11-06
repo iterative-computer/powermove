@@ -56,6 +56,11 @@ fn mime(path: &Path, kind: &str) -> String {
     }
 }
 
+/// The kind Import Media gives a file and the type its bytes are kept as.
+pub fn classify(path: &Path) -> Option<(&'static str, String)> {
+    kind(path).map(|kind| (kind, mime(path, kind)))
+}
+
 /// Folders expand to their media, recursively and in name order.
 pub fn expand(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out = vec![];
