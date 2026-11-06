@@ -239,6 +239,10 @@ pub struct DocumentStore {
     gesture: Option<Gesture>,
     state_token: u64,
     saved_token: u64,
+    /// Changes history cannot return from: direct writes, Undo that skipped a
+    /// stale operation. History position alone proves nothing past one.
+    outside_writes: u64,
+    saved_outside_writes: u64,
     metadata_token: u64,
     saved_metadata_token: u64,
     save_metadata_token: u64,
@@ -325,6 +329,8 @@ impl DocumentStore {
             gesture: None,
             state_token: token,
             saved_token: token,
+            outside_writes: 0,
+            saved_outside_writes: 0,
             metadata_token: 0,
             saved_metadata_token: 0,
             save_metadata_token: 0,
@@ -442,9 +448,10 @@ impl DocumentStore {
     ///
     /// Difference: the old app compared content fingerprints, so retyping a
     /// value back by hand also became clean; here only reaching the same
-    /// history state does (see `docs/gpui/core-api.md`).
+    /// history state does (see `docs/gpui/core-api.md`), and only with no
+    /// write outside history since that state was saved.
     pub fn is_dirty(&self) -> bool {
-        self.state_token != self.saved_token
+        self.state_token != self.saved_token || self.outside_writes != self.saved_outside_writes
     }
 
     /// Whether a save of this document is running.
@@ -720,30 +727,12 @@ impl DocumentStore {
         let record = self
             .history
             .peek_undo()
-            .ok_or(TransactionError::NothingToUndo)?
-            .clone();
-        if record.selection.is_some() {
-            self.kernel_undo()?;
-            return Ok(self.revision());
-        }
-        if !record.is_document() {
+            .ok_or(TransactionError::NothingToUndo)?;
+        if record.selection.is_none() && !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_history_ops(&record.inverse)?;
-        let revision = staged.document.revision();
-        self.publish(
-            staged.document,
-            staged.forward.into(),
-            ChangeCause::Undo {
-                label: record.label.clone(),
-            },
-        );
-        self.history.mark_undone();
-        self.history_owned = true;
-        self.tap(|_| Tap::Undo { external: false });
-        self.set_state_token(self.history.state_token());
-        self.emit(StoreEvent::HistoryChanged);
-        Ok(revision)
+        self.kernel_undo()?;
+        Ok(self.revision())
     }
 
     /// `PM.hist.redo()`.
@@ -754,30 +743,12 @@ impl DocumentStore {
         let record = self
             .history
             .peek_redo()
-            .ok_or(TransactionError::NothingToRedo)?
-            .clone();
-        if record.selection.is_some() {
-            self.kernel_redo()?;
-            return Ok(self.revision());
-        }
-        if !record.is_document() {
+            .ok_or(TransactionError::NothingToRedo)?;
+        if record.selection.is_none() && !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_history_ops(&record.forward)?;
-        let revision = staged.document.revision();
-        self.publish(
-            staged.document,
-            staged.forward.into(),
-            ChangeCause::Redo {
-                label: record.label.clone(),
-            },
-        );
-        self.history.mark_redone();
-        self.history_owned = true;
-        self.tap(|_| Tap::Redo { external: false });
-        self.set_state_token(self.history.state_token());
-        self.emit(StoreEvent::HistoryChanged);
-        Ok(revision)
+        self.kernel_redo()?;
+        Ok(self.revision())
     }
 
     /// A position to squash back to ([`DocumentStore::squash_since`]).
@@ -1082,8 +1053,10 @@ impl DocumentStore {
 
     /// Undo and Redo: applies what still matches. A write outside history can
     /// remove what an id-keyed operation names; that operation is skipped, as
-    /// a leaf patch without its parent is, and the entry stays usable. Only
-    /// what applied is published, so the journal replays the same result.
+    /// a leaf patch without its parent is, and the entry stays usable. The
+    /// result's `forward` is what applied, the only thing that may be
+    /// published: journal replay refuses an operation that does not apply.
+    /// `inverse` is filled only when something was skipped.
     fn stage_history_ops(&self, ops: &[Op]) -> Result<Staged, TransactionError> {
         match self.stage_ops(ops, false) {
             Err(TransactionError::Patch(_)) => {}
@@ -1092,24 +1065,48 @@ impl DocumentStore {
         let revision = self.revision() + 1;
         let mut root = self.current.root().cloned();
         let mut applied = Vec::with_capacity(ops.len());
+        let mut inverse = Vec::with_capacity(ops.len());
         let mut changed = false;
         for op in ops {
+            let (undo, _) = capture_inverse(root.as_ref(), op);
             if let Ok((next, did)) = apply_one(root.clone(), op, revision) {
                 root = next;
                 changed |= did;
                 applied.push(op.clone());
+                inverse.push(undo);
             }
         }
+        inverse.reverse();
         let document = Document::from_root(root, revision);
         validate(&document, &applied)?;
         Ok(Staged {
             media: vec![],
             document,
             forward: applied,
-            inverse: vec![],
+            inverse,
             scopes: vec![],
             changed,
         })
+    }
+
+    /// One Undo or Redo of a document entry: publishes what applied and
+    /// returns it with the operations reversing it (`reverse` when all did).
+    fn history_step(
+        &mut self,
+        ops: &Arc<[Op]>,
+        reverse: &Arc<[Op]>,
+        cause: ChangeCause,
+    ) -> Result<HistoryStep, TransactionError> {
+        let staged = self.stage_history_ops(ops)?;
+        let skipped = staged.forward.len() != ops.len();
+        let applied: Arc<[Op]> = staged.forward.into();
+        self.publish(staged.document, applied.clone(), cause);
+        if !skipped {
+            return Ok((applied, reverse.clone()));
+        }
+        // This position no longer names the document it recorded.
+        self.note_outside_write();
+        Ok((applied, staged.inverse.into()))
     }
 
     /// Stages raw operations (undo, redo, cancel, restore). `capture`
@@ -1272,6 +1269,14 @@ impl DocumentStore {
         }
     }
 
+    fn note_outside_write(&mut self) {
+        let was = self.is_dirty();
+        self.outside_writes += 1;
+        if !was {
+            self.emit(StoreEvent::DirtyChanged(true));
+        }
+    }
+
     // ── saving ─────────────────────────────────────────────────────────────
 
     /// Freezes the current revision for saving. Cheap (no serialization);
@@ -1421,6 +1426,7 @@ impl DocumentStore {
             revision: self.revision(),
             doc_id: self.doc_id,
             state_token: self.state_token,
+            outside_writes: self.outside_writes,
             document: self.current.clone(),
             had_comps: self.file.envelope.had_comps,
             history,
@@ -1469,6 +1475,7 @@ impl DocumentStore {
         }
         let was = self.is_dirty();
         self.saved_token = receipt.state_token;
+        self.saved_outside_writes = receipt.outside_writes;
         self.saved_metadata_token = self.save_metadata_token;
         let revision = receipt.revision;
         drop(receipt);
@@ -1495,15 +1502,8 @@ impl DocumentStore {
                 }
             } else {
                 for op in record.forward.iter().chain(record.inverse.iter()) {
-                    match op {
-                        Op::Leaf(p) => project_io::collect_patch_assets(p, &mut ids, &mut add_keys),
-                        // A deleted layer's value is what Undo would reinsert.
-                        Op::Insert { path, value, .. } => project_io::collect_patch_assets(
-                            &Patch::set(path.clone(), value.clone()),
-                            &mut ids,
-                            &mut add_keys,
-                        ),
-                        _ => {}
+                    if let Op::Leaf(p) = op {
+                        project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
                     }
                 }
             }
@@ -1518,9 +1518,13 @@ impl DocumentStore {
         }
         for record in self.history.records() {
             for op in record.forward.iter().chain(record.inverse.iter()) {
-                if let Op::Leaf(p) = op
-                    && let Some(value) = p.value.as_ref()
-                {
+                // A deleted layer's value is what Undo would reinsert.
+                let value = match op {
+                    Op::Leaf(p) => p.value.as_ref(),
+                    Op::Insert { value, .. } => Some(value),
+                    _ => None,
+                };
+                if let Some(value) = value {
                     crate::commands::scene3d::collect_original_assets(value, &mut ids);
                 }
             }
@@ -1538,6 +1542,9 @@ pub(crate) struct Applied {
     /// Where each operation's inverse was captured (forward order).
     pub scopes: Vec<Vec<PathPart>>,
 }
+
+/// The operations a history step applied, and those reversing them.
+type HistoryStep = (Arc<[Op]>, Arc<[Op]>);
 
 /// What a kernel undo/redo step did ([`DocumentStore::kernel_undo`]).
 #[derive(Clone, Debug)]
@@ -1731,6 +1738,11 @@ impl DocumentStore {
         self.history.take_retired()
     }
 
+    /// A write no history entry covers.
+    pub(crate) fn kernel_outside_write(&mut self) {
+        self.note_outside_write();
+    }
+
     pub(crate) fn kernel_state_token(&self) -> u64 {
         self.state_token
     }
@@ -1917,22 +1929,21 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_history_ops(&record.inverse)?;
-        self.publish(
-            staged.document,
-            record.inverse.clone(),
+        let (ops, reverse) = self.history_step(
+            &record.inverse,
+            &record.forward,
             ChangeCause::Undo {
                 label: record.label.clone(),
             },
-        );
+        )?;
         self.history.mark_undone();
         self.history_owned = true;
         self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            ops: record.inverse.clone(),
-            reverse: record.forward.clone(),
+            ops,
+            reverse,
             label: record.label,
         })
     }
@@ -1962,22 +1973,21 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_history_ops(&record.forward)?;
-        self.publish(
-            staged.document,
-            record.forward.clone(),
+        let (ops, reverse) = self.history_step(
+            &record.forward,
+            &record.inverse,
             ChangeCause::Redo {
                 label: record.label.clone(),
             },
-        );
+        )?;
         self.history.mark_redone();
         self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            ops: record.forward.clone(),
-            reverse: record.inverse.clone(),
+            ops,
+            reverse,
             label: record.label,
         })
     }
@@ -2002,6 +2012,7 @@ impl DocumentStore {
     }
     pub(crate) fn mark_library_saved(&mut self) {
         self.saved_token = self.state_token;
+        self.saved_outside_writes = self.outside_writes;
         self.saved_metadata_token = self.metadata_token;
         self.emit(StoreEvent::Saved {
             revision: self.revision(),

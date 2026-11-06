@@ -1051,6 +1051,8 @@ impl Project {
                 &before,
                 applied.scopes,
             );
+        } else {
+            self.store.kernel_outside_write();
         }
         Ok((true, None))
     }

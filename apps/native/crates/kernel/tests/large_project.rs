@@ -3,7 +3,9 @@
 mod common;
 use common::TempDir;
 use pm_kernel::journal::{Recovery, sessions};
+use pm_kernel::session::*;
 use pm_kernel::*;
+use pm_model::container::{ReadOptions, read_container};
 use pm_model::json::{parse, to_canonical_string};
 use pm_model::ops::Op;
 use pm_model::patch::{Patch, PathPart};
@@ -17,7 +19,9 @@ fn target_bytes() -> usize {
         .and_then(|bytes| bytes.parse().ok())
         .unwrap_or(8 << 20)
 }
-/// What one edit may cost, in history and in the journal, on any project size.
+/// What one edit may cost, in history and in the journal, once a member passes
+/// the whole-value limit. Under 1 MiB an entry keeps the form shipped readers
+/// load, so it can cost up to that limit.
 const EDIT_BYTES: usize = 32 << 10;
 
 fn project() -> Value {
@@ -103,11 +107,32 @@ fn kernel() -> Kernel {
 fn store(kernel: &Kernel) -> &DocumentStore {
     kernel.project("big").unwrap().store()
 }
+fn open_file(kernel: &mut Kernel, path: &std::path::Path) -> SessionHandle {
+    match kernel
+        .shell(ShellCall::Open {
+            id: "big".into(),
+            source: SessionSource::File(path.into()),
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    }
+}
 
 #[test]
-fn an_edit_costs_what_it_changed_on_any_project_size_and_saves_and_reopens() {
+fn an_edit_on_a_large_project_costs_what_it_changed_and_its_history_survives_the_file() {
     let dir = TempDir::new("large-project");
-    let mut kernel = kernel();
+    let source = dir.path("source.pmv");
+    let mut untitled = DocumentStore::new_untitled(project());
+    common::save_as(&mut untitled, &source).unwrap();
+    drop(untitled);
+    let mut kernel = Kernel::new(KernelConfig {
+        journal_root: Some(dir.path("journals")),
+        ..Default::default()
+    });
+    let session = open_file(&mut kernel, &source);
     call(&mut kernel, commands("Add", vec![add_layer("new-a")]));
     let cost = |k: &Kernel| store(k).history().records().last().unwrap().bytes;
     assert!(
@@ -142,15 +167,31 @@ fn an_edit_costs_what_it_changed_on_any_project_size_and_saves_and_reopens() {
         "no edit trimmed the others"
     );
 
-    // Undo works from operations, and they survive a save and reopen.
+    // Undo works from operations, and they survive the file itself.
     let path = dir.path("big.pmv");
-    let saved = store(&kernel).snapshot();
-    let mut file = DocumentStore::new_untitled(saved.document.to_value().unwrap());
-    let history = store(&kernel).history().snapshot().to_saved();
-    common::save_as(&mut file, &path).unwrap();
-    let mut with_history = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
-    with_history.history = Some(History::import(&history, Some("main")).unwrap());
-    let mut reopened = DocumentStore::open(with_history);
+    let plan = kernel
+        .prepare_session_save(session, Some(path.clone()), false)
+        .unwrap();
+    kernel.finish_session_save(plan.run()).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let container = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        container
+            .document
+            .get("requiresEngine")
+            .and_then(Value::as_str),
+        Some("native"),
+        "a reader that drops operation history cannot represent this file"
+    );
+    let opened = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+    assert!(opened.history.is_some(), "the file carries its history");
+    let mut reopened = DocumentStore::open(opened);
     let ids = layer_ids(&reopened);
     assert!(ids.contains(&"new-b".to_owned()));
     reopened.undo().unwrap();
@@ -181,6 +222,164 @@ fn undo_skips_what_a_write_outside_history_removed_and_stays_usable() {
     );
     call(&mut kernel, HistoryCall::Redo);
     assert!(layer_ids(store(&kernel)).contains(&"gone".to_owned()));
+}
+
+#[test]
+fn undo_over_a_stale_operation_recovers_after_a_crash() {
+    let dir = TempDir::new("stale-undo");
+    let root = dir.path("journals");
+    let mut kernel = Kernel::new(KernelConfig {
+        journal_root: Some(root.clone()),
+        ..Default::default()
+    });
+    kernel.open("big", OpenSource::Untitled(project())).unwrap();
+    call(&mut kernel, commands("Add", vec![add_layer("gone")]));
+    call(&mut kernel, commands("Add", vec![add_layer("kept")]));
+    let stale = store(&kernel).history().records()[0].inverse.to_vec();
+    call(&mut kernel, Call::DirectWrite { ops: stale });
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, HistoryCall::Redo);
+    call(&mut kernel, HistoryCall::Undo);
+    kernel.durability_barrier().unwrap();
+    let expected = store(&kernel).root().unwrap().to_value();
+    drop(kernel);
+    let recovered = match pm_kernel::journal::recover(&root.join("big"), None, None) {
+        Recovery::Recovered(recovered) => recovered,
+        _ => panic!("a skipped operation must not poison the journal"),
+    };
+    let document = recovered.document.root().unwrap().to_value();
+    assert!(to_canonical_string(&document) == to_canonical_string(&expected));
+}
+
+#[test]
+fn undo_folded_into_an_open_entry_records_only_what_applied() {
+    let mut kernel = kernel();
+    call(&mut kernel, commands("Add", vec![add_layer("gone")]));
+    let stale = store(&kernel).history().records()[0].inverse.to_vec();
+    call(&mut kernel, Call::DirectWrite { ops: stale });
+    call(
+        &mut kernel,
+        HistoryCall::Begin {
+            label: "Run".into(),
+        },
+    );
+    call(&mut kernel, HistoryCall::Undo);
+    call(&mut kernel, HistoryCall::Commit { label: None });
+    // Nothing applied, so the entry has nothing to reverse into.
+    call(&mut kernel, commands("Add", vec![add_layer("next")]));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(!layer_ids(store(&kernel)).contains(&"gone".to_owned()));
+}
+
+#[test]
+fn undo_keeps_the_originals_of_a_layer_it_would_reinsert() {
+    let mut kernel = kernel();
+    let path = layers_path();
+    let layer = parse(
+        r#"{"id":"model","type":"shape","name":"M","from":0,"dur":1,"on":true,"p":{},"native3dSources":[{"id":"original-a"}]}"#,
+    )
+    .unwrap();
+    let insert = Op::Insert {
+        path: path.clone(),
+        index: 0,
+        value: layer,
+    };
+    let delete = Op::Delete {
+        path,
+        id: "model".into(),
+    };
+    let transact = |ops| Call::Transact {
+        label: Some("Edit".into()),
+        body: WriteBody::Ops(ops),
+        expected_revision: None,
+    };
+    call(&mut kernel, transact(vec![insert]));
+    call(&mut kernel, HistoryCall::Clear);
+    call(&mut kernel, transact(vec![delete]));
+    assert!(!layer_ids(store(&kernel)).contains(&"model".to_owned()));
+    assert!(store(&kernel).reachable_assets().contains("original-a"));
+}
+
+#[test]
+fn a_write_outside_history_stays_unsaved_until_a_save_covers_it() {
+    let dir = TempDir::new("dirty");
+    let source = dir.path("source.pmv");
+    let mut untitled = DocumentStore::new_untitled(project());
+    common::save_as(&mut untitled, &source).unwrap();
+    drop(untitled);
+    let mut kernel = Kernel::new(KernelConfig {
+        journal_root: Some(dir.path("journals")),
+        ..Default::default()
+    });
+    let session = open_file(&mut kernel, &source);
+    let save = |k: &mut Kernel| {
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        k.finish_session_save(plan.run()).unwrap();
+    };
+    let dirty = |k: &Kernel| store(k).is_dirty();
+    call(&mut kernel, commands("Add", vec![add_layer("saved")]));
+    save(&mut kernel);
+    assert!(!dirty(&kernel));
+
+    // Edit and Undo alone come back clean, by position.
+    call(&mut kernel, commands("Add", vec![add_layer("edit")]));
+    assert!(dirty(&kernel));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(!dirty(&kernel));
+    call(&mut kernel, HistoryCall::Redo);
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(!dirty(&kernel));
+
+    // A direct write at the saved position does not.
+    let direct = |at: &str| Call::DirectWrite {
+        ops: vec![Op::Leaf(Patch::set(
+            vec![PathPart::Key("name".into())],
+            Value::from(at),
+        ))],
+    };
+    call(&mut kernel, direct("Direct"));
+    call(&mut kernel, commands("Add", vec![add_layer("after")]));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(dirty(&kernel), "the direct write is not in the file");
+    save(&mut kernel);
+    assert!(!dirty(&kernel));
+    call(&mut kernel, HistoryCall::Redo);
+    assert!(dirty(&kernel));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(!dirty(&kernel), "the save covers it now");
+
+    // A direct write while a save runs is not covered by that save.
+    let plan = kernel
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    call(&mut kernel, direct("During"));
+    kernel.finish_session_save(plan.run()).unwrap();
+    assert!(dirty(&kernel));
+    call(&mut kernel, commands("Add", vec![add_layer("later")]));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(dirty(&kernel));
+
+    // Undo that skipped an operation is not the position it lands on.
+    save(&mut kernel);
+    call(&mut kernel, commands("Add", vec![add_layer("stale")]));
+    let stale = store(&kernel)
+        .history()
+        .records()
+        .last()
+        .unwrap()
+        .inverse
+        .to_vec();
+    save(&mut kernel);
+    call(&mut kernel, Call::DirectWrite { ops: stale });
+    save(&mut kernel);
+    assert!(!dirty(&kernel));
+    call(&mut kernel, HistoryCall::Undo);
+    assert!(dirty(&kernel));
+    call(&mut kernel, HistoryCall::Redo);
+    assert!(dirty(&kernel), "Redo re-added a layer the save had not");
 }
 
 #[test]

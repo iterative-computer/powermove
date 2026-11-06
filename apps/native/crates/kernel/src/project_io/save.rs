@@ -164,6 +164,7 @@ pub struct SavePlan {
     /// Identity of the document session (guards `finish_save`).
     pub doc_id: u64,
     pub(crate) state_token: u64,
+    pub(crate) outside_writes: u64,
     pub(crate) document: Arc<Document>,
     pub(crate) had_comps: bool,
     pub(crate) history: HistoryToWrite,
@@ -217,6 +218,7 @@ pub struct SaveReceipt {
     pub revision: u64,
     pub doc_id: u64,
     pub(crate) state_token: u64,
+    pub(crate) outside_writes: u64,
     pub size: u64,
     pub layout: SaveLayout,
     /// SHA-256 of the whole file.
@@ -890,6 +892,7 @@ impl SavePlan {
             revision: self.revision,
             doc_id: self.doc_id,
             state_token: self.state_token,
+            outside_writes: self.outside_writes,
             size,
             layout,
             file_hash,

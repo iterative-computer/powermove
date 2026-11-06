@@ -208,13 +208,28 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
         return true;
     };
     let source = saved.get("history").unwrap_or(saved);
-    if source
-        .get("entries")
-        .and_then(Value::as_array)
-        .is_some_and(|entries| entries.len() != history.records().len())
-    {
+    let entries = source.get("entries").and_then(Value::as_array);
+    if entries.is_some_and(|entries| entries.len() != history.records().len()) {
         // Import can trim history to its budget. A partial inventory is not a
         // proof of legacy readability, including for raw preserved dictionaries.
+        return true;
+    }
+    // Large edits save as id-keyed operations. The shipped reader's
+    // `validPatches` refuses them, dropping the file's whole history.
+    let holds_operations = |entry: &Value| {
+        ["forward", "backward"].iter().any(|side| {
+            entry
+                .get(side)
+                .and_then(Value::as_array)
+                .is_some_and(|ops| {
+                    ops.iter().any(|op| {
+                        let op = op.get("patch").unwrap_or(op);
+                        op.get("op").and_then(Value::as_str).is_some()
+                    })
+                })
+        })
+    };
+    if entries.is_some_and(|entries| entries.iter().any(holds_operations)) {
         return true;
     }
     // Reconstruct each reachable state, not isolated patch values: a leaf
