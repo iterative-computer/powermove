@@ -128,11 +128,12 @@ impl Controller {
         let document = published.snapshot.doc_id;
         let profile = self.profile.clone();
         cx.spawn(async move |this, cx| {
-            let _operation = operation;
             let result = cx
                 .background_executor()
                 .spawn(async move { runtime.import_media(document, &profile, request, &cancel) })
                 .await;
+            // The next batch takes this fence itself.
+            drop(operation);
             let _ = this.update(cx, |v, cx| {
                 v.importing = None;
                 v.message = match result {
