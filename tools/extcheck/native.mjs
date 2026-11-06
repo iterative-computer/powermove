@@ -3,12 +3,23 @@ import { readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { referenceRevision } from "./references.mjs";
-import { CLOCK_FIXTURE } from "./clock-source.mjs";
+import { CLOCK_FIXTURE, CLOCK_START } from "./clock-source.mjs";
 import { fileURLToPath } from "node:url";
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString());
 const out = request.output;
+const header = (request, manifest) => ({
+  scenario: request.case,
+  synthetic: true,
+  role: request.case.startsWith("store-") ? "store" : "trusted",
+  apiVersions: [manifest.apiVersion ?? 1],
+  driver: "extcheck-native",
+  input: "scripted-interactions",
+  eventScope: "synchronous-calls",
+  input_sha256: request.input_sha256,
+  script_sha256: request.script_sha256,
+});
 const status = {
   status: "blocked",
   reason: "native-extension-compile-failed",
@@ -58,10 +69,21 @@ try {
           initial: JSON.parse(
             await readFile(path.join(out, "initial.json"), "utf8"),
           ),
-          expressions: ["__extcheck.dispose()"],
+          driver: request.trace_only ? path.join(out, "trace.js") : undefined,
+          expressions: request.trace_only
+            ? [
+                `__extcheckDriver.start(${JSON.stringify(header(request, manifest))},${CLOCK_START})`,
+                ...request.script.steps.map(
+                  (step, index) =>
+                    `__extcheckDriver.step(${index},${JSON.stringify(step)})`,
+                ),
+                "__extcheckDriver.finish()",
+              ]
+            : ["__extcheck.dispose()"],
         }),
         encoding: "utf8",
         timeout: 60000,
+        maxBuffer: 256 * 1024 * 1024,
       }),
     );
     await writeFile(path.join(out, "probe.json"), JSON.stringify(reply));
@@ -70,6 +92,19 @@ try {
     status.reason = reply.activation.ok
       ? "native-webkit-script-adapter-unavailable"
       : "native-activation-needs-backend";
+    if (request.trace_only && reply.activation.ok) {
+      const { trace, interactions } = reply.results.at(-1);
+      status.boot_clock = reply.results[0];
+      await writeFile(path.join(out, "trace.jsonl"), trace);
+      await writeFile(
+        path.join(out, "interactions.json"),
+        JSON.stringify(interactions),
+      );
+      // Trace-only: logic ran natively, but no panel or canvas was on screen.
+      status.path = { logic: "runtime-v8" };
+      status.status = "captured";
+      delete status.reason;
+    }
   }
 } catch (error) {
   const diagnostic = String(error.stderr ?? error.message ?? "");

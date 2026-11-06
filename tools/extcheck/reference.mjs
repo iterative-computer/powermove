@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { prepareReferenceExtension } from "./reference-profile.mjs";
 import { admitFixtureWorkspace } from "./fixture-aliases.mjs";
 import { referenceRevision } from "./references.mjs";
-import { CLOCK_FIXTURE } from "./clock-source.mjs";
+import { CLOCK_FIXTURE, CLOCK_START } from "./clock-source.mjs";
 import { withBootClock } from "./startup-clock.mjs";
 
 delete process.env.ELECTRON_RUN_AS_NODE;
@@ -153,6 +153,10 @@ try {
     throw Error("Extension not active on frozen reference");
   }
   status.reason = "reference-capture-failed";
+  status.boot_clock = await session.page.evaluate(
+    (start) => window.__extcheckClock.align(start),
+    CLOCK_START,
+  );
   await session.page.evaluate(
     ({ request, revision, fingerprint, apiVersion }) => {
       const PM = window.PM;
@@ -189,9 +193,6 @@ try {
     },
   );
   await session.page.evaluate(admitFixtureWorkspace);
-  await session.page.evaluate(() =>
-    window.__PMTrace.point("driver.clock", window.__extcheckClock.snapshot()),
-  );
   const interactions = [];
   for (let index = 0; index < request.script.steps.length; index++) {
     const step = request.script.steps[index];

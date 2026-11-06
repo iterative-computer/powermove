@@ -29,6 +29,9 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
         .transpose()?
         .unwrap_or_default();
     let runner = CompatRunner::with_prelude(&bundle, &initial, &prelude)?;
+    if let Some(driver) = input["driver"].as_str() {
+        runner.eval(&fs::read_to_string(driver)?)?;
+    }
     let activation = runner.activate(&input["manifest"], &module)?;
     let mut results = vec![];
     if activation["ok"] == true {

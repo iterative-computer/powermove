@@ -178,6 +178,7 @@ impl KernelAdapter {
             "history.canUndo" => Some(json!(p.store().history().can_undo())),
             "history.canRedo" => Some(json!(p.store().history().can_redo())),
             "history.label" => Some(json!(p.store().history().undo_label())),
+            "history.traceState" => Some(json!({"depth":0,"index":-1,"pending":null,"entries":[],"totalBytes":0})),
             "workspace.prepare" | "document.touch" => Some(Value::Null),
             "edit.admitMutation" => Some(
                 json!({"ok":!p.source_edit_live(),"message":if p.source_edit_live(){"A source edit is already active"}else{""}}),

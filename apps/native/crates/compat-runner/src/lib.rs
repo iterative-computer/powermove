@@ -89,8 +89,13 @@ impl CompatRunner {
         }
         // The reference deactivates before importing a replacement module.
         self.json("__extcheck.dispose()")?;
-        self.eval(module)?;
-        self.json(&format!("__extcheck.activate({manifest}, ExtCheckModule)"))
+        // Function scope: the driver's reload re-evaluates the same module bytes.
+        self.eval(&format!(
+            "__extcheck.loadModule=function(){{{module}\n;return ExtCheckModule}}"
+        ))?;
+        self.json(&format!(
+            "__extcheck.activate({manifest}, __extcheck.loadModule())"
+        ))
     }
     pub fn json(&self, expression: &str) -> Result<Value> {
         let result = self.eval(&format!(

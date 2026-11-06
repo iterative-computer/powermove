@@ -224,6 +224,16 @@ await writeFile(
   path.join(output!, "store.js"),
   await storeBundle.outputs[0]!.text(),
 );
+const driver = await Bun.build({
+  entrypoints: [path.resolve(import.meta.dir, "native-trace.ts")],
+  target: "browser",
+  format: "iife",
+});
+if (!driver.success) throw Error("Native trace driver build failed");
+await writeFile(
+  path.join(output!, "trace.js"),
+  await driver.outputs[0]!.text(),
+);
 const page = await Bun.build({
   entrypoints: [
     path.resolve(

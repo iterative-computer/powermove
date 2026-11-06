@@ -165,8 +165,26 @@ globalThis.__extcheck = {
       );
     return true;
   },
+  active() {
+    return !!this.extension;
+  },
+  async reload() {
+    await null;
+    return this.activate(this.manifest, this.loadModule());
+  },
+  async disable() {
+    await null;
+    return this.dispose();
+  },
+  driverAPI() {
+    return (this.driver ??= this.realm.extension(
+      "synthetic-extcheck-driver",
+      3,
+    ).api);
+  },
   async activate(manifest, module) {
     if (this.extension) this.dispose();
+    this.manifest = manifest;
     const handle = this.realm.extension(manifest.id, manifest.apiVersion ?? 1, {
       manifest,
     });
