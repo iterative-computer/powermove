@@ -148,7 +148,7 @@ pub(crate) unsafe extern "C" fn check_external(mut raw: v8::UnsafeRawIsolatePtr,
         }
     }
 }
-fn throw(s: &mut v8::PinScope, msg: &str) {
+pub(crate) fn throw(s: &mut v8::PinScope, msg: &str) {
     let msg = v8::String::new(s, msg).unwrap();
     let error = v8::Exception::type_error(s, msg);
     s.throw_exception(error);
@@ -523,6 +523,7 @@ impl Vm {
             sync_calls: 0,
         }));
         isolate.set_slot(Native(native_state.clone()));
+        crate::modules::install(&mut isolate);
         let (context, retire_function) = {
             v8::scope!(let s,&mut isolate);
             let context = v8::Context::new(s, Default::default());
@@ -531,7 +532,17 @@ impl Vm {
                 ("__host", v8::Function::new(cs, native).unwrap()),
                 ("__now", v8::Function::new(cs, now).unwrap()),
                 ("__clone", v8::Function::new(cs, clone_value).unwrap()),
+                (
+                    "__linkModules",
+                    v8::Function::new(cs, crate::modules::link).unwrap(),
+                ),
             ] {
+                // Confined Store realms and the compiler never load module graphs.
+                if name == "__linkModules"
+                    && matches!(kind, SnapshotKind::Store | SnapshotKind::Compiler)
+                {
+                    continue;
+                }
                 let key = v8::String::new(cs, name).unwrap();
                 context.global(cs).set(cs, key.into(), function.into());
             }
@@ -785,6 +796,7 @@ impl Drop for Vm {
             let mut guard = isolate.lock();
             drop(self.retire_function.take());
             drop(self.context.take());
+            crate::modules::clear(&mut guard);
             guard.remove_near_heap_limit_callback(near_limit, 0);
         }
         drop(self.isolate.take());

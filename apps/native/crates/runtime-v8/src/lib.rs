@@ -6,6 +6,7 @@ mod store;
 pub use compiler::*;
 pub use store::*;
 mod host;
+mod modules;
 mod runtime;
 mod vm;
 pub use cache::{CacheKey, CodeCache, SnapshotKind};
