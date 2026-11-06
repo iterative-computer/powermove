@@ -372,16 +372,11 @@ impl Controller {
                     let p = v.published.clone()?;
                     let asset_id = pm_kernel::new_id("lut");
                     match lut_commands(&p, &layer, &asset_id, &name, &retained) {
-                        Ok(commands) => {
-                            v.media.originals.insert(asset_id, retained);
-                            if let Some(viewer) = &v.viewer {
-                                viewer.media(v.media.clone()).ok();
-                            }
-                            Some(
-                                v.kernel
-                                    .call(&p.project, transact(&p, "Apply LUT", commands)),
-                            )
-                        }
+                        // The media refresh resolves the new asset's sourcePath.
+                        Ok(commands) => Some(
+                            v.kernel
+                                .call(&p.project, transact(&p, "Apply LUT", commands)),
+                        ),
                         Err(message) => {
                             v.message = message;
                             cx.notify();
