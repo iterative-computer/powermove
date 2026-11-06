@@ -1,5 +1,5 @@
 // Runs in the actual Compat V8 owner. Missing app capabilities are errors, never test doubles.
-globalThis.__extcheck = {
+globalThis.__compat = {
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
     const unavailable = (operation, input) => call(operation, input);
@@ -11,6 +11,8 @@ globalThis.__extcheck = {
       reportError: (report) => {
         const error = report?.error ?? report;
         this.errors.push({ name: error?.name, message: error?.message });
+        if (report?.extensionId)
+          this.loader?.reportRuntimeError(report.extensionId, error);
       },
       pinGeneration: (handle) => unavailable("kernel.pin", { handle }),
       unpinGeneration: (handle) => unavailable("kernel.unpin", { handle }),
@@ -31,7 +33,7 @@ globalThis.__extcheck = {
     );
     this.dom = PowermoveCompat.RemoteDOM
       ? new PowermoveCompat.RemoteDOM({
-          session: { panel: "extcheck", generation: 1 },
+          session: { panel: "compat", generation: 1 },
           realmGlobal: globalThis,
           send: (batch) => call("dom.batch", { batch }),
           requestAnimationFrame: globalThis.__extcheckClock
@@ -62,7 +64,12 @@ globalThis.__extcheck = {
         ),
       ),
       PM: {
-        invalidate: () => {
+        invalidate: (what = "all") => {
+          if (what === "all" || what === "render")
+            this.realm.PM.bus.emit("draw");
+          if (what === "all") dirty.add("ui").add("timeline");
+          else if (what !== "render") dirty.add(what);
+          scheduleDirty();
           this.controls?.sync();
           this.dom?.flush();
           call("presentation.invalidate");
@@ -75,13 +82,31 @@ globalThis.__extcheck = {
         },
       },
     };
+    // Rendering demand is immediate; UI and timeline notices coalesce on one frame.
+    const dirty = new Set();
+    let dirtyFrame = 0;
+    const scheduleDirty = () => {
+      if (dirtyFrame) return;
+      const flush = () => {
+        dirtyFrame = 0;
+        const notices = new Set(dirty);
+        dirty.clear();
+        for (const name of ["timeline", "ui", "status"])
+          if (notices.has(name)) this.realm.PM.bus.emit("draw:" + name);
+      };
+      dirtyFrame =
+        typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame(flush)
+          : setTimeout(flush, 16);
+    };
     this.realm = new PowermoveCompat.CompatRealm({
-      id: "extcheck",
+      id: "compat",
       generation: 1,
       initial,
       host,
       recorder,
       dom: this.dom,
+      installLegacy: PowermoveCompat.installLegacyRuntime,
       runtimeModules: PowermoveCompat.runtimeModules,
       capabilities,
     });
@@ -156,6 +181,14 @@ globalThis.__extcheck = {
     __installNativeCanvas(this);
     if (globalThis.__extcheckClock)
       globalThis.__extcheckClock.task = (fn) => this.realm.task(fn);
+    this.loader = PowermoveCompat.createLoader({
+      realm: this.realm,
+      link: (graph) => __linkModules(graph),
+      report: (id, health) => call("extension.health", { id, health }),
+      toast: (text, options) => call("ui.toast", { text, options }),
+      document: this.dom?.document,
+    });
+    this.realm.PM.Kernel.loader = this.loader;
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(
         this.realm,
@@ -165,68 +198,19 @@ globalThis.__extcheck = {
       );
     return true;
   },
-  active() {
-    return !!this.extension;
-  },
-  async reload() {
-    await null;
-    return this.activate(this.manifest, this.loadModule());
-  },
-  async disable() {
-    await null;
-    return this.dispose();
+  /** One enabled extension, activated through the production loader. */
+  async install(record) {
+    const known = this.loader.records().filter((r) => r.id !== record.id);
+    await this.loader.update([...known, record], [record.id], "install");
+    const health = this.loader.records().find((r) => r.id === record.id).health;
+    return health.state === "ok"
+      ? { ok: true }
+      : { ok: false, error: { message: health.error } };
   },
   driverAPI() {
     return (this.driver ??= this.realm.extension(
       "synthetic-extcheck-driver",
       3,
     ).api);
-  },
-  async activate(manifest, module) {
-    if (this.extension) this.dispose();
-    this.manifest = manifest;
-    const handle = this.realm.extension(manifest.id, manifest.apiVersion ?? 1, {
-      manifest,
-    });
-    this.extension = handle;
-    this.errors.length = 0;
-    try {
-      const activate = module.default;
-      if (typeof activate !== "function")
-        throw Error("Missing activation export");
-      handle.setActivating(true);
-      if (module.__powermoveAcquireStyles)
-        handle.api.onDispose(
-          module.__powermoveAcquireStyles((css) => {
-            if (!this.dom) throw Error("Remote DOM is not attached");
-            const style = this.dom.document.createElement("style");
-            style.textContent = css;
-            this.dom.document.head.append(style);
-            handle.api.onDispose(() => style.remove());
-          }),
-        );
-      const cleanup = await this.realm.task(() => activate(handle.api));
-      if (typeof cleanup === "function") handle.api.onDispose(cleanup);
-      else if (typeof cleanup?.dispose === "function")
-        handle.api.onDispose(() => cleanup.dispose());
-      this.realm.flush();
-      if (this.errors.length) throw Error("Activation reported runtime errors");
-      return { ok: true };
-    } catch (error) {
-      handle.dispose();
-      this.extension = null;
-      return {
-        ok: false,
-        error: { name: error?.name, message: error?.message },
-        reports: this.errors.slice(),
-      };
-    } finally {
-      handle.setActivating(false);
-    }
-  },
-  dispose() {
-    this.extension?.dispose();
-    this.extension = null;
-    return true;
   },
 };

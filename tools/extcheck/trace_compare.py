@@ -15,6 +15,38 @@ DEFAULT_SCRIPT = {"version": 1, "complete": False, "steps": [
 TRACE_STEPS = ("reload", "dispose", "seek", "panel", "command", "advance")
 
 
+def unordered(value, ids):
+    """Key order and the object ids it numbers removed. The kernel keeps JSON objects
+    sorted, so this tier separates that one known difference from real behavior."""
+    if isinstance(value, list):
+        return [unordered(item, ids) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for key in sorted(value):
+        item = value[key]
+        if key in ("$id", "$ref") and isinstance(item, str):
+            out[key] = ids.setdefault(item, f"o{len(ids)+1}")
+        else:
+            out[key] = unordered(item, ids)
+    return out
+
+
+def behavior_diffs(left, right):
+    a = run.validate_trace((left/"trace.jsonl").read_text())
+    b = run.validate_trace((right/"trace.jsonl").read_text())
+    ids_a, ids_b, context, out = {}, {}, "lifecycle", []
+    for index in range(1, max(len(a), len(b))):
+        x, y = (a[index] if index < len(a) else None), (b[index] if index < len(b) else None)
+        for row in (x, y):
+            if row and row.get("type") == "call":
+                context = run.family(row.get("name", ""))
+        if run.exact(unordered(x, ids_a)) != run.exact(unordered(y, ids_b)):
+            out.append({"row": index, "family": context,
+                        "type": (x or y).get("type"), "name": (x or y).get("name")})
+    return out
+
+
 def check_script(script):
     if script.get("version") != 1 or not script.get("steps") or any(
             step.get("op") not in TRACE_STEPS for step in script["steps"]):
@@ -47,7 +79,7 @@ def compare_case(args, source, case, input_path, sha, native, reference, script,
     right = record(native, request, "native", root, args.repeat, args.timeout)
     if run.tree_digest(input_path) != sha:
         raise run.Blocked("input-mutated")
-    return run.compare(left, right, script)
+    return run.compare(left, right, script), behavior_diffs(left, right)
 
 
 def main():
@@ -92,12 +124,14 @@ def main():
                     sha = run.copy_extension(path, root/"input")
                     script = run.load_trace_script(args.scripts, case, DEFAULT_SCRIPT)
                     check_script(script)
-                    diffs = compare_case(args, source, case, root/"input", sha, native, reference, script)
-                    if diffs:
+                    exact, behavior = compare_case(args, source, case, root/"input", sha, native, reference, script)
+                    if behavior:
                         counts["trace_mismatch"] += 1
-                        summary.setdefault("rows", {})[case] = len(diffs)
-                        for name, count in Counter(row["family"] for row in diffs).items():
+                        summary.setdefault("rows", {})[case] = {"exact": len(exact), "behavior": len(behavior)}
+                        for name, count in Counter(row["family"] for row in behavior).items():
                             families[name] += count
+                    elif exact:
+                        counts["trace_match_unordered"] += 1
                     else:
                         counts["trace_match"] += 1
                 except run.Blocked as error:

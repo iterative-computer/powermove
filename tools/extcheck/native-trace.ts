@@ -17,7 +17,7 @@ const call = <T>(name: string, args: unknown[], fn: () => T): T => {
   }
 };
 const point = (type: string, data?: unknown) => recorder?.point(type, data);
-const history = () => root.__extcheck.realm.channel.call("history.traceState");
+const history = () => root.__compat.realm.channel.call("history.traceState");
 
 function instrument(realm: any) {
   const PM = realm.PM;
@@ -72,9 +72,10 @@ function instrument(realm: any) {
 const interactions: unknown[] = [];
 let instrumented = false;
 root.__extcheckDriver = {
-  start(metadata: Row, clockStart: number) {
+  start(metadata: Row, clockStart: number, id: string) {
+    root.__compatDriverId = id;
     const boot = root.__extcheckClock.align(clockStart);
-    const realm = root.__extcheck.realm;
+    const realm = root.__compat.realm;
     if (!instrumented) instrument(realm);
     instrumented = true;
     const PM = realm.PM;
@@ -106,27 +107,29 @@ root.__extcheckDriver = {
     return boot;
   },
   async step(index: number, step: any) {
-    const realm = root.__extcheck.realm;
+    const realm = root.__compat.realm;
     const PM = realm.PM;
-    const id = root.__extcheck.manifest.id;
+    const id = root.__compatDriverId;
+    const loader = PM.Kernel.loader;
     point("driver.step", { index, step });
     let result: unknown = null;
     if (step.op === "reload") {
-      await call("lifecycle.reload", [id], () => root.__extcheck.reload());
-      result = { active: root.__extcheck.active() };
+      await call("lifecycle.reload", [id], () => loader.reload(id));
+      result = { active: loader.activeIds().includes(id) };
     } else if (step.op === "dispose") {
-      await call("lifecycle.dispose", [id], () => root.__extcheck.disable());
-      result = { active: root.__extcheck.active() };
+      await call("lifecycle.dispose", [id], () => loader.disable(id));
+      await loader.whenIdle();
+      result = { active: loader.activeIds().includes(id) };
     } else if (step.op === "seek") {
       PM.pause();
       call("PM.setTime", [step.time], () => PM.setTime(step.time));
       result = { time: PM.time };
     } else if (step.op === "panel") {
-      const api = root.__extcheck.driverAPI();
+      const api = root.__compat.driverAPI();
       call("panels.open", [step.id], () => api.panels.open(step.id));
       result = { open: api.panels.isOpen(step.id) };
     } else if (step.op === "command") {
-      const api = root.__extcheck.driverAPI();
+      const api = root.__compat.driverAPI();
       result = await call(
         "commands.run",
         [step.id, ...(step.args ?? [])],

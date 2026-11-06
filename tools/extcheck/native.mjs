@@ -39,18 +39,11 @@ try {
     throw Error("Compiler checkout does not match the requested oracle");
   }
   status.compiler_revision = revision;
-  execFileSync(
-    "bun",
-    [
-      fileURLToPath(new URL("./bundle.ts", import.meta.url)),
-      process.argv[2],
-      request.extension,
-      out,
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
+  execFileSync("bun", [fileURLToPath(new URL("./bundle.ts", import.meta.url)), out], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const manifest = JSON.parse(
-    await readFile(path.join(out, "manifest.json"), "utf8"),
+    await readFile(path.join(request.extension, "manifest.json"), "utf8"),
   );
   // Store source is compiled but never executed through a trusted facade. Its permissioned
   // signed native installation and resource dispatcher must be connected before
@@ -63,23 +56,21 @@ try {
       execFileSync(process.argv[3], [], {
         input: JSON.stringify({
           clock_fixture: path.join(out, "clock.js"),
-          compat_bundle: path.join(out, "compat.js"),
-          module: path.join(out, "extension.js"),
-          manifest,
+          extension: request.extension,
           initial: JSON.parse(
             await readFile(path.join(out, "initial.json"), "utf8"),
           ),
           driver: request.trace_only ? path.join(out, "trace.js") : undefined,
           expressions: request.trace_only
             ? [
-                `__extcheckDriver.start(${JSON.stringify(header(request, manifest))},${CLOCK_START})`,
+                `__extcheckDriver.start(${JSON.stringify(header(request, manifest))},${CLOCK_START},${JSON.stringify(manifest.id)})`,
                 ...request.script.steps.map(
                   (step, index) =>
                     `__extcheckDriver.step(${index},${JSON.stringify(step)})`,
                 ),
                 "__extcheckDriver.finish()",
               ]
-            : ["__extcheck.dispose()"],
+            : ["__compat.loader.dispose()"],
         }),
         encoding: "utf8",
         timeout: 60000,

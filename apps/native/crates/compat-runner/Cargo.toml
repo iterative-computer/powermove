@@ -19,12 +19,13 @@ pm-compat-host = { path = "../compat-host" }
 serde_json = "=1.0.150"
 png = "0.18"
 base64 = "0.22"
+sha2 = "=0.10.9"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
 libc = "=0.2.186"
 ed25519-dalek = "2.2"
-sha2 = "=0.10.9"
 tar = "0.4"
 flate2 = "1"
 

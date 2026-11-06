@@ -4749,6 +4749,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "url",
 ]
 
 [[package]]

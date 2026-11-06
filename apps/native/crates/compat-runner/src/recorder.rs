@@ -9,7 +9,6 @@ use std::{
 
 #[derive(Default)]
 struct State {
-    transport: crate::transport::Transport,
     storage: Value,
     next: u64,
     surfaces: BTreeMap<String, Canvas>,
@@ -20,9 +19,24 @@ struct State {
     bindings: BTreeMap<u64, String>,
     dom_sequence: u64,
 }
+/// Everything a host owner hears from its realm, without waiting on it.
+pub trait RealmEvents: Send + Sync + 'static {
+    fn health(&self, _id: &str, _health: &Value) {}
+    fn toast(&self, _text: &str, _options: &Value) {}
+    fn contributions(&self, _value: Value) {}
+    fn dom_ready(&self) {}
+    fn presentation(&self) {}
+    fn panel(&self, _request: &Value) -> Result<Value> {
+        Err(Error::Host("panel host not attached".into()))
+    }
+}
+pub struct NoEvents;
+impl RealmEvents for NoEvents {}
 pub struct NativeHost {
     state: Mutex<State>,
-    kernel: Mutex<crate::kernel::KernelAdapter>,
+    kernel: Mutex<crate::adapter::KernelAdapter>,
+    transport: crate::transport::Transport,
+    events: Box<dyn RealmEvents>,
 }
 fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
@@ -87,14 +101,30 @@ pub(crate) fn encode_png(image: &ImageData) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl NativeHost {
-    pub fn new(initial: &Value) -> Result<Self> {
-        Ok(Self {
+    pub fn new(
+        kernel: crate::adapter::KernelAdapter,
+        transport: crate::transport::Transport,
+        events: Box<dyn RealmEvents>,
+    ) -> Self {
+        Self {
             state: Mutex::new(State::default()),
-            kernel: Mutex::new(crate::kernel::KernelAdapter::new(initial)?),
-        })
+            kernel: Mutex::new(kernel),
+            transport,
+            events,
+        }
     }
-    pub fn publication(&self) -> Value {
-        self.kernel.lock().unwrap().publication()
+    pub fn snapshot(&self) -> Result<Value> {
+        self.kernel.lock().unwrap().snapshot()
+    }
+    pub fn transport(&self) -> &crate::transport::Transport {
+        &self.transport
+    }
+    /// Reply form of an external closure a native undo asked this realm to run.
+    pub fn continuation(&self, continuation: &pm_kernel::Continuation) -> Result<Value> {
+        self.kernel.lock().unwrap().continuation(continuation)
+    }
+    pub fn handle_name(&self, handle: u64) -> Option<String> {
+        self.kernel.lock().unwrap().handle_name(handle)
     }
     pub fn take_presentation_request(&self) -> bool {
         std::mem::take(&mut self.state.lock().unwrap().invalidated)
@@ -578,20 +608,37 @@ impl EngineProxy for NativeHost {
         budget.check()?;
         match operation {
             "transport.command" => {
-                let document = self.kernel.lock().unwrap().publication()["document"].clone();
-                return self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .transport
-                    .command(input, &document);
+                let base = self.kernel.lock().unwrap().timebase()?;
+                return self.transport.command(input, base);
             }
             "presentation.invalidate" => {
                 self.state.lock().unwrap().invalidated = true;
+                self.events.presentation();
                 return Ok(Value::Null);
             }
-            "kernel.call" => return self.kernel.lock().unwrap().call(input),
+            "kernel.call" => {
+                let time = self.transport.time();
+                return self.kernel.lock().unwrap().call(input, time);
+            }
+            "kernel.publication" => return self.kernel.lock().unwrap().publication(),
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
+            "extension.health" => {
+                self.events.health(
+                    input["id"].as_str().unwrap_or_default(),
+                    &input["health"],
+                );
+                return Ok(Value::Null);
+            }
+            "ui.toast" => {
+                self.events
+                    .toast(input["text"].as_str().unwrap_or_default(), &input["options"]);
+                return Ok(Value::Null);
+            }
+            "contributions.publish" => {
+                self.events.contributions(input["value"].clone());
+                return Ok(Value::Null);
+            }
+            "panel.request" => return self.events.panel(input),
             "kernel.pin" | "kernel.unpin" => {
                 let handle = input["handle"]
                     .as_str()
@@ -613,6 +660,8 @@ impl EngineProxy for NativeHost {
                 .as_u64()
                 .ok_or(Error::Invalid("DOM sequence"))?;
             state.dom.push(input["batch"].clone());
+            drop(state);
+            self.events.dom_ready();
             return Ok(json!(true));
         }
         if operation == "recorder.bind" {

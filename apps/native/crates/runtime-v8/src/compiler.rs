@@ -183,7 +183,43 @@ pub(crate) fn compile_expression(source: &str, filename: &str, unit: SvelteUnit)
         json!(source)
     ))
 }
-fn strip_typescript(source: &str, filename: &str) -> Result<String> {
+/// Runtime imports of one JavaScript module, in the order the graph must load
+/// them. Type-only imports were already removed by `strip_typescript`.
+pub fn module_imports(source: &str) -> Result<Vec<String>> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(Error::JavaScript(format!(
+            "JavaScript parse: {:?}",
+            parsed.diagnostics
+        )));
+    }
+    let mut imports: Vec<String> = parsed
+        .module_record
+        .requested_modules
+        .keys()
+        .map(|name| name.as_str().to_owned())
+        .collect();
+    imports.sort();
+    for dynamic in &parsed.module_record.dynamic_imports {
+        let request = &source[dynamic.module_request.start as usize..dynamic.module_request.end as usize];
+        // A computed specifier stays a runtime refusal, as the frozen compiler leaves it.
+        let literal = request
+            .strip_prefix(['"', '\''])
+            .and_then(|rest| rest.strip_suffix(['"', '\'']))
+            .filter(|text| !text.contains(['\\', '"', '\'']));
+        if let Some(name) = literal.filter(|name| !imports.iter().any(|i| i == name)) {
+            imports.push(name.to_owned());
+        }
+    }
+    Ok(imports)
+}
+
+/// TypeScript to ES2022 module text, with the native parser. No source executes.
+pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_semantic::SemanticBuilder;

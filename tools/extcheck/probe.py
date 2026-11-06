@@ -12,16 +12,15 @@ import run
 
 EXPRESSIONS = [
     '__extcheckClock.snapshot()',
-    '(async()=>{await __extcheckClock.settle(3);return {clock:__extcheckClock.snapshot(),project:PM.proj,time:PM.time,playing:PM.playing,errors:__extcheck.errors}})()',
+    '(async()=>{await __extcheckClock.settle(3);return {clock:__extcheckClock.snapshot(),project:PM.proj,time:PM.time,playing:PM.playing,errors:__compat.errors}})()',
     '(()=>{PM.pause();PM.setTime(.5);return [PM.time,PM.playing]})()',
-    '__extcheck.dispose()',
+    '__compat.loader.dispose()',
 ]
 
 
 def record(runner, output):
     request = {
-        'compat_bundle': str(output/'compat.js'), 'clock_fixture': str(output/'clock.js'),
-        'module': str(output/'extension.js'), 'manifest': json.loads((output/'manifest.json').read_text()),
+        'clock_fixture': str(output/'clock.js'), 'extension': str(output.parent/'input'),
         'initial': json.loads((output/'initial.json').read_text()),
         'expressions': EXPRESSIONS, 'inspect_dom': True,
     }
@@ -69,10 +68,10 @@ def main():
                 sha = run.copy_extension(source, root/'input')
                 output = root/'output'
                 output.mkdir()
-                built = subprocess.run(['bun', str(Path(__file__).with_name('bundle.ts')),
-                    str(args.reference_root), str(root/'input'), str(output)], capture_output=True, timeout=90)
+                built = subprocess.run(['bun', str(Path(__file__).with_name('bundle.ts')), str(output)],
+                    capture_output=True, timeout=90)
                 if built.returncode:
-                    raise run.Blocked('invalid-reference-manifest' if b'FROZEN_MANIFEST_INVALID' in built.stderr else 'native-extension-compile-failed')
+                    raise run.Blocked('native-extension-compile-failed')
                 recordings = [record(args.native_runner, output) for _ in range(3)]
                 for sample, recording in enumerate(recordings):
                     (output/f'probe-{sample}.json').write_text(json.dumps(recording))

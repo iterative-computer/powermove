@@ -62,8 +62,14 @@ const identity = (value: any): string | undefined =>
 
 export const equal = (a: any, b: any): boolean =>
   JSON.stringify(a) === JSON.stringify(b);
+/** One walk over both trees: a boundary diff stays linear in the document. */
 export function diff(before: any, after: any, path: Path = []): Patch[] {
-  if (equal(before, after)) return [];
+  const changes: Patch[] = [];
+  walk(before, after, path, changes);
+  return changes;
+}
+function walk(before: any, after: any, path: Path, changes: Patch[]): void {
+  if (before === after) return;
   if (
     !before ||
     !after ||
@@ -73,19 +79,47 @@ export function diff(before: any, after: any, path: Path = []): Patch[] {
     (Array.isArray(before) &&
       (before.length !== after.length ||
         before.some((v, i) => identity(v) !== identity(after[i]))))
-  )
-    return [{ path, exists: true, value: copy(after) }];
-  const changes: Patch[] = [];
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    const nextPath = [...path, Array.isArray(after) ? Number(key) : key];
-    if (!Object.hasOwn(after, key))
-      changes.push({ path: nextPath, exists: false });
-    else if (!Object.hasOwn(before, key))
-      changes.push({ path: nextPath, exists: true, value: copy(after[key]) });
-    else changes.push(...diff(before[key], after[key], nextPath));
+  ) {
+    if (!sameLeaf(before, after))
+      changes.push({ path: [...path], exists: true, value: copy(after) });
+    return;
   }
-  return changes;
+  if (Array.isArray(after)) {
+    if (Object.keys(after).length !== after.length)
+      throw new TypeError(
+        "Sparse or decorated document arrays are not supported",
+      );
+    for (let index = 0; index < after.length; index++) {
+      path.push(index);
+      walk(before[index], after[index], path, changes);
+      path.pop();
+    }
+    return;
+  }
+  for (const key of Object.keys(before))
+    if (!Object.hasOwn(after, key))
+      changes.push({ path: [...path, key], exists: false });
+  for (const key of Object.keys(after)) {
+    if (forbidden.has(key)) throw new TypeError("Invalid document key");
+    const descriptor = Object.getOwnPropertyDescriptor(after, key)!;
+    if (!("value" in descriptor))
+      throw new TypeError("Document accessors are not supported");
+    if (!Object.hasOwn(before, key)) {
+      changes.push({
+        path: [...path, key],
+        exists: true,
+        value: copy(descriptor.value),
+      });
+      continue;
+    }
+    path.push(key);
+    walk(before[key], descriptor.value, path, changes);
+    path.pop();
+  }
 }
+/** Distinct non-identical values: only NaN/undefined forms can compare equal. */
+const sameLeaf = (a: any, b: any): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
 export function patch(root: any, ops: Patch[]): any {
   let next = copy(root);
   for (const op of ops) {
@@ -180,8 +214,8 @@ export class DocumentMirror {
     this.base = copy(document);
     this.document = copy(document);
   }
+  /** Every changed value is validated by `copy`; unchanged values equal `base`. */
   pending(): Patch[] {
-    copy(this.document);
     return diff(this.base, this.document);
   }
   snapshot(): Data {
@@ -197,11 +231,28 @@ export class DocumentMirror {
     this.base = copy(document);
     reconcile(this.document, document);
   }
+  dirtyAgainst(document: Data): boolean {
+    return diff(document, this.document).length > 0;
+  }
+  /** Native operations against `base`, without rebuilding the whole tree. */
+  applyOps(ops: Patch[]): Data {
+    for (const op of ops) {
+      if (!op.path.length) {
+        this.base = copy(op.value);
+        continue;
+      }
+      let parent = this.base;
+      for (const part of op.path.slice(0, -1)) parent = parent[part];
+      const key = op.path.at(-1)!;
+      if (op.exists) parent[key] = copy(op.value);
+      else delete parent[key];
+    }
+    return this.base;
+  }
   /** Native writes received before our flush win only where we did not write. */
-  receive(document: Data): void {
-    const previous = this.base;
+  receive(document: Data, previous: Data = this.base): void {
     try {
-      const local = this.pending();
+      const local = diff(previous, this.document);
       const authoritative = copy(document);
       reconcile(
         this.document,

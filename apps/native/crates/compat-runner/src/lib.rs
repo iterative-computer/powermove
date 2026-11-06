@@ -1,100 +1,160 @@
-//! Executes the actual compat bundle in the sandbox-enabled V8 runtime.
-//! The executable owns no UI. Its disposable native kernel never opens a profile.
+//! The v1–3 extension runtime: discovery, native compilation, the V8 realm and
+//! its production kernel channel. `CompatRunner` wraps the same realm around a
+//! disposable project for tests and the comparison harness.
+use pm_kernel::{KernelActor, KernelConfig, OpenSource};
 use pm_runtime_v8::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
+    path::Path,
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
-mod kernel;
+pub mod adapter;
+pub mod compile;
+pub mod discovery;
+pub mod host;
+pub mod manifest;
 mod recorder;
 mod store_dispatch;
 mod store_kernel;
 mod store_runtime;
 pub use store_dispatch::KernelStoreDispatch;
-mod transport;
-pub use recorder::NativeHost;
+pub mod transport;
+pub use recorder::{NativeHost, NoEvents, RealmEvents};
 pub use store_kernel::{KernelStoreAdapter, StoreArchive};
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
+
+pub const COMPAT_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.js"));
+pub const STORE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/store.js"));
+pub const PAGE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/page.js"));
+
+/// One realm holds every trusted extension and a live mirror of the project.
+pub(crate) fn limits() -> Limits {
+    Limits {
+        heap_bytes: 1024 * 1024 * 1024,
+        external_bytes: 512 * 1024 * 1024,
+        max_source_bytes: 256 * 1024 * 1024,
+        max_host_ops: usize::MAX / 2,
+        max_op_bytes: 256 * 1024 * 1024,
+        max_ops: 4096,
+        max_response_bytes: 64 * 1024 * 1024,
+        ..Limits::default()
+    }
+}
+pub(crate) fn pool(scope: &str, host: Arc<NativeHost>) -> Result<RuntimePool> {
+    RuntimePool::new(
+        scope,
+        Config {
+            limits: limits(),
+            watchdog: WatchdogPolicy::default(),
+            kernel: host.clone(),
+            host: host.clone(),
+            watchdog_hooks: host.clone(),
+            engine: Some(host),
+            cache: CodeCache::new(32 * 1024 * 1024),
+            admission: Admission::new(2 * 1024 * 1024 * 1024),
+        },
+    )
+}
+pub(crate) fn settled(realm: &Realm, source: &str, seconds: u64) -> Result<Evaluation> {
+    let ticket = realm.eval(source)?;
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            return result;
+        }
+        if Instant::now() > deadline {
+            realm.stop(ticket.execution);
+            return Err(Error::Host("compat runner execution timeout".into()));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Result<()> {
+    if !prelude.is_empty() {
+        settled(realm, prelude, 15)?;
+    }
+    settled(realm, include_str!("globals.js"), 15)?;
+    settled(realm, COMPAT_BUNDLE, 60)?;
+    settled(realm, include_str!("canvas-dom.js"), 15)?;
+    settled(realm, include_str!("bootstrap.js"), 15)?;
+    settled(
+        realm,
+        &format!("__compat.create({})", host.snapshot()?),
+        60,
+    )?;
+    Ok(())
+}
+
+pub const PROJECT: &str = "compat";
+const COMPAT_REALM: u32 = 2;
 
 pub struct CompatRunner {
     realm: Realm,
     _pool: RuntimePool,
     host: Arc<NativeHost>,
+    actor: Option<KernelActor>,
 }
 
 impl CompatRunner {
-    pub fn new(bundle: &str, initial: &Value) -> Result<Self> {
-        Self::with_prelude(bundle, initial, "")
+    pub fn new(initial: &Value) -> Result<Self> {
+        Self::with_prelude(initial, "")
     }
     /// Disposable comparison fixtures run before the bundle or any extension.
     /// Production embedders keep using `new`, without altered time or entropy.
-    pub fn with_prelude(bundle: &str, initial: &Value, prelude: &str) -> Result<Self> {
-        let host = Arc::new(NativeHost::new(initial)?);
-        let initial = host.publication();
-        let pool = RuntimePool::new(
-            "extcheck",
-            Config {
-                limits: Limits::default(),
-                watchdog: WatchdogPolicy::default(),
-                kernel: host.clone(),
-                host: host.clone(),
-                watchdog_hooks: host.clone(),
-                engine: Some(host.clone()),
-                cache: CodeCache::new(4 * 1024 * 1024),
-                admission: Admission::new(256 * 1024 * 1024),
-            },
-        )?;
+    pub fn with_prelude(initial: &Value, prelude: &str) -> Result<Self> {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&initial["document"].to_string())
+            .map_err(|_| Error::Invalid("initial document"))?;
+        kernel
+            .open(PROJECT, OpenSource::Untitled(document))
+            .wait()
+            .ok_or(Error::Closed)?
+            .map_err(|e| Error::Host(e.to_string()))?;
+        let host = Arc::new(NativeHost::new(
+            adapter::KernelAdapter::new(kernel, PROJECT, PROJECT, COMPAT_REALM),
+            transport::Transport::default(),
+            Box::new(NoEvents),
+        ));
+        let pool = pool("compat", host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         let runner = Self {
             realm,
             _pool: pool,
             host,
+            actor: Some(actor),
         };
-        if !prelude.is_empty() {
-            runner.eval(prelude)?;
-        }
-        runner.eval(bundle)?;
-        runner.eval("if(typeof PowermoveCompat?.CompatRealm!=='function')throw Error('Missing compat bundle')")?;
-        runner.eval(include_str!("canvas-dom.js"))?;
-        runner.eval(include_str!("bootstrap.js"))?;
-        runner.eval(&format!("__extcheck.create({initial})"))?;
+        boot_realm(&runner.realm, &runner.host, prelude)?;
         Ok(runner)
     }
     pub fn eval(&self, source: &str) -> Result<Evaluation> {
-        let ticket = self.realm.eval(source)?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(result) = ticket.try_take() {
-                return result;
-            }
-            if Instant::now() > deadline {
-                self.realm.stop(ticket.execution);
-                return Err(Error::Host("compat runner execution timeout".into()));
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        settled(&self.realm, source, 15)
     }
-    /// Sources are browser IIFEs. No source rewriting or user-id renaming occurs here.
+    /// Sources are ES modules; the realm links them with no rewriting.
     pub fn activate(&self, manifest: &Value, module: &str) -> Result<Value> {
-        if !matches!(
-            manifest
-                .get("apiVersion")
-                .and_then(Value::as_u64)
-                .unwrap_or(1),
-            1..=3
-        ) {
-            return Err(Error::Invalid("apiVersion must be 1, 2 or 3"));
-        }
-        // The reference deactivates before importing a replacement module.
-        self.json("__extcheck.dispose()")?;
-        // Function scope: the driver's reload re-evaluates the same module bytes.
-        self.eval(&format!(
-            "__extcheck.loadModule=function(){{{module}\n;return ExtCheckModule}}"
-        ))?;
+        let entry = manifest["entry"].as_str().unwrap_or("index.js");
+        let sources = json!({
+            entry: module,
+            compile::BUNDLE: format!(
+                "export {{ default }} from {e}; export * from {e};",
+                e = json!(format!("./{entry}"))
+            ),
+        });
+        let edges = json!({compile::BUNDLE: {format!("./{entry}"): entry}, entry: {}});
+        self.install(manifest, &json!({"sources":sources,"edges":edges}))
+    }
+    /// A compiled extension directory, through the production compiler.
+    pub fn compile(&self, directory: &Path, entry: &str) -> Result<compile::ModuleGraph> {
+        let compiler = SvelteCompiler::new(&self._pool, 256 * 1024 * 1024, 8 * 1024 * 1024)?;
+        compile::compile(directory, entry, &compiler, None).map_err(Error::Host)
+    }
+    pub fn install(&self, manifest: &Value, graph: &Value) -> Result<Value> {
+        let record = json!({"id":manifest["id"],"scope":"user","manifest":manifest,"enabled":true,
+            "trust":"local","health":{"state":"ok"},"graph":graph});
         self.json(&format!(
-            "__extcheck.activate({manifest}, __extcheck.loadModule())"
+            "__compat.install({record})"
         ))
     }
     pub fn json(&self, expression: &str) -> Result<Value> {
@@ -116,19 +176,25 @@ impl CompatRunner {
     /// Called by the worker after flushing DOM and before queueing presentation.
     /// Immutable native resources are separate from the DOM JSON stream.
     pub fn canvas_frames(&self) -> Result<Vec<pm_compat_host::CanvasFrame>> {
-        self.eval("__extcheck.flushCanvases?.()")?;
+        self.eval("__compat.flushCanvases?.()")?;
         self.host.canvas_frames()
     }
     /// The embedder delivers applier feedback on this owner, outside AppKit/main.
     pub fn receive_dom(&self, message: &Value) -> Result<Value> {
         self.json(&format!(
-            "(()=>{{__extcheck.dom.receive({message});__extcheck.dom.flush();return true}})()"
+            "(()=>{{__compat.dom.receive({message});__compat.dom.flush();return true}})()"
         ))
     }
 }
 impl Drop for CompatRunner {
     fn drop(&mut self) {
         self.realm.close();
+        while !self.realm.is_disposed() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if let Some(actor) = self.actor.take() {
+            actor.shutdown();
+        }
     }
 }
 
@@ -140,30 +206,8 @@ pub fn initial() -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::OnceLock;
-    fn bundle() -> &'static str {
-        static BUNDLE: OnceLock<String> = OnceLock::new();
-        BUNDLE.get_or_init(|| {
-            let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../js/compat/src/browser.ts");
-            let build = std::process::Command::new("bun")
-                .args([
-                    "build",
-                    entry.to_str().unwrap(),
-                    "--target=browser",
-                    "--format=iife",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                build.status.success(),
-                "actual production compat bundle must build"
-            );
-            String::from_utf8(build.stdout).unwrap()
-        })
-    }
     fn runner() -> CompatRunner {
-        CompatRunner::new(bundle(), &initial()).unwrap()
+        CompatRunner::new(&initial()).unwrap()
     }
     #[test]
     fn native_transport_seeks_snap_without_document_edits_and_preserve_raw_time() {
@@ -193,25 +237,25 @@ mod tests {
     #[test]
     fn actual_bundle_executes_without_node_or_chromium() {
         let runner = runner();
-        assert_eq!(runner.json("[typeof process,typeof require,typeof document,typeof PowermoveCompat.CompatRealm]").unwrap(),
-            json!(["undefined","undefined","undefined","function"]));
+        assert_eq!(runner.json("[typeof process,typeof require,typeof PowermoveCompat.CompatRealm]").unwrap(),
+            json!(["undefined","undefined","function"]));
     }
     #[test]
     fn every_legacy_version_activates_and_disposes_real_contributions() {
         let runner = runner();
         for version in 1..=3 {
-            let result=runner.activate(&manifest(version), "var ExtCheckModule={default(api){api.commands.register({id:'synthetic-command',label:'Synthetic',run(){return 42}});api.onDispose(()=>globalThis.cleaned=(globalThis.cleaned||0)+1)}}").unwrap();
+            let result=runner.activate(&manifest(version), "export default function(api){api.commands.register({id:'synthetic-command',label:'Synthetic',run(){return 42}});api.onDispose(()=>globalThis.cleaned=(globalThis.cleaned||0)+1)}").unwrap();
             assert_eq!(result["ok"], true);
             assert_eq!(
                 runner
-                    .json("__extcheck.realm.kernel.commands.get('synthetic-command').run()")
+                    .json("__compat.realm.kernel.commands.get('synthetic-command').run()")
                     .unwrap(),
                 42
             );
-            runner.json("__extcheck.dispose()").unwrap();
+            runner.json("__compat.loader.dispose()").unwrap();
             assert_eq!(
                 runner
-                    .json("__extcheck.realm.kernel.commands.list().length")
+                    .json("__compat.realm.kernel.commands.list().length")
                     .unwrap(),
                 0
             );
@@ -221,22 +265,22 @@ mod tests {
     #[test]
     fn same_realm_reload_preserves_provider_identity_and_storage() {
         let runner = runner();
-        let source = "var ExtCheckModule={default(api){api.storage.set('n',(api.storage.get('n')||0)+1);api.services.register('synthetic-service',{value:17})}}";
+        let source = "export default function(api){api.storage.set('n',(api.storage.get('n')||0)+1);api.services.register('synthetic-service',{value:17})}";
         runner.activate(&manifest(3), source).unwrap();
         runner
-            .eval("globalThis.held=__extcheck.realm.services.get('synthetic-service')")
+            .eval("globalThis.held=__compat.realm.services.get('synthetic-service')")
             .unwrap();
         runner.activate(&manifest(3), source).unwrap();
-        assert_eq!(runner.json("[held.value,held===__extcheck.realm.services.get('synthetic-service'),storage['ext.synthetic'].n]").unwrap(),json!([17,false,2]));
+        assert_eq!(runner.json("[held.value,held===__compat.realm.services.get('synthetic-service'),storage['ext.synthetic'].n]").unwrap(),json!([17,false,2]));
     }
     #[test]
     fn thrown_activation_cleans_registrations_and_reports_failure() {
         let runner = runner();
-        let result=runner.activate(&manifest(3),"var ExtCheckModule={default(api){api.commands.register({id:'leak',label:'Synthetic',run(){}});throw Error('synthetic failure')}}").unwrap();
+        let result=runner.activate(&manifest(3),"export default function(api){api.commands.register({id:'leak',label:'Synthetic',run(){}});throw Error('synthetic failure')}").unwrap();
         assert_eq!(result["ok"], false);
         assert_eq!(
             runner
-                .json("__extcheck.realm.kernel.commands.list().length")
+                .json("__compat.realm.kernel.commands.list().length")
                 .unwrap(),
             0
         );
@@ -247,7 +291,7 @@ mod tests {
         let result = runner
             .activate(
                 &manifest(3),
-                "var ExtCheckModule={default(api){api.history.begin('Synthetic')}}",
+                "export default function(api){api.history.begin('Synthetic')}",
             )
             .unwrap();
         assert_eq!(result["ok"], true);
@@ -262,21 +306,21 @@ mod tests {
     #[test]
     fn native_kernel_history_round_trip_and_external_closures() {
         let runner = runner();
-        let value=runner.json("(()=>{const before=PM.proj.name;const result=__extcheck.realm.history.do('Synthetic',()=>{PM.proj.name='Edited';return 7});const edited=PM.proj.name;const undo=PM.hist.undo();const restored=PM.proj.name;const redo=PM.hist.redo();return [result,edited,undo,restored===before,redo,PM.proj.name]})()").unwrap();
+        let value=runner.json("(()=>{const before=PM.proj.name;const result=__compat.realm.history.do('Synthetic',()=>{PM.proj.name='Edited';return 7});const edited=PM.proj.name;const undo=PM.hist.undo();const restored=PM.proj.name;const redo=PM.hist.redo();return [result,edited,undo,restored===before,redo,PM.proj.name]})()").unwrap();
         assert_eq!(value, json!([7, "Edited", true, true, true, "Edited"]));
-        assert_eq!(runner.json("(()=>{let count=0;__extcheck.realm.history.external('Synthetic closure',()=>count--,()=>count++);return [PM.hist.undo(),count,PM.hist.redo(),count]})()").unwrap(),json!([true,-1,true,0]));
+        assert_eq!(runner.json("(()=>{let count=0;__compat.realm.history.external('Synthetic closure',()=>count--,()=>count++);return [PM.hist.undo(),count,PM.hist.redo(),count]})()").unwrap(),json!([true,-1,true,0]));
     }
     #[test]
     fn native_kernel_publication_exposes_the_legacy_open_composition() {
         let runner = runner();
         assert_eq!(runner.json("PM.proj").unwrap(), initial()["document"]);
-        let result=runner.json("(()=>{__extcheck.realm.history.do('Synthetic marker',()=>PM.proj.markers.push({id:'synthetic-marker',t:0,name:'Synthetic'}));const count=PM.proj.markers.length;PM.hist.undo();return [count,PM.proj.markers.length,PM.proj.w,PM.proj.compId]})()").unwrap();
+        let result=runner.json("(()=>{__compat.realm.history.do('Synthetic marker',()=>PM.proj.markers.push({id:'synthetic-marker',t:0,name:'Synthetic'}));const count=PM.proj.markers.length;PM.hist.undo();return [count,PM.proj.markers.length,PM.proj.w,PM.proj.compId]})()").unwrap();
         assert_eq!(result, json!([1, 0, 320, "synthetic-comp"]));
     }
     #[test]
     fn missing_kernel_method_is_acknowledged_without_poisoning_the_channel() {
         let runner = runner();
-        assert_eq!(runner.json("(()=>{try{__extcheck.realm.channel.call('synthetic.unavailable')}catch{}return [__extcheck.realm.channel.pending,PM.hist.canUndo()]})()").unwrap(),json!([false,false]));
+        assert_eq!(runner.json("(()=>{try{__compat.realm.channel.call('synthetic.unavailable')}catch{}return [__compat.realm.channel.pending,PM.hist.canUndo()]})()").unwrap(),json!([false,false]));
     }
     #[test]
     fn invalidation_publishes_coalesced_demand_to_the_native_presenter() {
@@ -289,33 +333,21 @@ mod tests {
     #[test]
     fn recorder_pixels_are_native_and_source_versions_survive_disposal() {
         let runner = runner();
-        let pixels=runner.json("(()=>{const a=__extcheck.realm.createCanvas(2,2),b=__extcheck.realm.createCanvas(2,2); const c=a.getContext('2d');c.fillStyle='#ff0000';c.fillRect(0,0,2,2); b.getContext('2d').drawImage(a,0,0);a.width=4;a.dispose();return b.getContext('2d').getImageData(0,0,1,1).data})()").unwrap();
+        let pixels=runner.json("(()=>{const a=__compat.realm.createCanvas(2,2),b=__compat.realm.createCanvas(2,2); const c=a.getContext('2d');c.fillStyle='#ff0000';c.fillRect(0,0,2,2); b.getContext('2d').drawImage(a,0,0);a.width=4;a.dispose();return b.getContext('2d').getImageData(0,0,1,1).data})()").unwrap();
         assert_eq!(pixels, json!([255, 0, 0, 255]));
     }
     #[test]
-    fn invalid_bundle_is_refused() {
-        assert!(CompatRunner::new("throw Error('synthetic')", &initial()).is_err());
+    fn a_failing_prelude_refuses_the_realm() {
+        assert!(CompatRunner::with_prelude(&initial(), "throw Error('synthetic')").is_err());
     }
     #[test]
     fn remote_dom_batches_and_event_closures_execute_inside_real_v8() {
-        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/dom-bundle.ts");
-        let built = std::process::Command::new("bun")
-            .args([
-                "build",
-                entry.to_str().unwrap(),
-                "--target=browser",
-                "--format=iife",
-            ])
-            .output()
-            .unwrap();
-        assert!(built.status.success());
-        let runner =
-            CompatRunner::new(std::str::from_utf8(&built.stdout).unwrap(), &initial()).unwrap();
-        let id=runner.json("(()=>{const d=__extcheck.dom.document;const input=d.createElement('input');const out=d.createElement('output');d.body.append(input,out);input.addEventListener('input',()=>out.textContent=input.value);__extcheck.dom.flush();globalThis.syntheticOutput=out;return __extcheck.dom.id(input)})()").unwrap();
+        let runner = runner();
+        let id=runner.json("(()=>{const d=__compat.dom.document;const input=d.createElement('input');const out=d.createElement('output');d.body.append(input,out);input.addEventListener('input',()=>out.textContent=input.value);__compat.dom.flush();globalThis.syntheticOutput=out;return __compat.dom.id(input)})()").unwrap();
         let batches = runner.take_dom_batches();
         assert!(!batches.is_empty());
         let seq = batches.last().unwrap()["seq"].as_u64().unwrap();
-        let session = json!({"panel":"extcheck","generation":1});
+        let session = json!({"panel":"compat","generation":1});
         runner
             .receive_dom(&json!({"kind":"applied","session":session,"seq":seq}))
             .unwrap();
@@ -327,22 +359,7 @@ mod tests {
         );
     }
     fn dom_runner() -> CompatRunner {
-        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/dom-bundle.ts");
-        let built = std::process::Command::new("bun")
-            .args([
-                "build",
-                entry.to_str().unwrap(),
-                "--target=browser",
-                "--format=iife",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "{}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-        CompatRunner::new(std::str::from_utf8(&built.stdout).unwrap(), &initial()).unwrap()
+        runner()
     }
     fn decode(bytes: &[u8]) -> (png::OutputInfo, Vec<u8>) {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -383,7 +400,7 @@ mod tests {
     fn native_png_encoding_matches_pixel_readback_and_zero_size_contract() {
         use base64::Engine;
         let runner = runner();
-        let value=runner.json("(()=>{const c=__extcheck.realm.createCanvas(3,2),x=c.getContext('2d');x.fillStyle='rgba(255,0,0,0.5)';x.fillRect(0,0,3,2);return [c.toDataURL(),x.getImageData(0,0,3,2).data]})()").unwrap();
+        let value=runner.json("(()=>{const c=__compat.realm.createCanvas(3,2),x=c.getContext('2d');x.fillStyle='rgba(255,0,0,0.5)';x.fillRect(0,0,3,2);return [c.toDataURL(),x.getImageData(0,0,3,2).data]})()").unwrap();
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(
                 value[0]
@@ -396,7 +413,7 @@ mod tests {
         assert_eq!(json!(decode(&bytes).1), value[1]);
         assert_eq!(
             runner
-                .json("__extcheck.realm.createCanvas(0,2).toDataURL()")
+                .json("__compat.realm.createCanvas(0,2).toDataURL()")
                 .unwrap(),
             "data:,"
         );
@@ -404,7 +421,7 @@ mod tests {
     #[test]
     fn native_path_transform_stroke_and_hit_test_bindings_reach_the_recorder() {
         let runner = runner();
-        assert_eq!(runner.json("(()=>{const x=__extcheck.realm.createCanvas(16,16).getContext('2d');x.setTransform(1,0,0,1,2,3);x.transform(2,0,0,2,0,0);const m=x.getTransform();x.lineCap='round';x.lineJoin='bevel';x.miterLimit=4;x.setLineDash([2,3,4]);x.lineDashOffset=1;x.beginPath();x.moveTo(0,0);x.quadraticCurveTo(1,2,3,4);x.bezierCurveTo(1,2,3,4,5,6);x.arc(2,2,1,0,Math.PI);x.arcTo(2,2,3,3,1);x.ellipse(3,3,2,1,0,0,Math.PI);x.stroke();x.resetTransform();x.beginPath();x.rect(0,0,4,4);return [m.a,m.e,m.f,x.lineCap,x.lineJoin,x.miterLimit,x.lineDashOffset,x.getLineDash(),x.isPointInPath(2,2),x.isPointInPath(7,7)]})()").unwrap(),json!([2,2,3,"round","bevel",4,1,[2,3,4,2,3,4],true,false]));
+        assert_eq!(runner.json("(()=>{const x=__compat.realm.createCanvas(16,16).getContext('2d');x.setTransform(1,0,0,1,2,3);x.transform(2,0,0,2,0,0);const m=x.getTransform();x.lineCap='round';x.lineJoin='bevel';x.miterLimit=4;x.setLineDash([2,3,4]);x.lineDashOffset=1;x.beginPath();x.moveTo(0,0);x.quadraticCurveTo(1,2,3,4);x.bezierCurveTo(1,2,3,4,5,6);x.arc(2,2,1,0,Math.PI);x.arcTo(2,2,3,3,1);x.ellipse(3,3,2,1,0,0,Math.PI);x.stroke();x.resetTransform();x.beginPath();x.rect(0,0,4,4);return [m.a,m.e,m.f,x.lineCap,x.lineJoin,x.miterLimit,x.lineDashOffset,x.getLineDash(),x.isPointInPath(2,2),x.isPointInPath(7,7)]})()").unwrap(),json!([2,2,3,"round","bevel",4,1,[2,3,4,2,3,4],true,false]));
         assert!(
             runner.diagnostics()["missing"]
                 .as_array()
@@ -415,7 +432,7 @@ mod tests {
     #[test]
     fn canvas_boolean_direction_and_invalid_winding_preserve_authored_geometry() {
         let runner = runner();
-        let value=runner.json("(()=>{const draw=ccw=>{const x=__extcheck.realm.createCanvas(8,8).getContext('2d');x.arc(4,4,3,0,Math.PI/2,ccw);x.lineTo(4,4);x.fill();return JSON.stringify(x.getImageData(0,0,8,8).data)};const x=__extcheck.realm.createCanvas(1,1).getContext('2d');x.rect(0,0,1,1);let refused=false;try{x.fill('invalid-rule')}catch{refused=true}return [draw(1)===draw(true),draw(1)!==draw(false),refused,x.getImageData(0,0,1,1).data]})()").unwrap();
+        let value=runner.json("(()=>{const draw=ccw=>{const x=__compat.realm.createCanvas(8,8).getContext('2d');x.arc(4,4,3,0,Math.PI/2,ccw);x.lineTo(4,4);x.fill();return JSON.stringify(x.getImageData(0,0,8,8).data)};const x=__compat.realm.createCanvas(1,1).getContext('2d');x.rect(0,0,1,1);let refused=false;try{x.fill('invalid-rule')}catch{refused=true}return [draw(1)===draw(true),draw(1)!==draw(false),refused,x.getImageData(0,0,1,1).data]})()").unwrap();
         assert_eq!(value, json!([true, true, true, [0, 0, 0, 0]]));
     }
 }

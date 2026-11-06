@@ -53,7 +53,9 @@ export interface GestureAPI {
 }
 export interface Publication {
   revision: number;
-  document: Data;
+  /** Whole document on a full sync; omitted when `ops` or nothing changed it. */
+  document?: Data;
+  ops?: Patch[];
   selection: Data;
   workspace: Data;
   facts: {
