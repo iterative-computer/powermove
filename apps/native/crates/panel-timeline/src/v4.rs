@@ -44,7 +44,9 @@ pub struct Context<'a> {
 }
 
 /// Timecode typed in the timeline header: `HH:MM:SS:FF` with any leading fields
-/// omitted, or a bare frame count.
+/// omitted, or a bare frame count. The inverse of the header, which counts
+/// whole seconds of the nominal rate (30 at 29.97), so typed text lands on the
+/// frame it names.
 pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
     let fields: Vec<f64> = text
         .trim()
@@ -53,7 +55,8 @@ pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
         .collect::<Option<_>>()?;
     let (frames, seconds) = fields.split_last()?;
     let seconds = seconds.iter().fold(0., |sum, field| sum * 60. + field);
-    (fps > 0.).then(|| seconds + frames / fps)
+    let nominal = fps.round().max(1.);
+    (fps > 0.).then(|| (seconds * nominal + frames) / fps)
 }
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {

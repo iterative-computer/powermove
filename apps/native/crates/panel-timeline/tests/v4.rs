@@ -275,6 +275,10 @@ fn typed_timecode_takes_any_leading_fields_or_bare_frames() {
     assert_eq!(v4::parse_timecode("1:00:00", 30.), Some(60.));
     assert_eq!(v4::parse_timecode("nonsense", 30.), None);
     assert_eq!(v4::parse_timecode("", 30.), None);
+    // 29.97 shows frame 18000 as 00:10:00:00; typing it back lands there.
+    let fps = 30000. / 1001.;
+    let time = v4::parse_timecode("00:10:00:00", fps).unwrap();
+    assert_eq!((time * fps).round(), 18000.);
 }
 #[test]
 fn stale_surface_and_malformed_requests_fail_before_any_edit() {
