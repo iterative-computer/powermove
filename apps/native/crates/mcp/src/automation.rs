@@ -913,7 +913,12 @@ impl ActorAutomation {
         self.shell(ShellCall::Save(session)).await
     }
     pub async fn save_as(&self, session: SessionHandle, path: PathBuf) -> Result<ShellReply> {
-        self.shell(ShellCall::SaveAs { session, path, replace: false }).await
+        self.shell(ShellCall::SaveAs {
+            session,
+            path,
+            replace: false,
+        })
+        .await
     }
     async fn shell(&self, call: ShellCall) -> Result<ShellReply> {
         self.kernel

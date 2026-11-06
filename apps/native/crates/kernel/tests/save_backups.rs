@@ -60,9 +60,14 @@ fn backups(root: &Path, id: &str) -> Vec<std::path::PathBuf> {
 }
 fn format(path: &Path) -> ContainerFormat {
     let file = std::fs::File::open(path).unwrap();
-    read_container(&file, ReadOptions { verify_media: false })
-        .unwrap()
-        .format
+    read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .format
 }
 
 #[test]

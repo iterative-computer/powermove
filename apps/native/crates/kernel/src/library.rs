@@ -490,7 +490,12 @@ pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
 /// `R.unwrap`: `{v, proj}`, a bare project, or a JSON string of either.
 fn parse_project_envelope(raw: Value) -> Option<Value> {
     let raw = match raw {
-        Value::String(s) => parse(s.as_str()?).ok()?,
+        Value::String(s) => {
+            let text = s.as_str()?;
+            let mut raw = parse(text).ok()?;
+            crate::asset_order::adopt_text(&mut raw, text);
+            raw
+        }
         other => other,
     };
     (!raw.is_null()).then_some(raw)

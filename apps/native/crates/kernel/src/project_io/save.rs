@@ -46,7 +46,10 @@
 //! # Differences from the old app
 //!
 //! * The document's keys are in canonical (UTF-16) order; the old app used
-//!   insertion order. Readers do not care.
+//!   insertion order. Object order is otherwise invisible to its readers, but
+//!   `assets` is a list to users (`Object.values` in the Project panel), so it
+//!   is written in authored order; see [`crate::asset_order`]. Other objects
+//!   whose order an extension reads still come back sorted.
 //! * Reused index records are written with the key order of new ones; the
 //!   old app kept the previous index's key order.
 //! * The media order follows the media table (file order, then imports);

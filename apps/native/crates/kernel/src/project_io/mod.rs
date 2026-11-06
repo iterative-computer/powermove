@@ -489,7 +489,7 @@ pub(crate) fn from_container(
 ) -> Result<OpenedProject, ProjectIoError> {
     let format = container.format;
     // `document.proj || document`.
-    let (mut fields, project, wrapped) = match container.document {
+    let (mut fields, mut project, wrapped) = match container.document {
         Value::Object(mut map) if map.get("proj").is_some_and(Value::is_truthy) => {
             let proj = map.remove("proj").unwrap_or(Value::Null);
             (map, proj, true)
@@ -497,6 +497,7 @@ pub(crate) fn from_container(
         other => (Map::new(), other, false),
     };
     validate_stored_project(&project)?;
+    crate::asset_order::adopt(&mut project, container.asset_order);
     if let Some(metadata) = container.legacy_metadata {
         let key = "nativePmv3Metadata";
         let retained = match fields.remove(key) {

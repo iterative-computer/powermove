@@ -1049,6 +1049,15 @@ impl DocumentStore {
                 forward.push(op);
             }
         }
+        for op in crate::asset_order::reconcile(start, root.as_ref(), &forward) {
+            let (inv, scope) = capture_inverse(root.as_ref(), &op);
+            let (next, did) = apply_one(root, &op, revision)?;
+            root = next;
+            changed |= did;
+            inverse.push(inv);
+            scopes.push(scope);
+            forward.push(op);
+        }
         inverse.reverse();
         let document = Document::from_root(root, revision);
         validate(&document, &forward)?;
@@ -1148,14 +1157,15 @@ impl DocumentStore {
         } else {
             None
         };
-        let ops = admitted.as_deref().unwrap_or(ops);
+        let mut forward = admitted.unwrap_or_else(|| ops.to_vec());
         let revision = self.revision() + 1;
+        let start = root.clone();
         let mut root = root;
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
         if capture {
-            for op in ops {
+            for op in &forward {
                 let (inv, scope) = capture_inverse(root.as_ref(), op);
                 let (next, did) = apply_one(root, op, revision)?;
                 root = next;
@@ -1163,21 +1173,31 @@ impl DocumentStore {
                 inverse.push(inv);
                 scopes.push(scope);
             }
+            let order = crate::asset_order::reconcile(start.as_ref(), root.as_ref(), &forward);
+            for op in order {
+                let (inv, scope) = capture_inverse(root.as_ref(), &op);
+                let (next, did) = apply_one(root, &op, revision)?;
+                root = next;
+                changed |= did;
+                inverse.push(inv);
+                scopes.push(scope);
+                forward.push(op);
+            }
             inverse.reverse();
         } else {
             let mut scratch = Document::from_root(root, revision - 1);
             changed = scratch
-                .apply_ops_at(ops, revision)
+                .apply_ops_at(&forward, revision)
                 .map_err(|e| TransactionError::Patch(e.to_string()))?
                 .changed;
             root = scratch.root().cloned();
         }
         let document = Document::from_root(root, revision);
-        validate(&document, ops)?;
+        validate(&document, &forward)?;
         Ok(Staged {
             media: vec![],
             document,
-            forward: ops.to_vec(),
+            forward,
             inverse,
             scopes,
             changed,
