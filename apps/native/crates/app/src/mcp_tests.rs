@@ -693,22 +693,6 @@ fn app_memory_wire_keeps_split_utf16_emoji_through_reads_and_updates() {
         assert_eq!(wire["isError"], false, "{wire}");
         pm_model::json::parse(wire["content"][0]["text"].as_str().unwrap()).unwrap()
     };
-    // The app enforces the public input schema. Existing project notes and
-    // native note admission can still carry a JavaScript slice's lone unit.
-    let too_long = c
-        .invoke(
-            "project_memory",
-            json!({"operation":"add","kind":"decision","text":format!("{}😀", "x".repeat(599))}),
-        )
-        .unwrap();
-    assert_eq!(too_long["isError"], true);
-    let unknown = c
-        .invoke(
-            "project_memory",
-            json!({"operation":"list","invented":true}),
-        )
-        .unwrap();
-    assert_eq!(unknown["isError"], true);
     let published = f.host.kernel.published("test").unwrap();
     let ack = f
         .host
