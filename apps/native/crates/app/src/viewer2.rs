@@ -610,12 +610,21 @@ impl Controller {
     /// (after any viewer is created or an option changes).
     pub fn apply_viewer_options(&mut self) {
         let mtm = MainThreadMarker::new().unwrap();
-        let geometry = self.overlay();
         let popout = self.popout.as_ref().and_then(|p| p.viewer.borrow().clone());
-        for viewer in self.viewer.iter().chain(popout.as_ref()) {
+        // Selection gizmos belong to the editing viewer alone.
+        let geometries = [
+            (self.viewer.as_ref(), self.overlay()),
+            (
+                popout.as_ref(),
+                OverlayGeometry::new(overlay_lines(self.safe_areas, self.guides))
+                    .expect("bounded overlay geometry"),
+            ),
+        ];
+        for (viewer, geometry) in geometries {
+            let Some(viewer) = viewer else { continue };
             if let Err(e) = viewer
                 .mastering(mtm, self.output_mode.mastering())
-                .and_then(|_| viewer.safe_areas(geometry.clone()))
+                .and_then(|_| viewer.safe_areas(geometry))
             {
                 self.message = format!("Viewer: {e}");
             }

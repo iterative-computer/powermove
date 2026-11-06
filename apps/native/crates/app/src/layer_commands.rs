@@ -11,7 +11,7 @@ use pm_kernel::commands::transform::TransformCommand;
 use pm_kernel::model::{LayerInfo, list_layers};
 use pm_kernel::{Command, CompCommand, LayerCommand, PropertyCommand, Published, new_id};
 use pm_model::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub struct Plan {
     pub label: String,
@@ -338,8 +338,34 @@ fn adjacent(layers: &[LayerInfo], selected: &[String], up: bool, extend: bool) -
         vec![target.id.clone()]
     }))
 }
+/// The selected layers that own their transform. A selected group or parent
+/// above carries the rest, which must not receive the same move twice
+/// (viewer.ts selectionTransformRoots).
+pub fn transform_roots<'a>(layers: &'a [LayerInfo], selected: &[String]) -> HashSet<&'a str> {
+    type Link = fn(&LayerInfo) -> Option<&String>;
+    let chosen: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let info: HashMap<&str, &LayerInfo> = layers.iter().map(|l| (l.id.as_str(), l)).collect();
+    let carried = |layer: &LayerInfo, next: Link| {
+        let mut at = next(layer);
+        for _ in 0..256 {
+            let Some(id) = at else { return false };
+            if chosen.contains(id.as_str()) {
+                return true;
+            }
+            at = info.get(id.as_str()).and_then(|l| next(l));
+        }
+        false
+    };
+    layers
+        .iter()
+        .filter(|l| chosen.contains(l.id.as_str()))
+        .filter(|l| {
+            !carried(l, |l| l.group.as_ref()) && !carried(l, |l| l.parent.as_ref())
+        })
+        .map(|l| l.id.as_str())
+        .collect()
+}
 /// One keyboard step in composition pixels, mapped into each layer's parent.
-/// Selected children follow their selected group instead of moving twice.
 fn nudge(
     published: &Published,
     layers: &[LayerInfo],
@@ -348,22 +374,15 @@ fn nudge(
     time: f64,
 ) -> Option<Plan> {
     let mut mirror = pm_kernel::QueryMirror::new(published);
-    let info = |id: &str| layers.iter().find(|l| l.id == id);
-    let inside_selection = |layer: &LayerInfo| {
-        let mut at = layer.group.clone();
-        while let Some(group) = at {
-            if selected.contains(&group) {
-                return true;
-            }
-            at = info(&group).and_then(|g| g.group.clone());
-        }
-        false
-    };
+    let ids: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let unlocked: Vec<String> = layers
+        .iter()
+        .filter(|l| !l.effectively_locked && ids.contains(l.id.as_str()))
+        .map(|l| l.id.clone())
+        .collect();
+    let roots = transform_roots(layers, &unlocked);
     let mut commands = vec![];
-    for id in selected {
-        let Some(layer) = info(id).filter(|l| !l.effectively_locked && !inside_selection(l)) else {
-            continue;
-        };
+    for layer in layers.iter().filter(|l| roots.contains(l.id.as_str())) {
         let q = mirror.queries();
         let (Ok(world), Ok(local)) = (
             q.world_matrix(None, &layer.id, time),
@@ -565,11 +584,16 @@ pub fn disabled(
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
         return off;
     };
-    let selected: Vec<&LayerInfo> = published
+    // Runs on every publication, so the selection is looked up, never scanned for.
+    let ids: HashSet<&str> = published
         .selection
         .layers()
         .iter()
-        .filter_map(|id| layers.iter().find(|l| l.id == *id))
+        .map(String::as_str)
+        .collect();
+    let selected: Vec<&LayerInfo> = layers
+        .iter()
+        .filter(|l| !ids.is_empty() && ids.contains(l.id.as_str()))
         .collect();
     let keys = !published.selection.keys().is_empty();
     let chosen = !selected.is_empty();
@@ -597,6 +621,10 @@ pub fn disabled(
     ] {
         set(name, !layers.is_empty());
     }
+    set(
+        "nudgeSelection",
+        selected.iter().any(|l| !l.effectively_locked),
+    );
     set(
         "duplicate",
         chosen && selected.iter().all(|l| !l.effectively_locked),

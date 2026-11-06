@@ -395,11 +395,15 @@ impl Controller {
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
             let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
-            let scale = self.zoom.unwrap_or(fit);
-            self.viewer_scale.set(scale);
+            let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
+            if self.view.scale.replace(scale) != scale
+                && let Some(gizmos) = &self.builtins.gizmos
+            {
+                gizmos.update(cx, |g, cx| g.redraw(cx));
+            }
             self.host
                 .borrow_mut()
-                .viewer_transform(self.dimensions, Some(scale), self.pan);
+                .viewer_transform(self.dimensions, Some(scale), self.view.pan);
             crate::playback::frame_outline(
                 &self.host.borrow(),
                 crate::panels::needs_frame_outline(self.background, t.colors.viewer),
@@ -797,6 +801,41 @@ impl Controller {
     }
 }
 impl Controller {
+    /// The highest zoom the display can show this composition at.
+    pub(crate) fn zoom_limit(&self) -> f64 {
+        self.host.borrow().viewer_zoom_limit(self.dimensions)
+    }
+    /// One Zoom In or Zoom Out step from what is on screen.
+    pub(crate) fn step_zoom(&mut self, factor: f64, cx: &mut Context<Self>) {
+        use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+        let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
+        let zoom = (self.view.scale.get() * factor).clamp(ZOOM_MIN, top);
+        self.view.place(Some(zoom), self.view.pan);
+        self.write_view(None, cx);
+    }
+    /// Writes the placement now or after `after`, replacing any write not yet
+    /// made. It stays local until the kernel has taken it.
+    pub(crate) fn write_view(
+        &mut self,
+        after: Option<std::time::Duration>,
+        cx: &mut Context<Self>,
+    ) {
+        self.view_write = Some(cx.spawn(async move |this, cx| {
+            if let Some(after) = after {
+                cx.background_executor().timer(after).await;
+            }
+            let Ok(pending) = this.update(cx, |v, _| v.write_ui()) else {
+                return;
+            };
+            if let Some(pending) = pending {
+                let _ = pending.await;
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.view.written();
+                v.refresh(cx);
+            });
+        }));
+    }
     /// The viewer slot's centre, window points.
     fn viewer_center(&self) -> Point<Pixels> {
         self.host
@@ -865,12 +904,12 @@ impl crate::gizmo::Host for ControllerDelegate {
         let controller = self.0.upgrade()?;
         let v = controller.read(cx);
         let slot = v.host.borrow().viewer_rect.get()?;
-        let scale = v.viewer_scale.get();
+        let scale = v.view.scale.get();
         let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
         Some(crate::gizmo::ViewFrame {
             origin: point(
-                px(slot.x + (slot.w - w as f32) / 2. + v.pan[0] as f32),
-                px(slot.y + (slot.h - h as f32) / 2. + v.pan[1] as f32),
+                px(slot.x + (slot.w - w as f32) / 2. + v.view.pan[0] as f32),
+                px(slot.y + (slot.h - h as f32) / 2. + v.view.pan[1] as f32),
             ),
             scale,
             size: v.dimensions,
@@ -915,11 +954,10 @@ impl crate::gizmo::Host for ControllerDelegate {
     }
     fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
-            let (zoom, pan) =
-                crate::gizmo::navigated(change, v.viewer_scale.get(), v.pan, v.viewer_center());
-            v.zoom = Some(zoom);
-            v.pan = pan;
-            v.persist_ui();
+            let limit = v.zoom_limit();
+            let center = v.viewer_center();
+            v.view.navigate(change, center, limit);
+            v.write_view(Some(crate::gizmo::NAVIGATION_IDLE), cx);
             cx.notify();
         });
     }

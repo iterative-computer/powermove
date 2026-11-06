@@ -433,10 +433,186 @@ fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {
         factor: 2.,
         at: pointer,
     };
-    let (zoom, pan) = crate::gizmo::navigated(change, 1., [0., 0.], center);
+    let (zoom, pan) = crate::gizmo::navigated(change, 1., [0., 0.], center, 8.);
     assert_eq!(zoom, 2.);
     // 200, 100 from centre now lands 400, 200 out: the view moves back by that.
     assert_eq!(pan, [-200., -100.]);
+}
+/// The app's state and its delegate in the shape that panicked: the owner holds
+/// the surface, updates it during its own update, and the host reads the owner.
+struct Owner {
+    surface: Option<Entity<GizmoSurface>>,
+    overlays: usize,
+}
+struct OwnerHost(gpui::WeakEntity<Owner>);
+impl Host for OwnerHost {
+    fn time(&self, cx: &App) -> f64 {
+        self.0.upgrade().map_or(0., |o| o.read(cx).overlays as f64 * 0.)
+    }
+    fn playing(&self, cx: &App) -> bool {
+        self.0.upgrade().is_some_and(|o| o.read(cx).overlays > 99)
+    }
+    fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame> {
+        self.0.upgrade()?.read(cx);
+        Some(ViewFrame {
+            origin: bounds.origin,
+            scale: 1.,
+            size: [640., 360.],
+        })
+    }
+    fn tool(&self, _: &App) -> Tool {
+        Tool::Select
+    }
+    fn overlay(&self, _: Vec<OverlayLine>, cx: &mut App) {
+        let _ = self.0.update(cx, |o, _| o.overlays += 1);
+    }
+    fn navigate(&self, _: Navigate, _: &mut App) {}
+    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {}
+    fn report(&self, _: String, _: &mut App) {}
+}
+#[gpui::test]
+fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
+    let rig = rig_project("viewer", &project());
+    let kernel = rig.kernel.clone();
+    let owner = cx.new(|_| Owner {
+        surface: None,
+        overlays: 0,
+    });
+    let weak = owner.downgrade();
+    let surface = cx.new(|_| {
+        GizmoSurface::new(
+            kernel,
+            PROJECT.into(),
+            tokens(),
+            Rc::new(OwnerHost(weak)),
+        )
+    });
+    owner.update(cx, |o, _| o.surface = Some(surface));
+    // Controller::refresh, tick_builtins and toggleLayerControls, each under lease.
+    owner.update(cx, |o, cx| {
+        let surface = o.surface.clone().unwrap();
+        surface.update(cx, |s, cx| s.refresh(cx));
+    });
+    owner.update(cx, |o, cx| {
+        let surface = o.surface.clone().unwrap();
+        surface.update(cx, |s, cx| s.toggle_controls(cx));
+    });
+    let check = owner.clone();
+    settle(cx, move |cx| check.read_with(cx, |o, _| o.overlays >= 2));
+}
+#[gpui::test]
+fn zoom_stops_at_what_the_view_state_accepts_and_the_display_can_show(_: &mut TestAppContext) {
+    use pm_panel_viewerchrome::Navigation;
+    let at = point(px(0.), px(0.));
+    let zoom = |limit: f64| {
+        let change = Navigate::Zoom { factor: 10., at };
+        crate::gizmo::navigated(change, 4., [0., 0.], at, limit).0
+    };
+    assert_eq!(zoom(100.), 8.);
+    let limit = pm_shell::zoom_limit([1920., 1080.], 2.);
+    assert!((limit - 2.1333).abs() < 1e-3);
+    assert_eq!(zoom(limit), limit);
+    let stored = Navigation {
+        fit: false,
+        zoom: zoom(100.),
+        pan: Default::default(),
+    };
+    assert!(stored.checked().is_ok());
+}
+/// A hand drag under load: publications of earlier steps land between events.
+#[gpui::test]
+fn publications_never_undo_navigation_they_are_behind(_: &mut TestAppContext) {
+    use pm_panel_viewerchrome::{Navigation, Point as Pan};
+    let center = point(px(0.), px(0.));
+    let mut view = crate::gizmo::ViewPlacement::default();
+    let step = Navigate::Pan(point(px(10.), px(0.)));
+    view.navigate(step, center, 8.);
+    view.navigate(step, center, 8.);
+    let behind = Navigation {
+        fit: false,
+        zoom: 1.,
+        pan: Pan { x: 10., y: 0. },
+    };
+    view.adopt(&behind);
+    view.navigate(step, center, 8.);
+    assert_eq!(view.pan, [30., 0.]);
+    // Two wheel steps in one frame both count, without a render between them.
+    let at = point(px(0.), px(0.));
+    let wheel = Navigate::Zoom { factor: 2., at };
+    view.navigate(wheel, center, 8.);
+    view.navigate(wheel, center, 8.);
+    assert_eq!(view.scale.get(), 4.);
+    view.written();
+    view.adopt(&behind);
+    assert_eq!(view.pan, [10., 0.]);
+}
+/// Hand protection written by a nudge or Center Anchor must not stop the viewer.
+#[gpui::test]
+fn a_drag_edits_a_channel_a_previous_hand_edit_protected(cx: &mut TestAppContext) {
+    let protected = project().replace(
+        r#""fx":[]}]}"#,
+        r#""fx":[],"locked_intent":{"position.x":"human"}}]}"#,
+    );
+    let mut s = stage_on(cx, &protected);
+    let before = s.pose();
+    let (centre, _, _) = s.points();
+    let at = s.point_of(centre);
+    s.drag(cx, at, point(px(30.), px(0.)), Modifiers::none());
+    assert_eq!(s.pose().position[0], before.position[0] + 30.);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let root = p.snapshot.root().unwrap();
+    let layer = pm_kernel::model::find_layer(root, "l0")
+        .and_then(|at| pm_kernel::model::layer_at(root, &at))
+        .unwrap();
+    assert!(
+        layer
+            .get("locked_intent")
+            .and_then(|i| i.get("position.y"))
+            .is_some()
+    );
+}
+/// A selected group and its member: the member follows the group, once.
+#[gpui::test]
+fn dragging_a_group_with_its_member_moves_the_member_once(cx: &mut TestAppContext) {
+    let grouped = pair()
+        .replace(
+            r#""id":"l1","type":"shape""#,
+            r#""id":"l1","group":"g","type":"shape""#,
+        )
+        .replace(
+            r#""layers":[{"#,
+            r#""layers":[{"id":"g","type":"group","name":"Group","from":0,"dur":2,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        );
+    let mut s = stage_on(cx, &grouped);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["g".into(), "l1".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.refresh(cx);
+    let at = s.point_of([460., 160.]);
+    s.drag(cx, at, point(px(40.), px(0.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let mut x = |id: &str| {
+        mirror
+            .queries()
+            .evaluate(None, id, "position.x", 0.5)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!((x("g"), x("l1")), (40., 450.));
 }
 #[gpui::test]
 fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestAppContext) {

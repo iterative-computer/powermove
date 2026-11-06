@@ -24,5 +24,5 @@ pub use macos::{run, run_integrated, run_with_device, smoke, tokens};
 #[cfg(target_os = "macos")]
 pub use native::{
     Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, preview_drawable,
-    system_accent,
+    system_accent, zoom_limit,
 };

@@ -133,6 +133,10 @@ pub fn settings() -> Accessibility {
         reduce_motion: w.accessibilityDisplayShouldReduceMotion(),
     }
 }
+/// The highest zoom whose layer stays inside Metal's largest drawable.
+pub fn zoom_limit(dimensions: [f64; 2], backing: f64) -> f64 {
+    8192. / dimensions[0].max(dimensions[1]) / backing
+}
 /// Drawable pixels for a layer of `size` points at the preview resolution.
 pub fn preview_drawable(size: (f64, f64), backing: f64, preview: f64) -> (f64, f64) {
     (
@@ -1034,7 +1038,6 @@ impl Host {
             subtitle,
         }));
         let weak = Rc::downgrade(&host);
-        let hit_rect = host.borrow().viewer_rect.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
@@ -1043,11 +1046,9 @@ impl Host {
                         h.borrow_mut().present()
                     })
             }),
-            Rc::new(move |p| {
-                !hit_rect
-                    .get()
-                    .is_some_and(|r| r.contains(p.x as f32, p.y as f32))
-            }),
+            // The viewer view below only shows pixels: GPUI paints a hole over it
+            // but owns the pointer there, for gizmos and viewer controls.
+            Rc::new(|_| true),
         );
         host.borrow_mut().registration = Some(reg);
         let weak = Rc::downgrade(&host);
@@ -1471,6 +1472,10 @@ impl Host {
         }
         self.viewer_transform = Some((dimensions, zoom, pan));
     }
+    /// The highest zoom the display can show `dimensions` at.
+    pub fn viewer_zoom_limit(&self, dimensions: [f64; 2]) -> f64 {
+        zoom_limit(dimensions, self.window.backingScaleFactor())
+    }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
         self.resolver.bindings.extend(bindings);
         self.resolver
@@ -1509,7 +1514,7 @@ impl Host {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
                 let zoom = zoom
                     .unwrap_or(fit)
-                    .min(8192. / dimensions[0].max(dimensions[1]) / scale);
+                    .min(zoom_limit(dimensions, scale));
                 (dimensions[0] * zoom, dimensions[1] * zoom, pan)
             } else {
                 (r.w as f64, r.h as f64, [0., 0.])

@@ -52,7 +52,6 @@ pub struct Controller {
     pub rate: pm_time::Rate,
     pub duration: f64,
     pub dimensions: [f64; 2],
-    pub zoom: Option<f64>,
     /// Composition background (`bg`); `None` when transparent.
     pub background: Option<u32>,
     /// Keyframes in the open composition, for the status bar.
@@ -65,10 +64,9 @@ pub struct Controller {
     pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
     /// The toolbar tool, mirrored from shell commands for native surfaces.
     pub tool: String,
-    /// The composition's scale in the viewer, as last placed.
-    pub viewer_scale: std::cell::Cell<f64>,
-    /// Viewer offset from centred, points.
-    pub pan: [f64; 2],
+    pub view: crate::gizmo::ViewPlacement,
+    /// The pending or running write of `view`.
+    pub(crate) view_write: Option<gpui::Task<()>>,
     pub clipboard: crate::layer_commands::Clipboard,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
@@ -262,7 +260,6 @@ impl Controller {
             rate: pm_time::Rate::FPS_30,
             duration: 1.,
             dimensions: [1920., 1080.],
-            zoom: None,
             background: None,
             keyframes: 0,
             recovery_pending: false,
@@ -272,8 +269,8 @@ impl Controller {
             close_operation: None,
             gizmo_lines: vec![],
             tool: "toolSelect".into(),
-            viewer_scale: std::cell::Cell::new(1.),
-            pan: [0., 0.],
+            view: Default::default(),
+            view_write: None,
             clipboard: Default::default(),
             disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
             save_pending: false,
@@ -337,9 +334,11 @@ impl Controller {
             } else {
                 0.
             };
-            self.zoom = pm_panel_viewerchrome::Chrome::read(&next.ui_state)
-                .ok()
-                .and_then(|c| (!c.navigation.fit).then_some(c.navigation.zoom));
+            self.view.written();
+            self.view_write = None;
+            if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&next.ui_state) {
+                self.view.adopt(&chrome.navigation);
+            }
             p = Arc::new(next);
             self.published = Some(p.clone());
             self.bind_composition();
@@ -376,8 +375,7 @@ impl Controller {
         self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
-            self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
-            self.pan = [chrome.navigation.pan.x, chrome.navigation.pan.y];
+            self.view.adopt(&chrome.navigation);
         }
         self.host
             .borrow_mut()
@@ -495,8 +493,8 @@ impl Controller {
         })
         .detach();
     }
-    /// Plans off the main thread: nudging reads layer matrices. `false` lets a
-    /// key with nothing to act on fall through to the focused control.
+    /// Plans off the main thread: nudging reads layer matrices. Whether a plan
+    /// exists is known only there, after the key is spent, so an empty one says so.
     fn run_plan(&mut self, name: &str, args: &[serde_json::Value], cx: &mut Context<Self>) -> bool {
         let Some(published) = self.published.clone() else {
             return false;
@@ -509,9 +507,13 @@ impl Controller {
                     crate::layer_commands::command_plan(&name, &args, &published, time)
                 })
                 .await;
-            if let Some(plan) = plan {
-                let _ = this.update(cx, |v, cx| v.run_layer_plan(plan, cx));
-            }
+            let _ = this.update(cx, |v, cx| match plan {
+                Some(plan) => v.run_layer_plan(plan, cx),
+                None => {
+                    v.message = "Nothing to change".into();
+                    cx.notify();
+                }
+            });
         })
         .detach();
         true
@@ -703,36 +705,44 @@ impl Controller {
         self.persist_ui();
     }
     pub fn persist_ui(&self) {
-        if let (Some(s), Some(p)) = (&self.session, &self.published) {
-            let mut ui = p.ui_state.clone();
-            if let pm_model::Value::Object(m) = &mut ui.transport {
-                m.insert("time", pm_model::Value::from(self.time()));
-                m.insert(
-                    "playing",
-                    pm_model::Value::from(
-                        self.viewer
-                            .as_ref()
-                            .and_then(|v| v.status().clock)
-                            .is_some_and(|c| c.state != TransportState::Stopped),
-                    ),
-                );
-            }
-            if let pm_model::Value::Object(m) = &mut ui.viewer {
-                m.insert("zoom", pm_model::Value::from(self.zoom.unwrap_or(1.)));
-                m.insert("fit", pm_model::Value::from(self.zoom.is_none()));
-                m.insert(
-                    "pan",
-                    pm_model::Value::Array(vec![self.pan[0].into(), self.pan[1].into()]),
-                );
-            }
-            let _pending = self.kernel.state_transaction(StateTransaction {
-                ops: vec![StateOp::Ui {
-                    project: s.project.clone(),
-                    next: ui,
-                }],
-                ..Default::default()
-            });
+        let _ = self.write_ui();
+    }
+    /// Resolves once the kernel has taken the write.
+    pub(crate) fn write_ui(
+        &self,
+    ) -> Option<pm_kernel::Pending<Result<pm_kernel::state::StateAck, pm_kernel::KernelFailure>>>
+    {
+        let (Some(s), Some(p)) = (&self.session, &self.published) else {
+            return None;
+        };
+        let mut ui = p.ui_state.clone();
+        if let pm_model::Value::Object(m) = &mut ui.transport {
+            m.insert("time", pm_model::Value::from(self.time()));
+            m.insert(
+                "playing",
+                pm_model::Value::from(
+                    self.viewer
+                        .as_ref()
+                        .and_then(|v| v.status().clock)
+                        .is_some_and(|c| c.state != TransportState::Stopped),
+                ),
+            );
         }
+        if let pm_model::Value::Object(m) = &mut ui.viewer {
+            m.insert("zoom", pm_model::Value::from(self.view.zoom.unwrap_or(1.)));
+            m.insert("fit", pm_model::Value::from(self.view.zoom.is_none()));
+            m.insert(
+                "pan",
+                pm_model::Value::Array(vec![self.view.pan[0].into(), self.view.pan[1].into()]),
+            );
+        }
+        Some(self.kernel.state_transaction(StateTransaction {
+            ops: vec![StateOp::Ui {
+                project: s.project.clone(),
+                next: ui,
+            }],
+            ..Default::default()
+        }))
     }
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open(SessionSource::File(path), cx);
@@ -1295,22 +1305,15 @@ impl Controller {
                 .detach();
             }
             "fit" | "fitComp" | "fitComposition" | "viewer.fit" => {
-                self.zoom = None;
-                self.pan = [0., 0.];
-                self.persist_ui();
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
             }
             "actualSize" => {
-                self.zoom = Some(1.);
-                self.persist_ui();
+                self.view.place(Some(1.), self.view.pan);
+                self.write_view(None, cx);
             }
-            "zoomIn" => {
-                self.zoom = Some(self.viewer_scale.get() * 1.25);
-                self.persist_ui();
-            }
-            "zoomOut" => {
-                self.zoom = Some(self.viewer_scale.get() / 1.25);
-                self.persist_ui();
-            }
+            "zoomIn" => self.step_zoom(1.25, cx),
+            "zoomOut" => self.step_zoom(0.8, cx),
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
             | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
             | "nextVisibleEvent" => {

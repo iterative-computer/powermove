@@ -8,7 +8,8 @@ use pm_kernel::{
     Request, SelectionCall, WriteBody, commands::properties::SetProperty,
 };
 use pm_model::Value;
-use std::{collections::VecDeque, rc::Rc, sync::Arc};
+use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
+use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -25,12 +26,67 @@ pub enum Navigate {
     Pan(Point<Pixels>),
     Zoom { factor: f64, at: Point<Pixels> },
 }
+/// How long pointer navigation rests before it is written. Every write publishes
+/// to all panels, so a hot gesture only moves local state.
+pub const NAVIGATION_IDLE: Duration = Duration::from_millis(150);
+/// The viewer's zoom and pan. The pointer owns them from its first event until
+/// their write lands: publications in between carry older values.
+#[derive(Debug)]
+pub struct ViewPlacement {
+    /// `None` fits the slot.
+    pub zoom: Option<f64>,
+    /// Offset from centred, points.
+    pub pan: [f64; 2],
+    /// The composition's scale as shown, which is what pointers map through.
+    pub scale: Cell<f64>,
+    local: bool,
+}
+impl Default for ViewPlacement {
+    fn default() -> Self {
+        Self {
+            zoom: None,
+            pan: [0., 0.],
+            scale: Cell::new(1.),
+            local: false,
+        }
+    }
+}
+impl ViewPlacement {
+    pub fn navigate(&mut self, change: Navigate, center: Point<Pixels>, limit: f64) {
+        let (zoom, pan) = navigated(change, self.scale.get(), self.pan, center, limit);
+        self.zoom = Some(zoom);
+        self.pan = pan;
+        self.scale.set(zoom);
+        self.local = true;
+    }
+    /// An absolute placement from a command.
+    pub fn place(&mut self, zoom: Option<f64>, pan: [f64; 2]) {
+        self.zoom = zoom;
+        self.pan = pan;
+        if let Some(zoom) = zoom {
+            self.scale.set(zoom);
+        }
+        self.local = true;
+    }
+    /// A publication's values, ignored while local ones are unwritten.
+    pub fn adopt(&mut self, navigation: &pm_panel_viewerchrome::Navigation) {
+        if !self.local {
+            self.zoom = (!navigation.fit).then_some(navigation.zoom);
+            self.pan = [navigation.pan.x, navigation.pan.y];
+        }
+    }
+    pub fn written(&mut self) {
+        self.local = false;
+    }
+}
 /// The zoom and pan after a change: zooming keeps the point under the pointer.
+/// `limit` is the highest zoom the display can show.
 pub fn navigated(
     change: Navigate,
     zoom: f64,
     pan: [f64; 2],
     center: Point<Pixels>,
+    limit: f64,
 ) -> (f64, [f64; 2]) {
     match change {
         Navigate::Pan(by) => (
@@ -41,7 +97,7 @@ pub fn navigated(
             ],
         ),
         Navigate::Zoom { factor, at } => {
-            let next = (zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+            let next = (zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX.min(limit).max(ZOOM_MIN));
             let kept = 1. - next / zoom;
             let offset = |at: Pixels, center: Pixels, pan: f64| {
                 pan + (f32::from(at) as f64 - f32::from(center) as f64 - pan) * kept
@@ -80,6 +136,8 @@ pub trait Host: 'static {
 pub struct Pose {
     pub id: String,
     pub locked: bool,
+    /// A selected parent or group carries this layer; moving both would double it.
+    root: bool,
     /// Images and video keep their picture's aspect, as in the shipped viewer.
     keeps_aspect: bool,
     world: [f64; 6],
@@ -151,6 +209,7 @@ pub struct GizmoSurface {
     controls: bool,
     panning: Option<Point<Pixels>>,
     cursor: CursorStyle,
+    refreshing: bool,
 }
 const HANDLES: [(f64, f64); 8] = [
     (0., 0.),
@@ -166,8 +225,6 @@ const HANDLES: [(f64, f64); 8] = [
 const ANCHOR_REACH: f64 = 12.;
 /// Smallest scale a handle drag reaches, percent (viewer.ts calculateResize).
 const MIN_SCALE: f64 = 0.1;
-const MIN_ZOOM: f64 = 0.05;
-const MAX_ZOOM: f64 = 16.;
 fn transform(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
     [
         m[0] * p[0] + m[2] * p[1] + m[4],
@@ -241,11 +298,12 @@ impl Pose {
 }
 fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let root = p.snapshot.root()?;
-    let layers: std::collections::HashMap<String, (bool, String)> =
-        pm_kernel::model::list_layers(root, None)
-            .into_iter()
-            .map(|l| (l.id, (l.effectively_locked, l.kind)))
-            .collect();
+    let list = pm_kernel::model::list_layers(root, None);
+    let roots = crate::layer_commands::transform_roots(&list, p.selection.layers());
+    let layers: std::collections::HashMap<&str, (bool, &str)> = list
+        .iter()
+        .map(|l| (l.id.as_str(), (l.effectively_locked, l.kind.as_str())))
+        .collect();
     let mut mirror = QueryMirror::new(p);
     let mut poses = vec![];
     for id in p.selection.layers() {
@@ -280,7 +338,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             number("anchor.x").unwrap_or(0.),
             number("anchor.y").unwrap_or(0.),
         ];
-        let (locked, kind) = layers.get(id).map_or((true, ""), |(l, k)| (*l, k.as_str()));
+        let (locked, kind) = layers.get(id.as_str()).copied().unwrap_or((true, ""));
         let parametric = kind == "shape"
             && pm_kernel::model::find_layer(root, id)
                 .and_then(|at| pm_kernel::model::layer_at(root, &at))
@@ -301,6 +359,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         poses.push(Pose {
             id: id.clone(),
             locked,
+            root: roots.contains(id.as_str()),
             keeps_aspect: matches!(kind, "image" | "video"),
             world,
             linear: [local[0], local[1], local[2], local[3]],
@@ -346,11 +405,32 @@ impl GizmoSurface {
             controls: true,
             panning: None,
             cursor: CursorStyle::Arrow,
+            refreshing: false,
         }
     }
-    /// Selection, document or playhead moved: reread the pose off the main
-    /// thread. While playing the engine owns the frame and gizmos stay down.
+    /// Selection, document or playhead moved. The Controller calls in during its
+    /// own update and the host reads the Controller, which GPUI refuses while it
+    /// is leased, so the work runs once that update ends.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.refreshing, true) {
+            return;
+        }
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            this.update(cx, |s, cx| {
+                s.refreshing = false;
+                s.reread(cx);
+            });
+        });
+    }
+    /// Lines depend on the shown scale; repaint them from the current poses.
+    pub fn redraw(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        cx.defer(move |cx| this.update(cx, |s, cx| s.draw(cx)));
+    }
+    /// Reread the pose off the main thread. While playing the engine owns the
+    /// frame and gizmos stay down.
+    fn reread(&mut self, cx: &mut Context<Self>) {
         if self.host.playing(cx) {
             self.poses = Default::default();
             self.host.overlay(vec![], cx);
@@ -464,7 +544,6 @@ impl GizmoSurface {
             Tool::Other => return,
             Tool::Hand => {
                 self.panning = Some(event.position);
-                cx.stop_propagation();
                 return;
             }
             Tool::Zoom => {
@@ -472,7 +551,6 @@ impl GizmoSurface {
                 let at = event.position;
                 self.host.navigate(Navigate::Zoom { factor, at }, cx);
                 self.draw(cx);
-                cx.stop_propagation();
                 return;
             }
             Tool::Rotate => {
@@ -504,7 +582,6 @@ impl GizmoSurface {
             }
         };
         self.drag = drag;
-        cx.stop_propagation();
     }
     /// Secondary press: selects what is under the pointer, locked layers
     /// included, then opens the shared layer menu on it.
@@ -700,7 +777,7 @@ impl GizmoSurface {
     /// View ▸ Show/Hide Layer Controls: boxes off, handles disarmed.
     pub fn toggle_controls(&mut self, cx: &mut Context<Self>) {
         self.controls = !self.controls;
-        self.draw(cx);
+        self.redraw(cx);
     }
     #[cfg(test)]
     pub fn gesture_active(&self) -> bool {
@@ -799,7 +876,12 @@ fn inside(corners: &[[f64; 2]; 4], p: [f64; 2]) -> bool {
     true
 }
 fn set(id: &str, channel: &str, value: f64, time: f64) -> Command {
-    PropertyCommand::Set(SetProperty::new(id, channel, Value::Number(value), time)).into()
+    // A viewer edit is the artist's hand: it overrides earlier hand edits and
+    // protects its value from agents, as in the shipped viewer.
+    let mut set = SetProperty::new(id, channel, Value::Number(value), time);
+    set.preserve_hand_edits = false;
+    set.mark_intent = true;
+    PropertyCommand::Set(set).into()
 }
 #[derive(Clone, Copy)]
 struct Mods {
@@ -817,7 +899,12 @@ fn commands(drag: &Drag, origin: [f64; 2], at: [f64; 2], mods: Mods) -> Vec<Comm
     }
     let t = drag.time;
     let mut out = vec![];
-    for pose in drag.poses.iter().filter(|p| !p.locked) {
+    let moves_roots = matches!(drag.hit, Hit::Body);
+    for pose in drag
+        .poses
+        .iter()
+        .filter(|p| !p.locked && (p.root || !moves_roots))
+    {
         let id = &pose.id;
         match drag.hit {
             Hit::Body => {
