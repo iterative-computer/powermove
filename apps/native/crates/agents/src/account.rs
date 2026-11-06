@@ -645,16 +645,13 @@ mod tests {
     }
     #[test]
     fn an_existing_login_is_copied_once_and_a_sign_out_stays_signed_out() {
-        let root = tempfile::tempdir().unwrap();
-        let shared = root.path().join("home/.codex");
+        let root = std::env::temp_dir().join(format!("pm-account-{}", std::process::id()));
+        let shared = root.join("home/.codex");
         std::fs::create_dir_all(&shared).unwrap();
         std::fs::write(shared.join("auth.json"), "{}").unwrap();
         let environment = Environment {
-            profile: root.path().join("profile"),
-            vars: BTreeMap::from([(
-                "HOME".into(),
-                root.path().join("home").display().to_string(),
-            )]),
+            profile: root.join("profile"),
+            vars: BTreeMap::from([("HOME".into(), root.join("home").display().to_string())]),
             ..Default::default()
         };
         let vars = environment.codex_vars().unwrap();
@@ -665,5 +662,6 @@ mod tests {
         std::fs::remove_file(home.join("auth.json")).unwrap();
         environment.codex_vars().unwrap();
         assert!(!home.join("auth.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
