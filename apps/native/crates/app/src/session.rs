@@ -566,7 +566,7 @@ impl Controller {
             source,
             electron_profile,
         });
-        self.settle_open(operation, name, path, async move { pending.await }, cx);
+        self.settle_open(operation, name, path, pending, cx);
     }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(&mut self, reply: ShellReply, cx: &mut Context<Self>) {

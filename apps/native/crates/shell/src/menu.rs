@@ -154,6 +154,10 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("compositionSettings"),
                 sep(),
                 m("precompose"),
+                sep(),
+                k("Edit Keyframe Value…", "keyframeValue", ""),
+                k("Keyframe Velocity…", "keyframeVelocity", ""),
+                k("Scale Keyframes…", "scaleKeyframes", ""),
             ],
         ),
         (
@@ -235,10 +239,6 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                     .with_args(serde_json::json!([-1])),
                 k("Nudge Keyframes Later", "nudgeKeyframes", "alt+right")
                     .with_args(serde_json::json!([1])),
-                k("Edit Value…", "keyframeValue", ""),
-                k("Keyframe Velocity…", "keyframeVelocity", ""),
-                k("Scale Keyframes…", "scaleKeyframes", ""),
-                sep(),
                 k("Easy Ease", "easyEase", "f9"),
                 k("Easy Ease In", "easyEaseIn", "shift+f9"),
                 k("Easy Ease Out", "easyEaseOut", "cmd+shift+f9"),

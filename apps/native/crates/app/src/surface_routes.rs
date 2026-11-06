@@ -25,6 +25,7 @@ impl Controller {
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }
+            "bringSignIns" => self.bring_sign_ins(cx),
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
             _ => return false,
@@ -86,6 +87,58 @@ impl Controller {
                 v.pump(cx);
             });
         }
+    }
+    /// Settings ▸ Accounts retry. The Keychain is touched only after this click,
+    /// and the library stays attached: locators go through the kernel.
+    fn bring_sign_ins(&mut self, cx: &mut Context<Self>) {
+        use pm_first_launch::{Config, KeychainDenied, SecretRetryOutcome, secrets};
+        let Some(electron_profile) = self.electron.clone() else {
+            self.message = "There’s no original app on this Mac.".into();
+            cx.notify();
+            return;
+        };
+        let config = Config {
+            electron_profile,
+            native_profile: self.profile.clone(),
+        };
+        let rx = crate::platform::choice(
+            &self.host.borrow().window,
+            "Keep Your Sign-Ins",
+            secrets::PROMPT,
+            &["Continue", "Not Now"],
+        );
+        let kernel = self.kernel.clone();
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await.ok() != Some(0) {
+                return;
+            }
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    pm_first_launch::retry_secret_consent_in_library(
+                        &config,
+                        &kernel,
+                        &mut secrets::MacKeychain::after_user_consent(),
+                        |_| Ok(()),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(SecretRetryOutcome::Complete) => "Your sign-ins came across.".into(),
+                    Ok(SecretRetryOutcome::WaitingForElectron) => {
+                        "Quit the original app, then try again.".into()
+                    }
+                    Err(error) if error.downcast_ref::<KeychainDenied>().is_some() => {
+                        "Keychain access wasn’t allowed. Your sign-ins stay in the original app."
+                            .into()
+                    }
+                    Err(_) => "Your sign-ins couldn’t be copied. Try again.".into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn dialog_owner(&self) -> Option<(String, WindowId)> {
         let project = self.session.as_ref()?.project.clone();

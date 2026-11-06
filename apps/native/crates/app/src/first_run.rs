@@ -355,9 +355,11 @@ impl Flow {
             }
             _ => self.model.view(),
         };
-        let progress = (self.model.gate == Gate::Copying || self.model.gate == Gate::Paused)
-            .then(|| self.model.progress.as_ref())
-            .flatten()
+        let progress = self
+            .model
+            .progress
+            .as_ref()
+            .filter(|_| matches!(self.model.gate, Gate::Copying | Gate::Paused))
             .map(|p| {
                 p.determinate()
                     .map_or(Progress::Indeterminate, |(done, total)| {
@@ -396,10 +398,9 @@ impl Flow {
             progress,
             rows,
             details: self
-                .model
-                .details_available()
-                .then(|| self.details.clone())
-                .flatten(),
+                .details
+                .clone()
+                .filter(|_| self.model.details_available()),
             buttons: view
                 .buttons
                 .iter()
@@ -651,7 +652,7 @@ pub fn gate(
     kernel: pm_kernel::KernelHandle,
     mcp_host: Arc<crate::mcp::Host>,
     server: Server,
-) -> Box<dyn FnOnce(pm_shell::Finish, &mut gpui::App)> {
+) -> pm_shell::Gate {
     Box::new(move |finish, cx| {
         let mut flow = Flow::new(plan.clone());
         let first = flow.start();
@@ -701,8 +702,14 @@ impl Driver {
                 }
             });
             let frame = flow.borrow().frame();
+            let chime = frame.animate;
             match pm_shell::welcome_view::open_welcome(pm_shell::tokens(), frame, on_action, cx) {
-                Ok(handle) => *window.borrow_mut() = Some(handle),
+                Ok(handle) => {
+                    *window.borrow_mut() = Some(handle);
+                    if chime {
+                        play_chime();
+                    }
+                }
                 Err(error) => eprintln!("Could not open Welcome: {error:#}"),
             }
         }
@@ -710,7 +717,7 @@ impl Driver {
             let (driver, flow, window, tx) = (self.clone(), flow, window.clone(), tx.clone());
             async move |cx| {
                 while let Ok(message) = rx.recv().await {
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let effects = flow.borrow_mut().message(message);
                         let frame = flow.borrow().frame();
                         show(&window, frame, cx);
@@ -771,7 +778,7 @@ impl Driver {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(1))
                     .await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if !done.get() {
                         let on_action = Rc::new(|_: &str, cx: &mut gpui::App| cx.quit());
                         let frame = updating_frame();
@@ -791,7 +798,7 @@ impl Driver {
             done.set(true);
             drop(late);
             let media = *result.as_ref().unwrap_or(&false);
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if let Err(error) = &result {
                     eprintln!("Could not open the library: {error:#}");
                 }
@@ -846,7 +853,39 @@ impl Library {
         });
     }
 }
+thread_local! {
+    static CHIME: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> =
+        const { RefCell::new(None) };
+}
+/// The original scene's sound, once, with the animation. Reduce Motion is silent.
+fn play_chime() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSSound, NSWorkspace};
+    use objc2_foundation::NSData;
+    const SOUND: &[u8] =
+        include_bytes!("../../../../desktop/src/renderer/public/onboarding/assets/media-0.wav");
+    if MainThreadMarker::new().is_none()
+        || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    {
+        return;
+    }
+    let sound = NSSound::initWithData(NSSound::alloc(), &NSData::with_bytes(SOUND));
+    if let Some(sound) = sound {
+        sound.play();
+        CHIME.with(|slot| *slot.borrow_mut() = Some(sound));
+    }
+}
+fn stop_chime() {
+    CHIME.with(|slot| {
+        if let Some(sound) = slot.borrow_mut().take() {
+            sound.stop();
+        }
+    });
+}
 fn show(window: &Window, frame: Frame, cx: &mut gpui::App) {
+    if !frame.animate {
+        stop_chime();
+    }
     let handle = *window.borrow();
     if let Some(handle) = handle {
         let _ = handle.update(cx, |view, _, cx| view.set_frame(frame, cx));

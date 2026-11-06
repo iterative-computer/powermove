@@ -5460,7 +5460,6 @@ dependencies = [
  "anyhow",
  "fs2",
  "pm-captions",
- "pm-first-launch",
  "pm-promedia",
  "pm-update-policy",
  "semver",

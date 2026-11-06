@@ -1,12 +1,7 @@
 //! Exact Opus copy for model states. No views or visual-token substitutes.
 //! Authority: docs/native/design/surfaces/{mixer-3d,workspaces,takes-notes-mods,
 //! onboarding,updates,diagnostics,migration,colour,tasks-storage,os-authorization}.md.
-use super::{
-    authorization::Authorization,
-    maintenance::UpdateState,
-    native::{MigrationState, MigrationSummary},
-    projects::NoteDraft,
-};
+use super::{authorization::Authorization, maintenance::UpdateState, projects::NoteDraft};
 use crate::ServiceErrorCode;
 use pm_promedia::tasks::{TaskFailureCode, TaskKind, TaskState};
 
@@ -125,57 +120,6 @@ pub const PERFORMANCE_LABELS: &[(&str, &str)] = &[
     ("layers", "Layers"),
     ("keyframes", "Keyframes"),
 ];
-pub fn migration_title(state: &MigrationState) -> &'static str {
-    match state {
-        // Generic Outcome doesn't establish a local process owner. Preserve the
-        // spec's unknown-owner treatment until the native host knows otherwise.
-        MigrationState::WaitingForElectron => "Powermove Might Still Be Open",
-        MigrationState::WaitingForLocalElectron => "Quit Powermove to Continue",
-        MigrationState::NotEnoughSpace { .. } => "Not Enough Space",
-        MigrationState::ProfileRefused => "Powermove Native Can’t Start",
-        MigrationState::WaitingForSecrets => "Keep Your Sign-Ins",
-        MigrationState::SecretDenied => "Keychain Access Wasn’t Allowed",
-        MigrationState::NeedsSecretConsent { interrupted: false } => "Keep Your Sign-Ins",
-        MigrationState::NeedsSecretConsent { interrupted: true } => {
-            "The Keychain Request Didn’t Finish"
-        }
-        MigrationState::Paused => "Copying Is Paused",
-        MigrationState::Failed(_) => "Copying Stopped",
-        MigrationState::Complete(_) => "Your Library Is Ready",
-        MigrationState::Idle | MigrationState::Running => "Copying Your Library",
-    }
-}
-pub fn migration_rows(summary: &MigrationSummary) -> Vec<String> {
-    let mut rows = Vec::new();
-    if summary.history_refusals > 0 {
-        rows.push(format!(
-            "{} projects came across without their Undo history. Their current state is complete.",
-            summary.history_refusals
-        ));
-    }
-    if summary.missing_projects > 0 {
-        rows.push(format!(
-            "{} projects couldn’t be read. They’re kept safely and weren’t changed.",
-            summary.missing_projects
-        ));
-    }
-    if summary.blocked_owners > 0 {
-        rows.push(format!(
-            "{} projects need media that went missing. They’ll ask you to find it.",
-            summary.blocked_owners
-        ));
-    }
-    if summary.proxy_only > 0 {
-        rows.push(format!("{} media files came across as proxies only. Exports using them show a warning until you relink the originals.", summary.proxy_only));
-    }
-    if summary.already_offline > 0 {
-        rows.push(format!(
-            "{} media files were already offline.",
-            summary.already_offline
-        ));
-    }
-    rows
-}
 pub const PROXY_EXPORT_WARNING: &str =
     "This uses proxy-only media, so quality may be lower. Relink the originals for full quality.";
 pub const GO_BACK_TITLE: &str = "Your original app still has everything from before.";

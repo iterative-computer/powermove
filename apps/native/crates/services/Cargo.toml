@@ -16,7 +16,6 @@ url = "2.5"
 semver = "1"
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
 toml_edit = "0.25"
-pm-first-launch = { path = "../first-launch" }
 pm-promedia = { path = "../promedia" }
 
 [dev-dependencies]

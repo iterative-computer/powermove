@@ -70,6 +70,44 @@ Design references below are relative to `docs/native/design/`:
 | Kit review | [reviews/na-cloud-uikit.md](design/reviews/na-cloud-uikit.md) | Native control recipes, semantics and accessibility; renderer integration/review still required. |
 | Theme reviews | [reviews/themes.md](design/reviews/themes.md), [reviews/na-cloud-editions.md](design/reviews/na-cloud-editions.md) | Theme translation and compat DOM appearances; not a theme-browser or arbitrary extension-content redesign. |
 
+## Attachment status, 2026-11-05
+
+The status column below predates attachment and counts models, not reachable UI. This
+table is what a running app reaches. Entry points are in `app/src/surface_routes.rs`
+and `app/src/first_run.rs`.
+
+| Rows | Reached from | Surface |
+|---|---|---|
+| N001–N003 | launch; Window ▸ Migration Report | Welcome gate, Keychain consent, summary, report |
+| S107–S110 | first launch | Welcome with animation, Timeline, Agent, Speech Model (unavailable state), Suitcase |
+| S017, S005, S019 | File ▸ Projects… | Project Library window: sections, search, rename, duplicate, trash, put back |
+| S018 | File ▸ New Project | AppKit sheet, kernel create |
+| S021 | Composition ▸ New Composition…, Composition Settings…; Project panel | AppKit sheet, guarded kernel edit |
+| S022 | Composition ▸ Pre-compose… | Sheet; the kernel refuses (`Precompose` is not implemented) and the project is untouched |
+| S029 | Composition ▸ Edit Keyframe Value…, Keyframe Velocity…, Scale Keyframes… | AppKit sheets; the keyframe context menu is the Timeline lane’s |
+| S001 | opening a project with recovery data | recovery alert and kernel decision |
+| S002, S004 | closing a dirty project; a failed open | alerts with spec copy |
+| S053 | Window ▸ Error Log | window |
+| S035, S034 | Inspector fill and font rows | system colour panel, sampler, font menu |
+
+Waiting for a route, and who owns it:
+
+| Rows | Blocked on |
+|---|---|
+| S006, S007, S024, S038–S040 | media import lane's Project panel effects |
+| S010, S059-family | agents lane |
+| S011, S012 | extension runtime in the app; needs a values service on Keychain |
+| S013, S054 | extension hosting; slowdown data source |
+| S003, S014, S016, S020, S055 | document tabs in the shell; `documents.rs` keeps alerts and notices for them |
+| S022 delete, S036, S043 | Project panel confirm reply path; property menu; Export panel RPC |
+| S025, S051 | Viewer lane; panel text host |
+
+Specs exist for every remaining **nothing** row, so none needs design first. Not built:
+S064, S071 (agents); S079–S082, S084–S086 (Store and account in the app); S091, S092
+(speech model service); S095 (easing panel); S103, S104 (Takes and Notes panels; models
+in `surface_backing/projects.rs`); S112 (needs a release notes source). S044 and S116 are
+deliberate exclusions.
+
 ## Inventory, sorted by user impact
 
 | Id / impact | User-facing surface and included states | v1.2.0 source files | Native design coverage / Opus gap | Native backing and status |

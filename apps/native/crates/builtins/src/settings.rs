@@ -168,6 +168,13 @@ impl Backend {
                 ))
             }
             Some("extensions.retry") => Ok(NativeCommand::Value(self.settings_snapshot()?)),
+            // Keychain consent belongs to the app: it asks before anything is read.
+            Some("row") if action["action"] == "account.bring-sign-ins" => {
+                self.native
+                    .platform
+                    .push(("command".into(), json!({"name": "bringSignIns"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Enabling needs runtime activation as well as a registry flag.
             // Accounts, speech and archive actions require their actual services.
             _ => Err("Settings service is unavailable for this action".into()),
