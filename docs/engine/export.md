@@ -664,13 +664,11 @@ class between native calls. Otherwise it returns to utility. Its shared
 transport can carry agent messages during a user export; dedicated agent
 workers remain utility.
 
-Exports construct `Mixer::new_legacy_export`: today's offline audio walk
-ignores clip speed and sourceTime, and omits remapped precompositions or
-embedded soundtracks. Ordinary playback keeps the engine's retiming.
-The export-only sample-bit regression compares nested speed 1 and 1.2,
-including trims, fades and gain automation, while checking that playback
-at speed 1.2 still differs. Only an explicit legacy remap omission becomes
-silent; unrelated shape or source failures keep their existing behavior.
+Exports mix with the playback `Mixer`: nested speed, sourceTime, remapped
+precompositions and embedded soundtracks sound in the file as they play.
+Today's exporter ignored speed and dropped remapped precompositions; that
+bug is not reproduced (2026-11-06). `pm-audio`'s `an_offline_mix_*` tests
+pin both cases.
 
 ## Native cloud export lane — 2026-11-01
 

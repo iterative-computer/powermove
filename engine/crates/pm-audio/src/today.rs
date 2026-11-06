@@ -5,9 +5,8 @@
 //! `AudioBufferSourceNode` over the asset decoded by `decodeAudioData` at
 //! the live context's rate, through a `GainNode` whose gain follows the
 //! envelope `applyEnvelope` schedules, into the master `GainNode`. This
-//! module reproduces that chain for linear voices in playback and for every
-//! voice included by the legacy audio walk in export (which ignores speed), with the
-//! arithmetic of the Chromium 152 sources Electron 44 ships:
+//! module reproduces that chain for linear voices, in playback and export,
+//! with the arithmetic of the Chromium 152 sources Electron 44 ships:
 //!
 //! * **Decode resampling** (`AudioBus::CreateBySampleRateConverting`, Blink's
 //!   `SincResampler`, `third_party/blink/renderer/platform/audio/
@@ -606,55 +605,6 @@ fn static_value(n: Option<&Node>) -> JsValue {
     }
 }
 
-/// The `evaluatedValue(..., timeRemap, PM.time)` gate in today's audioLayers.
-fn legacy_remapped(ev: &mut Evaluator, time: f64, comp: &Comp<'_>, layer: &Node) -> Result<bool> {
-    let remap = node::member(node::member(Some(layer), "d"), "timeRemap");
-    let value = if is_property(remap) {
-        ev.ev_p(
-            comp,
-            Some(layer),
-            remap,
-            time,
-            &JsString::from("c.timeRemap"),
-        )?
-    } else {
-        node::js_value_opt(remap)
-    };
-    Ok(value.truthy())
-}
-
-/// True only where today's audio walk omits a voice. It ignores speed on
-/// every clip, and a remap on an audio layer, but skips a remapped ancestor
-/// precomposition or embedded video at the playhead used to build its index.
-pub(crate) fn legacy_omits(
-    plan: &VoicePlan,
-    comps: &[Comp<'_>],
-    ev: &mut Evaluator,
-    time: f64,
-) -> Result<bool> {
-    let Some((last, ancestors)) = plan.levels.split_last() else {
-        return Ok(false);
-    };
-    for level in ancestors {
-        let Some(layer) = comps
-            .get(level.comp)
-            .and_then(|c| c.layers().get(level.layer))
-        else {
-            return Ok(false);
-        };
-        if legacy_remapped(ev, time, &comps[level.comp], layer)? {
-            return Ok(true);
-        }
-    }
-    if plan.kind == VoiceKind::Embedded
-        && let Some(comp) = comps.get(last.comp)
-        && let Some(layer) = comp.layers().get(last.layer)
-    {
-        return legacy_remapped(ev, time, comp, layer);
-    }
-    Ok(false)
-}
-
 /// The composition time `tau` at which `pm_eval` reads layer-local time
 /// `tau − from` equal to today's `T − naturalStart` for the flattened clip.
 fn local_tau(from: f64, natural: f64, t: f64) -> f64 {
@@ -675,9 +625,8 @@ fn local_tau(from: f64, natural: f64, t: f64) -> f64 {
 }
 
 impl Shape {
-    /// Today's walk over the voice's path, or `None` for a voice the selected
-    /// model does not cover. Legacy export ignores speed on this path, while
-    /// normal playback follows the engine's time mapping.
+    /// Today's walk over the voice's path, or `None` for a voice it does not
+    /// cover: speed and remaps follow the engine's time mapping instead.
     /// `at`: the evaluator and the time a precomposition's animated `trim` is
     /// read at. Today's `audioLayers` reads it once with the precomposition
     /// (`evaluatedValue(PM, layer, layer.d.trim, PM.time)`) when it builds
@@ -688,14 +637,12 @@ impl Shape {
         comps: &[Comp<'_>],
         root: &Node,
         mut at: Option<(&mut Evaluator, f64)>,
-        legacy_export: bool,
     ) -> Option<Shape> {
-        // Speed and remaps follow the picture in playback (AUDIO-4). An
-        // export takes today's source timing instead. A conformed rate is
-        // ignored (today plays a video's
+        // Speed and remaps follow the picture in playback and export alike
+        // (AUDIO-4). A conformed rate is ignored (today plays a video's
         // soundtrack at its own rate), a negative start is clamped to 0,
         // an animated trim is read once (`Clip::new`).
-        if plan.retimed && !legacy_export {
+        if plan.retimed {
             return None;
         }
         let (last, chain_levels) = plan.levels.split_last()?;
