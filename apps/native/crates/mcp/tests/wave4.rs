@@ -388,7 +388,32 @@ fn selection_body_errors_deduplication_and_extra_fields_match_tag() {
 }
 
 #[test]
-fn remaining_33_bodies_remain_explicit_blockers_without_mutating_the_project() {
+fn import_and_thread_tools_refuse_in_a_host_that_has_not_installed_them() {
+    let f = Fixture::new();
+    let mut session = f.session();
+    session
+        .dispatch("start_session", &json!({"prompt":"Host-backed refusals"}))
+        .unwrap();
+    for (name, arguments) in [
+        ("import_media", json!({"path":"/synthetic/a.png"})),
+        (
+            "import_media_to_timeline",
+            json!({"path":"/synthetic/a.png"}),
+        ),
+        (
+            "replace_media",
+            json!({"assetId":"a","path":"/synthetic/a.png"}),
+        ),
+        ("thread_list", json!({})),
+        ("thread_read", json!({"threadId":"t"})),
+    ] {
+        assert!(catalog::HOST_BACKED.contains(&name));
+        let error = session.dispatch(name, &arguments).unwrap_err();
+        assert_eq!(error.code, "not_available_in_this_build", "{name}");
+    }
+}
+#[test]
+fn remaining_28_bodies_remain_explicit_blockers_without_mutating_the_project() {
     let evidence: Value =
         serde_json::from_str(include_str!("../fixtures/unavailable-wave4.json")).unwrap();
     let pending: std::collections::HashSet<_> = catalog::tools()
@@ -396,7 +421,7 @@ fn remaining_33_bodies_remain_explicit_blockers_without_mutating_the_project() {
         .map(|t| t["name"].as_str().unwrap())
         .filter(|n| !catalog::IMPLEMENTED.contains(n))
         .collect();
-    assert_eq!(pending.len(), 33);
+    assert_eq!(pending.len(), 28);
     let historical = evidence["cases"].as_array().unwrap();
     assert_eq!(historical.len(), 35);
     // Studio and durable project-memory bodies have their own admitted regressions.
@@ -404,7 +429,7 @@ fn remaining_33_bodies_remain_explicit_blockers_without_mutating_the_project() {
     assert!(catalog::IMPLEMENTED.contains(&"project_memory"));
     let cases = historical
         .iter()
-        .filter(|c| c["tool"] != "edit_3d" && c["tool"] != "project_memory")
+        .filter(|c| pending.contains(c["tool"].as_str().unwrap()))
         .collect::<Vec<_>>();
     assert_eq!(cases.len(), pending.len());
     let f = Fixture::new();

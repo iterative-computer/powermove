@@ -164,13 +164,10 @@ pub fn dispatch_at(
         .get("target")
         .and_then(Value::as_object)
         .ok_or(Error::Stale)?;
-    // A streaming run republishes constantly. Input that names its own target
-    // can't wait for the next publication, or typing and Stop would drop out.
+    // A streaming run republishes constantly, so input can't wait for the latest
+    // publication. Only a whole-text draft replaces what the user last saw.
     let kind = envelope["action"]["type"].as_str().unwrap_or_default();
-    let ordered = !matches!(
-        kind,
-        "key" | "submit" | "stop" | "answer" | "chooseAnswer" | "typeAnswer" | "disclose"
-    );
+    let ordered = kind == "draft";
     if sequence == 0
         || ordered && envelope["sequence"].as_u64() != Some(sequence)
         || target.get("project") != Some(&json!(panel.project()))

@@ -10,16 +10,18 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-fn finish(ticket: Ticket<Evaluation>) {
+fn wait(ticket: Ticket<Evaluation>) -> pm_runtime_v8::Result<Evaluation> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(result) = ticket.try_take() {
-            result.expect("v4 worker execution");
-            return;
+            return result;
         }
         assert!(Instant::now() < deadline, "v4 ticket timed out");
         thread::sleep(Duration::from_millis(1));
     }
+}
+fn finish(ticket: Ticket<Evaluation>) {
+    wait(ticket).expect("v4 worker execution");
 }
 fn actor() -> KernelActor {
     let actor = KernelActor::spawn(KernelConfig::default());
@@ -96,18 +98,46 @@ impl Agent {
         }
         self.text();
     }
+    /// An event against an older surface revision is dropped, as a user's
+    /// click on a streaming run can be (see Open in agents.md). Press it again.
+    fn press(&mut self, id: &str, event: &str, detail: EventDetail) {
+        for _ in 0..50 {
+            self.text();
+            let target = self.node(id);
+            let (generation, revision) = {
+                let p = self.surface();
+                (p.generation, p.surface.revision())
+            };
+            let driven =
+                self.panels
+                    .event("agent", generation, revision, target, event, detail.clone());
+            match driven.map(wait) {
+                Ok(Ok(_)) => {
+                    self.text();
+                    return;
+                }
+                Err(Error::Host(stale)) if stale == "stale native drive" => {}
+                Ok(Err(pm_runtime_v8::Error::JavaScript(stale)))
+                    if stale.contains("Stale surface event") => {}
+                other => panic!("{id}: {other:?}"),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{id} stayed stale");
+    }
     fn change(&mut self, id: &str, value: &str) {
-        self.fire(
+        let value = Some(json!(value));
+        self.press(
             id,
             "change",
             EventDetail {
-                value: Some(json!(value)),
+                value,
                 ..Default::default()
             },
         );
     }
     fn click(&mut self, id: &str) {
-        self.fire(id, "click", EventDetail::default());
+        self.press(id, "click", EventDetail::default());
     }
     fn send(&mut self, text: &str) {
         self.type_text(text);
@@ -128,23 +158,8 @@ impl Agent {
             .map(|(key, _)| *key)
             .unwrap_or_else(|| panic!("no node {id}"))
     }
-    fn fire(&mut self, id: &str, event: &str, detail: EventDetail) {
-        let target = self.node(id);
-        let (generation, revision) = {
-            let p = self.surface();
-            (p.generation, p.surface.revision())
-        };
-        finish(
-            self.panels
-                .event("agent", generation, revision, target, event, detail)
-                .unwrap(),
-        );
-        for (_, ticket) in self.panels.publish() {
-            finish(ticket.unwrap());
-        }
-    }
     fn key(&mut self, key: &str, shift: bool) {
-        self.fire(
+        self.press(
             "agent-composer",
             "keydown",
             EventDetail {

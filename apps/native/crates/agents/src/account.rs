@@ -61,6 +61,7 @@ struct Slot {
     status: Status,
     models: Vec<Model>,
     worker: bool,
+    sign_out: bool,
     cancel: Arc<AtomicBool>,
 }
 pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
@@ -97,6 +98,7 @@ impl Accounts {
             status: Status::of(State::Checking, None),
             models: vec![],
             worker: false,
+            sign_out: false,
             cancel: Arc::default(),
         };
         Arc::new(Self {
@@ -151,7 +153,12 @@ impl Accounts {
             let Some(slot) = slots.get_mut(name) else {
                 return;
             };
-            if slot.worker || self.closed.load(Ordering::Acquire) {
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            if slot.worker {
+                // Runs once the current worker finishes; nothing else may be lost.
+                slot.sign_out |= matches!(job, Job::Disconnect);
                 return;
             }
             slot.worker = true;
@@ -165,10 +172,16 @@ impl Accounts {
         let spawned = std::thread::Builder::new()
             .name("pm-agent-account".into())
             .spawn(move || {
-                let provider = this.run(provider, job, &cancel);
-                let slots = &mut this.slots.lock().unwrap();
-                if let Some(slot) = slots.get_mut(provider.name()) {
+                let status = this.run(provider, job, &cancel);
+                let sign_out = {
+                    let mut slots = this.slots.lock().unwrap();
+                    let slot = slots.get_mut(provider.name()).unwrap();
                     slot.worker = false;
+                    std::mem::take(&mut slot.sign_out)
+                };
+                this.publish(provider, status);
+                if sign_out {
+                    this.start(provider, Job::Disconnect);
                 }
             });
         if let Err(error) = spawned {
@@ -179,15 +192,13 @@ impl Accounts {
             );
         }
     }
-    fn run(&self, provider: Provider, job: Job, cancel: &AtomicBool) -> Provider {
+    fn run(&self, provider: Provider, job: Job, cancel: &AtomicBool) -> Status {
         let result = match provider {
             Provider::Chatgpt => self.chatgpt(job, cancel),
             Provider::Claude => self.claude(job, cancel),
             Provider::Compatible => Ok(Status::of(State::Disconnected, None)),
         };
-        let status = result.unwrap_or_else(|detail| Status::of(State::Unavailable, Some(detail)));
-        self.publish(provider, status);
-        provider
+        result.unwrap_or_else(|detail| Status::of(State::Unavailable, Some(detail)))
     }
     fn publish(&self, provider: Provider, status: Status) {
         if let Some(slot) = self.slots.lock().unwrap().get_mut(provider.name()) {
@@ -295,7 +306,10 @@ impl Accounts {
                     ),
                 );
                 let login = ["auth", "login", "--claudeai"];
-                let (code, output) = run(&binary, &login, &vars, LOGIN, cancel)?;
+                let (code, output) = match run(&binary, &login, &vars, LOGIN, cancel) {
+                    Ok(finished) => finished,
+                    Err(detail) => return Ok(Status::of(State::Disconnected, Some(detail))),
+                };
                 if code != Some(0) {
                     let detail = output.trim();
                     return Ok(Status::of(

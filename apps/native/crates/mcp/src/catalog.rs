@@ -249,7 +249,6 @@ pub fn backing(name: &str) -> &'static str {
         | "media_contact_sheet"
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
-        "thread_list" | "thread_read" => "durable agent thread archive",
         "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
         "project_memory" => {
             "kernel non-revision durable memory metadata admission and application actor binding"

@@ -6,8 +6,9 @@ A panel run is real, from keystroke to durable reply:
 
 1. `panels/agent/view.tsx` sends composer keys as `{type:"key"}`. The Rust panel
    edits the draft. The v4 host reports keys, not composed text, so IME and
-   shifted punctuation need a real text input there. Typing, Send, Stop and
-   answers name their own target, so they don't depend on the latest publication.
+   shifted punctuation need a real text input there. Actions name their own
+   target, so a streaming run's publications don't refuse them. Only `draft`, which
+   replaces the whole text, needs the latest publication.
 2. `panel.agent.dispatch` in `builtins/src/models.rs` admits the action
    (`agent_host::admit`) before touching the panel. No runtime or no signed-in
    account means no consumed draft.
@@ -45,6 +46,11 @@ against the real binary.
 
 Open:
 
+- A click or key planned against an older surface revision fails with "Stale
+  surface event" (`js/v4/src/renderer.ts:298`, `surface/src/events.rs:92`), and
+  `v4_view.rs` shows it as a panel error. A streaming run republishes often enough
+  to hit this, so Stop can need a second click. The fix belongs in the shared v4
+  input path, which the editor lane owns.
 - Provider `model` efforts aren't per model; the pop-up shows the provider's union.
 - `Compatible` refuses at launch: `compatible` and `completion` have no HTTP or
   Keychain host. Computer access stays refused because no consent alert exists.
