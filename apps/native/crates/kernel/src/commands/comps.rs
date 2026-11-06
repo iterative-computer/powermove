@@ -67,7 +67,8 @@ pub struct NewComp {
 #[non_exhaustive]
 pub enum CompCommand {
     /// Open a composition by id. Hosts use Call::OpenComposition for navigation
-    /// without an undo entry; the canonical tree needs only its compId changed.
+    /// without an undo entry; here it shares its transaction's undo step, for
+    /// an edit that creates the composition it opens.
     Open { comp_id: String },
     /// `set_composition` (`setComposition`) on the open composition (`name`
     /// and `colorDepth` are the project's, as in the old command). Label

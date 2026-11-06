@@ -7,9 +7,9 @@
 //! layer's source and keeps its transforms, effects and timing outside.
 use std::collections::{HashMap, HashSet};
 
-use pm_model::{Map, Value};
+use pm_model::{Map, Node, NodeKind, Value};
 
-use super::comps::{NewComp, PrecomposeMode, comp_ids, comp_name, create, new_id_for, unique_name};
+use super::comps::{NewComp, PrecomposeMode, create, new_id_for, unique_name};
 use super::{Cx, layers, track, values};
 use crate::error::CommandError;
 
@@ -48,12 +48,23 @@ fn optional(id: Option<String>) -> Value {
     id.map(|id| values::s(&id)).unwrap_or(Value::Null)
 }
 
+/// Whether Leave All Attributes applies to a layer of `kind`.
+pub fn can_leave_attributes(kind: &str) -> bool {
+    LEAVE_TYPES.contains(&kind)
+}
+
 /// `nextName(stem)`: AE numbering, `Pre-comp 1`, `Pre-comp 2`, ...
-fn next_name(cx: &Cx<'_>, stem: &str) -> String {
-    let taken: HashSet<String> = comp_ids(cx).iter().map(|id| comp_name(cx, id)).collect();
+pub fn next_name(root: &Node, stem: &str) -> String {
+    let taken: HashSet<&str> = match root.get("comps").map(Node::kind) {
+        Some(NodeKind::Object(comps)) => comps
+            .values()
+            .filter_map(|comp| comp.get("name").and_then(crate::model::str_of))
+            .collect(),
+        _ => HashSet::new(),
+    };
     (1..)
         .map(|n| format!("{stem} {n}"))
-        .find(|name| !taken.contains(name))
+        .find(|name| !taken.contains(name.as_str()))
         .expect("unbounded")
 }
 
@@ -264,7 +275,7 @@ pub(super) fn precompose(cx: &mut Cx<'_>, r: &Request<'_>) -> Result<(), Command
         .map(values::js_trim)
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| next_name(cx, "Pre-comp"));
+        .unwrap_or_else(|| next_name(cx.root(), "Pre-comp"));
     let name = unique_name(cx, &requested, None);
     if r.mode == PrecomposeMode::LeaveAttributes {
         return leave_attributes(cx, r, &picked, name);
@@ -413,7 +424,7 @@ fn leave_attributes(
         return Ok(());
     };
     let kind = values::text(layer, "type").unwrap_or_default();
-    if !LEAVE_TYPES.contains(&kind) {
+    if !can_leave_attributes(kind) {
         return Ok(());
     }
     let id = id_of(layer).to_owned();

@@ -452,13 +452,12 @@ impl Controller {
         })
         .detach();
     }
-    /// One Undo step, then the selection and composition it leads to.
+    /// One Undo step, then the selection it leads to.
     fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
         let crate::layer_commands::Plan {
             label,
             commands,
             select,
-            open,
         } = plan;
         let Some(session) = &self.session else { return };
         let revision = self.published.as_ref().map(|p| p.revision());
@@ -483,10 +482,6 @@ impl Controller {
                     }
                     if let Some(ids) = select {
                         v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
-                    }
-                    if let (Some(comp_id), Some(p)) = (open, v.published.as_ref()) {
-                        let document = p.snapshot.doc_id;
-                        v.call(Call::OpenComposition { comp_id, document }, cx);
                     }
                 }
                 other => v.message = format!("Edit failed: {other:?}"),

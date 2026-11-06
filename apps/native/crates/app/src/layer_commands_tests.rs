@@ -167,6 +167,41 @@ fn precompose_move_keeps_the_picture_and_releases_back() {
 }
 
 #[test]
+fn precompose_and_open_is_one_undo_step() {
+    let (_actor, kernel) = open(&[layer("a", "solid", 40., 20., 0., "#FF0000", "")]);
+    let published = select(&kernel, &["a"]);
+    let draft = PrecomposeDraft {
+        open_after: true,
+        ..precompose_draft(&published).unwrap()
+    };
+    let open_comp = |kernel: &KernelHandle| {
+        let p = kernel.published("synthetic").unwrap();
+        let open = p.snapshot.open_comp().unwrap();
+        let root = p.snapshot.root().unwrap();
+        let exists = root
+            .lookup(&["comps".into(), open.as_str().into()])
+            .is_some();
+        (open, exists)
+    };
+    let original = open_comp(&kernel);
+    run(&kernel, precompose_plan(&published, &draft, 0.));
+    let (opened, exists) = open_comp(&kernel);
+    assert!(exists && opened != original.0);
+    assert!(
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .selection
+            .layers()
+            .is_empty()
+    );
+    send(&kernel, HistoryCall::Undo.into());
+    assert_eq!(open_comp(&kernel), original);
+    send(&kernel, HistoryCall::Redo.into());
+    assert_eq!(open_comp(&kernel), (opened, true));
+}
+
+#[test]
 fn precompose_leave_keeps_an_effect_on_the_outer_layer() {
     let _pixels = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
     let fx = r#","fx":[{"id":"f1","type":"invert","on":true,"open":true,"version":2,
@@ -349,7 +384,6 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
                     .into(),
                 ],
                 select: None,
-                open: None,
             },
         );
         if draw(&mut headless, &kernel) != plain {

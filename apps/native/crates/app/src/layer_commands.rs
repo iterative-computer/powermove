@@ -3,6 +3,7 @@
 use crate::dialogs::PrecomposeDraft;
 use pm_kernel::commands::comps::PrecomposeMode;
 use pm_kernel::commands::layers::LayerPatch;
+use pm_kernel::commands::precompose::{can_leave_attributes, next_name};
 use pm_kernel::commands::text::{SplitMode, TextCommand};
 use pm_kernel::commands::transform::TransformCommand;
 use pm_kernel::{Command, CompCommand, LayerCommand, Published, new_id};
@@ -12,7 +13,6 @@ pub struct Plan {
     pub label: String,
     pub commands: Vec<Command>,
     pub select: Option<Vec<String>>,
-    pub open: Option<String>,
 }
 
 fn layer(published: &Published, id: &str) -> Option<Value> {
@@ -28,7 +28,6 @@ fn plain(label: &str, commands: Vec<Command>) -> Plan {
         label: label.into(),
         commands,
         select: None,
-        open: None,
     }
 }
 
@@ -126,23 +125,9 @@ pub fn plan(name: &str, published: &Published, time: f64) -> Option<Plan> {
 pub fn precompose_draft(published: &Published) -> Option<PrecomposeDraft> {
     let selected = published.selection.layers();
     let first = layer(published, selected.first()?)?;
-    let can_leave = selected.len() == 1
-        && kind(&first).is_some_and(|k| {
-            ["solid", "image", "video", "precomp", "shader", "extension"].contains(&k)
-        });
-    let root = published.snapshot.root()?.to_value();
-    let taken: Vec<String> = root
-        .get("comps")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|comps| comps.iter())
-        .filter_map(|(_, comp)| comp.get("name").and_then(Value::as_str).map(str::to_owned))
-        .collect();
-    let name = (1..)
-        .map(|n| format!("Pre-comp {n}"))
-        .find(|name| !taken.contains(name))?;
+    let can_leave = selected.len() == 1 && kind(&first).is_some_and(can_leave_attributes);
     Some(PrecomposeDraft {
-        name,
+        name: next_name(published.snapshot.root()?, "Pre-comp"),
         layer_name: first.get("name").and_then(Value::as_str).map(str::to_owned),
         can_leave,
         leave: false,
@@ -158,16 +143,19 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
     let new_comp_id = new_id("C");
     Plan {
         label: "Pre-compose".into(),
-        select: Some(if leave {
-            layer_ids.clone()
+        select: if draft.open_after {
+            // The kernel keeps a composition's selection per composition; the
+            // new one has none yet.
+            Some(vec![])
+        } else if leave {
+            Some(layer_ids.clone())
         } else {
-            vec![precomp_layer_id.clone()]
-        }),
-        open: draft.open_after.then(|| new_comp_id.clone()),
-        commands: vec![
+            Some(vec![precomp_layer_id.clone()])
+        },
+        commands: std::iter::once(
             CompCommand::Precompose {
                 layer_ids,
-                new_comp_id,
+                new_comp_id: new_comp_id.clone(),
                 precomp_layer_id,
                 name: Some(draft.name.clone()),
                 mode: if leave {
@@ -179,7 +167,15 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
                 time,
             }
             .into(),
-        ],
+        )
+        // Inside the transaction, so Undo also leaves the composition it removes.
+        .chain(draft.open_after.then(|| {
+            CompCommand::Open {
+                comp_id: new_comp_id,
+            }
+            .into()
+        }))
+        .collect(),
     }
 }
 
