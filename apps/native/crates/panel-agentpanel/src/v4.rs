@@ -115,6 +115,18 @@ impl Window {
         Ok(value)
     }
 }
+/// The text of a plain key press. The v4 host reports keys, not composed text.
+fn typed(key: &Key) -> Option<String> {
+    let mut letters = key.name.chars();
+    let letter = letters.next().filter(|_| letters.next().is_none())?;
+    (!key.meta && !key.control && !key.composing && !letter.is_control()).then(|| {
+        if key.shift {
+            letter.to_uppercase().collect()
+        } else {
+            letter.to_string()
+        }
+    })
+}
 fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
         .as_str()
@@ -244,18 +256,25 @@ pub fn dispatch(
                 composing: optional_boolean(key, "composing")?,
                 code_229: false,
             };
-            panel
-                .composer_key(
-                    thread,
-                    &key,
-                    context.popover_open,
-                    Submission {
-                        run: context.run,
-                        request: context.request,
-                    },
-                    now,
-                )?
-                .effect
+            let outcome = panel.composer_key(
+                thread,
+                &key,
+                context.popover_open,
+                Submission {
+                    run: context.run,
+                    request: context.request,
+                },
+                now,
+            )?;
+            if outcome.route.intent == input::Intent::NativeText {
+                let (backward, name) = (key.name == "Backspace", key.name.as_str());
+                if backward || name == "Delete" {
+                    panel.draft_mut(thread)?.delete(backward, key.repeat, now);
+                } else if let Some(text) = typed(&key) {
+                    panel.draft_mut(thread)?.insert_text(&text, now, true);
+                }
+            }
+            outcome.effect
         }
         "openSettings" => Some(panel.host_settings(thread)?),
         "submit" => Some(panel.submit(thread, context.run, context.request, now)?),

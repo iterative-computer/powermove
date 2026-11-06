@@ -72,6 +72,11 @@ impl Controller {
                 return;
             }
         };
+        runtime.set_agent_environment(pm_agents::launch::Environment::current(
+            self.mcp.profile.clone(),
+            pm_mcp::catalog::names(),
+            pm_mcp::catalog::inspection_names(),
+        ));
         let mut tickets = vec![];
         for id in LIVE_PANELS {
             if application && !matches!(*id, "agent" | "settings") {

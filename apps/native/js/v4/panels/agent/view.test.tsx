@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import type { ComponentChild } from "preact";
 import { createRoot, type Commit } from "../../src";
-import { AgentPanel, AgentView, composerEvent, elapsed } from "./view";
+import { AgentPanel, AgentView, composerKey, elapsed } from "./view";
 import { fixture, states, withRows } from "./fixtures";
 import type { Action, AgentModel, Publication } from "./contract";
 
@@ -277,22 +277,20 @@ test("composer worker forwarding keeps native clipboard and editor routing disti
     { key: "Enter", composing: true },
     { key: "Enter", repeat: true },
   ]) {
-    let stopped = false;
-    await composerEvent(model, {
-      ...key,
-      type: "keydown",
-      target: 1,
-      currentTarget: 1,
-      defaultPrevented: false,
-      preventDefault() {
-        throw Error("late cancellation");
-      },
-      stopPropagation() {
-        stopped = true;
-      },
-      stopImmediatePropagation() {},
-    });
-    expect(stopped).toBe(key.key !== "v");
+    await model.dispatch(
+      composerKey({
+        ...key,
+        type: "keydown",
+        target: 1,
+        currentTarget: 1,
+        defaultPrevented: false,
+        preventDefault() {
+          throw Error("late cancellation");
+        },
+        stopPropagation() {},
+        stopImmediatePropagation() {},
+      }),
+    );
   }
   expect(seen).toHaveLength(4);
   expect(seen[2]).toMatchObject({

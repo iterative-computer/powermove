@@ -612,7 +612,7 @@ impl Panel {
                 pm_agents::Event::Progress { text, .. } => Some(Update::Progress(text.clone())),
                 pm_agents::Event::Completed { result, .. } => Some(match result {
                     pm_agents::RunResult::Success { text, .. } => Update::Complete {
-                        text: text.clone(),
+                        text: pm_agents::launch::reply_text(text),
                         error: false,
                         cancelled: false,
                     },

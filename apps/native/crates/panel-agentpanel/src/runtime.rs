@@ -24,6 +24,8 @@ struct Running {
     sequence: u64,
     pending: Option<Event>,
     action: Option<PendingAction>,
+    /// The run settled. Its process only has late cleanup left to report.
+    finished: bool,
 }
 #[derive(Default)]
 pub struct ProviderRuns {
@@ -54,7 +56,9 @@ impl ProviderRuns {
         Self::validate(panel, &effect.target)?;
         if self.runs.len() >= 8
             || self.runs.iter().any(|r| {
-                r.target.thread == effect.target.thread && r.target.project == effect.target.project
+                !r.finished
+                    && r.target.thread == effect.target.thread
+                    && r.target.project == effect.target.project
             })
         {
             return Err(Error::Busy);
@@ -78,8 +82,21 @@ impl ProviderRuns {
             sequence: 0,
             pending: None,
             action: None,
+            finished: false,
         });
         Ok(())
+    }
+    /// Cancel every unfinished run. Each settles through its usual events.
+    pub fn cancel_all(&mut self) {
+        for running in self.runs.iter().filter(|r| !r.finished) {
+            if let Some(run) = running.target.run.clone() {
+                let _ = running.handle.send(Action::Cancel(run));
+            }
+        }
+    }
+    /// Unfinished runs, which is what the thread lease and the UI care about.
+    pub fn active(&self) -> usize {
+        self.runs.iter().filter(|r| !r.finished).count()
     }
     fn validate(panel: &Panel, target: &Target) -> Result<()> {
         if panel.project() != target.project
@@ -210,6 +227,7 @@ impl ProviderRuns {
             }
             if let Some(event) = &running.pending {
                 let stopped = matches!(event, Event::Stopped(_));
+                let completed = matches!(event, Event::Completed { .. });
                 let receipt = Receipt {
                     source: running.target.run.clone().ok_or(Error::Stale)?,
                     sequence: running.sequence,
@@ -220,6 +238,11 @@ impl ProviderRuns {
                 running.sequence += 1;
                 delivered += 1;
                 empty = 0;
+                if completed {
+                    // App Server stays up after a turn; this run owns the process.
+                    running.finished = true;
+                    let _ = running.handle.send(Action::Shutdown);
+                }
                 if stopped {
                     self.runs.remove(self.cursor);
                 } else {

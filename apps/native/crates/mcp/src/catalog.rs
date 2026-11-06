@@ -45,6 +45,19 @@ pub fn permits(subset: &str, name: &str) -> bool {
         .iter()
         .any(|n| n == name)
 }
+/// Every tool name, then the subset a planning (editor) run may call.
+pub fn names() -> Vec<String> {
+    tools()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect()
+}
+pub fn inspection_names() -> Vec<String> {
+    names()
+        .into_iter()
+        .filter(|name| permits("inspection", name))
+        .collect()
+}
 pub fn validate(name: &str, args: &Value) -> Result<()> {
     let schema =
         &spec(name).ok_or_else(|| Error::invalid(format!("Unknown tool: {name}")))?["inputSchema"];

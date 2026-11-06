@@ -94,6 +94,7 @@ impl Backend {
             &identity.project,
             Caller::realm(realm, 1, Origin::Interface),
             application,
+            panel == "agent",
         )?;
         Ok(Self {
             kernel,
@@ -129,7 +130,7 @@ impl Backend {
             if self.native.stamp != stamp {
                 self.native.stamp = stamp;
                 self.native.settings_sequence += 1;
-                self.native.agent_sequence += 1;
+                self.native.agent_link.touch();
             }
             return Ok(());
         }
@@ -144,7 +145,7 @@ impl Backend {
         );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;
-            self.native.agent_sequence += 1;
+            self.native.agent_link.touch();
             self.native.settings_sequence += 1;
             if !self.native.export.is_null() {
                 self.native.export["sequence"] =

@@ -1,6 +1,8 @@
 //! Application v4 embedding. JavaScript owns presentation; the kernel remains
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 mod agent_host;
+#[cfg(test)]
+mod agent_tests;
 mod data;
 pub mod delivery;
 mod models;
@@ -84,6 +86,7 @@ struct Broker {
     timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
+    agent: Arc<agent_host::AgentLink>,
 }
 impl Builtins {
     pub fn new(
@@ -119,6 +122,7 @@ impl Builtins {
             timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
             wake: Arc::new(wake),
+            agent: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -149,9 +153,16 @@ impl Builtins {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
+        if panel == "agent" {
+            self.broker.agent.set_realm(realm.clone());
+        }
         let ticket = realm.eval(format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
         self.realms.insert(panel.into(), realm);
         Ok(ticket)
+    }
+    /// What agent runs may use. Without this the panel reports no connection.
+    pub fn set_agent_environment(&self, environment: pm_agents::launch::Environment) {
+        self.broker.agent.set_environment(environment);
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         self.realms
@@ -359,6 +370,7 @@ impl Builtins {
         }
     }
     pub fn close(&self) {
+        self.broker.agent.close();
         for realm in self.realms.values() {
             realm.close();
         }
@@ -419,6 +431,7 @@ impl EngineProxy for Broker {
                 )
                 .map_err(Error::Host)?,
             ));
+            backend.lock().unwrap().native.agent_link = self.agent.clone();
             let facts = self.facts.lock().unwrap().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
                 backend.lock().unwrap().native.facts = facts;

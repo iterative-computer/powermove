@@ -324,20 +324,23 @@ fn unsupported_agent_submission_keeps_the_draft_and_does_not_start_a_run() {
         project: "synthetic".into(),
     };
     let mut backend = data::Backend::new(actor.handle(), identity, "agent", false).unwrap();
-    let thread = backend.native.agent.active_id().to_owned();
-    backend
-        .native
-        .agent
+    let agent = backend.native.agent.clone().unwrap();
+    let thread = agent.lock().unwrap().panel.active_id().to_owned();
+    agent
+        .lock()
+        .unwrap()
+        .panel
         .draft_mut(&thread)
         .unwrap()
         .insert_text("Keep authored 日本🙂", 0, false);
-    let result=backend.native_command("panel.agent.dispatch",&json!({"sequence":backend.native.agent_sequence,"target":{"project":"synthetic","thread":thread,"run":null},"action":{"type":"submit"}}));
+    let result=backend.native_command("panel.agent.dispatch",&json!({"sequence":backend.native.agent_link.sequence(),"target":{"project":"synthetic","thread":thread,"run":null},"action":{"type":"submit"}}));
     assert!(result.is_err());
+    let state = agent.lock().unwrap();
     assert_eq!(
-        backend.native.agent.session(&thread).unwrap().draft.text(),
+        state.panel.session(&thread).unwrap().draft.text(),
         "Keep authored 日本🙂"
     );
-    assert!(backend.native.agent.session(&thread).unwrap().run.is_none());
+    assert!(state.panel.session(&thread).unwrap().run.is_none());
 }
 
 #[test]

@@ -10,6 +10,7 @@ pub mod completion;
 pub mod conversation;
 pub mod delivery;
 pub mod history;
+pub mod launch;
 pub mod markdown;
 pub mod media;
 pub mod monitor;

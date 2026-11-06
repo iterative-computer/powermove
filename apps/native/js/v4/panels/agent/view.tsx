@@ -557,10 +557,17 @@ export function AgentView({
           dropTarget: n.dropTarget,
         }}
         title="Return to send · Shift-Return for a new line · / for shortcuts"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          send(composerKey(event));
+        }}
         style={{
           ...vertical,
           background: t(n.dropTarget ? "colors.accent_wash" : "colors.field"),
           borderRadius: t("metrics.control_radius"),
+          minHeight: t("metrics.hit"),
+          minWidth: t("metrics.hit"),
           margin: t("metrics.inset"),
           paddingLeft: t("metrics.inset"),
           paddingRight: t("metrics.inset"),
@@ -699,21 +706,23 @@ export function AgentPanel({
     />
   );
 }
-/** Worker route for a future kit composer. Native cancellation/clipboard stays native. */
-export async function composerEvent(model: AgentModel, event: SurfaceEvent) {
-  if (
-    !(
-      (event.metaKey || event.ctrlKey) &&
-      !event.altKey &&
-      !event.shiftKey &&
-      event.key?.toLowerCase() === "v"
-    )
-  )
-    event.stopPropagation();
-  const { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing, code } =
-    event;
-  await model.dispatch({
+const namedKeys: Record<string, string> = {
+  backspace: "Backspace",
+  delete: "Delete",
+  tab: "Tab",
+};
+export function composerKey(event: SurfaceEvent): Action {
+  const { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing } = event;
+  return {
     type: "key",
-    key: { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing, code },
-  });
+    key: {
+      key: namedKeys[key ?? ""] ?? key,
+      metaKey,
+      ctrlKey,
+      shiftKey,
+      altKey,
+      repeat,
+      composing,
+    },
+  };
 }
