@@ -1193,12 +1193,15 @@ impl Render for Editor {
                 .border_color(rgb(c.separator))
                 .overflow_hidden();
             if body_native {
-                native_bodies.push(Rect {
-                    x: p.rect.x + m.border,
-                    y: p.rect.y + m.header,
-                    w: (p.rect.w - m.border * 2.).max(0.),
-                    h: (p.rect.h - m.header - m.border).max(0.),
-                });
+                native_bodies.push((
+                    id.to_string(),
+                    Rect {
+                        x: p.rect.x + m.border,
+                        y: p.rect.y + m.header,
+                        w: (p.rect.w - m.border * 2.).max(0.),
+                        h: (p.rect.h - m.header - m.border).max(0.),
+                    },
+                ));
             } else if !is_viewer || !native {
                 panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
             }

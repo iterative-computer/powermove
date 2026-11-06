@@ -3,9 +3,11 @@
 //! they enter through a recorded adoption of the bytes already on this Mac.
 use crate::{
     KernelStoreAdapter, KernelStoreDispatch, StoreAuthority, StoreCompatRunner, StoreRuntimeHost,
-    compile::ModuleGraph, discovery::Discovered, store_method_policy,
+    compile::ModuleGraph, discovery::Discovered, store_method_policy, store_runtime::StoreViews,
 };
+use pm_compat_host::{AdmittedDomBatch, RemoteDomPanel};
 use pm_kernel::tx::Writer;
+use pm_remote_dom::{TrySink, protocol::Session};
 use pm_runtime_v8::{Error, Result};
 use pm_store_host::{
     adapter::StoreSession,
@@ -23,6 +25,9 @@ use std::{
 
 pub const STORE_MARKER: &str = ".powermove-store.json";
 const LEGACY_PUBLISHER: &str = "powermove-store-v1";
+/// The one panel of a Store extension's dedicated WebKit document.
+pub const VIEW_PANEL: u64 = 1;
+pub const VIEW_GENERATION: u32 = 1;
 
 /// Next to the app in a build, or named by the environment in a test.
 fn helper() -> PathBuf {
@@ -134,7 +139,9 @@ fn adopt(
 
 pub struct StoreExtension {
     pub id: String,
+    pub session: StoreSession,
     runner: StoreCompatRunner,
+    router: RemoteDomPanel,
 }
 impl StoreExtension {
     pub fn start(
@@ -145,19 +152,31 @@ impl StoreExtension {
         graph: &ModuleGraph,
         marker: &Value,
         owner: Writer,
+        views: Arc<dyn StoreViews>,
     ) -> Result<Self> {
         adopt(&*kernel, namespace, found, graph, marker)?;
         let id = ExtensionId::new(found.id.clone()).map_err(|_| Error::Invalid("Store id"))?;
         let session = StoreSession::admit(&KernelStoreAdapter::new(&*kernel), &id)
             .map_err(|e| Error::Host(format!("{e:?}")))?;
         let dispatch = Arc::new(KernelStoreDispatch::new(owner, session.clone())?);
-        let host = Arc::new(StoreRuntimeHost::new(
-            kernel,
-            project.to_owned(),
-            session,
-            store_method_policy().map_err(|e| Error::Host(format!("{e:?}")))?,
-            dispatch,
-        ));
+        let host = Arc::new(
+            StoreRuntimeHost::new(
+                kernel,
+                project.to_owned(),
+                session.clone(),
+                store_method_policy().map_err(|e| Error::Host(format!("{e:?}")))?,
+                dispatch,
+            )
+            .with_views(views),
+        );
+        let router = RemoteDomPanel::new(
+            VIEW_PANEL,
+            Session {
+                panel: "store".into(),
+                generation: VIEW_GENERATION,
+            },
+        )
+        .map_err(|e| Error::Host(format!("{e:?}")))?;
         let manifest = found
             .manifest
             .as_ref()
@@ -177,7 +196,9 @@ impl StoreExtension {
         }
         Ok(Self {
             id: found.id.clone(),
+            session,
             runner,
+            router,
         })
     }
     /// Engine snapshots of what this extension registered; `origin: store`.
@@ -187,6 +208,62 @@ impl StoreExtension {
             .ok()
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default()
+    }
+    /// Panels are registered under the extension's namespace; its code knows the
+    /// id it wrote.
+    pub fn open_panel(&self, panel: &str) {
+        let short = panel
+            .strip_prefix(&format!("{}.", self.id))
+            .unwrap_or(panel);
+        let _ = self.runner.eval(&format!(
+            "void __storeCheck.openPanel({},{})",
+            json!(panel),
+            json!(short)
+        ));
+    }
+    pub fn close_panel(&self, panel: &str) {
+        let _ = self
+            .runner
+            .eval(&format!("void __storeCheck.closePanel({})", json!(panel)));
+    }
+    pub fn place_panel(&self, panel: &str, rect: [f32; 4]) {
+        let _ = self.runner.eval(&format!(
+            "void __storeCheck.placePanel({},{})",
+            json!(panel),
+            json!(rect)
+        ));
+    }
+    pub fn enqueue(
+        &mut self,
+        batch: Value,
+        sink: &mut impl TrySink<AdmittedDomBatch>,
+    ) -> pm_compat_host::Result<()> {
+        self.router.enqueue(batch, sink)
+    }
+    /// Page feedback into this helper's closures, through the same router checks.
+    pub fn page(&mut self, message: Value) {
+        struct Delivered(Vec<Value>);
+        impl TrySink<pm_remote_dom::protocol::PageMessage> for Delivered {
+            fn try_send(
+                &mut self,
+                message: pm_remote_dom::protocol::PageMessage,
+            ) -> std::result::Result<(), pm_remote_dom::Error> {
+                self.0.push(
+                    serde_json::to_value(message)
+                        .map_err(|_| pm_remote_dom::Error::Invalid("page message"))?,
+                );
+                Ok(())
+            }
+        }
+        let mut delivered = Delivered(vec![]);
+        if self.router.receive(message, &mut delivered).is_err() {
+            return;
+        }
+        for message in delivered.0 {
+            let _ = self.runner.eval(&format!(
+                "__storeCheck.dom.receive({message});__storeCheck.dom.flush()"
+            ));
+        }
     }
     pub fn run(&self, handle: u64, args: &Value) {
         let _ = self.runner.eval(&format!(

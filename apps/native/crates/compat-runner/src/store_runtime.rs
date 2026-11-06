@@ -35,6 +35,12 @@ pub trait StoreDispatch: Send + Sync + 'static {
     fn seal(&self, kernel: &dyn StoreAuthority, session: &StoreSession, generation: &Generation);
 }
 
+/// Where a helper's views go: DOM batches for its WebKit page and panel reveals.
+pub trait StoreViews: Send + Sync {
+    /// False is backpressure: the helper keeps the batch and retries.
+    fn batch(&self, batch: Value) -> bool;
+    fn panel(&self, id: &str, open: bool);
+}
 pub struct StoreRuntimeHost {
     kernel: Arc<dyn StoreAuthority>,
     session: StoreSession,
@@ -42,6 +48,7 @@ pub struct StoreRuntimeHost {
     dispatch: Arc<dyn StoreDispatch>,
     project: String,
     reports: Mutex<(Vec<Value>, usize)>,
+    views: Option<Arc<dyn StoreViews>>,
 }
 impl StoreRuntimeHost {
     pub fn new(
@@ -58,7 +65,12 @@ impl StoreRuntimeHost {
             policy,
             dispatch,
             reports: Mutex::new((vec![], 0)),
+            views: None,
         }
+    }
+    pub fn with_views(mut self, views: Arc<dyn StoreViews>) -> Self {
+        self.views = Some(views);
+        self
     }
     fn admit(&self, kernel: &dyn StoreAuthority, method: &str) -> Result<()> {
         let id = self.session.data_store.extension.as_str();
@@ -73,6 +85,24 @@ impl StoreRuntimeHost {
         self.session
             .authorize(&KernelStoreAdapter::new(kernel), &self.policy, method)
             .map_err(|_| Error::Host("Store permission or revision refused".into()))
+    }
+    /// A helper reveals and closes its own panels only.
+    fn panel_call(&self, args: &[Value]) -> Option<Value> {
+        let views = self.views.as_ref()?;
+        let open = match args[1].as_str()? {
+            "open" => true,
+            "close" => false,
+            _ => return None,
+        };
+        let id = args[2][0].as_str()?;
+        let owner = self.session.data_store.extension.as_str();
+        let id = if id.starts_with(&format!("{owner}.")) {
+            id.to_owned()
+        } else {
+            format!("{owner}.{id}")
+        };
+        views.panel(&id, open);
+        Some(json!({}))
     }
     fn storage(&self, kernel: &dyn StoreAuthority) -> Result<Value> {
         self.admit(kernel, "storage.get")?;
@@ -222,6 +252,13 @@ impl EngineProxy for StoreRuntimeHost {
                 &hex[20..]
             )));
         }
+        if operation == "store.dom" {
+            self.admit(&*self.kernel, "storage.get")?;
+            return match &self.views {
+                Some(views) => Ok(views.batch(input["batch"].clone()).into()),
+                None => Err(Error::Host("Store views are not attached".into())),
+            };
+        }
         if operation != "store.rpc"
             || serde_json::to_vec(input)
                 .map_err(|_| Error::Invalid("Store RPC"))?
@@ -251,11 +288,17 @@ impl EngineProxy for StoreRuntimeHost {
         };
         let kernel = &*self.kernel;
         self.admit(kernel, &policy_method)?;
-        let reply = match self.core_call(kernel, method, &input["args"])? {
+        let panel = (method == "invoke" && args[0] == "panels")
+            .then(|| self.panel_call(args))
+            .flatten();
+        let reply = match panel {
             Some(reply) => reply,
-            None => self
-                .dispatch
-                .call(kernel, &self.session, method, &input["args"], &budget)?,
+            None => match self.core_call(kernel, method, &input["args"])? {
+                Some(reply) => reply,
+                None => self
+                    .dispatch
+                    .call(kernel, &self.session, method, &input["args"], &budget)?,
+            },
         };
         budget.check()?;
         if serde_json::to_vec(&reply)

@@ -175,6 +175,7 @@ const pure = [
   "staggerWindow",
 ];
 const store = `import {createSandboxAPI,sandboxControl,sandboxReporter} from ${JSON.stringify(join(root, "src/frozen/host/store-api.js"))};
+import {RemoteDOM} from ${JSON.stringify(join(root, "../remote-dom/src/shim.ts"))};
 import * as helpers from ${JSON.stringify(join(root, "src/frozen/kernel/editor-helpers.ts"))};
 ${moduleImports}
 import {definitionSnapshots} from ${JSON.stringify(join(root, "src/definitions.ts"))};
@@ -186,7 +187,7 @@ const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has
 }]));
 const registry=list=>({entries:()=>(list??[]).map(item=>({id:item.id,ownerId:"store",item}))});
 const definitions=({effects,transitions,layers})=>definitionSnapshots({effects:registry(effects),transitions:registry(transitions),layerTypes:registry(layers),ownerOrigin:()=>"store"});
-globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,runtimeModules:{powermove,${moduleTable}}};`;
+globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,RemoteDOM,runtimeModules:{powermove,${moduleTable}}};`;
 await write(
   "store.js",
   await Bun.build({

@@ -80,6 +80,7 @@ fn registry(kind: &str) -> Option<&'static str> {
         "effects" => "effects",
         "transitions" => "transitions",
         "layers" => "layerTypes",
+        "panels" => "panels",
         "theme" => "themes",
         "status" => "status",
         _ => return None,

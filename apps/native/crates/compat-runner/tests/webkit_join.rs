@@ -42,6 +42,126 @@ mod mac {
             root.append(input,out,canvas);
           }});
         }";
+    const STORE_EXTENSION: &str = "
+        export default function(api){
+          api.panels.register({id:'view',title:'Confined',build(root){
+            const input=document.createElement('input');input.id='store-name';
+            const out=document.createElement('output');out.id='store-echo';out.textContent='confined '+(typeof PM);
+            input.addEventListener('input',()=>{out.textContent=input.value});
+            root.append(input,out);
+          }});
+        }";
+    /// A Store helper's view: its closures in the confined process, its document
+    /// in a WebKit page of its own.
+    fn store_view(
+        app: &NSApplication,
+        mtm: MainThreadMarker,
+        host: &ExtensionHost,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        const ID: &str = "synthetic-view";
+        const PANEL_ID: &str = "synthetic-view.view";
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let session = loop {
+            if let Some(session) = host.store_session(ID) {
+                break session;
+            }
+            if Instant::now() > deadline {
+                return Err(format!("no Store session: {:?}", host.records()).into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let (feedback, messages) = mpsc::channel();
+        let page = Rc::new(Page(feedback, RefCell::new(vec![])));
+        let mut web = MacDomHost::new_store_remote_dom(
+            mtm,
+            &session,
+            page.clone(),
+            &mut StoreDataStores::default(),
+            PAGE_BUNDLE,
+        )?;
+        web.create(PanelSpec {
+            id: 1,
+            label: "Confined".into(),
+        })?;
+        let viewport = Rect::new(0., 0., 640., 480.);
+        web.attach(
+            1,
+            PanelSlot {
+                id: 1,
+                bounds: viewport,
+                clip: viewport,
+                reading_order: 0,
+            },
+        )?;
+        web.present(viewport)?;
+        let sink = host.store_page_sink(ID);
+        let (mut ready, mut opened, mut stage, mut ticket) = (false, false, 0, None);
+        while Instant::now() < deadline {
+            if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::Any,
+                Some(&NSDate::dateWithTimeIntervalSinceNow(0.005)),
+                unsafe { NSDefaultRunLoopMode },
+                true,
+            ) {
+                app.sendEvent(&event);
+            }
+            web.tick();
+            for event in page.1.borrow_mut().drain(..) {
+                match event {
+                    HostEvent::Ready { .. } => ready = true,
+                    HostEvent::Failure(reason) => return Err(reason.into()),
+                    _ => (),
+                }
+            }
+            while let Ok(message) = messages.try_recv() {
+                sink(message);
+            }
+            if ready && !opened {
+                host.set_panel(PANEL_ID, true);
+                host.place_panel(PANEL_ID, [10., 20., 300., 200.]);
+                opened = true;
+            }
+            if ready {
+                let mut batches = host.take_store_batches(ID);
+                while let Some(batch) = batches.front() {
+                    match batch.present(&mut web) {
+                        Ok(()) => {
+                            batches.pop_front();
+                        }
+                        Err(Error::Backpressure) => break,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                host.return_store_batches(ID, batches);
+            }
+            if let Some(reply) = ticket.as_ref().and_then(CaptureTicket::try_take) {
+                ticket = None;
+                let text = reply.unwrap_or(Value::Null);
+                match stage {
+                    0 if text == "confined undefined" => {
+                        println!("store_panel_rendered_in_its_own_webkit_page=1");
+                        stage = 1;
+                        unsafe {
+                            web.web_view().evaluateJavaScript_completionHandler(
+                                &NSString::from_str("const i=document.querySelector('#store-name');i.value='typed in Store';i.dispatchEvent(new InputEvent('input',{bubbles:true}));0"),
+                                None,
+                            );
+                        }
+                    }
+                    1 if text == "typed in Store" => {
+                        println!("store_event_ran_confined_closure=1");
+                        web.destroy(1)?;
+                        return Ok(());
+                    }
+                    _ => (),
+                }
+            }
+            if ready && opened && ticket.is_none() {
+                ticket = web.inspect_capture(1, "#store-echo", false).ok();
+            }
+        }
+        Err(format!("Store view timed out at stage {stage}, ready={ready}").into())
+    }
     pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mtm = MainThreadMarker::new().ok_or("main thread required")?;
         let app = NSApplication::sharedApplication(mtm);
@@ -60,6 +180,18 @@ mod mac {
             directory.join("manifest.json"),
             json!({"id":"synthetic-dom","name":"Synthetic","version":"1.0.0","apiVersion":3,"entry":"index.js"})
                 .to_string(),
+        )?;
+        let store = root.path().join("extensions/synthetic-view");
+        fs::create_dir_all(&store)?;
+        fs::write(
+            store.join("manifest.json"),
+            json!({"id":"synthetic-view","name":"Confined","version":"1.0.0","apiVersion":3,"entry":"index.js","contributes":["panels"]})
+                .to_string(),
+        )?;
+        fs::write(store.join("index.js"), STORE_EXTENSION)?;
+        fs::write(
+            store.join(".powermove-store.json"),
+            json!({"repoId":"r","releaseId":"synthetic"}).to_string(),
         )?;
         let actor = KernelActor::spawn(KernelConfig::default());
         let kernel = actor.handle();
@@ -178,6 +310,7 @@ mod mac {
                     2 if text == "[255,0,0,255]" => {
                         println!("recorder_canvas_painted_in_webkit=1");
                         web.destroy(1)?;
+                        store_view(&app, mtm, &host)?;
                         drop(host);
                         std::thread::spawn(move || actor.shutdown());
                         return Ok(());

@@ -846,11 +846,9 @@ pub struct Host {
     /// Commands contributed at runtime, listed in the palette after built-ins.
     pub contributed_choices: Vec<Choice>,
     /// Rectangles of panel bodies a native surface below GPUI draws.
-    pub native_panels: Rc<RefCell<Vec<crate::layout::Rect>>>,
+    pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     /// Runs inside the composition transaction, with the window size.
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
-    /// True when a native surface must receive this window point.
-    pub native_hit: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
     pub native_accessibility: Vec<Retained<NSView>>,
     menu_state: RefCell<Option<MenuState>>,
@@ -1028,7 +1026,6 @@ impl Host {
             contributed_choices: vec![],
             native_panels: Rc::default(),
             native_present: None,
-            native_hit: None,
             native_accessibility: vec![],
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
@@ -1053,7 +1050,7 @@ impl Host {
                     && !native_rects
                         .borrow()
                         .iter()
-                        .any(|r| r.contains(p.x as f32, p.y as f32))
+                        .any(|(_, r)| r.contains(p.x as f32, p.y as f32))
             }),
         );
         host.borrow_mut().registration = Some(reg);

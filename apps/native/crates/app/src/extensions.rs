@@ -59,6 +59,8 @@ struct Page {
     host: Rc<RefCell<MacDomHost>>,
     events: Rc<PageEvents>,
     ready: bool,
+    /// Which run of a Store helper this page draws; 0 for the trusted realm.
+    view: u64,
 }
 
 /// The realm asks the one clock owner to move; the Controller answers on main.
@@ -106,7 +108,14 @@ fn external_link(url: &str) -> bool {
 #[derive(Default)]
 pub struct Extensions {
     pub host: Option<ExtensionHost>,
-    page: Option<Page>,
+    /// One WebKit document per trust domain: the trusted realm's under the empty
+    /// key, then each Store extension's own. Never shared.
+    pages: BTreeMap<String, Page>,
+    views: Rc<RefCell<BTreeMap<String, Rc<RefCell<MacDomHost>>>>>,
+    data_stores: StoreDataStores,
+    /// Panels drawn by a Store helper, with its id and run.
+    stores: BTreeMap<String, (String, u64)>,
+    owners: Rc<RefCell<BTreeMap<String, String>>>,
     /// Open contributed panels and where the shell placed their bodies.
     panels: BTreeMap<String, layout::Rect>,
     known_panels: BTreeSet<String>,
@@ -356,6 +365,22 @@ impl Controller {
                 Some((id, title))
             })
             .collect();
+        self.extensions.stores = value["panels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|panel| {
+                let store = panel["store"].as_str()?.to_owned();
+                let view = panel["view"].as_u64().unwrap_or_default();
+                Some((panel["id"].as_str()?.to_owned(), (store, view)))
+            })
+            .collect();
+        *self.extensions.owners.borrow_mut() = self
+            .extensions
+            .stores
+            .iter()
+            .map(|(panel, (store, _))| (panel.clone(), store.clone()))
+            .collect();
         let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
         // As in the shipped app: the workspace keeps a retired panel's place, and
         // it comes back if something registers the id again.
@@ -480,7 +505,7 @@ impl Controller {
         {
             host.set_panel(id, true);
         }
-        self.ensure_page(cx);
+        self.ensure_page(id, cx);
         self.place_panels();
         Some(
             div()
@@ -490,10 +515,18 @@ impl Controller {
                 .into_any_element(),
         )
     }
-    fn ensure_page(&mut self, cx: &mut Context<Self>) {
-        if self.extensions.page.is_some() {
+    /// The trusted realm's document, or a Store extension's own.
+    fn ensure_page(&mut self, id: &str, cx: &mut Context<Self>) {
+        let key = self
+            .extensions
+            .stores
+            .get(id)
+            .map_or(String::new(), |(store, _)| store.clone());
+        let view = self.extensions.stores.get(id).map_or(0, |(_, view)| *view);
+        if self.extensions.pages.get(&key).is_some_and(|page| page.view == view) {
             return;
         }
+        self.extensions.pages.remove(&key);
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -506,13 +539,24 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
         });
-        let created = MacDomHost::new_remote_dom(
-            mtm,
-            Trust::Trusted,
-            events.clone(),
-            &mut StoreDataStores::default(),
-            PAGE_BUNDLE,
-        );
+        let session = self.extensions.host.as_ref().and_then(|h| h.store_session(&key));
+        let created = match &session {
+            Some(session) => MacDomHost::new_store_remote_dom(
+                mtm,
+                session,
+                events.clone(),
+                &mut self.extensions.data_stores,
+                PAGE_BUNDLE,
+            ),
+            None if key.is_empty() => MacDomHost::new_remote_dom(
+                mtm,
+                Trust::Trusted,
+                events.clone(),
+                &mut self.extensions.data_stores,
+                PAGE_BUNDLE,
+            ),
+            None => return,
+        };
         let mut host = match created {
             Ok(host) => host,
             Err(error) => {
@@ -531,40 +575,65 @@ impl Controller {
         host.install_below(&shell.native_container(), &shell.gpui);
         drop(shell);
         let page = Rc::new(RefCell::new(host));
-        let present = page.clone();
+        self.extensions
+            .views
+            .borrow_mut()
+            .insert(key.clone(), page.clone());
+        let views = self.extensions.views.clone();
+        let owners = self.extensions.owners.clone();
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
         shell.native_present = Some(Rc::new(move |width, height| {
-            let mut host = present.borrow_mut();
             let viewport = Rect::new(0., 0., width, height);
-            let regions = bodies
-                .borrow()
-                .iter()
-                .map(|r| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64))
-                .collect();
-            let _ = host.set_regions(regions);
-            let dirty = host.composition_dirty();
-            let _ = host.attach(
-                PAGE_PANEL,
-                PanelSlot {
-                    id: PAGE_PANEL,
-                    bounds: viewport,
-                    clip: viewport,
-                    reading_order: 1,
-                },
-            );
-            let _ = host.present(viewport);
+            let bodies = bodies.borrow();
+            let owners = owners.borrow();
+            let mut dirty = false;
+            for (key, page) in views.borrow().iter() {
+                let mut host = page.borrow_mut();
+                let regions = bodies
+                    .iter()
+                    .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
+                    .map(|(_, r)| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64))
+                    .collect();
+                let _ = host.set_regions(regions);
+                dirty |= host.composition_dirty();
+                let _ = host.attach(
+                    PAGE_PANEL,
+                    PanelSlot {
+                        id: PAGE_PANEL,
+                        bounds: viewport,
+                        clip: viewport,
+                        reading_order: 1,
+                    },
+                );
+                let _ = host.present(viewport);
+            }
             dirty
         }));
-        shell.native_accessibility = vec![page.borrow().accessibility_view()];
+        shell.native_accessibility = self
+            .extensions
+            .views
+            .borrow()
+            .values()
+            .map(|page| page.borrow().accessibility_view())
+            .collect();
         drop(shell);
-        self.extensions.page = Some(Page {
-            host: page,
-            events,
-            ready: false,
-        });
-        // Feedback reaches the realm on a worker, never inside the page's callback.
-        let sink = self.extensions.host.as_ref().map(|h| h.page_sink());
+        self.extensions.pages.insert(
+            key.clone(),
+            Page {
+                host: page,
+                events,
+                ready: false,
+                view,
+            },
+        );
+        // Feedback reaches its realm on a worker, never inside the page's callback.
+        let host = self.extensions.host.as_ref();
+        let sink: Option<Box<dyn Fn(Value) + Send>> = if key.is_empty() {
+            host.map(|h| Box::new(h.page_sink()) as _)
+        } else {
+            host.map(|h| Box::new(h.store_page_sink(&key)) as _)
+        };
         std::thread::spawn(move || {
             while let Ok(message) = output.recv() {
                 if let Some(sink) = &sink {
@@ -619,32 +688,42 @@ impl Controller {
         }
     }
     fn present_page(&mut self, cx: &mut Context<Self>) {
-        let (Some(page), Some(host)) = (&mut self.extensions.page, &self.extensions.host) else {
+        let Some(host) = &self.extensions.host else {
             return;
         };
-        for event in page.events.events.borrow_mut().drain(..) {
-            match event {
-                HostEvent::Ready { .. } => page.ready = true,
-                HostEvent::CompositionChanged => cx.notify(),
-                HostEvent::ProcessTerminated => page.ready = false,
-                HostEvent::Recovered { .. } => page.ready = true,
-                _ => (),
+        for (key, page) in &mut self.extensions.pages {
+            for event in page.events.events.borrow_mut().drain(..) {
+                match event {
+                    HostEvent::Ready { .. } => page.ready = true,
+                    HostEvent::CompositionChanged => cx.notify(),
+                    HostEvent::ProcessTerminated => page.ready = false,
+                    HostEvent::Recovered { .. } => page.ready = true,
+                    _ => (),
+                }
             }
-        }
-        if !page.ready {
-            return;
-        }
-        let mut batches = host.take_batches();
-        let mut web = page.host.borrow_mut();
-        while let Some(batch) = batches.front() {
-            if batch.present(&mut *web).is_err() {
-                break;
+            if !page.ready {
+                continue;
             }
-            batches.pop_front();
-        }
-        host.return_batches(batches);
-        for frame in host.take_canvases() {
-            let _ = web.present_canvas(PAGE_PANEL, &frame);
+            let mut batches = if key.is_empty() {
+                host.take_batches()
+            } else {
+                host.take_store_batches(key)
+            };
+            let mut web = page.host.borrow_mut();
+            while let Some(batch) = batches.front() {
+                if batch.present(&mut *web).is_err() {
+                    break;
+                }
+                batches.pop_front();
+            }
+            if key.is_empty() {
+                host.return_batches(batches);
+                for frame in host.take_canvases() {
+                    let _ = web.present_canvas(PAGE_PANEL, &frame);
+                }
+            } else {
+                host.return_store_batches(key, batches);
+            }
         }
     }
 }

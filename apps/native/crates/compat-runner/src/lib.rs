@@ -26,7 +26,9 @@ pub use store_dispatch::KernelStoreDispatch;
 pub mod transport;
 pub use recorder::{CanvasText, NativeHost, NoEvents, RealmEvents};
 pub use store_kernel::{KernelStoreAdapter, StoreArchive, StoreAuthority};
-pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
+pub use store_runtime::{
+    StoreCompatRunner, StoreDispatch, StoreRuntimeHost, StoreViews, store_method_policy,
+};
 
 pub const COMPAT_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.js"));
 pub const STORE_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/store.js"));

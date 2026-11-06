@@ -8,7 +8,7 @@ use crate::{
     recorder::{CanvasText, NativeHost, RealmEvents},
     transport::{Transport, TransportOwner},
 };
-use crate::store_host::StoreExtension;
+use crate::{store_host::StoreExtension, store_runtime::StoreViews};
 use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
 use pm_kernel::{
     KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
@@ -16,6 +16,7 @@ use pm_kernel::{
 };
 use pm_remote_dom::{TrySink, protocol::Session};
 use pm_runtime_v8::*;
+use pm_store_host::adapter::StoreSession;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -60,6 +61,8 @@ enum Input {
     Page(Value),
     Answer(u64, Value),
     Menu(String, Value, u64),
+    StorePage(String, Value),
+    StoreDom(String),
     Dom,
     Enabled(String, bool),
     Rescan,
@@ -86,6 +89,8 @@ struct Published {
     contributions: Option<Arc<Value>>,
     records: BTreeMap<String, Value>,
     toasts: Vec<String>,
+    /// Admitted view batches of each confined helper, for its own page.
+    store_batches: BTreeMap<String, VecDeque<AdmittedDomBatch>>,
     /// Questions only the main thread can answer: menus, sheets, panel reveals.
     requests: Vec<Value>,
     batches: VecDeque<AdmittedDomBatch>,
@@ -99,6 +104,7 @@ struct Shared {
     published: Mutex<Published>,
     /// What the confined helpers registered, in contribution-list form.
     store: Mutex<Value>,
+    sessions: Mutex<BTreeMap<String, StoreSession>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 impl Shared {
@@ -197,8 +203,45 @@ impl RealmEvents for Arc<Events> {
     }
 }
 
+/// A confined helper's views: its batches wait here for the owner to admit them.
+struct ViewEvents {
+    id: String,
+    shared: Arc<Shared>,
+    inbox: Sender<Input>,
+    pending: Mutex<Vec<Value>>,
+}
+impl StoreViews for ViewEvents {
+    fn batch(&self, batch: Value) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.len() >= 64 {
+            return false;
+        }
+        pending.push(batch);
+        let _ = self.inbox.send(Input::StoreDom(self.id.clone()));
+        true
+    }
+    fn panel(&self, id: &str, open: bool) {
+        let request = json!({"kind":"panel","id":id,"open":open});
+        self.shared.update(|p| p.requests.push(request));
+    }
+}
+
 /// Bounded handoff to AppKit: a full queue is backpressure, never a dropped batch.
 struct PageQueue<'a>(&'a Shared);
+struct StorePageQueue<'a>(&'a Shared, &'a str);
+impl TrySink<AdmittedDomBatch> for StorePageQueue<'_> {
+    fn try_send(&mut self, batch: AdmittedDomBatch) -> std::result::Result<(), pm_remote_dom::Error> {
+        let mut published = self.0.published.lock().unwrap();
+        let queue = published.store_batches.entry(self.1.to_owned()).or_default();
+        if queue.len() >= 256 {
+            return Err(pm_remote_dom::Error::Backpressure);
+        }
+        queue.push_back(batch);
+        drop(published);
+        (self.0.wake)();
+        Ok(())
+    }
+}
 impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
     fn try_send(&mut self, batch: AdmittedDomBatch) -> std::result::Result<(), pm_remote_dom::Error> {
         let mut published = self.0.published.lock().unwrap();
@@ -223,6 +266,7 @@ impl ExtensionHost {
         let shared = Arc::new(Shared {
             published: Mutex::default(),
             store: Mutex::new(json!({})),
+            sessions: Mutex::default(),
             wake: config.wake.clone(),
         });
         let transport = Arc::new(Mutex::new(None));
@@ -280,6 +324,26 @@ impl ExtensionHost {
     }
     pub fn take_toasts(&self) -> Vec<String> {
         std::mem::take(&mut self.shared.published.lock().unwrap().toasts)
+    }
+    pub fn take_store_batches(&self, id: &str) -> VecDeque<AdmittedDomBatch> {
+        let mut published = self.shared.published.lock().unwrap();
+        published.store_batches.remove(id).unwrap_or_default()
+    }
+    pub fn return_store_batches(&self, id: &str, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut published = self.shared.published.lock().unwrap();
+        let queue = published.store_batches.entry(id.to_owned()).or_default();
+        rest.append(queue);
+        *queue = rest;
+    }
+    /// What a Store page needs: its data store and permissions.
+    pub fn store_session(&self, id: &str) -> Option<StoreSession> {
+        self.shared.sessions.lock().unwrap().get(id).cloned()
+    }
+    pub fn store_page_sink(&self, id: &str) -> impl Fn(Value) + Send + 'static + use<> {
+        let (inbox, id) = (self.inbox.clone(), id.to_owned());
+        move |message| {
+            let _ = inbox.send(Input::StorePage(id.clone(), message));
+        }
     }
     pub fn take_requests(&self) -> Vec<Value> {
         std::mem::take(&mut self.shared.published.lock().unwrap().requests)
@@ -392,9 +456,14 @@ struct Live {
     host: Arc<NativeHost>,
     events: Arc<Events>,
 }
+struct StoreLive {
+    owner: Writer,
+    extension: StoreExtension,
+    views: Arc<ViewEvents>,
+}
 struct Owner {
     writer: Writer,
-    stores: Vec<(Writer, StoreExtension)>,
+    stores: Vec<StoreLive>,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -482,6 +551,24 @@ impl Owner {
                     self.eval(&source);
                 }
             }
+            Input::StorePage(id, message) => {
+                if let Some(store) = self.stores.iter_mut().find(|s| s.extension.id == id) {
+                    store.extension.page(message);
+                }
+                self.drain_store_dom(&id);
+            }
+            Input::StoreDom(id) => self.drain_store_dom(&id),
+            Input::Panel(id, open) if self.store_of(&id).is_some() => {
+                let store = self.store_of(&id).unwrap();
+                if open {
+                    store.open_panel(&id);
+                } else {
+                    store.close_panel(&id);
+                }
+            }
+            Input::Place(id, rect) if self.store_of(&id).is_some() => {
+                self.store_of(&id).unwrap().place_panel(&id, rect);
+            }
             Input::Panel(id, open) => {
                 let source = format!(
                     "__compat.{}({})",
@@ -518,13 +605,45 @@ impl Owner {
             Input::Kernel | Input::Close => (),
         }
     }
+    fn store_of(&self, panel: &str) -> Option<&StoreExtension> {
+        let state = self.config.kernel.state();
+        let entry = state.provider("panels", panel)?;
+        let owner = entry.owner;
+        self.stores
+            .iter()
+            .find(|store| store.owner == owner)
+            .map(|store| &store.extension)
+    }
+    fn drain_store_dom(&mut self, id: &str) {
+        let Some(store) = self.stores.iter_mut().find(|s| s.extension.id == id) else {
+            return;
+        };
+        let batches = std::mem::take(&mut *store.views.pending.lock().unwrap());
+        for batch in batches {
+            let mut queue = StorePageQueue(&self.shared, id);
+            let mut remaining = 200;
+            loop {
+                match store.extension.enqueue(batch.clone(), &mut queue) {
+                    Err(pm_compat_host::Error::Backpressure) if remaining > 0 => {
+                        remaining -= 1;
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
     /// A confined helper owns this command: its callback is a handle in there.
     fn run_store(&self, id: &str, args: &Value) -> bool {
         let state = self.config.kernel.state();
         let Some(entry) = state.provider("commands", id) else {
             return false;
         };
-        let Some((_, extension)) = self.stores.iter().find(|(owner, _)| *owner == entry.owner)
+        let Some(extension) = self
+            .stores
+            .iter()
+            .find(|store| store.owner == entry.owner)
+            .map(|store| &store.extension)
         else {
             return false;
         };
@@ -538,10 +657,12 @@ impl Owner {
         let state = self.config.kernel.state();
         let mut store = json!({});
         let mut definitions = vec![];
-        for (owner, extension) in &self.stores {
+        for store_entry in &self.stores {
+            let (owner, extension) = (&store_entry.owner, &store_entry.extension);
             let mut own = json!({"effects":[],"transitions":[],"layers":[]});
             for (kind, registry) in [
                 ("commands", "commands"),
+                ("panels", "panels"),
                 ("effects", "effects"),
                 ("transitions", "transitions"),
                 ("layers", "layerTypes"),
@@ -553,10 +674,18 @@ impl Owner {
                     .flatten()
                     .filter(|entry| entry.owner == *owner)
                     .filter_map(|entry| {
-                        serde_json::from_str(&pm_model::json::to_canonical_string(
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(
                             &entry.definition,
                         ))
                         .ok()
+                    })
+                    .map(|mut item| {
+                        // Panels name the helper whose page draws them, and which run of it.
+                        if kind == "panels" {
+                            item["store"] = json!(extension.id);
+                            item["view"] = json!(owner.realm);
+                        }
+                        item
                     })
                     .collect();
                 own[kind] = json!(items);
@@ -791,6 +920,12 @@ impl Owner {
             realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
             generation: GENERATION,
         };
+        let views = Arc::new(ViewEvents {
+            id: found.id.clone(),
+            shared: self.shared.clone(),
+            inbox: self.inbox.clone(),
+            pending: Mutex::default(),
+        });
         let started = graph.map_err(Error::Host).and_then(|graph| {
             StoreExtension::start(
                 Arc::new(self.config.kernel.clone()),
@@ -800,10 +935,22 @@ impl Owner {
                 &graph,
                 found.store.as_ref().unwrap_or(&Value::Null),
                 owner,
+                views.clone(),
             )
         });
         match started {
-            Ok(extension) => self.stores.push((owner, extension)),
+            Ok(extension) => {
+                self.shared
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .insert(extension.id.clone(), extension.session.clone());
+                self.stores.push(StoreLive {
+                    owner,
+                    extension,
+                    views,
+                });
+            }
             Err(error) => {
                 record["health"] = json!({"state":"activation-error","error":error.to_string()});
             }

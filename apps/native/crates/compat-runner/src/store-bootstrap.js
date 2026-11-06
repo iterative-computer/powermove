@@ -54,6 +54,17 @@ globalThis.__storeCheck = {
     };
     this.errors = [];
     this.rpc = rpc;
+    this.views = new Map();
+    this.dom = new StoreCompat.RemoteDOM({
+      session: { panel: "store", generation: 1 },
+      realmGlobal: globalThis,
+      send: (batch) => runtime.engine("store.dom", { batch }),
+      requestAnimationFrame: (fn) => setTimeout(() => fn(performance.now()), 16),
+      cancelAnimationFrame: (id) => clearTimeout(id),
+      reportError: (error) =>
+        this.errors.push({ name: error?.name, message: error?.message }),
+    });
+    this.dom.installGlobals(globalThis);
     if (typeof globalThis.crypto === "undefined")
       globalThis.crypto = Object.freeze({
         randomUUID: () => runtime.engine("store.uuid"),
@@ -84,6 +95,51 @@ globalThis.__storeCheck = {
         error: { name: error.name, message: error.message },
         reports: this.errors.slice(),
       };
+    }
+  },
+  /** A panel's own document lives here; only its description reaches WebKit. */
+  openPanel(id, short) {
+    if (this.views.has(id)) return;
+    const definition = this.control.panel(id) ?? this.control.panel(short);
+    if (!definition) return;
+    const root = this.dom.document.createElement("section");
+    root.setAttribute("data-pm-contribution", id);
+    this.dom.document.body.append(root);
+    let cleanup;
+    if (definition.component) {
+      const svelte = StoreCompat.runtimeModules.svelte;
+      const instance = svelte.mount(definition.component, {
+        target: root,
+        props: { api: this.api },
+      });
+      cleanup = () => svelte.unmount(instance);
+    } else {
+      const built = definition.build(root, { spec: { id, panel: id } });
+      cleanup =
+        typeof built === "function" ? built : built?.dispose?.bind(built);
+    }
+    this.views.set(id, { root, cleanup });
+    this.dom.flush();
+  },
+  placePanel(id, rect) {
+    const [x, y, w, h] = rect;
+    this.views
+      .get(id)
+      ?.root.setAttribute(
+        "style",
+        `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`,
+      );
+    this.dom.flush();
+  },
+  closePanel(id) {
+    const view = this.views.get(id);
+    if (!view) return;
+    this.views.delete(id);
+    try {
+      view.cleanup?.();
+    } finally {
+      view.root.remove();
+      this.dom.flush();
     }
   },
   /** The native compiler's graph, linked inside this confined realm. */
@@ -118,6 +174,11 @@ globalThis.__storeCheck = {
       JSON.stringify({ sources, edges, entry: url("powermove:bundle") }),
     );
     await done;
+    namespace.__powermoveAcquireStyles?.((css) => {
+      const style = this.dom.document.createElement("style");
+      style.textContent = css;
+      this.dom.document.head.append(style);
+    });
     return this.activate(namespace);
   },
   dispose() {
