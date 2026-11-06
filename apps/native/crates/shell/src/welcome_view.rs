@@ -197,7 +197,10 @@ impl Render for WelcomeView {
         let (c, m) = (&t.colors, &t.metrics);
         let frame = self.frame.clone();
         let time = (frame.animate && !t.accessibility.reduce_motion).then(|| self.time());
-        if time.is_some_and(|time| time < welcome::ANIMATION_SECONDS) && self.clock.is_none() {
+        let spin = frame.spinner && !t.accessibility.reduce_motion;
+        if (spin || time.is_some_and(|time| time < welcome::ANIMATION_SECONDS))
+            && self.clock.is_none()
+        {
             window.request_animation_frame();
         }
         let mut content = div()
@@ -230,13 +233,17 @@ impl Render for WelcomeView {
                     .child(frame.line.clone()),
             );
         if let Some(status) = &frame.status {
-            content = content.child(
-                div()
-                    .debug_selector(|| "welcome-status".into())
-                    .text_size(px(t.typography.body))
-                    .text_color(rgb(c.secondary))
-                    .child(status.clone()),
-            );
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(m.gap))
+                .debug_selector(|| "welcome-status".into())
+                .text_size(px(t.typography.body))
+                .text_color(rgb(c.secondary));
+            if frame.spinner {
+                row = row.child(spinner(if spin { self.time() } else { 0. }, &t));
+            }
+            content = content.child(row.child(status.clone()));
         }
         if let Some(progress) = &frame.progress {
             content = content.child(self.progress(progress));
@@ -364,6 +371,37 @@ impl Render for WelcomeView {
         root.child(content)
     }
 }
+/// Three quarters of a ring, one turn a second. Still under Reduce Motion.
+fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
+    let colour = tokens.colors.secondary;
+    let size = tokens.typography.reading;
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let radius = f64::from(size) / 2. - 1.;
+            let centre = bounds.center();
+            let at = |turn: f64| {
+                let angle = turn * std::f64::consts::TAU;
+                centre
+                    + point(
+                        px((angle.cos() * radius) as f32),
+                        px((angle.sin() * radius) as f32),
+                    )
+            };
+            let mut builder = PathBuilder::stroke(px(1.5));
+            const SEGMENTS: usize = 24;
+            builder.move_to(at(time));
+            for segment in 1..=SEGMENTS {
+                builder.line_to(at(time + 0.75 * segment as f64 / SEGMENTS as f64));
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, rgb(colour));
+            }
+        },
+    )
+    .flex_none()
+    .size(px(size))
+}
 /// The first-run mark, drawn on the window's own ground. Its bloom is stacked
 /// translucent strokes; the mark itself stays hollow, as in the original scene.
 fn mark_canvas(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
@@ -436,7 +474,10 @@ pub fn open_welcome(
 ) -> anyhow::Result<WindowHandle<WelcomeView>> {
     let bounds = Bounds::centered(
         None,
-        size(px(tokens.metrics.welcome_width), px(tokens.metrics.welcome_height)),
+        size(
+            px(tokens.metrics.welcome_width),
+            px(tokens.metrics.welcome_height),
+        ),
         cx,
     );
     cx.open_window(

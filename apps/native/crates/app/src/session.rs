@@ -28,6 +28,9 @@ pub struct Controller {
     pub engine: Arc<EngineService>,
     pub host: Rc<RefCell<Host>>,
     pub profile: PathBuf,
+    /// The original app's profile, when this Mac has one. A file it might hold
+    /// opens as a copy while it runs. The native library is never affected.
+    pub electron: Option<PathBuf>,
     pub session: Option<SessionHandle>,
     pub published: Option<Arc<Published>>,
     pub mirror: Option<QueryMirror>,
@@ -150,6 +153,7 @@ impl Controller {
         kernel: KernelHandle,
         engine: Arc<EngineService>,
         profile: PathBuf,
+        electron: Option<PathBuf>,
         mcp: Arc<crate::mcp::Host>,
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
@@ -225,6 +229,7 @@ impl Controller {
             kernel,
             engine,
             profile,
+            electron,
             host,
             session: None,
             published: None,
@@ -534,6 +539,7 @@ impl Controller {
         };
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
+        let electron = self.electron.clone();
         let kernel = self.kernel.clone();
         let cache = self
             .profile
@@ -548,7 +554,8 @@ impl Controller {
                 SessionSource::File(p)=>stable_id(p),
                 SessionSource::New(_)=>pm_kernel::new_id("app"),
             };
-            let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
+            let electron_profile = matches!(source, SessionSource::File(_)).then_some(electron).flatten();
+            let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile}).await;
             if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
                 let ticket = ticket.clone();
                 let description = match recovery {

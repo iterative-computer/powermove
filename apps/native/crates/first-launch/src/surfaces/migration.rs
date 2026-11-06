@@ -212,7 +212,7 @@ impl Model {
             Gate::Consent|Gate::InterruptedConsent => (if self.gate==Gate::Consent {"Keep Your Sign-Ins"} else {"The Keychain Request Didn’t Finish"},if self.gate==Gate::Consent {crate::secrets::PROMPT.into()} else {"Powermove Native stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.".into()},None,vec![Button::new("skip_secret_consent","Not Now"),Button::new("resume_with_secret_consent","Continue")],Some("resume_with_secret_consent")),
             Gate::WaitingForMacos => ("Keep Your Sign-Ins",crate::secrets::PROMPT.into(),Some("Waiting for macOS…".into()),vec![Button{id:"skip_secret_consent",label:"Not Now",enabled:false},Button{id:"resume_with_secret_consent",label:"Continue",enabled:false}],None),
             Gate::Denied => ("Keychain Access Wasn’t Allowed","Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.".into(),None,vec![Button::new("skip_secret_consent","Continue Without Them"),Button::new("resume_with_secret_consent","Try Again")],Some("skip_secret_consent")),
-            Gate::Complete => ("Your Library Is Ready",format!("{} projects were copied. Your original app stays unchanged.",self.summary.as_ref().map_or(0,|s|s.projects)),None,if self.report_needs_review || self.summary.as_ref().is_some_and(|s|!s.rows().is_empty()) {vec![Button::new("show_report","Show Report…"),Button::new("open_native","Open Powermove Native")]} else {vec![Button::new("open_native","Open Powermove Native")]},Some("open_native")),
+            Gate::Complete => ("Your Library Is Ready",format!("{} Your original app stays unchanged.",copied(self.summary.as_ref().map_or(0,|s|s.projects))),None,if self.report_needs_review || self.summary.as_ref().is_some_and(|s|!s.rows().is_empty()) {vec![Button::new("show_report","Show Report…"),Button::new("open_native","Open Powermove Native")]} else {vec![Button::new("open_native","Open Powermove Native")]},Some("open_native")),
         };
         let mut buttons = buttons;
         if !matches!(self.gate, Gate::Complete | Gate::WaitingForMacos) {
@@ -252,6 +252,12 @@ impl Model {
         view
     }
 }
+fn copied(n: usize) -> String {
+    match n {
+        1 => "1 project was copied.".into(),
+        n => format!("{n} projects were copied."),
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     pub projects: usize,
@@ -263,11 +269,65 @@ pub struct Summary {
 }
 impl Summary {
     pub fn rows(&self) -> Vec<(&'static str, String)> {
-        [("history_refusals",self.history_refusals,"projects came across without their Undo history. Their current state is complete."),
-         ("missing_projects",self.missing_projects,"projects couldn’t be read. They’re kept safely and weren’t changed."),
-         ("blocked_owners",self.blocked_owners,"projects need media that went missing. They’ll ask you to find it."),
-         ("proxy_only",self.proxy_only,"media files came across as proxies only. Exports using them show a warning until you relink the originals."),
-         ("already_offline",self.already_offline,"media files were already offline.")].into_iter().filter(|(_,n,_)|*n>0).map(|(id,n,text)|(id,format!("{n} {text}"))).collect()
+        let projects = |n: usize, one: &str, many: &str| match n {
+            1 => format!("1 project {one}"),
+            n => format!("{n} projects {many}"),
+        };
+        let media = |n: usize, one: &str, many: &str| match n {
+            1 => format!("1 media file {one}"),
+            n => format!("{n} media files {many}"),
+        };
+        [
+            (
+                "history_refusals",
+                self.history_refusals,
+                projects(
+                    self.history_refusals,
+                    "came across without its Undo history. Its current state is complete.",
+                    "came across without their Undo history. Their current state is complete.",
+                ),
+            ),
+            (
+                "missing_projects",
+                self.missing_projects,
+                projects(
+                    self.missing_projects,
+                    "couldn’t be read. It’s kept safely and wasn’t changed.",
+                    "couldn’t be read. They’re kept safely and weren’t changed.",
+                ),
+            ),
+            (
+                "blocked_owners",
+                self.blocked_owners,
+                projects(
+                    self.blocked_owners,
+                    "needs media that went missing. It’ll ask you to find it.",
+                    "need media that went missing. They’ll ask you to find it.",
+                ),
+            ),
+            (
+                "proxy_only",
+                self.proxy_only,
+                media(
+                    self.proxy_only,
+                    "came across as a proxy only. Exports using it show a warning until you relink the original.",
+                    "came across as proxies only. Exports using them show a warning until you relink the originals.",
+                ),
+            ),
+            (
+                "already_offline",
+                self.already_offline,
+                media(
+                    self.already_offline,
+                    "was already offline.",
+                    "were already offline.",
+                ),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, n, _)| *n > 0)
+        .map(|(id, _, text)| (id, text))
+        .collect()
     }
 }
 pub const PROXY_EXPORT_WARNING: &str =

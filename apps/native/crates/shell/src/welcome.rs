@@ -264,7 +264,9 @@ mod tests {
     fn the_small_mark_settles_without_overshoot() {
         let mut last = f64::MAX;
         for frame in 0..60 {
-            let scale = mark_at(SECOND_LAYER_START + frame as f64 / 10.).unwrap().scale;
+            let scale = mark_at(SECOND_LAYER_START + frame as f64 / 10.)
+                .unwrap()
+                .scale;
             assert!(scale <= last + 1e-9, "scale rose at {frame}");
             last = scale;
         }

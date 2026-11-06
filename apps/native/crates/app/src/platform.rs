@@ -76,6 +76,19 @@ pub fn choice(
     rx
 }
 
+/// A one-button alert as a sheet on the key window.
+pub fn note(title: &str, detail: &str) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
+        return;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(detail));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.beginSheetModalForWindow_completionHandler(&window, None);
+}
+
 fn choice_index(response: NSModalResponse) -> usize {
     usize::try_from(response - NSAlertFirstButtonReturn).unwrap_or(usize::MAX)
 }

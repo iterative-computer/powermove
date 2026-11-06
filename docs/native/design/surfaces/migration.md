@@ -49,9 +49,16 @@ Names and paths never appear here: the event carries counts only.
 `Details` shows selectable `MONO_FONT` text and goes to the Error Log. No secret or user
 path is included.
 
-**Later launches.** A completed profile only brings in new media. No gate: Background
-Tasks row `Bringing in new media`, and the library opens normally. If the original app is
-running, the delta waits silently for a later launch.
+**Normal path.** With nothing to review, `Your Library Is Ready` is skipped and the editor
+opens by itself. No click is needed unless encrypted values exist (N002) or a row below
+has something to say.
+
+**Later launches.** An unchanged original costs a metadata check. Otherwise its changes
+come in before the library attaches, with no gate; if that passes one second, the Welcome
+frame shows `Updating Your Library`, `Your original app stays unchanged.`, spinner +
+`Bringing in your recent work…` and `Quit Powermove Native`. New media then lands behind
+the open library. If the original app is running, the delta waits silently for a later
+launch.
 
 VoiceOver: the status block is a polite live region, throttled to one update per 5 s.
 Title gets focus on each state change. Return activates the default.

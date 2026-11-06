@@ -41,6 +41,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The native profile folder can't be used: linked, foreign or overlapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileRefused;
+impl std::fmt::Display for ProfileRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the native library folder can't be used")
+    }
+}
+impl std::error::Error for ProfileRefused {}
+/// macOS answered no, or never answered. A fresh click is the only retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeychainDenied;
+impl std::fmt::Display for KeychainDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Keychain access wasn't allowed")
+    }
+}
+impl std::error::Error for KeychainDenied {}
 /// A preserved input requiring a real adapter, not a success-shaped capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationRequirement {
@@ -112,13 +130,15 @@ pub enum Launch {
     Later,
 }
 pub fn detect(config: &Config) -> Launch {
-    let finished = disk::json::<State>(&config.native_profile.join("migration.json"))
-        .is_ok_and(|state| state.completed.contains(&Step::Secrets));
-    if finished {
+    let state = config.native_profile.join("migration.json");
+    if disk::json::<State>(&state).is_ok_and(|s| s.completed.contains(&Step::Secrets)) {
         Launch::Later
-    } else if config.electron_profile.is_dir() {
+    } else if config.electron_profile.is_dir()
+        && (state.exists() || !config.native_profile.join("store").exists())
+    {
         Launch::Migrate
     } else {
+        // Work began here before the original app appeared. It stays as it is.
         Launch::Fresh
     }
 }
@@ -126,7 +146,7 @@ pub fn detect(config: &Config) -> Launch {
 pub fn onboarding_completed(native: &Path) -> bool {
     native.join("onboarding-v1.json").is_file()
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub electron_profile: PathBuf,
     pub native_profile: PathBuf,
@@ -243,6 +263,9 @@ pub fn retry_secret_consent(
     run_inner(config, Some(access), false, true, hook)
 }
 fn validate(config: &Config) -> Result<(PathBuf, PathBuf)> {
+    checked_paths(config).context(ProfileRefused)
+}
+fn checked_paths(config: &Config) -> Result<(PathBuf, PathBuf)> {
     let source = config.electron_profile.canonicalize()?;
     let native = disk::resolved(&config.native_profile)?;
     ensure!(
@@ -261,6 +284,27 @@ fn validate(config: &Config) -> Result<(PathBuf, PathBuf)> {
         "native profile cannot be a symlink"
     );
     Ok((source, native))
+}
+fn fresh_destination(native: &Path) -> Result<()> {
+    if native.exists() && !native.join("migration.json").exists() {
+        // A kill may occur after creating the process lock or temporary state
+        // file, before the first state rename. Those two private artifacts are
+        // safe to resume; any other preexisting destination remains refused.
+        for entry in fs::read_dir(native)? {
+            let entry = entry?;
+            ensure!(
+                ["first-launch.lock", "migration.first-launch-part"]
+                    .iter()
+                    .any(|n| entry.file_name() == *n),
+                "destination is not a fresh native beta profile"
+            );
+            ensure!(
+                entry.file_type()?.is_file(),
+                "invalid bootstrap recovery artifact"
+            );
+        }
+    }
+    Ok(())
 }
 fn validate_native_paths(native: &Path) -> Result<()> {
     // Reject linked ancestors before any writer runs. Existing beta files may
@@ -309,24 +353,7 @@ fn run_inner(
         hook(Event::WaitingForElectron)?;
         return Ok(Outcome::WaitingForElectron);
     }
-    if native.exists() && !native.join("migration.json").exists() {
-        // A kill may occur after creating the process lock or temporary state
-        // file, before the first state rename. Those two private artifacts are
-        // safe to resume; any other preexisting destination remains refused.
-        for entry in fs::read_dir(&native)? {
-            let entry = entry?;
-            ensure!(
-                ["first-launch.lock", "migration.first-launch-part"]
-                    .iter()
-                    .any(|n| entry.file_name() == *n),
-                "destination is not a fresh native beta profile"
-            );
-            ensure!(
-                entry.file_type()?.is_file(),
-                "invalid bootstrap recovery artifact"
-            );
-        }
-    }
+    fresh_destination(&native).context(ProfileRefused)?;
     disk::private_dir(&native)?;
     disk::space(&native, 0)?;
     let lock = OpenOptions::new()
@@ -496,7 +523,7 @@ fn run_inner(
             state.secrets = SecretStep::AccessStarted;
             publish(&native, &state)?;
             hook(Event::Started(Step::Secrets))?;
-            let password = access.legacy_password()?;
+            let password = access.legacy_password().context(KeychainDenied)?;
             for payload in payloads {
                 let id = format!(
                     "{}:{}",
@@ -960,7 +987,7 @@ pub fn retry_secret_consent_in_library(
         state.secrets = SecretStep::AccessStarted;
         publish(&native, &state)?;
         hook(Event::Started(Step::Secrets))?;
-        let password = access.legacy_password()?;
+        let password = access.legacy_password().context(KeychainDenied)?;
         for payload in pending {
             let version = blake3::hash(&payload.ciphertext).to_hex().to_string();
             let id = format!("{}:{version}", payload.id);
