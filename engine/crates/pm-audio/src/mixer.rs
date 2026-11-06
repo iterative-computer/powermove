@@ -3373,82 +3373,84 @@ mod prepared_tests {
         assert!(m.prepared_ready(&[start]), "worker preparation at {start}");
     }
 
-    #[test]
-    fn an_offline_mix_follows_nested_speed() {
-        let f = Fixture::new();
-        let build = |speed: f64| {
-            let json = r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"root","type":"audio","from":0.1,"dur":0.85,"on":true,"d":{"asset":"s","gain":{"v":0.25,"kf":[{"t":0,"v":0.25,"i":"a"},{"t":0.4,"v":0.9,"i":"b"}],"expr":null},"trim":0.05,"fadeIn":0.14,"fadeOut":0.2}},{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","audioGain":0.75,"trim":0}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"audioGain":0.7,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.35,"trim":0.1,"speed":{"v":__SPEED__,"kf":[],"expr":null},"fadeIn":0.08,"fadeOut":0.1}}]}}}"#
-                .replace("__SPEED__", &speed.to_string());
-            let doc = Arc::new(Document::new(Some(parse(&json).unwrap()), 1));
+    /// The export's mix of `json` (pm-export's offline render over the
+    /// range) and the playback mix (a worker-prepared start, then audio
+    /// callbacks of 256 frames), interleaved stereo.
+    fn export_and_playback(f: &Fixture, json: &str, voices: usize) -> (Vec<f32>, Vec<f32>) {
+        let mixer = || {
+            let doc = Arc::new(Document::new(Some(parse(json).unwrap()), 1));
             let graph = Arc::new(
                 MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
                     Some(f.dir.path().join("tone.wav"))
                 })
                 .unwrap(),
             );
-            assert_eq!(graph.voices.len(), 2);
-            (doc, graph)
-        };
-        let render = |speed: f64| {
-            let (doc, graph) = build(speed);
-            let mut mixer = Mixer::new(
+            assert_eq!(graph.voices.len(), voices);
+            Mixer::new(
                 MixFormat::stereo(48_000),
                 doc,
                 graph,
                 Evaluator::new(),
                 f.cache.clone(),
-            );
-            mixer.set_today_range(0.0, 1.0, 0);
-            let mut pcm = Vec::new();
-            crate::offline::render(&mut mixer, 0, 48_000, 8192, |_, block| {
-                pcm.extend_from_slice(block);
-                Ok(())
-            })
-            .unwrap();
-            pcm.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+            )
         };
-        // Exports mix offline with this mixer: a nested clip at 1.2× is heard
-        // at 1.2×, as it plays (today's exporter ignored the speed).
-        let reference = render(1.0);
-        let exported = render(1.2);
-        assert_eq!(exported.len(), 96_000);
-        assert!(
-            exported.iter().zip(&reference).any(|(a, b)| a != b),
-            "the export keeps speed 1.2"
-        );
-    }
-
-    #[test]
-    fn an_offline_mix_keeps_a_remapped_precomposition() {
-        let f = Fixture::new();
-        let doc = Arc::new(Document::new(
-            Some(parse(r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","trim":0,"timeRemap":{"v":1,"kf":[],"expr":null}}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.5,"trim":0,"speed":1.2,"fadeIn":0,"fadeOut":0}}]}}}"#).unwrap()),
-            1,
-        ));
-        let graph = Arc::new(
-            MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
-                Some(f.dir.path().join("tone.wav"))
-            })
-            .unwrap(),
-        );
-        assert_eq!(graph.voices.len(), 1);
-        let mut mixer = Mixer::new(
-            MixFormat::stereo(48_000),
-            doc,
-            graph,
-            Evaluator::new(),
-            f.cache.clone(),
-        );
-        mixer.set_today_range(0.0, 1.0, 0);
-        let mut pcm = Vec::new();
-        crate::offline::render(&mut mixer, 0, 48_000, 8192, |_, block| {
-            pcm.extend_from_slice(block);
+        let mut export = mixer();
+        export.set_today_range(0.0, 1.0, 0);
+        let mut exported = Vec::new();
+        crate::offline::render(&mut export, 0, 48_000, 8192, |_, block| {
+            exported.extend_from_slice(block);
             Ok(())
         })
         .unwrap();
-        assert_eq!(pcm.len(), 96_000);
+        let mut play = mixer();
+        play.standard_content(true);
+        prepare(&mut play, 0);
+        play.use_prepared(0);
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        let (mut out, mut played) = (vec![vec![]; 2], Vec::new());
+        for at in (0..48_000).step_by(256) {
+            let n = (48_000 - at).min(256);
+            play.render(at as i64, n, &mut out, &options).unwrap();
+            played.extend((0..n).flat_map(|i| [out[0][i], out[1][i]]));
+        }
+        (exported, played)
+    }
+    fn bits(pcm: &[f32]) -> Vec<u32> {
+        pcm.iter().map(|s| s.to_bits()).collect()
+    }
+
+    #[test]
+    fn an_export_mix_follows_nested_speed_as_playback_does() {
+        let f = Fixture::new();
+        let json = |speed: f64| {
+            r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"root","type":"audio","from":0.1,"dur":0.85,"on":true,"d":{"asset":"s","gain":{"v":0.25,"kf":[{"t":0,"v":0.25,"i":"a"},{"t":0.4,"v":0.9,"i":"b"}],"expr":null},"trim":0.05,"fadeIn":0.14,"fadeOut":0.2}},{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","audioGain":0.75,"trim":0}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"audioGain":0.7,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.35,"trim":0.1,"speed":{"v":__SPEED__,"kf":[],"expr":null},"fadeIn":0.08,"fadeOut":0.1}}]}}}"#
+                .replace("__SPEED__", &speed.to_string())
+        };
+        // Today's exporter ignored the nested speed; the export now mixes it
+        // exactly as playback hears it, sample for sample.
+        let (exported, played) = export_and_playback(&f, &json(1.2), 2);
+        assert_eq!(exported.len(), 96_000);
+        assert_eq!(bits(&exported), bits(&played), "export equals playback");
+        let (unretimed, _) = export_and_playback(&f, &json(1.0), 2);
+        assert_ne!(bits(&exported), bits(&unretimed), "speed 1.2 is not 1.0");
+    }
+
+    #[test]
+    fn an_export_mix_keeps_a_remapped_precomposition_as_playback_does() {
+        let f = Fixture::new();
         // Today's exporter dropped it; the picture and playback keep it.
-        assert!(pcm.iter().any(|sample| *sample != 0.0));
+        let (exported, played) = export_and_playback(
+            &f,
+            r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","trim":0,"timeRemap":{"v":1,"kf":[],"expr":null}}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.5,"trim":0,"speed":1.2,"fadeIn":0,"fadeOut":0}}]}}}"#,
+            1,
+        );
+        assert_eq!(exported.len(), 96_000);
+        assert_eq!(bits(&exported), bits(&played), "export equals playback");
+        let peak = exported.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05, "the remapped clip is heard: peak {peak}");
     }
 
     #[cfg(feature = "test-hooks")]

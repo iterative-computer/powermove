@@ -667,7 +667,7 @@ workers remain utility.
 Exports mix with the playback `Mixer`: nested speed, sourceTime, remapped
 precompositions and embedded soundtracks sound in the file as they play.
 Today's exporter ignored speed and dropped remapped precompositions; that
-bug is not reproduced (2026-11-06). `pm-audio`'s `an_offline_mix_*` tests
+bug is not reproduced (2026-11-06). `pm-audio`'s `an_export_mix_*` tests
 pin both cases.
 
 ## Native cloud export lane — 2026-11-01
