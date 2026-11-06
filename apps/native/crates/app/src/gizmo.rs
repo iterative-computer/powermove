@@ -71,6 +71,8 @@ pub trait Host: 'static {
     /// Publish engine-drawn lines, normalized to the composition frame.
     fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
     fn navigate(&self, change: Navigate, cx: &mut App);
+    /// The shared layer menu, on the selection the press made.
+    fn layer_menu(&self, window: &mut Window, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
 }
 /// One selected layer's pose at the current time, in composition pixels.
@@ -87,6 +89,8 @@ pub struct Pose {
     to_parent: [f64; 4],
     /// Layer-space box: x0, y0, x1, y1.
     bounds: [f64; 4],
+    /// A parametric shape resizes its content, not its scale.
+    shape: Option<ShapeSize>,
     pub corners: [[f64; 2]; 4],
     /// Where the anchor lands in the composition.
     pub anchor: [f64; 2],
@@ -94,6 +98,12 @@ pub struct Pose {
     pub position: [f64; 2],
     pub scale: [f64; 2],
     pub rotation: f64,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShapeSize {
+    width: f64,
+    height: f64,
+    stroke: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Hit {
@@ -140,6 +150,7 @@ pub struct GizmoSurface {
     picks: usize,
     controls: bool,
     panning: Option<Point<Pixels>>,
+    cursor: CursorStyle,
 }
 const HANDLES: [(f64, f64); 8] = [
     (0., 0.),
@@ -151,8 +162,6 @@ const HANDLES: [(f64, f64); 8] = [
     (0., 1.),
     (0., 0.5),
 ];
-/// Stem above top-centre, points (viewer-chrome.md §Gizmos).
-const STEM: f64 = 18.;
 /// The Anchor tool grabs only near the anchor (viewer.ts startAnchorTool).
 const ANCHOR_REACH: f64 = 12.;
 /// Smallest scale a handle drag reaches, percent (viewer.ts calculateResize).
@@ -210,13 +219,24 @@ impl Pose {
         lerp(top, bottom, v)
     }
     /// Above the top-centre handle, along the layer's own up axis.
-    fn rotate_handle(&self, scale: f64) -> [f64; 2] {
+    fn rotate_handle(&self, stem: f64) -> [f64; 2] {
         let top = self.handle(1);
         let centre = lerp(self.handle(1), self.handle(5), 0.5);
         let (dx, dy) = (top[0] - centre[0], top[1] - centre[1]);
         let length = dx.hypot(dy).max(1e-6);
-        let stem = STEM / scale;
         [top[0] + dx / length * stem, top[1] + dy / length * stem]
+    }
+    /// The resize cursor along a handle's direction from the box centre.
+    fn cursor(&self, index: usize) -> CursorStyle {
+        let centre = lerp(self.handle(0), self.handle(4), 0.5);
+        let at = self.handle(index);
+        let angle = (at[1] - centre[1]).atan2(at[0] - centre[0]).to_degrees();
+        match ((angle + 22.5).rem_euclid(180.) / 45.) as usize {
+            0 => CursorStyle::ResizeLeftRight,
+            1 => CursorStyle::ResizeUpLeftDownRight,
+            2 => CursorStyle::ResizeUpDown,
+            _ => CursorStyle::ResizeUpRightDownLeft,
+        }
     }
 }
 fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
@@ -261,6 +281,21 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             number("anchor.y").unwrap_or(0.),
         ];
         let (locked, kind) = layers.get(id).map_or((true, ""), |(l, k)| (*l, k.as_str()));
+        let parametric = kind == "shape"
+            && pm_kernel::model::find_layer(root, id)
+                .and_then(|at| pm_kernel::model::layer_at(root, &at))
+                .and_then(|layer| layer.get("d"))
+                .and_then(|d| d.get("paths"))
+                .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
+        let shape = if parametric {
+            number("c.w").zip(number("c.h")).map(|(width, height)| ShapeSize {
+                width,
+                height,
+                stroke: number("c.stroke").unwrap_or(0.).max(0.),
+            })
+        } else {
+            None
+        };
         poses.push(Pose {
             id: id.clone(),
             locked,
@@ -269,6 +304,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             linear: [local[0], local[1], local[2], local[3]],
             to_parent,
             bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
+            shape,
             corners: [
                 transform(&world, [bounds.x0, bounds.y0]),
                 transform(&world, [bounds.x1, bounds.y0]),
@@ -307,6 +343,7 @@ impl GizmoSurface {
             picks: 0,
             controls: true,
             panning: None,
+            cursor: CursorStyle::Arrow,
         }
     }
     /// Selection, document or playhead moved: reread the pose off the main
@@ -355,6 +392,28 @@ impl GizmoSurface {
             f32::from(at.y) as f64 / frame.scale,
         ]
     }
+    fn stem(&self, scale: f64) -> f64 {
+        self.tokens.metrics.rotation_stem as f64 / scale
+    }
+    /// The cursor promises what a press here does.
+    fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(position, frame);
+        let cursor = match self.host.tool(cx) {
+            Tool::Hand => CursorStyle::OpenHand,
+            Tool::Anchor | Tool::Zoom => CursorStyle::Crosshair,
+            _ => match self.handle_at(at, frame.scale) {
+                Some(Hit::Handle(index)) => self.poses[0].cursor(index),
+                _ => CursorStyle::Arrow,
+            },
+        };
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+    }
     /// A selection holding a locked layer owns its geometry but does not move.
     fn transformable(&self) -> bool {
         !self.poses.is_empty() && self.poses.iter().all(|p| !p.locked)
@@ -368,7 +427,7 @@ impl GizmoSurface {
         }
         let distance = |p: [f64; 2]| (p[0] - at[0]).hypot(p[1] - at[1]);
         let reach = self.tokens.metrics.hit as f64 / 2. / scale;
-        if distance(pose.rotate_handle(scale)) <= reach {
+        if distance(pose.rotate_handle(self.stem(scale))) <= reach {
             return Some(Hit::Rotate);
         }
         // Small boxes overlap: the handle really under the pointer wins.
@@ -444,6 +503,59 @@ impl GizmoSurface {
         };
         self.drag = drag;
         cx.stop_propagation();
+    }
+    /// Secondary press: selects what is under the pointer, locked layers
+    /// included, then opens the shared layer menu on it.
+    fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return;
+        };
+        let at = self.to_comp(event.position, frame);
+        let press = Press {
+            at,
+            shift: false,
+            deep: false,
+            time: self.host.time(cx),
+        };
+        cx.stop_propagation();
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let handle = window.window_handle();
+        self.picks += 1;
+        cx.spawn(async move |this, cx| {
+            let poses = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let options = pm_kernel::PickOptions { include_locked: true };
+                    let hit = QueryMirror::new(&p)
+                        .queries()
+                        .pick(None, press.at[0], press.at[1], press.time, &options)
+                        .ok()?
+                        .layer_id?;
+                    if !p.selection.layers().contains(&hit) {
+                        let ids = vec![hit];
+                        let selection = SelectionCall::Layers { ids, add: false };
+                        let request = Request::new(Caller::native(), selection);
+                        kernel.call(&project, request).await?.ok()?;
+                    }
+                    let p = kernel.published(&project)?;
+                    read_at(&p, press.time)
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.picks -= 1;
+                let Some(poses) = poses else {
+                    return;
+                };
+                s.poses = Arc::new(poses);
+                s.draw(cx);
+                let host = s.host.clone();
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| host.layer_menu(window, cx));
+                });
+            });
+        })
+        .detach();
     }
     /// Asks the kernel what is under the pointer and applies the shipped click
     /// rules, off the main thread. The answer arrives while the press may be held.
@@ -523,6 +635,12 @@ impl GizmoSurface {
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
+        if self.drag.is_none() {
+            if self.bounds.contains(&event.position) {
+                self.hover(event.position, cx);
+            }
+            return;
+        }
         let threshold = self.tokens.metrics.drag_threshold;
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
@@ -540,6 +658,7 @@ impl GizmoSurface {
             drag.active = true;
             self.queue.push_back(Job::Begin(match drag.hit {
                 Hit::Body => "Move",
+                Hit::Handle(_) if drag.poses.iter().any(|p| p.shape.is_some()) => "Resize Shape",
                 Hit::Handle(_) => "Scale",
                 Hit::Rotate => "Rotate",
                 Hit::Anchor => "Move Anchor Point",
@@ -657,7 +776,7 @@ impl GizmoSurface {
         Some((
             lerp(pose.corners[0], pose.corners[2], 0.5),
             pose.handle(4),
-            pose.rotate_handle(1.),
+            pose.rotate_handle(self.stem(1.)),
         ))
     }
 }
@@ -830,6 +949,9 @@ fn resize(
         fx = uniform;
         fy = uniform;
     }
+    if let Some(shape) = pose.shape {
+        return resize_shape(pose, shape, pivot, [fx, fy], t);
+    }
     let scale_x = (pose.scale[0] * fx).max(MIN_SCALE);
     let scale_y = (pose.scale[1] * fy).max(MIN_SCALE);
     let (kept_x, kept_y) = (scale_x / pose.scale[0], scale_y / pose.scale[1]);
@@ -856,6 +978,26 @@ fn resize(
             round(pose.position[1] + correction[1], 3),
             t,
         ),
+    ]
+}
+/// Selection bounds carry half the stroke on each side, and a shape's box grows
+/// about its own centre, so the fixed point follows its place inside that box.
+fn resize_shape(pose: &Pose, shape: ShapeSize, pivot: [f64; 2], f: [f64; 2], t: f64) -> Vec<Command> {
+    let [x0, y0, x1, y1] = pose.bounds;
+    let (span_x, span_y) = (x1 - x0, y1 - y0);
+    let width = (span_x * f[0] - shape.stroke).max(1.);
+    let height = (span_y * f[1] - shape.stroke).max(1.);
+    let centre = pose.local(0.5, 0.5);
+    let moved = [
+        (pivot[0] - centre[0]) * (1. - (width + shape.stroke) / span_x.max(1e-9)),
+        (pivot[1] - centre[1]) * (1. - (height + shape.stroke) / span_y.max(1e-9)),
+    ];
+    let correction = apply(pose.linear, moved);
+    vec![
+        set(&pose.id, "c.w", round(width, 3), t),
+        set(&pose.id, "c.h", round(height, 3), t),
+        set(&pose.id, "position.x", round(pose.position[0] + correction[0], 3), t),
+        set(&pose.id, "position.y", round(pose.position[1] + correction[1], 3), t),
     ]
 }
 /// The top layer under a press. Groups the selection has not entered answer
@@ -914,7 +1056,8 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
             color,
         });
     };
-    let half = (t.metrics.keyframe as f64 - 2.) / 2. / frame.scale;
+    let half = t.metrics.gizmo_handle as f64 / 2. / frame.scale;
+    let stem = t.metrics.rotation_stem as f64 / frame.scale;
     let square = |p: [f64; 2], line: &mut dyn FnMut([f64; 2], [f64; 2])| {
         let c = [
             [p[0] - half, p[1] - half],
@@ -937,8 +1080,8 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
         for i in 0..8 {
             square(pose.handle(i), &mut line);
         }
-        line(pose.handle(1), pose.rotate_handle(frame.scale));
-        square(pose.rotate_handle(frame.scale), &mut line);
+        line(pose.handle(1), pose.rotate_handle(stem));
+        square(pose.rotate_handle(stem), &mut line);
         let a = pose.anchor;
         line([a[0] - half, a[1]], [a[0] + half, a[1]]);
         line([a[0], a[1] - half], [a[0], a[1] + half]);
@@ -951,9 +1094,16 @@ impl Render for GizmoSurface {
         div()
             .id("viewer-gizmos")
             .size_full()
+            .cursor(self.cursor)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.on_context(event, window, cx);
+                }),
             )
             .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
                 s.on_wheel(event, window.line_height(), cx);

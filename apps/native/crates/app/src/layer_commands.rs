@@ -197,6 +197,30 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
 }
+/// The shared layer menu, on timeline rows and in the viewer. Rows run ordinary
+/// commands on the selection; an empty row is a separator.
+pub const LAYER_MENU: [(&str, &str); 8] = [
+    ("duplicate", "Duplicate"),
+    ("split", "Split at Playhead"),
+    ("groupLayers", "Group"),
+    ("bringForward", "Bring Forward"),
+    ("sendBackward", "Send Backward"),
+    ("lockSelectedLayers", "Lock"),
+    ("", ""),
+    ("delete", "Delete"),
+];
+pub fn layer_menu_rows() -> Vec<serde_json::Value> {
+    LAYER_MENU
+        .iter()
+        .map(|(id, label)| {
+            if id.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({"id":id,"label":label})
+            }
+        })
+        .collect()
+}
 /// Commands [`command_plan`] answers.
 pub const PLANNED: [&str; 24] = [
     "newSolid",

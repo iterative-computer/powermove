@@ -22,6 +22,7 @@ struct Recorder {
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
     navigation: RefCell<Vec<Navigate>>,
+    menus: Cell<usize>,
 }
 struct Recording(Rc<Recorder>);
 impl Host for Recording {
@@ -47,6 +48,9 @@ impl Host for Recording {
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
     }
+    fn layer_menu(&self, _: &mut gpui::Window, _: &mut App) {
+        self.0.menus.set(self.0.menus.get() + 1);
+    }
     fn report(&self, message: String, _: &mut App) {
         self.0.reports.borrow_mut().push(message);
     }
@@ -60,6 +64,9 @@ struct Stage {
 }
 /// One visible square with a real transform at its anchor.
 pub(crate) fn project() -> String {
+    project_of("image")
+}
+fn project_of(kind: &str) -> String {
     let channel = |key: &str, v: f64| format!(r#""{key}":{{"v":{v},"kf":[]}}"#);
     let channels = [
         ("opacity", 100.),
@@ -74,8 +81,22 @@ pub(crate) fn project() -> String {
     .map(|(key, v)| channel(key, v))
     .join(",");
     format!(
-        r##"{{"id":"integration","name":"Square","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{{"id":"l0","type":"shape","name":"Square","from":0,"dur":2,"on":true,"p":{{{channels}}},"d":{{"w":100,"h":100}},"fx":[]}}]}}"##
+        r##"{{"id":"integration","name":"Square","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[{{"id":"l0","type":"{kind}","name":"Square","from":0,"dur":2,"on":true,"p":{{{channels}}},"d":{{"w":100,"h":100}},"fx":[]}}]}}"##
     )
+}
+#[gpui::test]
+fn a_corner_resizes_a_shape_instead_of_scaling_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    let before = s.pose();
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    s.drag(cx, at, point(px(50.), px(20.)), Modifiers::none());
+    let after = s.pose();
+    assert_eq!(after.scale, before.scale);
+    assert_eq!(after.corners[0], before.corners[0]);
+    assert_eq!(after.corners[2], [before.corners[2][0] + 50., before.corners[2][1] + 20.]);
+    s.undo(cx);
+    assert_eq!(s.pose().corners, before.corners);
 }
 /// Two side-by-side squares for picking.
 fn pair() -> String {
@@ -250,8 +271,18 @@ fn the_opposite_corner_stays_fixed_while_scaling(cx: &mut TestAppContext) {
     let at = s.point_of(corner);
     s.drag(cx, at, point(px(50.), px(30.)), Modifiers::none());
     let after = s.pose();
-    assert_eq!(after.scale, [150., 130.]);
+    assert_eq!(after.scale, [140., 140.], "pictures keep their aspect");
     assert_eq!(after.corners[0], before.corners[0]);
+}
+#[gpui::test]
+fn a_solid_scales_each_axis_freely(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("solid"));
+    let (_, corner, _) = s.points();
+    let width = s.pose().corners[1][0] - s.pose().corners[0][0];
+    let height = s.pose().corners[3][1] - s.pose().corners[0][1];
+    let at = s.point_of([corner[0] - 2., corner[1] - 2.]);
+    s.drag(cx, at, point(px(width as f32 / 2.), px(height as f32 / 4.)), Modifiers::none());
+    assert_eq!(s.pose().scale, [150., 125.]);
 }
 #[gpui::test]
 fn option_scales_from_the_centre_and_shift_keeps_the_aspect(cx: &mut TestAppContext) {
@@ -398,6 +429,19 @@ fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {
     assert_eq!(zoom, 2.);
     // 200, 100 from centre now lands 400, 200 out: the view moves back by that.
     assert_eq!(pan, [-200., -100.]);
+}
+#[gpui::test]
+fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let at = s.point_of([460., 160.]);
+    let (kernel, recorder) = (s.rig.kernel.clone(), s.recorder.clone());
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    settle(cx, move |_| recorder.menus.get() == 1);
+    let selected = kernel.published(PROJECT).unwrap().selection.layers().to_vec();
+    assert_eq!(selected, ["l1"]);
 }
 /// The Resolution pop-up reaches the value that sizes the engine's drawable.
 #[gpui::test]

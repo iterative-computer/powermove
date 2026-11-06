@@ -314,3 +314,50 @@ fn nudging_with_no_args_is_refused_instead_of_guessing(cx: &mut TestAppContext) 
     let done = s.surface.clone();
     settle(cx, move |cx| done.read_with(cx, |t, _| t.idle()));
 }
+#[gpui::test]
+fn copied_keys_paste_at_the_playhead_and_undo_removes_them(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::gizmo_tests::project());
+    select(&mut s, cx, &["l0"]);
+    let key = |time: f64| {
+        let mut set = SetProperty::new("l0", "opacity", Value::Number(40.), time);
+        set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
+        pm_kernel::PropertyCommand::Set(set).into()
+    };
+    call(
+        &s.rig.kernel,
+        Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![key(0.5)]),
+        },
+    );
+    delivered(&mut s, cx);
+    let count = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model()
+                .index
+                .layer("l0")
+                .map_or(0, |l| l.channels.iter().map(|c| c.keys.len()).sum::<usize>())
+        })
+    };
+    assert_eq!(count(&s), 1);
+    let ids: Vec<String> = s.surface.read_with(&s.vcx, |t, _| {
+        let layer = t.model();
+        let layer = layer.index.layer("l0").unwrap();
+        layer
+            .channels
+            .iter()
+            .flat_map(|c| c.keys.iter().map(|k| k.id.clone()))
+            .collect()
+    });
+    call(&s.rig.kernel, SelectionCall::Keys(ids));
+    delivered(&mut s, cx);
+    let tracks = s.surface.read_with(&s.vcx, |t, _| t.copied_keys());
+    assert_eq!(tracks.len(), 1);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.paste_keys(tracks, 1.5, cx));
+    delivered(&mut s, cx);
+    assert_eq!(count(&s), 2);
+    undo(&mut s, cx);
+    assert_eq!(count(&s), 1);
+}

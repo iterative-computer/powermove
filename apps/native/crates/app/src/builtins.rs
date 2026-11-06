@@ -893,6 +893,22 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn layer_menu(&self, window: &mut Window, cx: &mut App) {
+        let host = self.0.clone();
+        crate::v4_native::menu(
+            window,
+            &crate::layer_commands::layer_menu_rows(),
+            cx,
+            move |index, cx| {
+                let rows = &crate::layer_commands::LAYER_MENU;
+                if let (Some((command, _)), Some(controller)) =
+                    (index.and_then(|i| rows.get(i)), host.upgrade())
+                {
+                    controller.read(cx).host.borrow().send_command(command, vec![]);
+                }
+            },
+        );
+    }
     fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| {
             let (zoom, pan) =

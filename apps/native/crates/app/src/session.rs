@@ -1304,11 +1304,11 @@ impl Controller {
                 self.persist_ui();
             }
             "zoomIn" => {
-                self.zoom = Some(self.zoom.unwrap_or(1.) * 1.25);
+                self.zoom = Some(self.viewer_scale.get() * 1.25);
                 self.persist_ui();
             }
             "zoomOut" => {
-                self.zoom = Some(self.zoom.unwrap_or(1.) / 1.25);
+                self.zoom = Some(self.viewer_scale.get() / 1.25);
                 self.persist_ui();
             }
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"

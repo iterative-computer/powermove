@@ -990,37 +990,18 @@ impl TimelineSurface {
     }
     /// The shared layer menu runs ordinary commands on the row's selection.
     fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        const ROWS: [(&str, &str); 8] = [
-            ("duplicate", "Duplicate"),
-            ("split", "Split at Playhead"),
-            ("groupLayers", "Group"),
-            ("bringForward", "Bring Forward"),
-            ("sendBackward", "Send Backward"),
-            ("lockSelectedLayers", "Lock"),
-            ("", ""),
-            ("delete", "Delete"),
-        ];
         if !self.model.selection.contains(&id) {
             self.queue.push_back(Job::SelectLayer(id, Mods::default()));
             self.pump(cx);
         }
-        let rows = ROWS
-            .iter()
-            .map(|(id, label)| {
-                if id.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::json!({"id":id,"label":label})
-                }
-            })
-            .collect();
         let delegate = self.delegate.clone();
         self.delegate.clone().menu(
-            rows,
+            crate::layer_commands::layer_menu_rows(),
             window,
             cx,
             Box::new(move |index, cx| {
-                if let Some((command, _)) = index.and_then(|i| ROWS.get(i)) {
+                let rows = &crate::layer_commands::LAYER_MENU;
+                if let Some((command, _)) = index.and_then(|i| rows.get(i)) {
                     delegate.command(command, cx);
                 }
             }),

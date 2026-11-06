@@ -507,6 +507,29 @@ fn false_after(ms: u64) -> bool {
     std::thread::sleep(Duration::from_millis(ms));
     true
 }
+/// Project rows and effect rows open their menus from this press.
+#[gpui::test]
+fn a_secondary_press_reaches_pointerdown_with_its_button(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":100,"height":40}}), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id":"target","style":{"width":60,"height":20}}),
+        &["pointerdown"],
+    ));
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "target").center();
+    vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    vcx.run_until_parked();
+    let log = view.update(&mut vcx, |v, _| std::mem::take(&mut v.log));
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].1, "pointerdown");
+    assert_eq!(log[0].2.button, Some(2));
+}
 /// S3: a real panel and its real V8 worker under the production gate.
 #[gpui::test]
 fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppContext) {

@@ -1221,6 +1221,17 @@ impl SurfaceView {
                 }),
             );
         }
+        // Panels open their menus from a secondary press, the way they did in Electron.
+        if events.pointer_down {
+            element = element.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |v, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let detail = v.detail(event.position, Some(2), 2, 1, event.modifiers);
+                    v.pointer(id, "pointerdown", detail, cx);
+                }),
+            );
+        }
         if events.context_menu {
             element = element.on_mouse_down(
                 MouseButton::Right,
