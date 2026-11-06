@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Line { float4 ends; float4 color; };
-struct Params { uint count; uint pad0; uint pad1; uint pad2; float4 output; Line lines[64]; };
+struct Params { uint count; uint reduced; uint pad1; uint pad2; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[64]; };
 vertex float4 vs(uint i [[vertex_id]]) {
     float2 q=float2(float((i<<1)&2),float(i&2));
     return float4(q*2-1,0,1);
@@ -27,8 +27,11 @@ float3 mastering(float3 p,float4 u) {
     c*=y>0?pow(y,1.0/gamma-1.0):0;
     return float3(hlg(c.r),hlg(c.g),hlg(c.b));
 }
-fragment half4 fs(float4 p [[position]], texture2d<half,access::read> src [[texture(0)]], constant Params& u [[buffer(0)]]) {
-    float4 c=float4(src.read(uint2(p.xy)));
+// A reduced-resolution frame scales to the drawable once, here; a full one is
+// read pixel for pixel, so paused frames equal the export.
+constexpr sampler reduced(filter::linear,address::clamp_to_edge);
+fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], constant Params& u [[buffer(0)]]) {
+    float4 c=float4(u.reduced!=0 ? src.sample(reduced,p.xy/u.drawable) : src.read(uint2(p.xy)));
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
     v=float3(dec(v.r),dec(v.g),dec(v.b));
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);
@@ -37,8 +40,8 @@ fragment half4 fs(float4 p [[position]], texture2d<half,access::read> src [[text
     // WindowServer maps this labelled EDR surface to the physical display;
     // a mastering transform must be an explicit engine policy, never this clamp.
     for(uint i=0;i<u.count;i++) {
-        float2 size=float2(src.get_width(),src.get_height());
-        float2 a=u.lines[i].ends.xy*size,b=u.lines[i].ends.zw*size;
+        // Overlays are normalized to the whole canvas, cropped or not.
+        float2 a=u.lines[i].ends.xy*u.canvas.zw-u.canvas.xy,b=u.lines[i].ends.zw*u.canvas.zw-u.canvas.xy;
         float2 ab=b-a;
         float t=clamp(dot(p.xy-a,ab)/max(dot(ab,ab),0.0001),0.0,1.0);
         if(length(p.xy-(a+t*ab))<=1.0) {

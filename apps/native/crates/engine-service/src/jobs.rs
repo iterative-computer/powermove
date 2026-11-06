@@ -31,7 +31,62 @@ pub struct ExportRequest {
     pub saving_app_version: Option<String>,
     #[serde(default)]
     pub resources: crate::resources::ResourceSnapshot,
+    /// An export stops, and removes its partial output, before the
+    /// destination volume has less free space than this.
+    #[serde(default = "disk_reserve")]
+    pub disk_reserve: u64,
 }
+/// Room left for macOS and a project save when a long export fills a disk.
+pub const DISK_RESERVE: u64 = 2 << 30;
+fn disk_reserve() -> u64 {
+    DISK_RESERVE
+}
+/// Space an export may use on the volume that will hold `destination` (its
+/// nearest existing ancestor: a PNG folder does not exist yet). This is the
+/// figure Finder shows: free space plus what macOS purges on demand.
+fn free_bytes(destination: &Path) -> Result<u64> {
+    use objc2_foundation::{NSNumber, NSString, NSURL};
+    let volume = destination
+        .ancestors()
+        .find(|p| p.exists())
+        .ok_or_else(|| anyhow::anyhow!("export destination has no existing folder"))?;
+    objc2::rc::autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&volume.to_string_lossy()));
+        let mut value = None;
+        // SAFETY: the key is a resource key; the value it returns is an NSNumber.
+        unsafe {
+            url.getResourceValue_forKey_error(
+                &mut value,
+                objc2_foundation::NSURLVolumeAvailableCapacityForImportantUsageKey,
+            )
+        }
+        .map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
+        value
+            .and_then(|v| v.downcast::<NSNumber>().ok())
+            .map(|n| n.unsignedLongLongValue())
+            .ok_or_else(|| anyhow::anyhow!("the destination volume does not report free space"))
+    })
+}
+/// Stops an export (through `cancel`) once `free` drops below `reserve`,
+/// checking every `every` until `finished`.
+fn watch_disk(
+    free: impl Fn() -> Result<u64>,
+    reserve: u64,
+    every: std::time::Duration,
+    finished: &AtomicBool,
+    low_disk: &AtomicBool,
+    cancel: &AtomicBool,
+) {
+    while !finished.load(Ordering::Acquire) {
+        if free().is_ok_and(|free| free < reserve) {
+            low_disk.store(true, Ordering::Release);
+            cancel.store(true, Ordering::Release);
+            return;
+        }
+        std::thread::sleep(every);
+    }
+}
+const LOW_DISK: &str = "The export stopped because the destination disk is almost full. Free some space and export again.";
 impl ExportRequest {
     pub fn new(
         job: JobId,
@@ -54,6 +109,7 @@ impl ExportRequest {
             destination,
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
+            disk_reserve: DISK_RESERVE,
         })
     }
 }
@@ -258,6 +314,34 @@ pub fn run_child() -> Result<()> {
     broker.set_generation(font_service.generation());
     let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
+    // Low disk: refuse to start, then watch the volume while frames land.
+    let reserve = request.disk_reserve;
+    if free_bytes(&request.destination)? < reserve {
+        emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(LOW_DISK.into()),
+        ))?;
+        return Ok(());
+    }
+    let low_disk = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    {
+        let (low_disk, finished, cancel) = (low_disk.clone(), finished.clone(), cancel.clone());
+        let destination = request.destination.clone();
+        std::thread::spawn(move || {
+            watch_disk(
+                || free_bytes(&destination),
+                reserve,
+                std::time::Duration::from_millis(250),
+                &finished,
+                &low_disk,
+                &cancel,
+            )
+        });
+    }
     let worker_cancel = cancel.clone();
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
         let cancel = worker_cancel;
@@ -295,7 +379,7 @@ pub fn run_child() -> Result<()> {
         }
         let mut renderer = pm_render::Renderer::headless()?;
         renderer
-            .set_main_effects_for_document(&doc)
+            .set_main_effects_with(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
         #[cfg(feature = "kernel")]
         crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
@@ -338,7 +422,16 @@ pub fn run_child() -> Result<()> {
     let result = worker
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("export worker panicked")));
+    finished.store(true, Ordering::Release);
     match result {
+        // The worker's output was dropped unpublished: its temporary is gone.
+        Err(_) if low_disk.load(Ordering::Acquire) => emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(LOW_DISK.into()),
+        ))?,
         Ok(path) => emit(status(
             &job_id,
             JobState::Done,
@@ -387,4 +480,42 @@ impl pm_export::render::GpuGate for ChildGate {
     }
     fn finished(&self, _: u64, _: u32, _: f64) {}
     fn abandoned(&self, _: u64) {}
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A disk that fills during an export stops it; a finished export is
+    /// left alone.
+    #[test]
+    fn a_disk_filling_mid_export_stops_it() {
+        let left = std::sync::atomic::AtomicU64::new(DISK_RESERVE + (64 << 20));
+        let (finished, low, cancel) = (
+            AtomicBool::new(false),
+            AtomicBool::default(),
+            AtomicBool::default(),
+        );
+        let tick = std::time::Duration::from_millis(1);
+        watch_disk(
+            || Ok(left.fetch_sub(16 << 20, Ordering::AcqRel)),
+            DISK_RESERVE,
+            tick,
+            &finished,
+            &low,
+            &cancel,
+        );
+        assert!(low.load(Ordering::Acquire) && cancel.load(Ordering::Acquire));
+        assert!(left.load(Ordering::Acquire) < DISK_RESERVE);
+        let (finished, low, cancel) = (
+            AtomicBool::new(true),
+            AtomicBool::default(),
+            AtomicBool::default(),
+        );
+        watch_disk(|| Ok(0), DISK_RESERVE, tick, &finished, &low, &cancel);
+        assert!(!cancel.load(Ordering::Acquire) && !low.load(Ordering::Acquire));
+    }
+    #[test]
+    fn free_space_is_read_for_a_folder_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(free_bytes(&dir.path().join("frames/not-yet")).unwrap() > 0);
+    }
 }

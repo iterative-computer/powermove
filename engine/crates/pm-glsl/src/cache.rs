@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use crate::pipeline;
-use crate::pipeline::{Failure, FailureStage, PIPELINE_REVISION, Prepared};
+use crate::pipeline::{Failure, PIPELINE_REVISION, Prepared};
 
 /// Default translation deadline. The slowest valid program measured in S3
 /// (a 256 KiB program at the statement budget) translated in 5.2 s cold,
@@ -126,9 +126,7 @@ impl Cache {
                 result
             }
         });
-        if !matches!(entry.as_ref(), Err(f) if matches!(f.stage,
-            FailureStage::CompilerBusy | FailureStage::CompilerProcess | FailureStage::CompilerResources | FailureStage::Deadline))
-        {
+        if !matches!(entry.as_ref(), Err(f) if f.stage.retryable()) {
             self.memory_put(key, entry.clone());
         }
         entry
@@ -228,6 +226,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::FailureStage;
 
     const SRC: &str = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_uv); }\n";
 

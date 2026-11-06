@@ -457,7 +457,7 @@ fn metal_imported_multi_object_reflection_preview_final_and_export() {
             &Scene {
                 doc: doc.clone(),
                 comp: "test".into(),
-                media: media.clone(),
+                media: Arc::new(media.clone()),
                 content: 1
             },
             Ticks::ZERO,
@@ -696,7 +696,7 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
             &Scene {
                 doc: doc.clone(),
                 comp: "test".into(),
-                media: media.clone(),
+                media: Arc::new(media.clone()),
                 content: 1
             },
             Ticks::ZERO,

@@ -474,6 +474,8 @@ pub struct Renderer {
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// See [`Renderer::set_isolate_layers`].
+    isolate_layers: bool,
     /// [`Renderer::set_channel_memo`].
     channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
@@ -535,6 +537,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            isolate_layers: false,
             svg_warned: Default::default(),
             channel_memo: true,
             prefix: Default::default(),
@@ -624,7 +627,24 @@ impl Renderer {
     /// Install the pinned native current and historical built-in programs.
     /// File provenance is carried outside authored JSON and frozen per job.
     pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
-        let set = crate::effects::versions::for_document(document);
+        self.set_main_effects_with(document, &[])
+    }
+
+    /// [`Renderer::set_main_effects_for_document`] plus the effect,
+    /// transition and layer definitions extensions registered: each replaces
+    /// any definition of its kind and id (the kernel's registry already chose
+    /// the winner), so a fork of a built-in renders as the fork.
+    pub fn set_main_effects_with(
+        &mut self,
+        document: &Document,
+        extensions: &[pm_protocol::definitions::DefinitionSnapshot],
+    ) -> Result<(), String> {
+        let mut set = crate::effects::versions::for_document(document);
+        for d in extensions {
+            set.definitions.retain(|b| b.kind != d.kind || b.id != d.id);
+            set.missing.retain(|m| *m != d.id);
+            set.definitions.push(d.clone());
+        }
         let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
         if !failures.is_empty() {
             return Err(format!("effect definition failures: {failures:?}"));
@@ -1308,6 +1328,21 @@ impl Renderer {
         self.media.scrub = on;
     }
 
+    /// Frames while playing: a video layer waits for its exact frame until
+    /// `deadline`, then draws a stand-in so the frame keeps its display
+    /// deadline. `None` waits as paused frames do. Stand-ins are reported in
+    /// [`Rendered::stand_ins`]; a viewer draws the exact frame once it stops.
+    pub fn set_playback(&mut self, deadline: Option<std::time::Instant>) {
+        self.media.playback = deadline;
+    }
+
+    /// Viewer frames: a layer this renderer cannot draw becomes a
+    /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
+    /// this: a delivered file refuses to omit a layer.
+    pub fn set_isolate_layers(&mut self, on: bool) {
+        self.isolate_layers = on;
+    }
+
     /// Changes whenever a frame a scrub render asked for has decoded: a
     /// frame drawn with stand-ins can be drawn again.
     pub fn media_landed(&self) -> u64 {
@@ -1878,8 +1913,12 @@ impl Renderer {
             && !crate::composite::has_nodes(&plan);
         let mut failures = build.failures;
         let svg_layers = build.svg_layers;
-        if !build.unsupported.is_empty() {
-            return Err(RenderError::Unsupported(build.unsupported));
+        let mut planned_unsupported = build.unsupported;
+        if self.isolate_layers {
+            layer_failures(&mut planned_unsupported, &mut failures);
+        }
+        if !planned_unsupported.is_empty() {
+            return Err(RenderError::Unsupported(planned_unsupported));
         }
         if !build.compat_missing.is_empty() {
             return Err(RenderError::CompatPending(build.compat_missing));
@@ -2000,7 +2039,13 @@ impl Renderer {
             // Something met at exec time is unsupported (media facts the
             // plan could not see): the frame fails, and the caller's
             // targets keep their previous contents. The commands still run,
-            // so media caches filled by this encoder stay valid.
+            // so media caches filled by this encoder stay valid. A viewer
+            // keeps drawing the rest of the frame instead.
+            if self.isolate_layers {
+                let mut unsupported = std::mem::take(&mut exec.unsupported);
+                layer_failures(&mut unsupported, &mut exec.failures);
+                exec.unsupported = unsupported;
+            }
             let held = exec.effects.watchdog.take_held();
             let complete = exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
@@ -2481,6 +2526,19 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
                 feature: Feature::ProjectColor,
             }])
         })
+}
+
+/// Moves layer-scoped refusals into per-layer failures.
+fn layer_failures(unsupported: &mut Vec<Unsupported>, failures: &mut Vec<LayerFailure>) {
+    unsupported.retain(|u| {
+        let Some(layer) = &u.layer else { return true };
+        failures.push(LayerFailure {
+            composition: u.composition.clone().unwrap_or_default(),
+            layer: layer.clone(),
+            message: u.feature.to_string(),
+        });
+        false
+    });
 }
 
 /// The project Color depth is authoritative for preview, snapshots and export.

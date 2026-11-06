@@ -294,3 +294,64 @@ fn every_render_format_maps_to_real_engine_contract_and_pmv_does_not_render() {
         assert!(mapped.delivery.hide_captions);
     }
 }
+
+#[test]
+fn every_profile_codec_and_depth_reaches_the_engine_and_old_settings_mean_today() {
+    use pm_protocol::priority::*;
+    let old = options();
+    assert_eq!(
+        (old.profile, old.codec, old.depth),
+        (Profile::P4444, Codec::H264, 8)
+    );
+    let map = |patch: serde_json::Value| {
+        let mut value = serde_json::to_value(options()).unwrap();
+        for (k, v) in patch.as_object().unwrap() {
+            value[k] = v.clone();
+        }
+        let o: Options = serde_json::from_value(value).unwrap();
+        let i = o.intent(true, 0).unwrap();
+        let mut base = planned();
+        if matches!(o.format, Format::Png | Format::Still) {
+            base.color = pm_protocol::color::OutputColor::SrgbImage;
+        }
+        let mapped = i.engine_settings(base).unwrap().unwrap();
+        (mapped.format, mapped.alpha)
+    };
+    for (id, profile, alpha) in [
+        ("422proxy", ProResProfile::Proxy, AlphaOutput::None),
+        ("422lt", ProResProfile::Lt, AlphaOutput::None),
+        ("422", ProResProfile::Standard, AlphaOutput::None),
+        ("422hq", ProResProfile::Hq, AlphaOutput::None),
+        ("4444", ProResProfile::P4444, AlphaOutput::Straight),
+        ("4444xq", ProResProfile::P4444Xq, AlphaOutput::Straight),
+    ] {
+        assert_eq!(
+            map(json!({"format":"prores","profile":id})),
+            (ExportFormat::ProRes { profile }, alpha),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        map(json!({"codec":"hevc"})).0,
+        ExportFormat::Hevc {
+            ten_bit: true,
+            container: Container::Mp4
+        }
+    );
+    assert_eq!(map(json!({"codec":"h264"})).0, ExportFormat::H264);
+    assert_eq!(
+        map(json!({"format":"png","depth":16})).0,
+        ExportFormat::PngSequence { sixteen_bit: true }
+    );
+    assert_eq!(
+        map(json!({"format":"still","depth":16})).0,
+        ExportFormat::PngStill { sixteen_bit: true }
+    );
+    let mut bad = serde_json::to_value(options()).unwrap();
+    bad["depth"] = json!(10);
+    let bad: Options = serde_json::from_value(bad).unwrap();
+    assert!(bad.validate().is_err());
+    let mut unknown = serde_json::to_value(options()).unwrap();
+    unknown["profile"] = json!("dnxhr");
+    assert!(serde_json::from_value::<Options>(unknown).is_err());
+}

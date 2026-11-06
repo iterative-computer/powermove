@@ -814,6 +814,28 @@ struct SlotGeometry {
     frame: NSRect,
     layer: NSRect,
     scale: f64,
+    crop: Option<[u32; 4]>,
+}
+/// The viewer layer's frame in a `slot` points wide and high, for a canvas
+/// zoomed to `canvas` points and centred on it, plus, when the canvas is
+/// larger than the slot, the drawable's window onto the whole canvas in
+/// device pixels: `[x, y, canvas width, canvas height]`. The engine renders
+/// only that window, so zooming in never renders pixels nobody sees.
+pub fn viewer_window(slot: [f64; 2], canvas: [f64; 2], scale: f64) -> (NSRect, Option<[u32; 4]>) {
+    let visible = [canvas[0].min(slot[0]), canvas[1].min(slot[1])];
+    let frame = NSRect::new(
+        NSPoint::new((slot[0] - visible[0]) / 2., (slot[1] - visible[1]) / 2.),
+        NSSize::new(visible[0], visible[1]),
+    );
+    if visible == canvas {
+        return (frame, None);
+    }
+    // The drawable is `visible × scale` rounded, as the layer sizes it; the
+    // window is centred in whole pixels so it always lies on its canvas.
+    let px = |v: f64| (v * scale).round().max(1.) as u32;
+    let (cw, ch) = (px(canvas[0]), px(canvas[1]));
+    let (w, h) = (px(visible[0]).min(cw), px(visible[1]).min(ch));
+    (frame, Some([(cw - w) / 2, (ch - h) / 2, cw, ch]))
 }
 pub struct Host {
     pub window: Retained<NSWindow>,
@@ -827,6 +849,9 @@ pub struct Host {
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>)>,
+    /// The drawable's window onto the zoomed canvas ([`viewer_window`]), set
+    /// before the drawable size so its observers read the matching window.
+    pub viewer_crop: Rc<Cell<Option<[u32; 4]>>>,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
@@ -1000,6 +1025,7 @@ impl Host {
             flowchart: None,
             layer,
             viewer_transform: None,
+            viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
             _delegate: delegate,
@@ -1482,22 +1508,21 @@ impl Host {
         let h = self.content.bounds().size.height;
         let geometry = self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
-            let (width, height) = if let Some((dimensions, zoom)) = self.viewer_transform {
+            let canvas = if let Some((dimensions, zoom)) = self.viewer_transform {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
                 let zoom = zoom
                     .unwrap_or(fit)
                     .min(8192. / dimensions[0].max(dimensions[1]) / scale);
-                (dimensions[0] * zoom, dimensions[1] * zoom)
+                [dimensions[0] * zoom, dimensions[1] * zoom]
             } else {
-                (r.w as f64, r.h as f64)
+                [r.w as f64, r.h as f64]
             };
+            let (layer, crop) = viewer_window([r.w as f64, r.h as f64], canvas, scale);
             SlotGeometry {
                 frame: rect(r, h),
-                layer: NSRect::new(
-                    NSPoint::new((r.w as f64 - width) / 2., (r.h as f64 - height) / 2.),
-                    NSSize::new(width, height),
-                ),
+                layer,
                 scale,
+                crop,
             }
         });
         let moved = self.last_geometry != Some(geometry);
@@ -1509,6 +1534,7 @@ impl Host {
                     let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
                 }
                 self.layer.set_contents_scale(g.scale);
+                self.viewer_crop.set(g.crop);
                 self.layer
                     .set_drawable_size(core_graphics::geometry::CGSize::new(
                         g.layer.size.width * g.scale,
@@ -2817,5 +2843,35 @@ fn append_menu(menu: &NSMenu, items: &[MenuEntry], target: &AnyObject, mtm: Main
             item.setSubmenu(Some(&submenu));
         }
         menu.addItem(&item);
+    }
+}
+
+#[cfg(test)]
+mod viewer_window_tests {
+    use super::viewer_window;
+
+    #[test]
+    fn a_canvas_inside_its_slot_is_whole_and_centred() {
+        let (frame, crop) = viewer_window([800., 600.], [640., 360.], 2.);
+        assert_eq!(crop, None);
+        assert_eq!((frame.origin.x, frame.origin.y), (80., 120.));
+        assert_eq!((frame.size.width, frame.size.height), (640., 360.));
+    }
+
+    #[test]
+    fn a_zoomed_canvas_draws_only_the_window_in_its_slot() {
+        // 1920×1080 at 400 %, Retina, in an 800×600 pt slot.
+        let (frame, crop) = viewer_window([800., 600.], [7680., 4320.], 2.);
+        assert_eq!((frame.origin.x, frame.origin.y), (0., 0.));
+        assert_eq!((frame.size.width, frame.size.height), (800., 600.));
+        let [x, y, cw, ch] = crop.unwrap();
+        assert_eq!((cw, ch), (15360, 8640));
+        assert_eq!((x, y), ((15360 - 1600) / 2, (8640 - 1200) / 2));
+        // Wider than the slot only: the full height stays, centred across.
+        let (frame, crop) = viewer_window([800., 600.], [1000.5, 300.], 2.);
+        assert_eq!((frame.size.width, frame.size.height), (800., 300.));
+        assert_eq!(frame.origin.y, 150.);
+        let [x, y, cw, ch] = crop.unwrap();
+        assert_eq!((x, y, cw, ch), ((2001 - 1600) / 2, 0, 2001, 600));
     }
 }

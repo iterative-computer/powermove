@@ -262,6 +262,19 @@ toolchain and the LGPL FFmpeg build (`PM_FFMPEG_DIR`) on the runner, and the
 counts must be checked on the runner's GPU (the GPU counts are API calls and
 should match; the heap tolerance may not): not done here.
 
+### Raised baselines
+
+A raise is a hand edit. This table lists every field `46c9421fc` raised (a diff
+of `baselines.json` against its parent) with its cause; earlier raises are
+explained in the commits that made them.
+
+| Date, commit | Bench / counter (both scopes) | Old → new | Cause | Open |
+|---|---|---|---|---|
+| 2026-11-05, `46c9421fc` | `text_cold` `cpu.heap_allocs` | 10,800 → 11,744 (+8.7%) | First use of the nearest-even half-store WGSL module (naga parse) and exact glyph outline preparation, from allocator traces recorded in `docs/native/int2-fixes.md`. | Not re-measured or reduced since. Glyph geometry runs on the caller or on helper threads (`3de258cb0`), so the count depends on scheduling, and `text_cold` has no tolerance entry: one extra allocation fails the run (seen once: +1 allocation, +128 bytes). A tolerance needs a measured spread first. Reduction candidates: parse the half-store module once per process instead of per renderer, and make glyph threading deterministic. |
+| 2026-11-05, `46c9421fc` | `text_cold` `cpu.heap_alloc_bytes` | 1,392,503 → 2,575,841 (+85%) | Same work. The all-thread total was used for both scopes; the caller-only total measured 2,142,841. | As above. The thread scope keeps about 433 KB of slack over the caller-only measurement; it is not tightened because which thread builds a glyph varies, and no spread has been measured. |
+| 2026-11-05, `46c9421fc` | `blend_stack_cold` `cpu.heap_alloc_bytes` | 1,419,648 → 1,551,613 (+9.3%) | First-use parse of the nearest-even half-store WGSL module (`HalfModules::module`), from allocator traces in `docs/native/int2-fixes.md`. | Parse once per process. |
+| 2026-11-05, `46c9421fc` | `export_120` `gpu.texture_alloc_bytes` | 354,073,088 → 354,946,896 (+0.25%) | Stills keep their native working precision and full mip chains instead of the old 8-bit bitmap path (873,808 bytes over the whole export). | None: required by the feature. |
+
 ## The 120 Hz rig
 
 `apps/desktop/e2e/perfbench-rig.spec.ts` drives today's viewer (Use New Engine

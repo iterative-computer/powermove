@@ -123,9 +123,15 @@ impl Effects {
         let current = self
             .get(DefinitionKind::Effect, id)
             .ok_or_else(|| format!("missing effect provider {id}"))?;
-        let registered = main_catalog()
-            .current(id)
-            .ok_or_else(|| format!("unversioned provider history unavailable for {id}"))?;
+        let Some(registered) = main_catalog().current(id) else {
+            // An extension's own effect (no built-in has its id): the
+            // registration the kernel chose is its only version.
+            return if current.origin == DefinitionOrigin::BuiltIn {
+                Err(format!("unversioned provider history unavailable for {id}"))
+            } else {
+                Ok(id.into())
+            };
+        };
         let registered_source = &main_effects()
             .shaders
             .iter()

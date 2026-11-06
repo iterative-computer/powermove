@@ -12,8 +12,8 @@ export const descriptions: Record<Kind, string> = {
   project: "An editable .pmv with every layer and its media.",
 };
 export const formats: { v: Format; label: string }[] = [
-  { v: "prores", label: "QuickTime · ProRes 4444" },
-  { v: "mp4", label: "MP4 · H.264" },
+  { v: "prores", label: "QuickTime · ProRes" },
+  { v: "mp4", label: "MP4 · H.264 or HEVC" },
   { v: "webm", label: "WebM · VP9" },
   { v: "png", label: "PNG sequence" },
   { v: "still", label: "Still frame (PNG)" },
@@ -25,7 +25,30 @@ export const kindOf = (format: Format): Kind =>
     : format === "png" || format === "still"
       ? "images"
       : "video";
+export type Profile = "422proxy" | "422lt" | "422" | "422hq" | "4444" | "4444xq";
+export type Codec = "h264" | "hevc";
+export const profiles: { v: Profile; label: string }[] = [
+  { v: "422proxy", label: "ProRes 422 Proxy" },
+  { v: "422lt", label: "ProRes 422 LT" },
+  { v: "422", label: "ProRes 422" },
+  { v: "422hq", label: "ProRes 422 HQ" },
+  { v: "4444", label: "ProRes 4444" },
+  { v: "4444xq", label: "ProRes 4444 XQ" },
+];
+export const codecs: { v: Codec; label: string }[] = [
+  { v: "h264", label: "H.264" },
+  { v: "hevc", label: "HEVC · 10-bit" },
+];
+export const depths = [
+  { v: 8, label: "8-bit" },
+  { v: 16, label: "16-bit" },
+];
+/** Settings saved before these fields existed mean today's output. */
+export const fieldDefaults = { profile: "4444", codec: "h264", depth: 8 } as const;
 export type Field =
+  | "profile"
+  | "codec"
+  | "depth"
   | "scale"
   | "fps"
   | "range"
@@ -34,13 +57,20 @@ export type Field =
   | "audio"
   | "alpha";
 export const fields: Record<Format, readonly Field[]> = {
-  prores: ["scale", "fps", "range", "mblur", "audio", "alpha"],
-  mp4: ["scale", "fps", "range", "quality", "mblur", "audio"],
+  prores: ["profile", "scale", "fps", "range", "mblur", "audio", "alpha"],
+  mp4: ["codec", "scale", "fps", "range", "quality", "mblur", "audio"],
   webm: ["scale", "fps", "range", "quality", "mblur", "audio"],
-  png: ["scale", "fps", "range", "mblur", "alpha"],
-  still: ["scale", "mblur", "alpha"],
+  png: ["depth", "scale", "fps", "range", "mblur", "alpha"],
+  still: ["depth", "scale", "mblur", "alpha"],
   json: [],
 };
+/** Whether the sheet shows `field`: ProRes 422 has no alpha channel. */
+export const shows = (
+  o: { format: Format; profile?: string },
+  field: Field,
+) =>
+  fields[o.format].includes(field) &&
+  !(field === "alpha" && o.format === "prores" && !o.profile?.startsWith("4444"));
 export const actions: Record<Format, string> = {
   prores: "Export Video",
   mp4: "Export Video",
@@ -79,6 +109,12 @@ export const sidecars = [
 ];
 export const rows = {
   format: ["Format", "Container and codec of the exported file."],
+  profile: [
+    "Profile",
+    "422 HQ for editing and delivery, 4444 to keep transparency.",
+  ],
+  codec: ["Codec", "HEVC is 10-bit and smaller than H.264 at the same quality."],
+  depth: ["Depth", "16-bit keeps smooth gradients for grading and compositing."],
   scale: [
     "Resolution",
     "Rendered size relative to the composition, or any pixel size.",

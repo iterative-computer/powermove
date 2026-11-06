@@ -34,6 +34,7 @@ pub(crate) struct Models {
     viewer_projection: Option<(
         pm_panel_viewerchrome::Stamp,
         pm_panel_viewerchrome::Viewport,
+        f64,
         Value,
     )>,
     pub project: ProjectBridge,
@@ -368,8 +369,16 @@ impl Backend {
     pub(crate) fn viewer_snapshot(&mut self) -> Result<Value, String> {
         self.sync()?;
         let p = self.published().ok_or("closed")?;
-        let vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
+        let mut vm = pm_panel_viewerchrome::ViewModel::read(&p, self.kernel.state().revision)
             .map_err(|e| e.to_string())?;
+        // Auto's playing resolution is the engine's measurement, not a setting.
+        if let Some(scale) = self.native.facts["effectiveQuality"]
+            .as_f64()
+            .filter(|q| (0.25..=1.).contains(q))
+        {
+            vm.chrome.effective_quality = scale;
+        }
+        let effective = vm.chrome.effective_quality;
         let stage = pm_panel_viewerchrome::Size {
             width: self.native.facts["stage"][0].as_f64().unwrap_or(640.),
             height: self.native.facts["stage"][1].as_f64().unwrap_or(360.),
@@ -382,10 +391,11 @@ impl Backend {
                     .inset as f64,
             )
             .map_err(|e| e.to_string())?;
-        let model = if let Some((stamp, previous_viewport, projection)) =
+        let model = if let Some((stamp, previous_viewport, previous_effective, projection)) =
             &self.native.viewer_projection
             && *stamp == vm.stamp
             && *previous_viewport == viewport
+            && *previous_effective == effective
         {
             projection.clone()
         } else {
@@ -396,7 +406,8 @@ impl Backend {
                     .publish(&vm, viewport)
                     .map_err(|e| e.to_string())?,
             );
-            self.native.viewer_projection = Some((vm.stamp.clone(), viewport, projection.clone()));
+            self.native.viewer_projection =
+                Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
         Ok(
@@ -704,6 +715,9 @@ impl Backend {
                 "alpha",
                 "captionsBurn",
                 "captionsSidecar",
+                "profile",
+                "codec",
+                "depth",
                 "preset",
                 "presetName"
             ]))?;
@@ -713,6 +727,9 @@ impl Backend {
         }
         let options: pm_promedia::export_panel::Options =
             crate::delivery::options(&self.native.export["options"])?;
+        // Settings saved before a field existed show its default in the sheet.
+        self.native.export["options"] =
+            serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
         self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"summary":plan.summary});
         self.native.export["presets"] = json!(

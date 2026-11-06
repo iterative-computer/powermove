@@ -103,6 +103,7 @@ pub fn screen_output(
         height,
         display,
         headroom: screen.maximumExtendedDynamicRangeColorComponentValue(),
+        crop: None,
     };
     output.validate()?;
     Ok((

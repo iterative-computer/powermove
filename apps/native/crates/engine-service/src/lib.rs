@@ -40,8 +40,8 @@ use pm_protocol::{
     clock::{AudioLevels, ClockSample, TransportCommand},
     common::{Size, Ticks},
 };
-pub use policy::{Output, Stamp};
-pub use render::{Scene, metal_device};
+pub use policy::{Crop, Moment, Output, Quality, Stamp};
+pub use render::{FrameSpec, Scene, metal_device};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
@@ -63,8 +63,12 @@ pub struct OverlayGeometry {
 #[repr(C)]
 pub(crate) struct OverlayParams {
     count: u32,
-    pad: [u32; 3],
+    reduced: u32,
+    pad: [u32; 2],
     output: [f32; 4],
+    canvas: [f32; 4],
+    drawable: [f32; 2],
+    pad2: [f32; 2],
     lines: [OverlayLine; 64],
 }
 impl OverlayGeometry {
@@ -82,8 +86,12 @@ impl OverlayGeometry {
     fn params(&self) -> OverlayParams {
         let mut p = OverlayParams {
             count: self.lines.len() as u32,
-            pad: [0; 3],
+            reduced: 0,
+            pad: [0; 2],
             output: [0.; 4],
+            canvas: [0.; 4],
+            drawable: [0.; 2],
+            pad2: [0.; 2],
             lines: [OverlayLine::default(); 64],
         };
         p.lines[..self.lines.len()].copy_from_slice(&self.lines);
@@ -100,6 +108,20 @@ pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,
 }
+/// What the viewer plays for each clip (View › Media). Exports read
+/// originals whatever this says; only an explicit draft export uses proxies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaMode {
+    /// Originals, and a proxy for a clip whose original is missing.
+    #[default]
+    Automatic,
+    /// Originals only: a clip whose original is missing is offline.
+    Originals,
+    /// A proxy where one exists, the original otherwise.
+    ProxyPreferred,
+    /// Proxies only: a clip without one is offline.
+    ProxyOnly,
+}
 impl MediaCatalog {
     /// Export safety: a draft is the only path that can substitute proxy pixels.
     pub fn export_paths(&self, draft: bool) -> pm_export::render::MediaPaths {
@@ -109,11 +131,33 @@ impl MediaCatalog {
         }
         pm_export::render::MediaPaths { paths }
     }
-    pub fn audio_paths(&self) -> MediaMap {
+    /// The file the viewer reads for each asset in `mode`.
+    pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
+        let (first, second) = match mode {
+            MediaMode::Automatic => (&self.originals, Some(&self.proxies)),
+            MediaMode::Originals => (&self.originals, None),
+            MediaMode::ProxyPreferred => (&self.proxies, Some(&self.originals)),
+            MediaMode::ProxyOnly => (&self.proxies, None),
+        };
+        let mut paths = second.cloned().unwrap_or_default();
+        paths.extend(first.iter().map(|(k, v)| (k.clone(), v.clone())));
+        paths
+    }
+    /// Assets the viewer draws from a proxy in `mode`.
+    pub fn proxied(&self, mode: MediaMode) -> usize {
+        let paths = self.viewer_paths(mode);
+        self.proxies
+            .iter()
+            .filter(|(id, path)| {
+                paths.get(*id) == Some(path) && self.originals.get(*id) != Some(path)
+            })
+            .count()
+    }
+    pub fn audio_paths(&self, mode: MediaMode) -> MediaMap {
         MediaMap(Arc::new(
-            self.originals
-                .iter()
-                .map(|(k, v)| (k.clone(), Some(v.clone())))
+            self.viewer_paths(mode)
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
                 .collect(),
         ))
     }
@@ -144,6 +188,11 @@ pub struct FrameReport {
     pub worker_to_completion_ms: Option<f64>,
     pub input_host_seconds: Option<f64>,
     pub audio_host_seconds: Option<f64>,
+    pub moment: Moment,
+    /// Render resolution as a share of the drawable.
+    pub scale: f64,
+    /// A video layer showed its nearest decoded frame.
+    pub stand_ins: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
@@ -160,9 +209,20 @@ pub struct ViewerStatus {
     pub held_frames: u64,
     /// Paused pictures re-presented once because they never reached the glass.
     pub represented: u64,
+    /// Layers missing from the frame on screen, with why. The rest is drawn.
+    pub layer_failures: Vec<pm_render::LayerFailure>,
+    /// Playing frames with a stand-in for a decode that missed its allowance.
+    pub stand_in_frames: u64,
+    /// Auto's current playing resolution, for the viewer chrome.
+    pub effective_quality: f64,
     /// Playing or waiting for the audio epoch: the host should keep its
     /// display-phase source running so the start can align to vsync.
     pub wants_display: bool,
+    /// GPU devices lost and rebuilt under this viewer.
+    pub device_losses: u64,
+    /// Clips the viewer plays from a proxy (View › Media). Never counted as
+    /// originals.
+    pub proxied: usize,
 }
 struct View {
     config: ViewerConfig,
@@ -182,6 +242,9 @@ struct View {
     pipeline: trace::Pipeline,
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
+    quality: Quality,
+    media_mode: MediaMode,
+    paths: Arc<pm_export::render::MediaPaths>,
 }
 impl View {
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
@@ -219,8 +282,14 @@ struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
+    /// The worker engine's current Metal device; a GPU loss replaces it.
+    device: Mutex<metal::Device>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    lose_device: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    invalid_call: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -312,12 +381,50 @@ impl Viewer {
             .views
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        v.paths = Arc::new(pm_export::render::MediaPaths {
+            paths: media.viewer_paths(v.media_mode),
+        });
+        v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
         v.content = content;
         v.stamp.sequence += 1;
         v.dirty = true;
         self.shared.wake.try_send(()).ok();
         Ok(())
+    }
+    /// Which file each clip plays from (View › Media). Audio follows it.
+    pub fn media_mode(&self, mode: MediaMode) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        state.content += 1;
+        let content = state.content;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        if v.media_mode == mode {
+            return Ok(());
+        }
+        v.media_mode = mode;
+        v.paths = Arc::new(pm_export::render::MediaPaths {
+            paths: v.config.media.viewer_paths(mode),
+        });
+        v.status.proxied = v.config.media.proxied(mode);
+        v.content = content;
+        v.stamp.sequence += 1;
+        v.dirty = true;
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    /// Render resolution. Auto measures playback; stopped frames are full.
+    pub fn quality(&self, quality: Quality) -> Result<()> {
+        self.edit(|v| {
+            if v.quality != quality {
+                v.quality = quality;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
+            Ok(())
+        })
     }
     /// Interactive scrubbing pauses and immediately requests the exact frame.
     pub fn scrub(&self, time: Ticks) -> Result<()> {
@@ -361,6 +468,7 @@ impl Viewer {
             if output.width != previous.width
                 || output.height != previous.height
                 || output.display != previous.display
+                || output.crop != previous.crop
             {
                 v.stamp.generation += 1;
                 v.stamp.sequence += 1;
@@ -519,7 +627,6 @@ impl Viewer {
 pub struct EngineService {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
-    device: metal::Device,
 }
 impl EngineService {
     /// Start off the UI thread: renderer/shader initialization may take time.
@@ -543,8 +650,13 @@ impl EngineService {
             state: Mutex::new(State::default()),
             wake,
             interactive: Arc::default(),
+            device: Mutex::new(device),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            lose_device: Default::default(),
+            #[cfg(test)]
+            invalid_call: Default::default(),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -553,7 +665,6 @@ impl EngineService {
         Ok(Self {
             shared,
             thread: Some(thread),
-            device,
         })
     }
     /// Call after the main-thread font broker's generation changes.
@@ -576,8 +687,10 @@ impl EngineService {
         self.shared.state.lock().unwrap().subscribers.push(tx);
         rx
     }
-    pub fn metal_device(&self) -> &metal::DeviceRef {
-        &self.device
+    /// The device viewer layers and popouts must use. It changes after a
+    /// GPU loss; the worker re-points layers it already draws into.
+    pub fn metal_device(&self) -> metal::Device {
+        self.shared.device.lock().unwrap().clone()
     }
     pub fn viewer(&self, config: ViewerConfig) -> Result<Viewer> {
         config.output.validate()?;
@@ -595,7 +708,7 @@ impl EngineService {
                 objc2::msg_send![layer.as_ptr() as *mut objc2::runtime::AnyObject, device]
             };
             ensure!(
-                attached.cast::<metal::MTLDevice>() == self.device.as_ref().as_ptr(),
+                attached.cast::<metal::MTLDevice>() == self.metal_device().as_ptr(),
                 "viewer layer must use the engine Metal device"
             );
             ensure!(
@@ -615,6 +728,10 @@ impl EngineService {
             revision: config.snapshot.revision,
             sequence: 1,
         };
+        let paths = Arc::new(pm_export::render::MediaPaths {
+            paths: config.media.viewer_paths(MediaMode::default()),
+        });
+        let proxied = config.media.proxied(MediaMode::default());
         state.views.insert(
             id,
             View {
@@ -628,13 +745,19 @@ impl EngineService {
                 locked_provider: None,
                 commands: VecDeque::new(),
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
-                status: ViewerStatus::default(),
+                status: ViewerStatus {
+                    proxied,
+                    ..Default::default()
+                },
                 phase: None,
                 input: None,
                 pending_input: None,
                 pipeline: Default::default(),
                 mastering: Default::default(),
                 resources: Arc::default(),
+                quality: Quality::Auto,
+                media_mode: MediaMode::default(),
+                paths,
             },
         );
         state.notify();
@@ -677,16 +800,56 @@ struct Runtime {
     /// A paused picture that never reached the glass was re-presented once
     /// for this stamp (bounded: a hidden window does not loop).
     represented: Option<Stamp>,
+    /// The last seek was a drag: paused video may stand in until it lands.
+    scrub: bool,
+    /// The last frame showed stand-ins: the landed counter it was drawn at.
+    stand_in: Option<u64>,
+    /// A clock that stops on its own still owes the exact stopped frame.
+    was_playing: bool,
+    auto: policy::AutoQuality,
+    /// A transient refusal: draw again no earlier than this.
+    not_before: f64,
+    prepared: f64,
 }
 struct Flight {
     id: u64,
     stamp: Stamp,
-    time: Ticks,
+    spec: FrameSpec,
+    budget_ms: f64,
     submission: render::Submission,
     input: Option<f64>,
     audio_host: Option<f64>,
     pipeline: trace::Pipeline,
 }
+/// One frame taken from the shared state, drawn without its lock.
+struct Work {
+    id: u64,
+    stamp: Stamp,
+    scene: Scene,
+    spec: FrameSpec,
+    budget_ms: f64,
+    layer: Option<metal::MetalLayer>,
+    overlays: OverlayGeometry,
+    provider: Option<LockedOverlayProvider>,
+    capture: bool,
+    due: Option<f64>,
+    mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
+    input: Option<f64>,
+    pipeline: trace::Pipeline,
+    audio_host: Option<f64>,
+    plan: Option<present::Plan>,
+}
+/// How much of a frame's budget a video may wait for its exact frame.
+const DECODE_SHARE: f64 = 0.35;
+/// Clips this far ahead of the playhead open on background workers.
+const PREPARE_AHEAD_SECONDS: f64 = 0.75;
+const PREPARE_EVERY_SECONDS: f64 = 0.25;
+/// A transient refusal (fonts, GPU watchdog) waits this long to try again.
+const RETRY_SECONDS: f64 = 0.016;
+/// A GPU lost again within this long of a rebuild backs off between these.
+const LOSS_WINDOW: Duration = Duration::from_secs(10);
+const LOSS_BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
     // Same interactive class as pm-node/present; export remains separately
     // governed. A default-class worker can miss display deadlines under load.
@@ -694,6 +857,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         objc2_foundation::NSThread::currentThread()
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
+    engine.set_waker(Some(shared.wake.clone()));
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
     let recorder =
@@ -708,7 +872,85 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
+        #[cfg(test)]
+        if shared
+            .lose_device
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.destroy_device();
+        }
+        #[cfg(test)]
+        if shared
+            .invalid_call
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.raise_validation_error();
+        }
+        // Delivers a pending device-lost callback even while idle.
+        engine.poll();
+        if engine.lost() {
+            // Work on the lost device never completes: forget it, rebuild,
+            // and draw every viewer again on the new device. A device lost
+            // again soon after a rebuild waits longer each time, and says so.
+            flights.clear();
+            backoff = if rebuilt_at.is_some_and(|t| t.elapsed() < LOSS_WINDOW) {
+                (backoff * 2).clamp(LOSS_BACKOFF.0, LOSS_BACKOFF.1)
+            } else {
+                Duration::ZERO
+            };
+            if !backoff.is_zero() {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.status.error = Some(format!(
+                        "The GPU keeps failing. Trying again in {} s.",
+                        backoff.as_secs_f64()
+                    ));
+                }
+                state.notify();
+                drop(state);
+                // Wakes do not cut the wait short; quitting does.
+                let until = std::time::Instant::now() + backoff;
+                while let Some(left) = until.checked_duration_since(std::time::Instant::now())
+                    && !shared.state.lock().unwrap().stop
+                {
+                    let _ = wakes.recv_timeout(left);
+                }
+            }
+            let rebuilt = engine.rebuild();
+            let mut state = shared.state.lock().unwrap();
+            if state.stop {
+                break;
+            }
+            match rebuilt {
+                Ok(next) => {
+                    engine = next;
+                    rebuilt_at = Some(std::time::Instant::now());
+                    *shared.device.lock().unwrap() = engine.metal().to_owned();
+                    for (id, v) in state.views.iter_mut() {
+                        v.status.device_losses += 1;
+                        v.status.error = None;
+                        v.stamp.sequence += 1;
+                        v.dirty = true;
+                        if let Some(r) = runtime.get_mut(id) {
+                            r.last = None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    for v in state.views.values_mut() {
+                        v.status.error = Some(format!("The GPU was lost and is not back yet: {e}"));
+                    }
+                }
+            }
+            state.notify();
+            drop(state);
+            if engine.lost() {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        }
         let mut state = shared.state.lock().unwrap();
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
@@ -745,7 +987,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     }
                     // Never shown on a layer: the screen may not hold it.
                     None => {
-                        if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.time)) {
+                        if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.spec.time))
+                        {
                             r.last = None;
                         }
                         // A paused (untimed) present dropped during window
@@ -761,14 +1004,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         }
                     }
                 }
-                if !t.gpu_ok && r.last == Some((f.stamp, f.time)) {
+                if !t.gpu_ok && r.last == Some((f.stamp, f.spec.time)) {
                     r.last = None;
+                }
+                if t.gpu_ok && !t.cache_hit && f.spec.moment == Moment::Playing {
+                    r.auto
+                        .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
-                        "input":f.input,"audio_host":f.audio_host,"time":f.time.get(),"cache_hit":t.cache_hit,
+                        "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
@@ -784,9 +1031,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     v.dirty = true;
                     v.status.represented += 1;
                 }
+                v.status.layer_failures = f.submission.failures.to_vec();
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
-                    time: f.time,
+                    time: f.spec.time,
+                    moment: f.spec.moment,
+                    scale: f.spec.scale,
+                    stand_ins: f.submission.stand_ins,
                     cache_hit: t.cache_hit,
                     gpu_ok: f.submission.command.status()
                         == metal::MTLCommandBufferStatus::Completed,
@@ -832,7 +1083,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     (
                         *id,
                         v.config.snapshot.clone(),
-                        v.config.media.audio_paths(),
+                        v.config.media.audio_paths(v.media_mode),
                         v.config.composition.clone(),
                         v.stamp.revision,
                         v.content,
@@ -858,6 +1109,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }
         }
         let now = trace::now();
+        let landed = engine.media_landed();
         let mut work = None;
         let mut changed = false;
         let mut ids: Vec<_> = state.views.keys().copied().collect();
@@ -880,7 +1132,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     if let Err(e) = transport.enable_audio(
                         &v.config.snapshot.document,
                         v.config.composition.clone(),
-                        v.config.media.audio_paths(),
+                        v.config.media.audio_paths(v.media_mode),
                         levels,
                     ) {
                         v.status.error = Some(e.to_string());
@@ -897,12 +1149,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     last: None,
                     represented: None,
                     ahead: 1.,
+                    scrub: false,
+                    stand_in: None,
+                    was_playing: false,
+                    auto: Default::default(),
+                    not_before: 0.,
+                    prepared: 0.,
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
                 r.transport.update(
                     &v.config.snapshot,
-                    v.config.media.audio_paths(),
+                    v.config.media.audio_paths(v.media_mode),
                     &v.config.composition,
                 );
                 r.revision = v.stamp.revision;
@@ -915,6 +1173,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // Audio starts are placed on this viewer's last known vsync line.
             r.transport.grid = r.grid.filter(|_| !legacy);
             while let Some(cmd) = v.commands.pop_front() {
+                if let TransportCommand::Seek { mode, .. } = cmd {
+                    r.scrub = mode == pm_protocol::clock::SeekMode::Scrub;
+                }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
             let sample = r.transport.poll((now * 1e6) as i64);
@@ -966,7 +1227,20 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             } else {
                 1.
             };
-            if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - r.ahead * interval) {
+            let playing = r.transport.clock.is_playing();
+            // The exact frame of a stop, and of a stand-in whose decode landed.
+            if std::mem::replace(&mut r.was_playing, playing) && !playing {
+                r.scrub = false;
+                v.dirty = true;
+            }
+            if r.stand_in.is_some_and(|at| at != landed) {
+                r.stand_in = None;
+                v.dirty = !playing || v.dirty;
+            }
+            if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
+                continue;
+            }
+            if now < r.not_before {
                 continue;
             }
             // A timed present reaches glass `lag` after its request (measured
@@ -1018,33 +1292,51 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
                 comp: v.config.composition.clone(),
-                media: v.config.media.export_paths(false),
+                media: v.paths.clone(),
                 content: v.content,
             };
             cursor = id;
-            work = Some((
+            let moment = if playing {
+                Moment::Playing
+            } else if r.scrub {
+                Moment::Scrub
+            } else {
+                Moment::Paused
+            };
+            let budget = frame.max(interval);
+            work = Some(Work {
                 id,
-                v.stamp,
+                stamp: v.stamp,
                 scene,
-                v.config.output,
-                v.config.layer.clone(),
-                if v.overlay_time.is_none_or(|t| t == time) {
+                spec: FrameSpec {
+                    time,
+                    output: v.config.output,
+                    moment,
+                    scale: v.quality.scale(&r.auto, moment),
+                    decode_deadline: playing.then(|| {
+                        std::time::Instant::now() + Duration::from_secs_f64(budget * DECODE_SHARE)
+                    }),
+                },
+                budget_ms: budget * 1000.,
+                layer: v.config.layer.clone(),
+                overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
                 } else {
                     OverlayGeometry::default()
                 },
-                v.locked_provider.clone(),
-                std::mem::take(&mut v.capture),
-                time,
+                provider: v.locked_provider.clone(),
+                capture: std::mem::take(&mut v.capture),
                 due,
-                v.mastering,
-                v.input.take(),
-                v.pipeline,
-                r.transport
+                mastering: v.mastering,
+                resources: v.resources.clone(),
+                input: v.input.take(),
+                pipeline: v.pipeline,
+                audio_host: r
+                    .transport
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
                 plan,
-            ));
+            });
             break;
         }
         shared.interactive.store(
@@ -1060,23 +1352,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         if changed {
             state.notify();
         }
-        if let Some((
+        if let Some(Work {
             id,
             stamp,
             scene,
-            output,
+            spec,
+            budget_ms,
             layer,
             overlays,
             provider,
             capture,
-            time,
             due,
             mastering,
+            resources,
             input,
             pipeline,
             audio_host,
             plan,
-        )) = work
+        }) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
@@ -1087,19 +1380,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 ..Default::default()
             }));
             engine.mastering = mastering;
+            engine.set_resources(resources);
+            let landed_before = engine.media_landed();
             let result = provider
-                .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, time))
+                .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
-                    engine.frame(
-                        &scene,
-                        time,
-                        output,
-                        layer.as_ref(),
-                        &overlays,
-                        capture,
-                        trace,
-                    )
+                    engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
                 });
+            if spec.moment == Moment::Playing
+                && let Some(r) = runtime.get_mut(&id)
+                && now - r.prepared >= PREPARE_EVERY_SECONDS
+            {
+                r.prepared = now;
+                let ahead = (PREPARE_AHEAD_SECONDS * pm_protocol::common::TICKS_PER_SECOND as f64)
+                    * f64::from(r.transport.rate().num.signum());
+                let at = (spec.time.get() + ahead as i64).max(0);
+                engine.prepare(&scene, Ticks::new(at).unwrap_or(spec.time), spec);
+            }
             #[cfg(test)]
             if let Some(hook) = shared.before_submit.lock().unwrap().take() {
                 hook();
@@ -1108,12 +1405,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // short lock. Render and drawable acquisition never hold it.
             let mut state = shared.state.lock().unwrap();
             if let Some(v) = state.views.get_mut(&id) {
+                // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp {
                     v.status.stale_rejections += 1;
+                    v.capture |= capture;
                     continue;
                 }
                 match result {
                     Ok(Some(s)) => {
+                        v.status.error = None;
+                        v.status.stand_in_frames +=
+                            u64::from(s.stand_ins && spec.moment == Moment::Playing);
+                        v.status.effective_quality = spec.scale;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.stand_in = s.stand_ins.then_some(landed_before);
+                        }
                         let completed = Arc::downgrade(&shared);
                         s.submit_notifying(
                             plan.map(|p| p.requested),
@@ -1126,12 +1432,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                             })),
                         );
                         if let Some(r) = runtime.get_mut(&id) {
-                            r.last = Some((stamp, time));
+                            r.last = Some((stamp, spec.time));
                         }
                         flights.push_back(Flight {
                             id,
                             stamp,
-                            time,
+                            spec,
+                            budget_ms,
                             submission: s,
                             input,
                             audio_host,
@@ -1139,9 +1446,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         });
                     }
                     Ok(None) => {
+                        v.capture |= capture;
                         v.status.no_drawable += 1;
                         v.dirty = true;
                         v.input = input;
+                    }
+                    Err(e) if render::transient(&e) => {
+                        v.capture |= capture;
+                        v.dirty = true;
+                        v.input = input;
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.not_before = trace::now() + RETRY_SECONDS;
+                        }
                     }
                     Err(e) => {
                         v.status.error = Some(e.to_string());
@@ -1150,8 +1466,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }
             state.notify();
         } else {
-            let busy = !flights.is_empty() || runtime.values().any(|r| r.transport.running());
-            let timeout = if busy {
+            let waiting = runtime
+                .values()
+                .any(|r| r.stand_in.is_some() || r.not_before > now);
+            let busy =
+                waiting || !flights.is_empty() || runtime.values().any(|r| r.transport.running());
+            let timeout = if waiting {
+                Duration::from_millis(2)
+            } else if busy {
                 let now = trace::now();
                 let next = runtime
                     .iter()
@@ -1206,35 +1528,65 @@ impl Headless {
         size: Size,
         overlays: &OverlayGeometry,
     ) -> Result<Vec<[f64; 3]>> {
-        let s = self
-            .engine
-            .frame(
-                scene,
+        self.frame_spec_settled(
+            scene,
+            FrameSpec::exact(
                 time,
                 Output {
                     width: size.width,
                     height: size.height,
                     display: 0,
                     headroom: 1.,
+                    crop: None,
                 },
-                None,
-                overlays,
-                true,
-                Arc::default(),
-            )?
-            .ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
-        s.commit();
-        s.complete()?;
-        Ok(s.pixels())
+            ),
+            overlays,
+        )
+    }
+    /// One viewer frame exactly as the worker requests it, drawn again after
+    /// the same transient refusals the worker retries.
+    pub fn frame_spec_settled(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        overlays: &OverlayGeometry,
+    ) -> Result<Vec<[f64; 3]>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match self
+                .engine
+                .frame(scene, spec, None, overlays, true, Arc::default())
+            {
+                Ok(s) => {
+                    let s = s.ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
+                    s.commit();
+                    s.complete()?;
+                    return Ok(s.pixels());
+                }
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
     pub fn export_reference(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
-        self.engine.export(scene, time, size)
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.engine.export(scene, time, size) {
+                Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));
+                }
+                other => return other,
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+    use foreign_types::ForeignTypeRef;
     #[test]
     fn revision_and_output_change_while_encoding_reject_the_submission() {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
@@ -1266,6 +1618,7 @@ mod worker_tests {
                     height: 90,
                     display: 1,
                     headroom: 1.,
+                    crop: None,
                 },
                 layer: None,
                 rate: pm_time::Rate::FPS_30,
@@ -1280,6 +1633,7 @@ mod worker_tests {
             height: 180,
             display: 2,
             headroom: 2.,
+            crop: None,
         })
         .unwrap();
         v.snapshot(Snapshot {
@@ -1302,5 +1656,155 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot,
+                media: Default::default(),
+                output: Output {
+                    width: 160,
+                    height: 90,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer,
+                rate: pm_time::Rate::FPS_30,
+                end: None,
+                audio: false,
+            })
+            .unwrap()
+    }
+    fn drawn(v: &Viewer) -> ViewerStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = v.status();
+            if let Some(frame) = &status.frame
+                && frame.gpu_ok
+                && frame.pixels.is_some()
+                && Some(frame.stamp) == v.stamp()
+            {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A removed or reset GPU: the worker rebuilds its device, points the
+    /// viewer's layer and the service's device at it, and the viewer draws
+    /// again without anyone reopening it.
+    #[test]
+    fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_framebuffer_only(false);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let v = shapes_viewer(&service, Some(layer.clone()));
+        let old = service.metal_device();
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .lose_device
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().device_losses == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None);
+        assert_eq!(after.device_losses, 1);
+        assert_eq!(
+            after.frame.unwrap().pixels.unwrap(),
+            before,
+            "same picture on the new device"
+        );
+        // Metal hands back the same system device object for the same GPU,
+        // so here the rebuilt engine's device equals the old one; a removed
+        // GPU gives a new one, which the layer and the service then report.
+        let new = service.metal_device();
+        assert_eq!(new.as_ptr(), old.as_ptr());
+        assert_eq!(
+            layer.device().as_ptr(),
+            new.as_ptr(),
+            "the layer follows the rebuild"
+        );
+    }
+
+    /// A validation error fails the frame that raised it, visibly, without a
+    /// rebuild, and that frame is never cached or reused.
+    #[test]
+    fn a_gpu_validation_error_fails_its_frame_and_never_caches_it() {
+        let service = EngineService::start(pm_gpu::Gpu::new("validation-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        let good = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .invalid_call
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while service
+            .shared
+            .invalid_call
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        let refused = v.stamp().unwrap();
+        let error = loop {
+            let status = v.status();
+            if let Some(error) = status.error {
+                break error;
+            }
+            assert!(
+                status.frame.as_ref().is_none_or(|f| f.stamp != refused),
+                "the refused frame was shown"
+            );
+            assert!(std::time::Instant::now() < deadline, "{status:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(error.contains("refused this frame"), "{error}");
+        assert_eq!(
+            v.status().device_losses,
+            0,
+            "a validation error is not a loss"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.scrub(Ticks::from_whole_seconds(1)).unwrap();
+        v.capture_next().unwrap();
+        let again = drawn(&v);
+        assert_eq!(again.error, None);
+        assert!(
+            !again.frame.as_ref().unwrap().cache_hit,
+            "the refused frame was cached"
+        );
+        v.scrub(Ticks::ZERO).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
     }
 }

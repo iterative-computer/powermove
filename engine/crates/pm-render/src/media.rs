@@ -997,6 +997,9 @@ pub struct MediaCache {
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
+    /// Frames while playing: until this instant a render may wait for exact
+    /// frames, then video layers take stand-ins ([`Want::Playback`]).
+    pub playback: Option<std::time::Instant>,
     /// The frame (presented index in its source) of each video layer drawn
     /// with a stand-in since the list was reset.
     pub stand_ins: Vec<usize>,
@@ -1047,6 +1050,7 @@ impl MediaCache {
             service,
             background: None,
             scrub: false,
+            playback: None,
             stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
@@ -1468,7 +1472,13 @@ impl MediaCache {
                 (n, f, None)
             }
         } else {
-            let want = if self.scrub { Want::Scrub } else { Want::Exact };
+            let want = match self.playback {
+                Some(deadline) => Want::Playback(
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                ),
+                None if self.scrub => Want::Scrub,
+                None => Want::Exact,
+            };
             let fetched = self
                 .viewer
                 .fetch(&src, instance, n, want)

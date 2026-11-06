@@ -1193,7 +1193,9 @@ where
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
-        let mut mixer = pm_audio::Mixer::new_legacy_export(
+        // The playback mixer: nested speed and remapped precompositions are
+        // heard in the file as they play (today's exporter dropped both).
+        let mut mixer = pm_audio::Mixer::new(
             pm_audio::MixFormat::stereo(a.sample_rate),
             document.clone(),
             a.graph,

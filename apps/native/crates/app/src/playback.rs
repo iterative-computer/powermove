@@ -129,10 +129,23 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let current = Rc::new(RefCell::new(None::<pm_engine_service::Viewer>));
     let placed = current.clone();
     let main_output = entity.read(cx).main_output.clone();
+    let crop = host.borrow().viewer_crop.clone();
     let binding = pm_engine_service::layers::OutputBinding::new(
         &host.borrow().window,
         host.borrow().viewer_layer(),
         Rc::new(move |output| {
+            // Zoomed past its pane, the drawable is a window onto the canvas.
+            let output = pm_engine_service::Output {
+                crop: crop.get().map(|[x, y, canvas_width, canvas_height]| {
+                    pm_engine_service::Crop {
+                        x,
+                        y,
+                        canvas_width,
+                        canvas_height,
+                    }
+                }),
+                ..output
+            };
             main_output.set(Some(output));
             if let Some(v) = &*placed.borrow() {
                 let _ = v.configure(output);

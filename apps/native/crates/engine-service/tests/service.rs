@@ -46,6 +46,7 @@ fn config(s: Snapshot) -> ViewerConfig {
             height: 180,
             display: 0,
             headroom: 1.,
+            crop: None,
         },
         layer: None,
         rate: pm_time::Rate::FPS_30,
@@ -119,16 +120,35 @@ fn cache_key_includes_every_content_coordinate() {
         time: 7,
         width: 100,
         height: 100,
+        crop: None,
+        moment: policy::Moment::Paused,
     };
     for other in [
         policy::CacheKey { content: 2, ..k },
         policy::CacheKey { revision: 4, ..k },
         policy::CacheKey { width: 101, ..k },
         policy::CacheKey { height: 101, ..k },
+        policy::CacheKey {
+            crop: Some(policy::Crop {
+                x: 1,
+                y: 0,
+                canvas_width: 200,
+                canvas_height: 200,
+            }),
+            ..k
+        },
     ] {
         assert!(!k.same_content(other));
     }
     assert_ne!(k, policy::CacheKey { time: 8, ..k });
+    // A playing frame is never the exact paused picture of its time.
+    assert_ne!(
+        k,
+        policy::CacheKey {
+            moment: policy::Moment::Playing,
+            ..k
+        }
+    );
 }
 #[test]
 fn export_resolver_never_silently_uses_proxies() {
@@ -223,6 +243,7 @@ fn worker_exact_cache_and_revision_resize_retirement() {
         height: 90,
         display: 2,
         headroom: 2.,
+        crop: None,
     })
     .unwrap();
     assert_ne!(before.generation, v.stamp().unwrap().generation);
@@ -234,6 +255,36 @@ fn worker_exact_cache_and_revision_resize_retirement() {
     b.retire();
 }
 
+/// A main viewer and a popout share one engine. Drawing one must not drop
+/// the other's cached frames or reinstall definitions: neither pins resources.
+#[test]
+fn two_viewers_keep_each_others_cached_frames() {
+    let service = EngineService::start(pm_gpu::Gpu::new("two-viewers-test").unwrap()).unwrap();
+    let a = service.viewer(config(snapshot())).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    let seek = |v: &pm_engine_service::Viewer, seconds| {
+        v.command(C::Seek {
+            time: Ticks::from_whole_seconds(seconds),
+            mode: SeekMode::Scrub,
+        })
+        .unwrap();
+        wait_frame(v, v.stamp().unwrap())
+    };
+    for v in [&a, &b] {
+        assert!(!seek(v, 1).cache_hit);
+        seek(v, 0);
+    }
+    for v in [&a, &b] {
+        assert!(
+            seek(v, 1).cache_hit,
+            "the other viewer's frame cleared this one's cache"
+        );
+    }
+    a.retire();
+    b.retire();
+}
 #[test]
 fn worker_evaluates_locked_geometry_at_the_rendered_time() {
     let service = EngineService::start(pm_gpu::Gpu::new("locked-overlay-test").unwrap()).unwrap();
@@ -378,6 +429,7 @@ fn telemetry_headroom_does_not_invalidate_identical_pixels() {
     let stamp = v.stamp().unwrap();
     v.configure(Output {
         headroom: 2.,
+        crop: None,
         ..output
     })
     .unwrap();
@@ -470,6 +522,7 @@ fn safe_areas_persist_across_revisions_and_display_moves() {
         height: 90,
         display: 7,
         headroom: 1.,
+        crop: None,
     })
     .unwrap();
     assert_ne!(v.stamp().unwrap().generation, before);
@@ -480,6 +533,7 @@ fn safe_areas_persist_across_revisions_and_display_moves() {
         height: 90,
         display: 7,
         headroom: 4.,
+        crop: None,
     })
     .unwrap();
     assert_eq!(v.stamp().unwrap().generation, moved);

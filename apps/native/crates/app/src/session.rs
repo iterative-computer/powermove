@@ -42,6 +42,10 @@ pub struct Controller {
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
     pub output_mode: crate::viewer2::OutputMode,
+    /// View › Viewer Media for this editor's viewers.
+    pub media_mode: pm_engine_service::MediaMode,
+    /// Preview Resolution (viewer bar) for this editor's viewers.
+    pub quality: pm_engine_service::Quality,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -220,7 +224,7 @@ impl Controller {
         pm_engine_service::layers::configure_layer(
             objc2::MainThreadMarker::new().unwrap(),
             &layer,
-            engine.metal_device(),
+            &engine.metal_device(),
         )
         .expect("viewer layer");
         host.borrow().set_viewer_label("Composition viewer");
@@ -242,6 +246,8 @@ impl Controller {
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
+            media_mode: Default::default(),
+            quality: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -364,6 +370,19 @@ impl Controller {
         self.selected = p.selection.primary().map(str::to_owned);
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
+            // Preview Resolution in the viewer bar: the engine renders at it.
+            use pm_engine_service::Quality as Q;
+            use pm_panel_viewerchrome::state::Quality as Chosen;
+            let quality = match chrome.quality {
+                Chosen::Auto => Q::Auto,
+                Chosen::Full => Q::Full,
+                Chosen::Half => Q::Half,
+                Chosen::Quarter => Q::Quarter,
+            };
+            if self.quality != quality {
+                self.quality = quality;
+                self.apply_viewer_options();
+            }
         }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
@@ -882,6 +901,7 @@ impl Controller {
                 height: 360,
                 display: 0,
                 headroom: 1.,
+                crop: None,
             },
             layer: Some(self.host.borrow().viewer_layer()),
             rate: self.rate,

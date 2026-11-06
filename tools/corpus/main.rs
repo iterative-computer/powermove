@@ -467,6 +467,7 @@ fn project(
             height: size.height,
             display: 0,
             headroom: 1.,
+            crop: None,
         },
         layer: None,
         rate: frame_rate,
@@ -550,7 +551,7 @@ fn project(
             &original,
         )?;
         ensure!(graph.problems.is_empty(), "audio_graph_problems");
-        let mut mixer = pm_audio::Mixer::new_legacy_export(
+        let mut mixer = pm_audio::Mixer::new(
             pm_audio::MixFormat::stereo(48000),
             p.snapshot.document.clone(),
             Arc::new(graph),

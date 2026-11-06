@@ -145,7 +145,7 @@ fn main() -> Result<()> {
     // Filled once the library is attached; the MCP server waits for that too.
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
-    let device = engine.metal_device().to_owned();
+    let device = engine.metal_device();
     let service = Rc::new(RefCell::new(
         FontService::new().map_err(anyhow::Error::msg)?,
     ));

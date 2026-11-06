@@ -42,6 +42,7 @@ pub fn run() -> anyhow::Result<()> {
             height: 720,
             display: 0,
             headroom: 1.,
+            crop: None,
         },
         layer: None,
         rate: pm_time::Rate::FPS_30,

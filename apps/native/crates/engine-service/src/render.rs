@@ -1,6 +1,6 @@
 //! Adapted from engine-host: bounded cached/leased surfaces, nonblocking GPU
 //! completion and exact Metal-device injection. The final consumer is the viewer.
-use crate::policy::Output;
+use crate::policy::{Moment, Output};
 use crate::trace::{Trace, now};
 use anyhow::{Result, anyhow, bail};
 use foreign_types::ForeignTypeRef;
@@ -10,10 +10,11 @@ use pm_protocol::{
     common::{Size, Ticks},
     interop::{SurfaceFormat, SurfaceRequest},
 };
-use pm_render::Renderer;
+use pm_render::{LayerFailure, RenderError, Renderer};
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
 
 /// One immutable render input. Content identity rotates on document, comp,
@@ -21,8 +22,103 @@ use std::{
 pub struct Scene {
     pub doc: Arc<pm_model::Document>,
     pub comp: String,
-    pub media: pm_export::render::MediaPaths,
+    pub media: Arc<pm_export::render::MediaPaths>,
     pub content: u64,
+}
+/// One viewer frame's request. The renderer's playback path, never an export.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameSpec {
+    pub time: Ticks,
+    pub output: Output,
+    pub moment: Moment,
+    /// Render resolution as a share of `output`; the final pass scales once.
+    pub scale: f64,
+    /// Playing frames: video waits for exact frames until here, then stands in.
+    pub decode_deadline: Option<Instant>,
+}
+impl FrameSpec {
+    pub fn exact(time: Ticks, output: Output) -> Self {
+        Self {
+            time,
+            output,
+            moment: Moment::Paused,
+            scale: 1.,
+            decode_deadline: None,
+        }
+    }
+    fn render_size(&self) -> Size {
+        let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).max(1);
+        Size::new(px(self.output.width), px(self.output.height))
+    }
+    fn request(&self, scene: &Scene) -> Result<pm_render::RenderRequest> {
+        use pm_protocol::frame::MotionBlurKind;
+        let playing = self.moment == Moment::Playing;
+        let mut request = pm_render::RenderRequest::sized(self.render_size(), Precision::Float16);
+        if let Some(crop) = self.output.crop {
+            let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp)
+                .map_err(|_| RenderError::Composition(scene.comp.clone()))?;
+            let side = |key: &str| {
+                let v = pm_eval::node::to_number(comp.member(key));
+                if v.is_finite() && v > 0. { v } else { 1. }
+            };
+            request.scale = Some((
+                f64::from(crop.canvas_width) * self.scale / side("w"),
+                f64::from(crop.canvas_height) * self.scale / side("h"),
+            ));
+            request.origin = Some((
+                f64::from(crop.x) * self.scale,
+                f64::from(crop.y) * self.scale,
+            ));
+        }
+        // Today's viewer: 6 motion samples while playing, 12 stopped.
+        request.motion_blur = pm_render::motion::MotionBlur::Kind(if playing {
+            MotionBlurKind::PreviewPlaying
+        } else {
+            MotionBlurKind::PreviewPaused
+        });
+        request.sampling = if playing {
+            pm_render::sampling::Sampling::Playback
+        } else {
+            pm_render::sampling::Sampling::Final
+        };
+        Ok(request)
+    }
+}
+/// A frame that could not be drawn yet: the picture stays and it is drawn again.
+#[derive(Debug)]
+struct FontsPending(String);
+impl std::fmt::Display for FontsPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a frame waited for fonts ({})", self.0)
+    }
+}
+impl std::error::Error for FontsPending {}
+/// Every compiler slot was taken while definitions were installing. Nothing is
+/// wrong with the shader; a sticky error here would stick to a healthy project.
+#[derive(Debug)]
+struct CompilerBusy;
+impl std::fmt::Display for CompilerBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("every shader compiler slot is busy")
+    }
+}
+impl std::error::Error for CompilerBusy {}
+pub(crate) fn transient(error: &anyhow::Error) -> bool {
+    error.is::<FontsPending>()
+        || error.is::<CompilerBusy>()
+        || matches!(
+            error.downcast_ref::<RenderError>(),
+            Some(
+                RenderError::WatchdogPending
+                    | RenderError::CompatPending(_)
+                    | RenderError::ShaderFallbackPending(_)
+            )
+        )
+}
+struct CachedFrame {
+    key: crate::policy::CacheKey,
+    surface: Arc<ExportedSurface>,
+    failures: Arc<[LayerFailure]>,
 }
 pub fn metal_device(gpu: &Gpu) -> metal::Device {
     // HAL owns +1; to_owned retains a separate +1 for metal 0.33 and GPUI.
@@ -44,10 +140,26 @@ pub struct Engine {
     pool: Vec<Arc<ExportedSurface>>,
     fonts: Option<pm_node::fonts::render::RenderFonts>,
     font_generation: Option<u64>,
-    cache: VecDeque<(crate::policy::CacheKey, Arc<ExportedSurface>)>,
+    cache: VecDeque<CachedFrame>,
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
+    /// Set by the device's lost callback or an internal GPU error: the
+    /// worker rebuilds the engine on a new device.
+    lost: Arc<AtomicBool>,
+    /// A validation or out-of-memory error raised since the last frame. The
+    /// device is fine; the frame that raised it fails and is never shown.
+    failed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Wakes an idle worker when the device is lost ([`Engine::set_waker`]).
+    waker: Waker,
+    resources: Arc<crate::resources::ResourceSnapshot>,
+}
+type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
+fn lose(lost: &AtomicBool, waker: &Waker) {
+    lost.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(wake) = &*waker.lock().unwrap() {
+        wake.try_send(()).ok();
+    }
 }
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
@@ -57,9 +169,76 @@ pub struct Submission {
     pub readback: Option<metal::Buffer>,
     pub width: u32,
     pub height: u32,
+    /// Layers left out of this frame, with why.
+    pub failures: Arc<[LayerFailure]>,
+    /// Video drew a nearest decoded frame; the exact one is on its way.
+    pub stand_ins: bool,
 }
 impl Engine {
+    /// A fresh engine on a new device after `lost` reported a loss. Fonts
+    /// carry over; every surface, cache and program is made again.
+    pub fn rebuild(&self) -> Result<Self> {
+        let mut next = Self::new(Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?)?;
+        next.set_waker(self.waker.lock().unwrap().clone());
+        next.resources = self.resources.clone();
+        next.mastering = self.mastering;
+        next.cache_enabled = self.cache_enabled;
+        if let Some(fonts) = &self.fonts {
+            next.set_fonts(fonts.clone());
+        }
+        Ok(next)
+    }
+    pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
+        *self.waker.lock().unwrap() = wake;
+    }
+    /// Non-blocking: runs wgpu's completed callbacks, a device loss among them.
+    pub fn poll(&self) {
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+    }
+    pub fn lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn metal(&self) -> &metal::DeviceRef {
+        &self.metal
+    }
+    /// Test hook: lose the device as a removed or reset GPU does.
+    #[cfg(test)]
+    pub fn destroy_device(&self) {
+        self.gpu.device.destroy();
+    }
+    /// Test hook: a real validation error, as a bad pipeline or texture raises.
+    #[cfg(test)]
+    pub fn raise_validation_error(&self) {
+        let _invalid = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("invalid"),
+            size: 4,
+            usage: wgpu::BufferUsages::empty(),
+            mapped_at_creation: false,
+        });
+    }
     pub fn new(gpu: Gpu) -> Result<Self> {
+        let lost = Arc::new(AtomicBool::new(false));
+        let waker = Waker::default();
+        let (flag, wake) = (lost.clone(), waker.clone());
+        gpu.device.set_device_lost_callback(move |reason, message| {
+            eprintln!("Viewer GPU device lost ({reason:?}): {message}");
+            lose(&flag, &wake);
+        });
+        // wgpu's default handler panics, which would stop every viewer. A
+        // validation or out-of-memory error fails the frame; an internal
+        // error rebuilds.
+        let failed = Arc::<std::sync::Mutex<Option<String>>>::default();
+        let (flag, wake, frame) = (lost.clone(), waker.clone(), failed.clone());
+        gpu.device
+            .on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                eprintln!("Viewer GPU error: {error}");
+                match error {
+                    wgpu::Error::Validation { .. } | wgpu::Error::OutOfMemory { .. } => {
+                        *frame.lock().unwrap() = Some(error.to_string());
+                    }
+                    wgpu::Error::Internal { .. } => lose(&flag, &wake),
+                }
+            }));
         let metal = metal_device(&gpu);
         let library = metal
             .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
@@ -106,6 +285,10 @@ impl Engine {
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
+            lost,
+            failed,
+            waker,
+            resources: Arc::default(),
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -123,14 +306,51 @@ impl Engine {
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
+    /// Changes when a frame a scrub or playback render missed has decoded.
+    pub fn media_landed(&self) -> u64 {
+        self.renderer.media_landed()
+    }
+    /// Opens and warms the videos of a coming frame on background workers, so
+    /// a clip entering the playhead does not stall the frame that meets it.
+    pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) {
+        if self.sync_studio(scene).is_err() {
+            return;
+        }
+        let Ok(request) = spec.request(scene) else {
+            return;
+        };
+        // A plan that cannot be built reports through the frame itself.
+        let _ = self.renderer.prepare_media(
+            &scene.doc,
+            &scene.comp,
+            time,
+            &request,
+            scene.media.as_ref(),
+        );
+    }
+    /// The extension definitions the next frames render with (the viewer's
+    /// pinned resource snapshot). A new snapshot installs them again.
+    pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
+        if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
+            self.resources = resources;
+            self.studio_content = None;
+            self.cache.clear();
+        }
+    }
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
         if self.studio_content != Some(key) {
             self.renderer
-                .set_main_effects_for_document(&scene.doc)
-                .map_err(anyhow::Error::msg)?;
+                .set_main_effects_with(&scene.doc, &self.resources.definitions)
+                .map_err(|e| {
+                    if e.contains("compiler-busy") {
+                        anyhow::Error::new(CompilerBusy)
+                    } else {
+                        anyhow::Error::msg(e)
+                    }
+                })?;
             #[cfg(feature = "kernel")]
-            crate::studio::attach(&mut self.renderer, scene.doc.clone(), &scene.media);
+            crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
             self.studio_content = Some(key);
         }
         Ok(())
@@ -141,43 +361,45 @@ impl Engine {
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
         request.export = true;
         request.output_kind = pm_render::OutputKind::Final;
+        self.renderer.set_draw_reuse(false);
         let f = pm_export::render::render_frame(
             &mut self.renderer,
             &scene.doc,
             &scene.comp,
             time,
             &request,
-            &scene.media,
+            scene.media.as_ref(),
             &pm_export::render::Unrestricted,
             1,
             &AtomicBool::new(false),
-        )?;
+        );
+        self.renderer.set_draw_reuse(true);
+        let f = f?;
+        if let Some(error) = self.failed.lock().unwrap().take() {
+            bail!("The GPU refused this frame: {error}");
+        }
         if !f.failures.is_empty() {
             bail!("export layer failures: {:?}", f.failures);
         }
         Ok(f.rgba)
     }
-    #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         scene: &Scene,
-        time: Ticks,
-        output: Output,
+        spec: FrameSpec,
         layer: Option<&metal::MetalLayer>,
         overlays: &crate::OverlayGeometry,
         capture: bool,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
         objc2::rc::autoreleasepool(|_| {
-            self.encode_inner(scene, time, output, layer, overlays, capture, trace)
+            self.encode_inner(scene, spec, layer, overlays, capture, trace)
         })
     }
-    #[allow(clippy::too_many_arguments)]
     fn encode_inner(
         &mut self,
         scene: &Scene,
-        time: Ticks,
-        output: Output,
+        spec: FrameSpec,
         layer: Option<&metal::MetalLayer>,
         overlays: &crate::OverlayGeometry,
         capture: bool,
@@ -186,30 +408,34 @@ impl Engine {
         self.sync_studio(scene)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
+        let FrameSpec { time, output, .. } = spec;
+        let size = spec.render_size();
         let key = crate::policy::CacheKey {
             content: scene.content,
             revision: scene.doc.revision(),
             time: time.get(),
-            width: output.width,
-            height: output.height,
+            width: size.width,
+            height: size.height,
+            crop: output.crop,
+            moment: spec.moment,
         };
         // A revision or size change retires all old cached frames. Leases held
         // by submitted consumers still protect their storage until completion.
         self.cache
-            .retain(|(k, _)| k.content != key.content || k.same_content(key));
+            .retain(|c| c.key.content != key.content || c.key.same_content(key));
         let hit = self
             .cache_enabled
-            .then(|| self.cache.iter().position(|(k, _)| *k == key))
+            .then(|| self.cache.iter().position(|c| c.key == key))
             .flatten();
-        let size = Size::new(output.width, output.height);
-        let surface = if let Some(index) = hit {
+        let mut stand_ins = false;
+        let (surface, failures) = if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
-            let surface = entry.1.clone();
+            let found = (entry.surface.clone(), entry.failures.clone());
             self.cache.push_back(entry);
             trace.lock().unwrap().cache_hit = true;
-            surface
+            found
         } else {
-            let bytes = u64::from(output.width) * u64::from(output.height) * 8;
+            let bytes = u64::from(size.width) * u64::from(size.height) * 8;
             let capacity = ((128 * 1024 * 1024 / bytes).clamp(1, 8)) as usize;
             while self.cache.len() >= capacity {
                 self.cache.pop_front();
@@ -237,30 +463,42 @@ impl Engine {
                 }
             };
             let target = Target::wrap(surface.texture.clone());
-            let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
-            request.export = true;
-            request.output_kind = pm_render::OutputKind::Final;
+            let request = spec.request(scene)?;
+            self.renderer.set_scrub(spec.moment == Moment::Scrub);
+            self.renderer.set_playback(spec.decode_deadline);
+            self.renderer.set_isolate_layers(true);
             trace.lock().unwrap().render_start = now();
             let rendered = self.renderer.render_into(
                 &scene.doc,
                 &scene.comp,
                 time,
                 &request,
-                &scene.media,
+                scene.media.as_ref(),
                 &target,
                 None,
-            )?;
+            );
             trace.lock().unwrap().render_submitted = now();
+            self.renderer.set_scrub(false);
+            self.renderer.set_playback(None);
+            self.renderer.set_isolate_layers(false);
+            let rendered = rendered?;
+            if let Some(error) = self.failed.lock().unwrap().take() {
+                bail!("The GPU refused this frame: {error}");
+            }
             if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
-                bail!("{error}");
+                return Err(FontsPending(error.to_string()).into());
             }
-            if !rendered.failures.is_empty() {
-                bail!("viewer layer failures: {:?}", rendered.failures);
+            let failures: Arc<[LayerFailure]> = rendered.failures.into();
+            stand_ins = !rendered.stand_ins.is_empty();
+            // A frame with stand-ins is not the exact picture of its time.
+            if self.cache_enabled && !stand_ins {
+                self.cache.push_back(CachedFrame {
+                    key,
+                    surface: surface.clone(),
+                    failures: failures.clone(),
+                });
             }
-            if self.cache_enabled {
-                self.cache.push_back((key, surface.clone()));
-            }
-            surface
+            (surface, failures)
         };
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();
@@ -271,6 +509,10 @@ impl Engine {
         };
         trace.lock().unwrap().drawable_asked = now();
         let drawable = if let Some(layer) = layer {
+            // A rebuilt engine has a new device; the layer follows it.
+            if layer.device().as_ptr() != self.metal.as_ptr() {
+                layer.set_device(&self.metal);
+            }
             let Some(d) = layer.next_drawable() else {
                 return Ok(None);
             };
@@ -316,6 +558,17 @@ impl Engine {
         pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
         params.output = self.mastering.params()?;
+        params.reduced = u32::from(size != Size::new(output.width, output.height));
+        params.drawable = [output.width as f32, output.height as f32];
+        params.canvas = match output.crop {
+            Some(c) => [
+                c.x as f32,
+                c.y as f32,
+                c.canvas_width as f32,
+                c.canvas_height as f32,
+            ],
+            None => [0., 0., output.width as f32, output.height as f32],
+        };
         pass.set_fragment_bytes(
             0,
             size_of_val(&params) as u64,
@@ -359,6 +612,8 @@ impl Engine {
             readback,
             width: output.width,
             height: output.height,
+            failures,
+            stand_ins,
         }))
     }
 }
@@ -498,23 +753,30 @@ mod lifetime_tests {
                 .into(),
             ..scene
         };
-        let s = engine
-            .frame(
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                width: 160,
+                height: 90,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+        );
+        // Another test may hold both compiler slots: the worker retries that.
+        let s = loop {
+            match engine.frame(
                 &scene,
-                Ticks::ZERO,
-                Output {
-                    width: 160,
-                    height: 90,
-                    display: 0,
-                    headroom: 1.,
-                },
+                spec,
                 None,
                 &Default::default(),
                 false,
                 Arc::default(),
-            )
-            .unwrap()
-            .unwrap();
+            ) {
+                Err(e) if transient(&e) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => break other.unwrap().unwrap(),
+            }
+        };
         let event = engine.metal.new_shared_event();
         s.command.encode_wait_for_event(&event, 1);
         let weak = Arc::downgrade(&s.surface);
@@ -549,7 +811,12 @@ mod lifetime_tests {
             content: 1,
         };
         let size = Size::new(160, 90);
-        let reference = engine.export(&scene, Ticks::ZERO, size).unwrap();
+        let reference = loop {
+            match engine.export(&scene, Ticks::ZERO, size) {
+                Err(e) if transient(&e) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => break other.unwrap(),
+            }
+        };
         for mode in [
             Mastering::Pq {
                 source_peak: 1000.,
@@ -568,13 +835,16 @@ mod lifetime_tests {
             let sub = engine
                 .frame(
                     &scene,
-                    Ticks::ZERO,
-                    Output {
-                        width: 160,
-                        height: 90,
-                        display: 0,
-                        headroom: 1.,
-                    },
+                    FrameSpec::exact(
+                        Ticks::ZERO,
+                        Output {
+                            width: 160,
+                            height: 90,
+                            display: 0,
+                            headroom: 1.,
+                            crop: None,
+                        },
+                    ),
                     None,
                     &Default::default(),
                     true,
