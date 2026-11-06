@@ -188,8 +188,9 @@ pub(crate) struct Panel {
 pub(crate) struct Panels {
     pub items: BTreeMap<PanelId, Panel>,
     pub viewport: Rect,
-    /// One document can show through several shell rectangles; empty means its slots.
-    pub regions: Vec<Rect>,
+    /// One document can show through several shell rectangles. `None` shows its
+    /// slots; `Some` is the exact mask, so a document with no region shows nothing.
+    pub regions: Option<Vec<Rect>>,
 }
 #[cfg(any(target_os = "macos", test))]
 impl Panels {
@@ -224,17 +225,16 @@ impl Panels {
             .map(|r| r.intersection(self.viewport))
             .filter(|r| r.w > 0. && r.h > 0.)
             .collect();
-        let mut visible_union: Vec<_> = if self.regions.is_empty() {
-            panels
+        let mut visible_union: Vec<_> = match &self.regions {
+            None => panels
                 .iter()
                 .map(|(_, s)| s.visible().intersection(self.viewport))
-                .collect()
-        } else {
-            self.regions
+                .collect(),
+            Some(regions) => regions
                 .iter()
                 .map(|r| r.intersection(self.viewport))
                 .filter(|r| r.w > 0. && r.h > 0.)
-                .collect()
+                .collect(),
         };
         visible_union.extend(overlay_holes.iter().copied());
         CompositionSnapshot {
@@ -279,10 +279,10 @@ mod tests {
             ..Panels::default()
         };
         panel(&mut p, 1, 0);
-        p.regions = vec![
+        p.regions = Some(vec![
             Rect::new(0., 0., 50., 50.),
             Rect::new(300., 300., 200., 200.),
-        ];
+        ]);
         assert_eq!(
             p.snapshot().visible_union,
             vec![
@@ -290,6 +290,9 @@ mod tests {
                 Rect::new(300., 300., 100., 100.)
             ]
         );
+        // Every panel closed: the whole-window slot must not unmask the window.
+        p.regions = Some(vec![]);
+        assert!(p.snapshot().visible_union.is_empty());
     }
     #[test]
     fn logical_lifecycle_and_duplicates() {

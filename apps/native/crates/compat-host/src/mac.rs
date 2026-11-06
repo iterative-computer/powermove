@@ -723,8 +723,8 @@ impl MacDomHost {
             return Err(Error::InvalidGeometry);
         }
         let mut panels = self.shared.panels.borrow_mut();
-        if panels.regions != regions {
-            panels.regions = regions;
+        if panels.regions.as_ref() != Some(&regions) {
+            panels.regions = Some(regions);
             self.shared.geometry_dirty.set(true);
         }
         Ok(())
