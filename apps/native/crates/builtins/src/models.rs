@@ -41,8 +41,9 @@ pub(crate) struct Models {
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
     pub platform: Vec<(String, Value)>,
-    pub agent: pm_panel_agentpanel::model::Panel,
-    pub agent_sequence: u64,
+    /// Loaded for the Agent panel only; its load settles interrupted runs.
+    pub agent: Option<crate::agent_host::SharedAgent>,
+    pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
     pub stamp: String,
     pub settings_sequence: u64,
     pub export: Value,
@@ -60,19 +61,28 @@ impl Models {
         project: &str,
         caller: Caller,
         application: bool,
+        loads_agent: bool,
     ) -> Result<Self, String> {
         let timeline = if application {
             None
         } else {
             Some(TimelineClient::new(kernel.clone(), project, caller).map_err(|e| e.to_string())?)
         };
-        let mut store = KernelStore {
-            kernel,
-            application,
+        let agent = if loads_agent {
+            let mut store = KernelStore::new(kernel, application);
+            let panel = pm_panel_agentpanel::model::Panel::load(
+                &mut store,
+                project,
+                &new_id("thread"),
+                crate::agent_host::now_ms(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::agent_host::AgentState::new(panel),
+            )))
+        } else {
+            None
         };
-        let agent =
-            pm_panel_agentpanel::model::Panel::load(&mut store, project, &new_id("thread"), 0)
-                .map_err(|e| format!("{e:?}"))?;
         Ok(Self {
             properties: Properties::default(),
             timeline,
@@ -84,7 +94,7 @@ impl Models {
             fields: BTreeMap::new(),
             platform: vec![],
             agent,
-            agent_sequence: 1,
+            agent_link: Default::default(),
             stamp: String::new(),
             settings_sequence: 1,
             export: Value::Null,
@@ -101,9 +111,17 @@ impl Models {
 // A disjoint actor setting namespace avoids treating any real project ID as
 // reserved. Unknown application fields are retained; concurrent writes refuse.
 const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
-struct KernelStore {
+pub(crate) struct KernelStore {
     kernel: KernelHandle,
     application: bool,
+}
+impl KernelStore {
+    pub fn new(kernel: KernelHandle, application: bool) -> Self {
+        Self {
+            kernel,
+            application,
+        }
+    }
 }
 impl pm_agents::persistence::Store for KernelStore {
     fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
@@ -492,17 +510,36 @@ impl Backend {
         ))
     }
     pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
+        let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
+        let mut state = agent.lock().unwrap();
+        let active = state.panel.active_id().to_owned();
+        let provider = state
+            .panel
+            .session(&active)
+            .map_err(|e| format!("{e:?}"))?
+            .settings
+            .provider;
+        state
+            .panel
+            .set_catalog(&active, self.native.agent_link.catalog(provider))
+            .map_err(|e| format!("{e:?}"))?;
+        let panel = &state.panel;
+        let active = active.as_str();
         let window =
-            pm_panel_agentpanel::v4::Window::new(&self.native.agent, self.native.agent.active_id())
-                .map_err(|e| format!("{e:?}"))?;
-        let count = window
-            .count(&self.native.agent)
-            .map_err(|e| format!("{e:?}"))?;
+            pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
+        let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
         let snapshot = window
-            .snapshot(&self.native.agent, count.saturating_sub(64)..count, 0)
+            .snapshot(
+                panel,
+                count.saturating_sub(64)..count,
+                crate::agent_host::now_ms(),
+            )
             .map_err(|e| format!("{e:?}"))?;
+        let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
+        let (connection, reason) = self.native.agent_link.connection(provider);
+        let needs_answer = session.needs_answer();
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_sequence,"snapshot":snapshot,"native":{"connection":"unavailable","reason":"Connect an API, Ollama, or LM Studio in Settings.","presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":false,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"reason":reason,"presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
@@ -521,10 +558,13 @@ impl Backend {
         });
         let state = self.kernel.state();
         let extensions=state.extensions.values().map(|e|json!({"id":e.id,"name":e.id,"type":"Other","source":if e.installed{"Installed"}else{"Built in"},"enabled":e.enabled,"about":"","includes":[],"shortcuts":[],"files":[],"variables":[],"canArchive":false})).collect::<Vec<_>>();
-        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":[],"extensions":extensions,"extensionsState":"ready","speech":[]});
+        let accounts = self.account_rows();
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready","speech":[]});
         if let Some(project) = project {
             publication["project"] = project;
-            publication["rows"] = json!(self.settings_rows()?);
+            let mut rows = self.settings_rows()?;
+            rows.extend(self.account_rows());
+            publication["rows"] = json!(rows);
             let p = self.published().ok_or("Project closed")?;
             let root = p.snapshot.root().ok_or("Project closed")?;
             let mut notes = pm_model::Map::new();
@@ -929,48 +969,88 @@ impl Backend {
             "panel.settings" => return self.settings_action(args),
             "panel.agent.read" => self.agent_snapshot()?,
             "panel.agent.dispatch" => {
-                crate::agent_host::admit(&args["action"])?;
-                let run = new_id("run");
-                let request = new_id("request");
-                let thread = new_id("thread");
-                let effect = pm_panel_agentpanel::v4::dispatch_at(
-                    &mut self.native.agent,
-                    self.native.agent_sequence,
-                    args,
-                    pm_panel_agentpanel::v4::Context {
-                        run: &run,
-                        request: &request,
-                        new_thread: &thread,
-                        now: 0,
-                        popover_open: true,
-                    },
-                )
-                .map_err(|e| format!("{e:?}"))?;
+                let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
+                let link = self.native.agent_link.clone();
+                let effect = {
+                    let mut state = agent.lock().unwrap();
+                    let thread = state.panel.active_id().to_owned();
+                    let session = state.panel.session(&thread).map_err(|e| format!("{e:?}"))?;
+                    let (provider, live) = (session.settings.provider, session.run.is_some());
+                    let action = &args["action"];
+                    if action["type"] == "retryConnection" {
+                        if let Some(accounts) = link.accounts() {
+                            accounts.refresh(provider);
+                        }
+                        drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    crate::agent_host::admit(action, link.available(provider), live)?;
+                    if crate::agent_host::sends(action) {
+                        crate::agent_host::admit_send(&state, &thread)?;
+                    }
+                    let run = new_id("run");
+                    let request = new_id("request");
+                    let new_thread = new_id("thread");
+                    let catalogs = |provider| link.catalog(provider);
+                    let effect = pm_panel_agentpanel::v4::dispatch_at(
+                        &mut state.panel,
+                        link.sequence(),
+                        args,
+                        pm_panel_agentpanel::v4::Context {
+                            run: &run,
+                            request: &request,
+                            new_thread: &new_thread,
+                            now: crate::agent_host::now_ms(),
+                            popover_open: true,
+                            catalogs: &catalogs,
+                        },
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                    let now = crate::agent_host::now_ms();
+                    // Typing reaches the archive at the next checkpoint, not per key.
+                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
+                    {
+                        state.panel.defer_save(now);
+                    } else {
+                        state
+                            .panel
+                            .save(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                now,
+                            )
+                            .map_err(|e| format!("{e:?}"))?;
+                    }
+                    effect
+                };
+                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
                 if let Some(effect) = effect {
                     use pm_panel_agentpanel::model::{EffectKind, ShellAction};
                     let operation = match effect.kind {
-                        EffectKind::OpenSettings => "agent.settings",
-                        EffectKind::Shell(ShellAction::Open) => "agent.open",
-                        EffectKind::Shell(ShellAction::Close) => "agent.close",
+                        EffectKind::OpenSettings => Some("agent.settings"),
+                        EffectKind::Shell(ShellAction::Open) => Some("agent.open"),
+                        EffectKind::Shell(ShellAction::Close) => Some("agent.close"),
+                        EffectKind::Send { .. } | EffectKind::Stop | EffectKind::Answer { .. } => {
+                            crate::agent_host::run_effect(
+                                &agent,
+                                &link,
+                                &self.kernel,
+                                self.application,
+                                &effect,
+                            )?;
+                            None
+                        }
                         _ => {
                             return Err(
                                 "Agent provider or native action service is unavailable".into()
                             );
                         }
                     };
-                    self.native.platform.push((operation.into(), Value::Null));
+                    if let Some(operation) = operation {
+                        self.native.platform.push((operation.into(), Value::Null));
+                    }
                 }
-                self.native
-                    .agent
-                    .save(
-                        &mut KernelStore {
-                            kernel: self.kernel.clone(),
-                            application: self.application,
-                        },
-                        0,
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                self.native.agent_sequence += 1;
+                link.touch();
                 self.agent_snapshot()?
             }
             "profile.get" => {

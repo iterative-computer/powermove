@@ -1,4 +1,51 @@
-# MCP and automation core (Phase 1)
+# Native MCP
+
+## Current state (2026-11-05)
+
+The app and the `powermove-mcp` binary share one tool path: `McpSession` over
+`Automation`. `Automation` either owns a kernel (headless binary) or attaches to
+the running app through `pm_mcp::app_host::Host` (`Automation::attached`). The
+app's `Connection` only adds its session fence. Error strings therefore match
+between the two hosts. `ActorAutomation` remains for acceptance scenarios and has
+no production caller.
+
+`app/src/mcp_services.rs` holds the production hosts:
+
+- `export_video` and `render_frames` run the same `--engine-job` child as the
+  Export panel. Exports land in `~/Powermove`, or `<profile>/exports` for an
+  explicit `--profile`. Effects need `pm-glsl-compiler` beside the executable;
+  `package.py --glsl-compiler` puts it there.
+- `probe_media`, `sample_media_frames`, `media_contact_sheet` and
+  `media_waveform` read originals through `pm-media`. Layer targets refuse until
+  evaluated clip timing exists; pass `assetId`. The `informative` frame scan
+  refuses. Loudness is peak level only.
+- `import_media`, `replace_media` and `import_media_to_timeline` retain originals
+  through `Archive::retain_path` and admit them with `Call::AdmitMedia`, so they
+  use normal media Undo. Kinds and types come from Import Media's table
+  (`pm_builtins::media_import::classify`), plus glTF and OBJ models. Images
+  aren't converted and videos get no playback proxy.
+  3D models import but aren't placed; use `edit_3d`. `list_media` reports
+  availability from the kernel's media table.
+- `thread_list` and `thread_read` read the durable thread archive. `activity` and
+  `questions` stay empty, because a live session isn't reachable from an MCP worker.
+
+Of the 68 tools, 36 have bodies in the app. The other 32 refuse with
+`not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
+the running binary in both directions.
+
+<!-- refused-tools -->
+| Tools | What is missing |
+|---|---|
+| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A bridge from MCP workers to the main-thread shell and v4 surfaces. |
+| `generate_captions`, `transcribe_media` | A local transcription runtime. |
+| `publish_extensions`, `stage_fork_rebase`, `fork_builtin_extension` | Extension activation; the app has no compat realm. Also a shipped source root for forks. |
+| `publish_visual_reply` | A safe viewer and its input validator. |
+| `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
+| `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_launch`, `thread_send`, `thread_cancel`, `thread_watch`, `thread_unwatch` | A production `Threads` and orchestration host over `ProviderRuns`. |
+<!-- refused-tools -->
+
+The sections below are older dated notes. Where they differ, this section wins.
 
 Crate: `apps/native/crates/mcp` (`pm-mcp`); binary: `powermove-mcp`.
 Status: **67 tools / 67 schema-identical / 21 standalone bodies + 10 host-backed adapters / 36 pending**.
@@ -690,7 +737,7 @@ provisional UI was made.
 
 | Tools | Required backing still absent on this base |
 | --- | --- |
-| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_list`, `thread_read`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
 | `publish_extensions`, `stage_fork_rebase` | Complete API pack, provenance/base inventory, compiler/scanner/isolated activation admission and atomic promotion/reload/rebase coordinator. |
 | `import_media_to_timeline`, `import_media`, `replace_media` | Durable original-byte/fingerprint/probe admission, retained runtime versions and native media Undo coordinated with the kernel. File-open ingress does not implement media import. |
 | `edit_3d` | Complete scene edit/validation admission: `kernel/src/commands/scene3d.rs` still returns `NotImplemented`. |

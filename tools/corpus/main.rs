@@ -24,15 +24,6 @@ use std::{
 #[allow(dead_code)]
 #[path = "../../apps/native/crates/app/src/mcp.rs"]
 mod app_mcp;
-// Only referenced by the unused stdio launcher in the app's shared MCP adapter.
-mod session {
-    pub fn stable_id(path: &std::path::Path) -> String {
-        format!(
-            "corpus-{}",
-            &blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex()[..16]
-        )
-    }
-}
 mod media;
 mod rotation;
 mod rotation_pixels;
@@ -574,7 +565,7 @@ fn project(
     })?;
     viewer.retire();
     drop(service);
-    let mut c = app_mcp::Connection::new(host.clone());
+    let mut c = app_mcp::Tools::new(host.clone(), host.profile.join("exports")).connect();
     let edit = attempt(work, "edit", || {
         invoke(
             &mut c,

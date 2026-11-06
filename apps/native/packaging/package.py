@@ -119,18 +119,24 @@ def new_destination(path):
     return path
 
 
+def native_file(path):
+    path = Path(path)
+    if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
+        raise ValueError("expected an executable native binary")
+    with path.open("rb") as binary:
+        if binary.read(4) not in MACHO:
+            raise ValueError("expected a Mach-O native executable")
+    return path
+
+
 def bundle(executable, destination, channel, version, build, update_config,
-           sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True):
+           sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True,
+           glsl_compiler=None, claude_runtime=None, codex_vendor=None):
     metadata = info(channel, version, build, sparkle_feed, sparkle_key)
     updates = config(update_config, "cutover" if channel == "dev" else channel)
     if updates["enabled"] and not all((sparkle_framework, sparkle_feed, sparkle_key)):
         raise ValueError("enabled updates require the reviewed Sparkle framework/feed/key")
-    executable = Path(executable)
-    if not executable.is_file() or executable.is_symlink() or not os.access(executable, os.X_OK):
-        raise ValueError("expected an executable native binary")
-    with executable.open("rb") as binary:
-        if binary.read(4) not in MACHO:
-            raise ValueError("expected a Mach-O native executable")
+    executable = native_file(executable)
     destination = new_destination(destination)
     if destination.suffix != ".app":
         raise ValueError("bundle destination must end in .app")
@@ -153,6 +159,17 @@ def bundle(executable, destination, channel, version, build, update_config,
     (contents / "MacOS").mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(executable, contents / "MacOS" / "powermove-native")
+    # Effect shaders compile in this helper, found beside the executable.
+    if glsl_compiler:
+        shutil.copy2(native_file(glsl_compiler), contents / "MacOS" / "pm-glsl-compiler")
+    # The layout provider discovery reads: <name>/bin/<name> under Resources.
+    if claude_runtime:
+        (resources / "claude" / "bin").mkdir(parents=True)
+        shutil.copy2(native_file(claude_runtime), resources / "claude" / "bin" / "claude")
+    if codex_vendor:
+        codex_vendor = Path(codex_vendor)
+        native_file(codex_vendor / "bin" / "codex")
+        shutil.copytree(codex_vendor, resources / "codex", symlinks=True)
     with (contents / "Info.plist").open("wb") as file:
         plistlib.dump(metadata, file, sort_keys=True)
     (contents / "PkgInfo").write_bytes(b"APPL????")
@@ -298,6 +315,9 @@ def main():
     create.add_argument("--sparkle-framework", type=Path)
     create.add_argument("--sparkle-feed")
     create.add_argument("--sparkle-key")
+    create.add_argument("--glsl-compiler", type=Path)
+    create.add_argument("--claude-runtime", type=Path, help="The pinned native claude binary")
+    create.add_argument("--codex-vendor", type=Path, help="The pinned vendor/<triple> tree")
     create.add_argument("--layout-only", action="store_true", help="Linux proof only; output cannot be distribution-signed")
     verify = commands.add_parser("verify-sparkle-archive")
     verify.add_argument("artifact", type=Path)
@@ -310,7 +330,7 @@ def main():
     if args.command == "bundle":
         bundle(args.executable, args.destination, args.channel, args.version, args.build,
                args.update_config, args.sparkle_framework, args.sparkle_feed, args.sparkle_key,
-               not args.layout_only)
+               not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor)
     elif args.command == "verify-sparkle-archive":
         verify_sparkle_archive(args.artifact)
     elif args.command == "sign":

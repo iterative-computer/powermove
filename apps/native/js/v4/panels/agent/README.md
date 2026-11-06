@@ -33,8 +33,9 @@ step disclosures independent. Effect actions on ambiguous archived raw ids refus
 explicitly until the model exposes scoped effect commands; they never operate on
 a different duplicate. All archive bytes remain in their existing store.
 
-`dispatch_at` checks coordinator sequence, project, visible thread and run before
-calling the existing model methods. Context time and fresh run/request/thread ids
+`dispatch_at` checks project, visible thread and run before calling the existing
+model methods. Only `draft`, which replaces the whole text, also needs the current
+sequence, because a streaming run republishes constantly. Context time and fresh run/request/thread ids
 come from the native coordinator. Returned `Effect`s remain pending for the
 existing provider/shell/storage owner; no provider result or consent is inferred
 from queue admission. HostRouter/HostClient separately enforce realm, generation,
@@ -50,12 +51,10 @@ connection, presentation, shell/input/accessibility observations and catalog cop
 The application must retain a failed/unsaved model and use its existing lifecycle
 lease/storage owner; this extension opens no writer or profile.
 
-The app must mount `AgentPanel` with the existing `createRoot` and a required error
-handler, retire the model/root with their realm generation, and forward accepted
-native actions asynchronously. The entry is ready for that registration; **the
-application registration/effect runner is outside this lane and is not installed
-here**. The UI-kit entry is imported directly because the current public `ui`
-export still exposes the older component set.
+`js/v4/app/entry.tsx` mounts `AgentPanel` with `createRoot` and retires it with its
+realm generation. `builtins/src/agent_host.rs` runs its effects; see
+`docs/native/agents.md`. The UI-kit entry is imported directly because the current
+public `ui` export still exposes the older component set.
 
 `model-wire.rs` is a **test-only** backend: public HostClient → actual Rust
 HostRouter/HostDataService → real Panel/adapter → six-op panel. Its Store, ids,
@@ -83,9 +82,9 @@ also projects the emitted commits through the real AccessKit tree builder.
 1. Kit native multiline composer: host binding for thread-local draft, IME/UTF-16
    selection, inline attachment tokens/arming/Undo, clipboard/file/layer drop and
    caret anchoring; modifier/composition-aware native default cancellation.
-2. Kit system push/default/borderless buttons and agent-specific disclosure/card
-   recipes. ToolbarItem is not substituted for push buttons. EmptyState needs the
-   specified display typography slot; current kit fixes its heading typography.
+2. Kit borderless buttons and agent-specific disclosure/card recipes. EmptyState
+   needs the specified display typography slot; current kit fixes its heading
+   typography.
 3. Kit selectable Markdown/code/tables, media/resource thumbnails, output paging,
    SF Symbols and message alignment/max-width/token arithmetic/wrapping. No raw
    markup executes. Copy/selection must stay in native text, never layer commands.
@@ -93,16 +92,14 @@ also projects the emitted commits through the real AccessKit tree builder.
    invalidation, viewport plus one viewport overscan, scroll anchors/full extent,
    scroll-to-row/Latest, AXRowCount and accessibility row navigation. Current
    virtual-list only admits fixed `itemSize`; metadata does not implement this.
-5. Thread/model picker publications, unread/running counts, confirmed archival,
-   provider capability/display labels; access menu subtitles/warnings plus the
-   native consent effect; approval decision commands and connection/settings/retry
-   routes. Access is disabled here so a binding cannot bypass consent.
+5. Thread picker publications, unread/running counts, confirmed archival; access
+   menu subtitles/warnings plus the native consent effect. Full access stays out
+   of the menu until that effect exists.
 6. Isolated visual/fitted-attachment previews, leased resources, modal zoom/replay,
    result/frame/Finder/import actions and opener focus restoration.
 7. Shell launch/popover/pin/drag/layout/visibility/keyboard integration; toolbar
    symbol/ring/dot/count rendering; system materials and accessibility notifications.
-8. Actual host command/effect registration and native publication/lifecycle wiring;
-   scoped model effect commands for duplicate archived ids. Row-count/announcement/
+8. Scoped model effect commands for duplicate archived ids. Row-count/announcement/
    message-row AX projection and real native control rendering remain host work.
 9. Missing `metrics.composer_max_lines` and token arithmetic/style/slot APIs for
    the exact specified derived measurements. No fallback literal is substituted.
@@ -118,8 +115,8 @@ All four are also recorded in `gaps.ts`; no extra product decisions are made:
    prohibits substituting literal visual values; current wire styling has no
    approved token-arithmetic representation.
 3. Reconcile §3's recommended/default single-choice buttons with the actual
-   model/tag's explicit Answer behavior (choosing never submits). Question
-   submission controls remain placeholders; the model contract is preserved.
+   model/tag's explicit Answer behavior (choosing never submits). Cards use push
+   buttons for each option, plus Answer and Skip.
 
 4. The model restores interrupted reply questions as `closed`, but the spec
    provides only Answered/Skipped copy. Closed questions stay plain labelled

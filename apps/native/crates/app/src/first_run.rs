@@ -749,7 +749,7 @@ pub fn later_store(plan: &Plan, events: impl FnMut(Event) -> Result<()>) -> Resu
 pub fn gate(
     plan: Plan,
     kernel: pm_kernel::KernelHandle,
-    mcp_host: Arc<crate::mcp::Host>,
+    tools: crate::mcp::Tools,
     server: Server,
 ) -> pm_shell::Gate {
     Box::new(move |finish, cx| {
@@ -758,7 +758,7 @@ pub fn gate(
             library: Library {
                 plan: plan.clone(),
                 kernel,
-                mcp_host,
+                tools,
                 server,
                 attached: Default::default(),
             },
@@ -776,7 +776,7 @@ pub type Server = Arc<std::sync::Mutex<Option<pm_mcp::transport::LoopbackServer>
 struct Library {
     plan: Plan,
     kernel: pm_kernel::KernelHandle,
-    mcp_host: Arc<crate::mcp::Host>,
+    tools: crate::mcp::Tools,
     server: Server,
     /// A retry after a later step failed must not attach a second time.
     attached: Arc<AtomicBool>,
@@ -960,10 +960,10 @@ impl Library {
             self.attached.store(true, Ordering::Release);
         }
         if self.server.lock().unwrap().is_none() {
-            let host = self.mcp_host.clone();
+            let tools = self.tools.clone();
             let server =
                 pm_mcp::transport::LoopbackServer::start_with(&self.plan.profile, move || {
-                    crate::mcp::Connection::new(host.clone())
+                    tools.connect()
                 })?;
             *self.server.lock().unwrap() = Some(server);
         }

@@ -76,6 +76,19 @@ pub struct NativeEvent {
     pub r#type: String,
     pub detail: EventDetail,
 }
+/// Typing and its composition, which follow focus rather than what was shown.
+pub fn keyboard(event: &str) -> bool {
+    matches!(
+        event,
+        "keydown"
+            | "keyup"
+            | "beforeinput"
+            | "input"
+            | "compositionstart"
+            | "compositionupdate"
+            | "compositionend"
+    )
+}
 impl Interaction {
     /// Called by an agent or AppKit adapter before enqueueing JS. Rejections change no input.
     #[allow(clippy::too_many_arguments)]
@@ -89,7 +102,20 @@ impl Interaction {
         event: &str,
         detail: EventDetail,
     ) -> Result<NativeEvent, String> {
-        if generation == 0 || generation != expected_generation || revision != surface.revision() {
+        // A publication between seeing and acting is common (a streaming run
+        // republishes often, typing echoes). Keys go to their element as it is
+        // now, as focus does. Anything else lands only if its target's subtree is
+        // unchanged since: an old click never reaches changed or new content.
+        let current = if keyboard(event) {
+            surface.node(target).is_some()
+        } else {
+            surface.unchanged_since(target, revision)
+        };
+        if generation == 0
+            || generation != expected_generation
+            || revision > surface.revision()
+            || revision != surface.revision() && !current
+        {
             return Err("stale native drive".into());
         }
         if [
@@ -227,6 +253,53 @@ mod tests {
             );
             assert_eq!(surface.nodes(), &before);
         }
+    }
+    #[test]
+    fn an_older_revision_lands_only_on_an_unchanged_subtree() {
+        // Revision 1: root > list(1) and button(2) > label(3).
+        let mut surface = Surface::default();
+        surface.apply_json(r#"{"baseRevision":0,"ops":[
+            {"op":"create","id":1,"type":"div"},{"op":"insertBefore","parent":0,"id":1,"before":null},
+            {"op":"create","id":2,"type":"button"},{"op":"insertBefore","parent":0,"id":2,"before":null},
+            {"op":"create","id":3,"type":"text"},{"op":"insertBefore","parent":2,"id":3,"before":null}]}"#).unwrap();
+        let mut interaction = Interaction::default();
+        let mut drive = |surface: &mut Surface, revision, target, event| {
+            interaction.drive(
+                surface,
+                1,
+                1,
+                revision,
+                target,
+                event,
+                EventDetail::default(),
+            )
+        };
+        // A streamed row lands in the list; the button is untouched.
+        surface.apply_json(r#"{"baseRevision":1,"ops":[
+            {"op":"create","id":4,"type":"text"},{"op":"insertBefore","parent":1,"id":4,"before":null}]}"#).unwrap();
+        let event = drive(&mut surface, 1, 2, "click").unwrap();
+        assert_eq!((event.plan.target, event.plan.revision), (2, 2));
+        assert!(
+            drive(&mut surface, 1, 1, "click").is_err(),
+            "the list changed"
+        );
+        assert!(
+            drive(&mut surface, 3, 2, "click").is_err(),
+            "a future revision"
+        );
+        // The button's label changes: what was clicked is no longer what is shown.
+        surface
+            .apply_json(r#"{"baseRevision":2,"ops":[{"op":"setText","id":3,"text":"Stopping"}]}"#)
+            .unwrap();
+        assert!(drive(&mut surface, 2, 2, "click").is_err());
+        assert!(drive(&mut surface, 3, 2, "click").is_ok());
+        // Keys follow focus: they reach the element as it is now.
+        assert!(drive(&mut surface, 2, 2, "keydown").is_ok());
+        // Removed: never lands, even on the revision it was seen at.
+        surface
+            .apply_json(r#"{"baseRevision":3,"ops":[{"op":"remove","id":2}]}"#)
+            .unwrap();
+        assert!(drive(&mut surface, 3, 2, "click").is_err());
     }
     #[test]
     fn pointer_capture_routes_and_releases_typed_drag() {

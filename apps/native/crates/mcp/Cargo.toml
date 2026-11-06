@@ -15,6 +15,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 libc = "0.2"
 icu_collator = "2"
+async-channel = "2"
 
 [[bin]]
 name = "powermove-mcp"

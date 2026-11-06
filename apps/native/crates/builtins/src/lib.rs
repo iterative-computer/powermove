@@ -2,6 +2,9 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+pub use agent_host::AgentCarry;
+#[cfg(test)]
+mod agent_tests;
 mod data;
 pub mod delivery;
 pub mod media_import;
@@ -87,6 +90,11 @@ struct Broker {
     timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
+    agent: Arc<agent_host::AgentLink>,
+    /// Runs carried in from the previous application window, for its Agent panel.
+    carried: Mutex<Option<agent_host::SharedAgent>>,
+    /// Set once `carry_agent` hands the runs on: closing no longer stops them.
+    agent_released: std::sync::atomic::AtomicBool,
 }
 impl Builtins {
     pub fn new(
@@ -94,21 +102,49 @@ impl Builtins {
         project: &str,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
-        Self::create(kernel, project, false, wake)
+        Self::create(kernel, project, false, wake, None)
     }
     /// Application-owned Agent/Settings without inventing an open document.
+    /// `carry` holds runs from an earlier application window; its panel shows them.
     pub fn application(
         kernel: KernelHandle,
         wake: impl Fn() + Send + Sync + 'static,
+        carry: Option<AgentCarry>,
     ) -> Result<Self> {
-        Self::create(kernel, "builtin-application", true, wake)
+        Self::create(kernel, "builtin-application", true, wake, carry)
+    }
+    /// Keep the application Agent panel's live runs going past this window, e.g.
+    /// when a run opens a project. `None` when nothing is running.
+    pub fn carry_agent(&self) -> Option<AgentCarry> {
+        if !self.broker.application {
+            return None;
+        }
+        let entries = self.broker.entries.lock().unwrap();
+        let state = entries
+            .get("agent")?
+            .backend
+            .lock()
+            .unwrap()
+            .native
+            .agent
+            .clone()?;
+        let carry = AgentCarry::take(&self.broker.agent, &state)?;
+        self.broker
+            .agent_released
+            .store(true, std::sync::atomic::Ordering::Release);
+        Some(carry)
     }
     fn create(
         kernel: KernelHandle,
         project: &str,
         application: bool,
         wake: impl Fn() + Send + Sync + 'static,
+        carry: Option<AgentCarry>,
     ) -> Result<Self> {
+        let (agent, carried) = match carry.map(AgentCarry::adopt) {
+            Some((link, state)) => (link, Some(state)),
+            None => Default::default(),
+        };
         let broker = Arc::new(Broker {
             project: project.into(),
             application,
@@ -122,6 +158,9 @@ impl Builtins {
             timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
             wake: Arc::new(wake),
+            agent,
+            carried: Mutex::new(carried),
+            agent_released: Default::default(),
         });
         let pool = RuntimePool::new(
             format!("window:{project}"),
@@ -152,9 +191,20 @@ impl Builtins {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
+        if matches!(panel, "agent" | "settings") {
+            self.broker.agent.add_realm(realm.clone());
+        }
         let ticket = realm.eval(format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
         self.realms.insert(panel.into(), realm);
         Ok(ticket)
+    }
+    /// What agent runs may use. Without this the panel reports no connection.
+    pub fn set_agent_environment(
+        &self,
+        environment: pm_agents::launch::Environment,
+        open: std::sync::Arc<pm_agents::account::Opener>,
+    ) {
+        self.broker.agent.set_environment(environment, open);
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         self.realms
@@ -372,6 +422,13 @@ impl Builtins {
         }
     }
     pub fn close(&self) {
+        if !self
+            .broker
+            .agent_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.broker.agent.close();
+        }
         for realm in self.realms.values() {
             realm.close();
         }
@@ -432,6 +489,12 @@ impl EngineProxy for Broker {
                 )
                 .map_err(Error::Host)?,
             ));
+            backend.lock().unwrap().native.agent_link = self.agent.clone();
+            if panel == "agent"
+                && let Some(state) = self.carried.lock().unwrap().take()
+            {
+                backend.lock().unwrap().native.agent = Some(state);
+            }
             let facts = self.facts.lock().unwrap().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
                 backend.lock().unwrap().native.facts = facts;

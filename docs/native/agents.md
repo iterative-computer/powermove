@@ -1,4 +1,81 @@
-# Rust agents (P4 package 16)
+# Rust agents
+
+## Current state (2026-11-06)
+
+A panel run is real, from keystroke to durable reply:
+
+1. `panels/agent/view.tsx` sends composer keys as `{type:"key"}`. The Rust panel
+   edits the draft. The v4 host reports keys, not composed text, so IME and
+   shifted punctuation need a real text input there. Actions name their own
+   target, so a streaming run's publications don't refuse them. Only `draft`, which
+   replaces the whole text, needs the latest publication.
+2. `panel.agent.dispatch` in `builtins/src/models.rs` admits the action
+   (`agent_host::admit`) before touching the panel. No runtime or no signed-in
+   account means no consumed draft.
+3. `agent_host::run_effect` builds the prompt with bounded thread context and
+   calls `ProviderRuns::start`, which saves intent before launch.
+4. `pm_agents::launch` finds the binary: `CODEX_BINARY`/`CLAUDE_BINARY`, then a
+   managed update under `<profile>/runtimes`, then `Resources/<name>/bin/<name>`.
+   Isolated homes are `codex-runtime` and `claude-runtime` in the profile.
+   Editor ChatGPT runs use App Server; Project runs use `codex exec`; Claude uses
+   stream-json. Providers reach tools through `--powermove-mcp`.
+5. The `pm-agent-runs` worker polls events into the panel and publishes. A Backend
+   lock is not held while it does. A failed save keeps the event for retry.
+   Reply and reasoning fragments (`Event::streamed`) and composer typing are
+   kept in memory and saved at most `CHECKPOINT_MS` (1 s) later, or with the
+   next event that saves; they keep no receipt. Everything else saves at once.
+   A crash can lose up to a second of streamed text or typing.
+6. Anything that keeps an effect from its process settles in the conversation
+   (`ProviderRuns::refuse`): a start fails its run with a readable reason, a
+   refused Stop or answer is acknowledged as refused.
+7. Window close sets `AgentLink::close`; the worker cancels runs, saves and
+   exits. The application panel is the exception: when its window goes because
+   a run opened a project, `Builtins::carry_agent` keeps the runs, the `Host`
+   holds them, and the next application window shows them
+   (`Builtins::application(.., carry)`). Dropping the carry cancels them.
+
+Sign-in is `pm_agents::account`, on `pm-agent-account` workers. ChatGPT uses App
+Server's `account/*` and `model/list`; Claude uses `auth status|login|logout` and
+an `initialize` control request. Status drives the panel's connection and the live
+rows in Settings › Accounts. Each provider's runtime owns its credentials.
+Stop always reaches a live run and answers do while it lives, whatever the
+account says now; the panel keeps a live run's conversation after sign-out.
+
+The composer has Access, provider, model and effort pop-ups, filled from the same
+workers. Access has no Full choice, because no consent alert exists. Question and
+approval cards answer through their own buttons.
+
+Composition-only runs differ from main on purpose. Main returns a structured plan
+that the renderer applies. Here the run edits through its MCP session, limited to
+`catalog::composition_names()`: `enabled_tools` on Codex, `--allowedTools` on Claude.
+
+A click planned against an older surface revision lands if its target's subtree
+is unchanged since (`Surface::unchanged_since`, mirrored in `renderer.ts`); keys
+follow focus and land on their element as it is now. So Stop works while a run
+streams, with no retry.
+
+Proof is `builtins/src/agent_tests.rs`: real V8 panel, real kernel actor and a fake
+provider over real pipes, for reply and reopen, Stop during a stream, question and
+approval cards, pickers reaching the argv, sign-in, sign-out mid-run, and an
+application run outliving its window. Its executable is `/bin/false`, so no test
+connects a panel run to the app's MCP tools. Sign-in is proven from the
+`panel.settings` command and, separately, from `SettingsModel.perform`; nobody has
+clicked the rendered Settings button. No real provider has
+run: `live-provider-check` is unexecuted, and the Claude model request is unproven
+against the real binary.
+
+Open:
+
+- Provider `model` efforts aren't per model; the pop-up shows the provider's union.
+- `Compatible` refuses at launch: no HTTP or Keychain host. Its parser and presets
+  are in history (see agents-main.md). Computer access stays refused because no
+  consent alert exists.
+- Attachments refuse with an explanation.
+- `INSTRUCTIONS` in `launch.rs` is a short stand-in for main's generated workspace
+  instructions, and user MCP servers and skills aren't shared into the homes.
+- Project access has no OS confinement host for Compatible-only workspace tools.
+
+The sections below are older dated notes.
 
 `apps/native/crates/agents` is `pm-agents`, a Linux-testable Rust service library.
 Reference: tag `v1.2.0`, commit `07ed5fa17ee640659cb075f9cad1af2095011d60`.

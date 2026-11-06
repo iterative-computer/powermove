@@ -3,6 +3,7 @@
 //! `Automation` owns a single `pm_kernel::Kernel` on a worker. Embedders that
 //! already own a kernel actor use `ActorAutomation` (async, no second writer).
 //! Missing actor operations are explicit integration requirements; see mcp.md.
+pub mod app_host;
 pub mod automation;
 pub mod catalog;
 pub mod commands;
@@ -28,7 +29,8 @@ pub mod video;
 pub mod views;
 
 pub use automation::{
-    ActorAutomation, Automation, AutomationEvent, CaptureRequest, EngineHook, SurfaceHook,
+    ActorAutomation, Automation, AutomationEvent, CaptureRequest, EngineHook, ProjectView,
+    SurfaceHook,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

@@ -68,6 +68,7 @@ impl KernelData for Backend {
                         new_thread: &format!("thread-{next}"),
                         now: next * 1000,
                         popover_open: true,
+                        catalogs: &|_| Default::default(),
                     },
                 )
                 .map_err(|e| format!("{e:?}"))?;

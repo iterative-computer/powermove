@@ -114,6 +114,36 @@ pub struct VideoExportRequest {
 }
 /// Runs on the MCP worker, never the UI thread. Video adapters own child
 /// cancellation/draining. Caption export is pure text and needs no subprocess.
+/// A worker copies an original into durable media and admits it through the kernel.
+#[derive(Clone, Debug)]
+pub struct MediaImport {
+    pub frozen: FrozenProject,
+    pub path: PathBuf,
+    pub folder: Option<String>,
+    pub replace: Option<String>,
+    pub expected_fingerprint: Option<String>,
+    pub writer: u32,
+}
+#[derive(Clone, Debug)]
+pub struct ImportedMedia {
+    pub status: &'static str,
+    pub asset: String,
+    pub name: String,
+    pub kind: String,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub duration: Option<f64>,
+    pub has_audio: bool,
+    pub fingerprint: String,
+    pub revision: u64,
+}
+pub trait MediaImporter: Send + Sync {
+    fn import(&self, request: &MediaImport) -> Result<ImportedMedia>;
+}
+/// Reads the durable agent thread archive, whose format the app owns.
+pub trait ThreadArchive: Send + Sync {
+    fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
+}
 pub trait ExportChild: Send + Sync {
     fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
     fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {
@@ -135,7 +165,7 @@ impl Automation {
     pub fn freeze(&self, id: &str) -> Result<FrozenProject> {
         Ok(FrozenProject {
             project_id: id.into(),
-            document_id: self.store(id)?.doc_id(),
+            document_id: self.view(id)?.document,
             revision: self.revision(id)?,
             project: self.read_document(id)?,
         })
@@ -168,7 +198,7 @@ impl Automation {
             .filter_map(Value::as_f64)
             .collect::<Vec<_>>();
         if times.is_empty() {
-            let selection = self.store(id)?.selection().layers();
+            let selection = self.view(id)?.selection.layers().to_vec();
             let selected = p["layers"]
                 .as_array()
                 .into_iter()
@@ -241,9 +271,8 @@ impl Automation {
         })
     }
     fn check_frozen(&self, p: &FrozenProject) -> Result<()> {
-        if self.store(&p.project_id)?.doc_id() != p.document_id
-            || self.revision(&p.project_id)? != p.revision
-        {
+        let view = self.view(&p.project_id)?;
+        if view.document != p.document_id || view.revision != p.revision {
             return Err(Error::conflict(
                 "The composition changed during engine work",
             ));

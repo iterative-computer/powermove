@@ -20,6 +20,41 @@ pub struct MediaState {
 pub trait MediaRegistry: Send + Sync {
     fn state(&self, project_id: &str, asset_id: &str) -> MediaState;
 }
+/// Whether a layer that uses this asset is locked, directly or through a parent.
+pub fn has_locked_reference(p: &Value, asset: &str) -> bool {
+    references(p, asset).iter().any(|r| r["locked"] == true)
+}
+/// The layer main adds for an imported asset. Models need a 3D definition instead.
+pub fn layer_for(
+    p: &Value,
+    imported: &crate::services::ImportedMedia,
+    at: f64,
+) -> Option<(String, Value)> {
+    let fps = p["fps"].as_f64().filter(|f| *f > 0.).unwrap_or(30.);
+    let from = (at * fps).round() / fps;
+    let span = (p["dur"].as_f64().unwrap_or(0.) - at).max(1. / fps);
+    let (w, h) = (
+        imported.width.or(p["w"].as_f64()),
+        imported.height.or(p["h"].as_f64()),
+    );
+    let (kind, content) = match imported.kind.as_str() {
+        "audio" => (
+            "audio",
+            json!({"asset":imported.asset,"trim":0,"gain":1,"fadeIn":0,"fadeOut":0}),
+        ),
+        "video" => (
+            "video",
+            json!({"asset":imported.asset,"trim":0,"speed":1,"embeddedAudio":imported.has_audio,"w":w,"h":h}),
+        ),
+        "image" => ("image", json!({"asset":imported.asset,"w":w,"h":h})),
+        _ => return None,
+    };
+    let id = pm_kernel::new_id("layer");
+    let command = json!({"type":"add_layer","id":id,"layerType":kind,"name":imported.name,
+        "from":from,"duration":imported.duration.filter(|d| *d > 0.).unwrap_or(span),
+        "content":content,"select":true});
+    Some((id, command))
+}
 pub fn valid_folder<'a>(p: &'a Value, id: &'a Value) -> Option<&'a str> {
     id.as_str().filter(|s| p["assetFolders"][*s].is_object())
 }

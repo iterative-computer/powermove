@@ -497,7 +497,12 @@ fn list_dir(file: &File) -> io::Result<Vec<(String, bool)>> {
 }
 /// Every ancestor is opened relative to an owned directory descriptor. A rename
 /// or symlink swap cannot redirect later operations outside that directory.
-fn open_relative(root: &Path, relative: &Path, directory: bool, create: bool) -> io::Result<File> {
+pub(crate) fn open_relative(
+    root: &Path,
+    relative: &Path,
+    directory: bool,
+    create: bool,
+) -> io::Result<File> {
     use std::{
         ffi::CString,
         os::{

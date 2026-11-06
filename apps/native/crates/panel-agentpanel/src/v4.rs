@@ -7,7 +7,7 @@ use crate::{
     interaction::Submission,
     model::{Effect, Panel, ShellAction},
 };
-use pm_agents::{Access, ApprovalMode};
+use pm_agents::{Access, ApprovalMode, Provider};
 use serde_json::{Value, json};
 use std::ops::Range;
 
@@ -18,6 +18,8 @@ pub struct Context<'a> {
     pub new_thread: &'a str,
     pub now: u64,
     pub popover_open: bool,
+    /// The choices of a provider the thread switches to.
+    pub catalogs: &'a dyn Fn(Provider) -> crate::input::Catalog,
 }
 /// Keep a matching immutable archive/index together. Refresh after structural
 /// archive changes, on a worker; streaming live rows need no archive rebuild.
@@ -74,7 +76,11 @@ impl Window {
                 (format!("live:{}", row.id), row.value.as_ref())
             };
             let command_id = value["id"].as_str().unwrap_or_default();
-            items.push(json!({"id":id,"commandId":id,"value":value,
+            let chosen = session
+                .questions
+                .get(command_id)
+                .map_or_else(Default::default, |draft| draft.chosen().clone());
+            items.push(json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
                 "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))}));
         }
         let mut value = panel.inspect(&self.thread)?;
@@ -115,6 +121,18 @@ impl Window {
         Ok(value)
     }
 }
+/// The text of a plain key press. The v4 host reports keys, not composed text.
+fn typed(key: &Key) -> Option<String> {
+    let mut letters = key.name.chars();
+    let letter = letters.next().filter(|_| letters.next().is_none())?;
+    (!key.meta && !key.control && !key.composing && !letter.is_control()).then(|| {
+        if key.shift {
+            letter.to_uppercase().collect()
+        } else {
+            letter.to_string()
+        }
+    })
+}
 fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
         .as_str()
@@ -146,11 +164,15 @@ pub fn dispatch_at(
         .get("target")
         .and_then(Value::as_object)
         .ok_or(Error::Stale)?;
+    // A streaming run republishes constantly, so input can't wait for the latest
+    // publication. Only a whole-text draft replaces what the user last saw.
+    let kind = envelope["action"]["type"].as_str().unwrap_or_default();
+    let ordered = kind == "draft";
     if sequence == 0
-        || envelope["sequence"].as_u64() != Some(sequence)
+        || ordered && envelope["sequence"].as_u64() != Some(sequence)
         || target.get("project") != Some(&json!(panel.project()))
         || target.get("thread") != Some(&json!(thread))
-        || target.get("run") != Some(&json!(run))
+        || kind != "key" && target.get("run") != Some(&json!(run))
     {
         return Err(Error::Stale);
     }
@@ -244,18 +266,25 @@ pub fn dispatch(
                 composing: optional_boolean(key, "composing")?,
                 code_229: false,
             };
-            panel
-                .composer_key(
-                    thread,
-                    &key,
-                    context.popover_open,
-                    Submission {
-                        run: context.run,
-                        request: context.request,
-                    },
-                    now,
-                )?
-                .effect
+            let outcome = panel.composer_key(
+                thread,
+                &key,
+                context.popover_open,
+                Submission {
+                    run: context.run,
+                    request: context.request,
+                },
+                now,
+            )?;
+            if outcome.route.intent == input::Intent::NativeText {
+                let (backward, name) = (key.name == "Backspace", key.name.as_str());
+                if backward || name == "Delete" {
+                    panel.draft_mut(thread)?.delete(backward, key.repeat, now);
+                } else if let Some(text) = typed(&key) {
+                    panel.draft_mut(thread)?.insert_text(&text, now, true);
+                }
+            }
+            outcome.effect
         }
         "openSettings" => Some(panel.host_settings(thread)?),
         "submit" => Some(panel.submit(thread, context.run, context.request, now)?),
@@ -302,6 +331,20 @@ pub fn dispatch(
         }
         "openAttachment" => Some(panel.open_attachment(thread, string(action, "id")?)?),
         "setAccess" => panel.set_access(thread, string(action, "access")?)?,
+        "setProvider" => {
+            let provider = match string(action, "provider")? {
+                "chatgpt" => Provider::Chatgpt,
+                "claude" => Provider::Claude,
+                _ => return Err(Error::Invalid("provider")),
+            };
+            panel.set_provider(
+                thread,
+                provider,
+                String::new(),
+                (context.catalogs)(provider),
+            )?;
+            None
+        }
         "setModel" => {
             panel.set_model(
                 thread,
@@ -398,6 +441,7 @@ mod tests {
                 new_thread: "new",
                 now: 10,
                 popover_open: true,
+                catalogs: &|_| Default::default(),
             },
         )
     }
@@ -634,6 +678,7 @@ mod admission_tests {
             new_thread: "new",
             now: 0,
             popover_open: true,
+            catalogs: &|_| Default::default(),
         }
     }
     #[test]
@@ -655,6 +700,20 @@ mod admission_tests {
         assert!(!panel.session("t").unwrap().draft.sendable());
         dispatch_at(&mut panel, 1, &good, context()).unwrap();
         assert!(panel.session("t").unwrap().draft.sendable());
+    }
+    #[test]
+    fn typing_outlives_a_publication_and_a_run_boundary_but_not_a_thread() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let key = |thread: &str| {
+            json!({"sequence":1,"target":{"project":"p","thread":thread,"run":"finished"},
+                "action":{"type":"key","key":{"key":"a"}}})
+        };
+        dispatch_at(&mut panel, 9, &key("t"), context()).unwrap();
+        assert!(panel.session("t").unwrap().draft.sendable());
+        assert!(matches!(
+            dispatch_at(&mut panel, 9, &key("other"), context()),
+            Err(Error::Stale)
+        ));
     }
     #[test]
     fn malformed_ime_flags_cannot_turn_into_a_submit() {
@@ -710,6 +769,7 @@ mod scoped_tests {
                 new_thread: "n",
                 now: 0,
                 popover_open: true,
+                catalogs: &|_| Default::default(),
             },
         )
         .unwrap();

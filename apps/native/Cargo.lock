@@ -4626,6 +4626,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "url",
 ]
 
 [[package]]
@@ -5027,6 +5028,7 @@ dependencies = [
 name = "pm-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "icu_collator",
  "libc",
  "pm-kernel",
@@ -5072,6 +5074,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "blake3",
  "block2 0.6.2",
  "foreign-types",
@@ -5083,6 +5086,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "pm-agents",
  "pm-audio",
  "pm-builtins",
  "pm-design",
@@ -5093,6 +5097,7 @@ dependencies = [
  "pm-gpu",
  "pm-kernel",
  "pm-mcp",
+ "pm-media",
  "pm-model",
  "pm-native-migrate",
  "pm-node",
@@ -5106,6 +5111,7 @@ dependencies = [
  "pm-shell",
  "pm-surface",
  "pm-time",
+ "png",
  "raw-window-handle",
  "serde_json",
  "sha2",

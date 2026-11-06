@@ -279,7 +279,7 @@ fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer()
 #[test]
 fn application_agent_and_settings_mount_without_creating_a_project() {
     let actor = KernelActor::spawn(KernelConfig::default());
-    let mut panels = Builtins::application(actor.handle(), || {}).unwrap();
+    let mut panels = Builtins::application(actor.handle(), || {}, None).unwrap();
     assert!(panels.mount("inspector").is_err());
     for id in ["agent", "settings"] {
         finish(panels.mount(id).unwrap());
@@ -466,20 +466,23 @@ fn unsupported_agent_submission_keeps_the_draft_and_does_not_start_a_run() {
         project: "synthetic".into(),
     };
     let mut backend = data::Backend::new(actor.handle(), identity, "agent", false).unwrap();
-    let thread = backend.native.agent.active_id().to_owned();
-    backend
-        .native
-        .agent
+    let agent = backend.native.agent.clone().unwrap();
+    let thread = agent.lock().unwrap().panel.active_id().to_owned();
+    agent
+        .lock()
+        .unwrap()
+        .panel
         .draft_mut(&thread)
         .unwrap()
         .insert_text("Keep authored 日本🙂", 0, false);
-    let result=backend.native_command("panel.agent.dispatch",&json!({"sequence":backend.native.agent_sequence,"target":{"project":"synthetic","thread":thread,"run":null},"action":{"type":"submit"}}));
+    let result=backend.native_command("panel.agent.dispatch",&json!({"sequence":backend.native.agent_link.sequence(),"target":{"project":"synthetic","thread":thread,"run":null},"action":{"type":"submit"}}));
     assert!(result.is_err());
+    let state = agent.lock().unwrap();
     assert_eq!(
-        backend.native.agent.session(&thread).unwrap().draft.text(),
+        state.panel.session(&thread).unwrap().draft.text(),
         "Keep authored 日本🙂"
     );
-    assert!(backend.native.agent.session(&thread).unwrap().run.is_none());
+    assert!(state.panel.session(&thread).unwrap().run.is_none());
 }
 
 #[test]

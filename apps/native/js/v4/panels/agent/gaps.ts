@@ -2,8 +2,6 @@
 export const gaps = {
   composer:
     "Native multiline composer, IME-aware default cancellation, inline tokens and pasteboard driver are absent from the UI kit.",
-  pushButton:
-    "System push/default/borderless buttons are absent from the UI kit; ToolbarItem is not a substitute.",
   richText:
     "Selectable Markdown, code/table scrolling, thumbnails and copy affordances are absent from the UI kit.",
   variableList:
@@ -12,8 +10,6 @@ export const gaps = {
     "Isolated fixed-aspect visual and fitted-attachment preview controls and their resource leases are absent from the UI kit.",
   threadPicker:
     "Thread picker search, unread facts, confirmed archival and windowed thread publications need the model/host adapter.",
-  modelPicker:
-    "Provider/model/effort picker and provider capability publication require a host control; the catalog has no effort display labels.",
   accessMenu:
     "Menu subtitles, warning symbol and native Full Access consent need the host adapter.",
   launcher:

@@ -62,6 +62,7 @@ export function publication(
         !!row.id &&
         typeof row.commandId === "string" &&
         typeof row.open === "boolean" &&
+        record(row.chosen) &&
         record(row.value),
     ) ||
     new Set(r.items.map((row) => (record(row) ? row.id : undefined))).size !==
@@ -108,10 +109,7 @@ export function publication(
       String(n.connection),
     ) ||
     !["popover", "docked"].includes(String(n.presentation)) ||
-    ![
-      "ChatGPT couldn’t be reached.",
-      "Connect an API, Ollama, or LM Studio in Settings.",
-    ].includes(String(n.reason)) ||
+    typeof n.reason !== "string" ||
     ![
       "atMinimumDockWidth",
       "visible",

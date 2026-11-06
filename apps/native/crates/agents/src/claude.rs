@@ -573,6 +573,8 @@ impl Options {
                 "--permission-mode".into(),
                 if editor {
                     "default".into()
+                } else if self.authority.approval == crate::ApprovalMode::Auto {
+                    "auto".into()
                 } else {
                     "acceptEdits".into()
                 },

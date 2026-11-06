@@ -74,6 +74,9 @@ impl McpSession {
             Err(e) => failure(e),
         }
     }
+    /// No schema admission, as on main: the session and memory switch refuse
+    /// first, and a JavaScript slice's lone surrogate is kept (tests/wave4.rs,
+    /// tests/main_memory.rs).
     fn project_memory(&mut self, args: &Value) -> Result<pm_model::Value> {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
@@ -102,6 +105,7 @@ impl McpSession {
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
         assert_project(session, &host, id)?;
+        host.document_fence = session.document;
         host.project_memory(id, args, self.writer)
     }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
@@ -128,6 +132,7 @@ impl McpSession {
         let mut host = shared
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
+        host.document_fence = self.active.as_ref().and_then(|session| session.document);
         if ["list_projects", "create_project", "open_project"].contains(&name) {
             if name != "list_projects" && self.active.is_some() {
                 return Err(Error::invalid(
@@ -219,6 +224,17 @@ impl McpSession {
             )?)
             .map_err(|_| Error::invalid("Invalid extension fork result"));
         }
+        if ["thread_list", "thread_read"].contains(&name) {
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let threads = host
+                .threads
+                .as_deref()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            return threads.read(name, session.project.as_deref(), args);
+        }
         if ["store_search", "store_extension", "store_source"].contains(&name) {
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;
@@ -266,9 +282,8 @@ impl McpSession {
         }
         let prepared_selection = if name == "select_layers" {
             let project = host
-                .active
-                .as_deref()
-                .map(|id| host.read_document(id))
+                .active_project()
+                .map(|id| host.read_document(&id))
                 .transpose()?;
             let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
                 id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
@@ -336,6 +351,74 @@ impl McpSession {
             }
 
             "export_captions" => host.export_captions(&id, args),
+            "import_media" | "replace_media" | "import_media_to_timeline" => {
+                let importer = host
+                    .media_importer
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let expected = session
+                    .transaction
+                    .as_ref()
+                    .map_or(session.baseline, |t| t.revision);
+                if host.revision(&id)? != expected {
+                    return Err(Error::conflict(
+                        "The project changed. Read get_project_state before retrying.",
+                    ));
+                }
+                let frozen = host.freeze(&id)?;
+                let replace = (name == "replace_media")
+                    .then(|| args["assetId"].as_str().unwrap_or_default().to_owned());
+                if let Some(asset) = replace.as_deref() {
+                    if crate::media::has_locked_reference(&frozen.project, asset) {
+                        return Err(Error::invalid(
+                            "Unlock layers using this media before replacing it.",
+                        ));
+                    }
+                    if args["missingOnly"] == true
+                        && host
+                            .media_registry
+                            .as_ref()
+                            .is_some_and(|registry| registry.state(&id, asset).available)
+                    {
+                        return Ok(json!({"status":"already_available","assetId":asset,
+                            "persisted":frozen.project["assets"][asset]["persisted"] == true}));
+                    }
+                }
+                let project = frozen.project.clone();
+                let imported = importer.import(&crate::services::MediaImport {
+                    frozen,
+                    path: args["path"].as_str().unwrap_or_default().into(),
+                    folder: args["folderId"].as_str().map(str::to_owned),
+                    replace,
+                    expected_fingerprint: args["expectedFingerprint"].as_str().map(str::to_owned),
+                    writer: self.writer,
+                })?;
+                // Media Undo is separate from run grouping, like manage_media.
+                session.external_actions = true;
+                session.committed |= imported.revision != expected;
+                session.baseline = imported.revision;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.revision = imported.revision;
+                }
+                let mut result = json!({"status":imported.status,"assetId":imported.asset,
+                    "name":imported.name,"persisted":true,"fingerprint":imported.fingerprint,
+                    "storage":"copied","revision":imported.revision});
+                if name == "import_media_to_timeline" {
+                    let at = args["at"].as_f64().unwrap_or(0.);
+                    match crate::media::layer_for(&project, &imported, at) {
+                        Some((layer, command)) => {
+                            drop(host);
+                            let commands = json!({"commands":[command],"label":"Import Media"});
+                            self.dispatch("apply_commands", &commands)?;
+                            result["layerId"] = json!(layer);
+                        }
+                        None => {
+                            result["note"] = json!("Imported. Place 3D models with edit_3d.");
+                        }
+                    }
+                }
+                Ok(result)
+            }
             "manage_media" => {
                 let expected = session
                     .transaction
@@ -357,8 +440,8 @@ impl McpSession {
                     tx.revision = ack.revision;
                 }
                 let selected = host
-                    .store(&id)?
-                    .selection()
+                    .view(&id)?
+                    .selection
                     .layers()
                     .iter()
                     .filter(|s| !plan.removed.contains(s))
@@ -427,7 +510,7 @@ impl McpSession {
                 };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
-                        &host.store(&id)?.snapshot(),
+                        &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         host.playhead(&id),
@@ -441,7 +524,7 @@ impl McpSession {
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
-                        Some(host.kernel().state()),
+                        Some(&host.state()),
                     )?)
                 } else {
                     None
@@ -527,8 +610,8 @@ impl McpSession {
                     .host
                     .lock()
                     .map_err(|_| Error::unavailable("headless host stopped"))?;
-                host.active.as_deref() != Some(id)
-                    || host.store(id).ok().map(|s| s.doc_id()) != session.document
+                host.active_project().as_deref() != Some(id)
+                    || host.view(id).ok().map(|view| view.document) != session.document
             } else {
                 false
             }
@@ -562,7 +645,7 @@ impl McpSession {
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
         let project = if context == "project" {
-            Some(host.active.clone().ok_or_else(|| {
+            Some(host.active_project().ok_or_else(|| {
                 Error::invalid("Create or open a project before starting a project session.")
             })?)
         } else {
@@ -575,7 +658,7 @@ impl McpSession {
             .unwrap_or(0);
         let document = project
             .as_ref()
-            .map(|id| host.store(id).map(|s| s.snapshot().doc_id))
+            .map(|id| host.view(id).map(|view| view.document))
             .transpose()?;
         let run_id = format!("mcp-{}", pm_kernel::new_id("run"));
         let mut result = json!({"runId":run_id,"projectId":project.as_deref().unwrap_or("powermove-global"),"access":access});
@@ -606,7 +689,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             result["instructions"] = json!(
-                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. Engine, panels, agents, Store and extension sources require their native host capabilities. User MCP servers and scripting sandbox are not available in this build. api/mcp-tools.json lists the frozen public contract; unsupported tools return a structured error. Extension staging is inert until the runtime lane is connected."
+                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. Extension staging is inert: nothing here activates."
             );
             Some(root)
         };
@@ -632,6 +715,7 @@ impl McpSession {
                 .host
                 .lock()
                 .map_err(|_| Error::unavailable("headless host stopped"))?;
+            host.document_fence = session.document;
             let Some(id) = session.project.clone() else {
                 return Ok(json!({"changed":session.committed}));
             };
@@ -669,7 +753,7 @@ impl McpSession {
         let id = a["projectId"]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| host.active.clone());
+            .or_else(|| host.active_project());
         let active = self.active.as_mut().unwrap();
         if ["create", "open"].contains(&operation) && active.context != "app" {
             return Err(Error::invalid(
@@ -695,7 +779,9 @@ impl McpSession {
                 .iter()
                 .map(|p| json!({"id":p["id"],"name":p["name"]}))
                 .collect::<Vec<_>>();
-            return Ok(json!({"activeProjectId":host.active,"projects":rows,"trash":trash}));
+            return Ok(
+                json!({"activeProjectId":host.active_project(),"projects":rows,"trash":trash}),
+            );
         }
         let name = || {
             a["name"]
@@ -729,7 +815,7 @@ impl McpSession {
             }
             "save" => host.save_library(&id)?,
             "rename" => {
-                if host.active.as_deref() != Some(&id) {
+                if host.active_project().as_deref() != Some(&id) {
                     return Err(Error::unavailable(
                         "rename unopened library slot through kernel shell",
                     ));
@@ -778,7 +864,7 @@ impl McpSession {
         if let Some(project) = &active.project {
             active.baseline = host.revision(project)?;
         }
-        Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active}))
+        Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
     }
     pub fn close(&mut self) -> Result<()> {
         let result = self.finish(false).map(|_| ());
@@ -796,8 +882,8 @@ impl Drop for McpSession {
     }
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
-    if host.active.as_deref() != Some(id)
-        || host.store(id).ok().map(|s| s.snapshot().doc_id) != session.document
+    if host.active_project().as_deref() != Some(id)
+        || host.view(id).ok().map(|view| view.document) != session.document
     {
         return Err(Error::conflict(
             "The active project changed or reopened. All work was preserved. Start a new agent run in this project.",

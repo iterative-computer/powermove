@@ -66,6 +66,15 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((self.app / "Contents/Resources/Assets.car").exists())
         self.assertNotIn("SUFeedURL", info)
 
+    def test_helpers_and_agent_runtimes_land_where_discovery_reads_them(self):
+        vendor = self.root / "vendor"
+        (vendor / "bin").mkdir(parents=True)
+        shutil.copy2(self.binary, vendor / "bin" / "codex")
+        self.bundle(glsl_compiler=self.binary, claude_runtime=self.binary, codex_vendor=vendor)
+        for path in ("MacOS/pm-glsl-compiler", "Resources/claude/bin/claude",
+                     "Resources/codex/bin/codex"):
+            self.assertTrue(os.access(self.app / "Contents" / path, os.X_OK), path)
+
     def test_accent_catalog_matches_the_existing_opus_owned_catalog_byte_for_byte(self):
         self.bundle()
         source = package.NATIVE / "bundle/Assets.xcassets"

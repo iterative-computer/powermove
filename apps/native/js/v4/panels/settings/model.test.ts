@@ -256,6 +256,38 @@ test("model service actions acknowledge; archive never invokes a raw delete", as
     await model.perform({ type: "row", id: "density", action: "invented" }),
   ).toBe(false);
 });
+test("a published account row replaces the disabled catalogue row and performs its action", async () => {
+  const { model, actions } = fixture();
+  expect(model.rows.find((r) => r.id === "account.chatgpt")?.disabled).toBe(
+    true,
+  );
+  model.publish(
+    publication({
+      revision: 2,
+      rows: [
+        {
+          id: "account.chatgpt",
+          section: "accounts",
+          group: "Subscriptions",
+          label: "ChatGPT",
+          control: "action",
+          action: "account.connect",
+          actionLabel: "Sign In…",
+        },
+      ],
+    }),
+  );
+  expect(
+    await model.perform({
+      type: "row",
+      id: "account.chatgpt",
+      action: "account.connect",
+    }),
+  ).toBe(true);
+  expect(actions).toEqual([
+    { type: "row", id: "account.chatgpt", action: "account.connect" },
+  ]);
+});
 test("secure input cannot be persisted or published through ordinary row writes", async () => {
   const { model, actions, requests } = fixture();
   expect(await model.write("account.key", "synthetic-key")).toBe(false);

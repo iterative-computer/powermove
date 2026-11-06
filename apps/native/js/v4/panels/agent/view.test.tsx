@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
 import type { ComponentChild } from "preact";
 import { createRoot, type Commit } from "../../src";
-import { AgentPanel, AgentView, composerEvent, elapsed } from "./view";
-import { fixture, states, withRows } from "./fixtures";
+import { AgentPanel, AgentView, composerKey, elapsed } from "./view";
+import { fixture, state, states, withRows } from "./fixtures";
 import type { Action, AgentModel, Publication } from "./contract";
 
 function mount() {
@@ -69,6 +69,10 @@ test("native supported focus order follows header, conversation and composer bar
     "agent-new",
     "agent-presentation",
     "agent-conversation",
+    "agent-composer",
+    "agent-access",
+    "agent-provider",
+    "agent-model",
     "agent-send",
   ]);
   expect(
@@ -198,6 +202,69 @@ test("empty Send and unavailable native actions cannot dispatch through system p
   assertWire(commits);
   root.dispose();
 });
+test("a live run keeps its conversation and Stop after its account signs out", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  await root.render(
+    <AgentView
+      publication={state({ runId: "run" }, { connection: "unavailable" })}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  const nodes = root.inspect().nodes;
+  expect(nodes.some((n) => n.props.label === "Connect Your Agent")).toBe(false);
+  const stop = nodes.find((n) => n.props.id === "agent-stop")!;
+  await root.drive(stop.id, "click");
+  expect(actions).toEqual([{ type: "stop" }]);
+  await root.render(
+    <AgentView publication={states.unavailable()} send={() => {}} />,
+  );
+  expect(
+    root.inspect().nodes.some((n) => n.props.label === "Connect Your Agent"),
+  ).toBe(true);
+  root.dispose();
+});
+test("question cards choose, answer and skip through the model; Answer waits for a choice", async () => {
+  const { root } = mount();
+  const sent: Action[] = [];
+  const question = {
+    id: "q",
+    commandId: "live:q",
+    chosen: {},
+    open: true,
+    value: {
+      id: "q",
+      kind: "question",
+      status: "open",
+      transport: "reply",
+      questions: [
+        { id: "a", question: "Which?", options: [{ label: "Soft" }] },
+      ],
+    },
+  };
+  const send = (action: Action) => sent.push(action);
+  await root.render(
+    <AgentView publication={withRows([question])} send={send} />,
+  );
+  const node = (id: string) =>
+    root.inspect().nodes.find((n) => n.props.id === id)!;
+  expect(node("q-answer").props.disabled).toBe(true);
+  await root.drive(node("q-a-Soft").id, "click");
+  await root.drive(node("q-skip").id, "click");
+  await root.render(
+    <AgentView
+      publication={withRows([{ ...question, chosen: { a: ["Soft"] } }])}
+      send={send}
+    />,
+  );
+  await root.drive(node("q-answer").id, "click");
+  expect(sent).toEqual([
+    { type: "chooseAnswer", step: "live:q", question: "a", option: "Soft" },
+    { type: "answer", step: "live:q", skip: true },
+    { type: "answer", step: "live:q", skip: false },
+  ]);
+  root.dispose();
+});
 test("attachment remove/open routes preserve ids and two-stage arming remains model-owned", async () => {
   const { root, commits } = mount();
   const p = fixture();
@@ -277,22 +344,20 @@ test("composer worker forwarding keeps native clipboard and editor routing disti
     { key: "Enter", composing: true },
     { key: "Enter", repeat: true },
   ]) {
-    let stopped = false;
-    await composerEvent(model, {
-      ...key,
-      type: "keydown",
-      target: 1,
-      currentTarget: 1,
-      defaultPrevented: false,
-      preventDefault() {
-        throw Error("late cancellation");
-      },
-      stopPropagation() {
-        stopped = true;
-      },
-      stopImmediatePropagation() {},
-    });
-    expect(stopped).toBe(key.key !== "v");
+    await model.dispatch(
+      composerKey({
+        ...key,
+        type: "keydown",
+        target: 1,
+        currentTarget: 1,
+        defaultPrevented: false,
+        preventDefault() {
+          throw Error("late cancellation");
+        },
+        stopPropagation() {},
+        stopImmediatePropagation() {},
+      }),
+    );
   }
   expect(seen).toHaveLength(4);
   expect(seen[2]).toMatchObject({
@@ -310,7 +375,6 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
       startedAt: 1000,
       endedAt: 4200,
     },
-    { kind: "approval", text: "Run “npm test”?" },
     { kind: "visual", title: "Rendered result", status: "error" },
     { kind: "result", text: "The rendered change is ready." },
     {
@@ -323,6 +387,7 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
   const rows = values.map((value, i) => ({
     id: `r${i}`,
     commandId: `r${i}`,
+    chosen: {},
     open: true,
     value,
   }));
@@ -409,6 +474,7 @@ test("answered and skipped cards collapse using masked model acknowledgements; r
         values.map((value, i) => ({
           id: `q${i}`,
           commandId: `q${i}`,
+          chosen: {},
           open: false,
           value,
         })),

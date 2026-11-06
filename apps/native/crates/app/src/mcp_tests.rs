@@ -1,8 +1,24 @@
 use super::*;
+use pm_model::json::parse;
+use serde_json::json;
+fn model(value: &Value) -> pm_model::Value {
+    parse(&value.to_string()).unwrap()
+}
+fn json_value(value: &pm_model::Value) -> Value {
+    serde_json::from_str(&pm_model::json::to_canonical_string(value)).unwrap()
+}
+fn document(p: &Published) -> Value {
+    let mut value = json_value(&pm_model::canonical::realize_project(
+        p.snapshot.document.to_value().unwrap(),
+    ));
+    value["revision"] = json!(p.revision());
+    value
+}
 struct Fixture {
     _root: tempfile::TempDir,
     actor: Option<KernelActor>,
     host: Arc<Host>,
+    tools: Tools,
 }
 impl Fixture {
     fn new() -> Self {
@@ -17,13 +33,14 @@ impl Fixture {
         host.open("test".into(),SessionSource::New(model(&json!({"id":"test","name":"Synthetic","compId":"c","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","layers":[],"assets":{},"comps":{}})))).unwrap();
         host.save(host.current().unwrap(), None).unwrap();
         Self {
-            _root: root,
             actor: Some(actor),
+            tools: Tools::new(host.clone(), host.profile.join("exports")),
             host,
+            _root: root,
         }
     }
     fn connection(&self) -> Connection {
-        Connection::new(self.host.clone())
+        self.tools.connect()
     }
     fn ui(&self, call: impl Into<Call>) -> Ack {
         self.host
@@ -71,6 +88,52 @@ fn layers(f: &Fixture) -> usize {
         .as_array()
         .unwrap()
         .len()
+}
+/// What the agent panel saved is what `thread_read` returns.
+#[test]
+fn thread_tools_page_the_durable_archive() {
+    let fixture = Fixture::new();
+    crate::mcp_services::connect_engine(&fixture.tools, Arc::default()).unwrap();
+    let long = "é".repeat(30);
+    let archive = json!({"version":1,"threads":[{"id":"t1","title":"Headline",
+        "updatedAt":5,"provider":"claude","access":"project","lastRunStatus":"completed",
+        "lastRunId":"r1","conversation":[{"role":"user","text":long},
+        {"role":"assistant","text":"Done."}]}]});
+    fixture
+        .host
+        .kernel
+        .state_transaction(state::StateTransaction {
+            expected_revision: None,
+            ops: vec![state::StateOp::Setting {
+                key: "agentThreads.test".into(),
+                value: Some(model(&archive)),
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut c = fixture.connection();
+    c.dispatch("start_session", &json!({"prompt":"read"}))
+        .unwrap();
+    let listed = c.dispatch("thread_list", &json!({})).unwrap();
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["threads"][0]["threadId"], "t1");
+    assert_eq!(listed["threads"][0]["status"], "completed");
+    assert_eq!(listed["threads"][0]["busy"], false);
+    assert_eq!(listed["threads"][0]["summary"], "Done.");
+    let read = c
+        .dispatch(
+            "thread_read",
+            &json!({"threadId":"t1","limit":1,"maxCharsPerMessage":10}),
+        )
+        .unwrap();
+    assert_eq!(read["messages"][0]["text"], "é".repeat(10));
+    assert_eq!(read["messages"][0]["nextTextOffset"], 10);
+    assert_eq!(read["nextOffset"], 1);
+    assert!(
+        c.dispatch("thread_read", &json!({"threadId":"t2"}))
+            .is_err()
+    );
 }
 #[test]
 fn live_mcp_folds_into_ui_gesture_without_regrouping_or_rollback() {
@@ -190,11 +253,12 @@ fn reopened_identity_and_editor_permissions_are_fenced() {
             },
         )
         .unwrap();
+    // A replaced document retires the run, as on main; it never reaches the new one.
     assert_eq!(
         c.dispatch("get_project_state", &json!({"indexOnly":true}))
             .unwrap_err()
-            .code,
-        "revision_conflict"
+            .message,
+        "Call start_session before using Powermove tools."
     );
     let mut c = f.connection();
     c.dispatch(
@@ -402,12 +466,16 @@ fn live_app_ingress_and_actor_export_keep_authored_utf16_and_source_bytes() {
     assert_eq!(opened["projectId"], "utf16");
     let current = f.host.current().unwrap();
     let before = f.host.kernel.published(&current.project).unwrap();
-    let saved = f.host.export(current, before.snapshot.doc_id).unwrap();
-    let opened = pm_kernel::open_project(
-        std::path::Path::new(saved["path"].as_str().unwrap()),
-        Default::default(),
-    )
-    .unwrap();
+    let saved = f._root.path().join("actor-export.pmv");
+    f.host
+        .kernel
+        .prepare_export(current, before.snapshot.doc_id, saved.clone())
+        .wait()
+        .unwrap()
+        .unwrap()
+        .run()
+        .unwrap();
+    let opened = pm_kernel::open_project(&saved, Default::default()).unwrap();
     assert_eq!(
         opened.document.to_value(),
         before.snapshot.document.to_value()
@@ -422,21 +490,22 @@ fn live_app_ingress_and_actor_export_keep_authored_utf16_and_source_bytes() {
 #[test]
 fn queued_app_mcp_call_cannot_edit_a_reopened_document_with_the_same_project_id() {
     let f = Fixture::new();
-    let mut connection = f.connection();
-    start(&mut connection);
+    let retired = f.host.kernel.published("test").unwrap().snapshot.doc_id;
     assert!(f.host.kernel.close("test").wait().unwrap());
     f.host.kernel.open("test",OpenSource::Untitled(model(&json!({"id":"test","name":"Replacement","compId":"c","w":320,"h":180,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})))).wait().unwrap().unwrap();
     let before = f.host.kernel.published("test").unwrap();
-    assert!(
-        connection
-            .call(
-                "test",
-                HistoryCall::Begin {
-                    label: "Retired request".into()
-                }
-            )
-            .is_err()
+    let mut automation = f.tools.automation.lock().unwrap();
+    automation.document_fence = Some(retired);
+    let retired_request = automation.apply_commands(
+        "test",
+        vec![],
+        "Retired request",
+        Origin::Mcp,
+        before.revision(),
+        7,
     );
+    assert!(retired_request.is_err());
+    drop(automation);
     let after = f.host.kernel.published("test").unwrap();
     assert_eq!(after.revision(), before.revision());
     assert!(after.entry.is_none());
@@ -624,15 +693,6 @@ fn app_memory_wire_keeps_split_utf16_emoji_through_reads_and_updates() {
         assert_eq!(wire["isError"], false, "{wire}");
         pm_model::json::parse(wire["content"][0]["text"].as_str().unwrap()).unwrap()
     };
-    // The app enforces the public input schema. Existing project notes and
-    // native note admission can still carry a JavaScript slice's lone unit.
-    let too_long = c
-        .invoke(
-            "project_memory",
-            json!({"operation":"add","kind":"decision","text":format!("{}😀", "x".repeat(599))}),
-        )
-        .unwrap();
-    assert_eq!(too_long["isError"], true);
     let published = f.host.kernel.published("test").unwrap();
     let ack = f
         .host

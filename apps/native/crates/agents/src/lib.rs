@@ -1,5 +1,6 @@
 //! Headless agent services. All runtime and disk work belongs on workers.
 //! OAuth homes are opaque runtime-owned paths, never read or modified here.
+pub mod account;
 pub mod approvals;
 pub mod claude;
 pub mod claude_launch;
@@ -8,6 +9,7 @@ pub mod codex_exec;
 pub mod conversation;
 pub mod delivery;
 pub mod history;
+pub mod launch;
 pub mod monitor;
 pub mod orchestration;
 pub mod persistence;
@@ -94,6 +96,19 @@ pub enum Event {
     Notification(Value),
     Warning(String),
     Stopped(String),
+}
+impl Event {
+    /// A text fragment of a reply or its reasoning: one per provider token. Its
+    /// effect lives in the conversation, so hosts checkpoint it, not each one.
+    pub fn streamed(&self) -> bool {
+        match self {
+            Event::Trace { value, .. } => {
+                matches!(value["kind"].as_str(), Some("answer" | "thought"))
+            }
+            Event::Progress { .. } => true,
+            _ => false,
+        }
+    }
 }
 #[derive(Default, Debug)]
 pub struct Effects {

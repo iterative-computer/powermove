@@ -48,7 +48,7 @@ fn saved_panel_layout_matches_tag_on_corpus_copy_and_app_context() {
         let project: Value = serde_json::from_slice(&std::fs::read(corpus).unwrap()).unwrap();
         let id = project["id"].as_str().unwrap();
         let opened = host
-            .kernel
+            .kernel_mut()
             .shell(ShellCall::Open {
                 id: id.into(),
                 source: SessionSource::New(model(&project)),
@@ -88,9 +88,10 @@ fn saved_panel_layout_matches_tag_on_corpus_copy_and_app_context() {
                 },
             });
         }
-        host.kernel
+        let state_revision = host.kernel_mut().state().revision;
+        host.kernel_mut()
             .state_transaction(StateTransaction {
-                expected_revision: Some(host.kernel.state().revision),
+                expected_revision: Some(state_revision),
                 ops,
             })
             .unwrap();
@@ -100,7 +101,7 @@ fn saved_panel_layout_matches_tag_on_corpus_copy_and_app_context() {
         );
         // A project-specific workspace wins over the global selection.
         let local = json!({"id":"local","name":"Local","layout":{"docks":[]}});
-        host.kernel
+        host.kernel_mut()
             .handle(
                 id,
                 Request::new(
@@ -165,9 +166,10 @@ fn layout_empty_and_contribution_override_disposal_match_tag() {
             oracle(&Value::Null, &json!([]))
         );
         for (token, title) in [("base", "Base"), ("override", "Override")] {
-            host.kernel
+            let state_revision = host.kernel_mut().state().revision;
+            host.kernel_mut()
                 .state_transaction(StateTransaction {
-                    expected_revision: Some(host.kernel.state().revision),
+                    expected_revision: Some(state_revision),
                     ops: vec![StateOp::Register {
                         registry: "panels".into(),
                         entry: Registration {
@@ -187,9 +189,10 @@ fn layout_empty_and_contribution_override_disposal_match_tag() {
             host.panel_layout(None).unwrap(),
             oracle(&Value::Null, &json!([{"id":"viewer","title":"Override"}]))
         );
-        host.kernel
+        let state_revision = host.kernel_mut().state().revision;
+        host.kernel_mut()
             .state_transaction(StateTransaction {
-                expected_revision: Some(host.kernel.state().revision),
+                expected_revision: Some(state_revision),
                 ops: vec![StateOp::Dispose {
                     token: "override".into(),
                 }],
@@ -216,7 +219,7 @@ fn corpus_project_reads_selection_rollback_and_library_management() {
         let project: Value = serde_json::from_slice(&bytes).unwrap();
         let id = project["id"].as_str().unwrap();
         let opened = host
-            .kernel
+            .kernel_mut()
             .shell(ShellCall::Open {
                 id: id.into(),
                 source: SessionSource::New(model(&project)),

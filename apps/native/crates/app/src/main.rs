@@ -17,6 +17,7 @@ mod layer_commands;
 pub mod library_surface;
 mod lifecycle;
 mod mcp;
+mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
@@ -49,6 +50,22 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
+
+/// MCP's host export folder is ~/Powermove for the default native profile.
+/// An explicit test or lane profile keeps its exports to itself.
+fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) -> PathBuf {
+    let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
+    match home {
+        Some(home)
+            if pm_first_launch::default_paths(&home.join("Library/Application Support"))
+                .native_profile
+                == profile =>
+        {
+            home.join("Powermove")
+        }
+        _ => profile.join("exports"),
+    }
+}
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -95,6 +112,7 @@ fn main() -> Result<()> {
         profile.is_absolute(),
         "Use an absolute isolated native profile"
     );
+    let exports = export_folder(&profile, std::env::var_os("HOME"));
     if mcp_mode {
         if profile.join("mcp/connection.json").exists() {
             anyhow::ensure!(
@@ -111,7 +129,7 @@ fn main() -> Result<()> {
             plan.launch != pm_first_launch::Launch::Migrate,
             "Open Powermove once to finish copying your library"
         );
-        return mcp::headless(profile, launch);
+        return mcp_services::headless(profile, exports, launch);
     }
     std::fs::create_dir_all(&profile)?;
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
@@ -126,7 +144,7 @@ fn main() -> Result<()> {
     let fonts = RenderFonts::new(broker.clone());
     let text_fonts = fonts.clone();
     let worker_profile = profile.clone();
-    let (actor, engine, mcp_host) = std::thread::spawn(move || -> Result<_> {
+    let (actor, engine, mcp_host, tools) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
@@ -138,7 +156,10 @@ fn main() -> Result<()> {
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu, fonts,
         )?);
-        Ok((actor, engine, mcp_host))
+        let tools = mcp::Tools::new(mcp_host.clone(), exports);
+        mcp_services::connect_engine(&tools, engine.export_activity())?;
+        // The server itself starts once the library is attached (first_run).
+        Ok((actor, engine, mcp_host, tools))
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
@@ -151,7 +172,7 @@ fn main() -> Result<()> {
     ));
     let started = Rc::new(Cell::new(false));
     let electron = plan.electron();
-    let gate = first_run::gate(plan, handle.clone(), mcp_host.clone(), server.clone());
+    let gate = first_run::gate(plan, handle.clone(), tools, server.clone());
     let result = pm_shell::run_gated(
         device,
         Rc::new({

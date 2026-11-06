@@ -98,6 +98,7 @@ impl Backend {
             &identity.project,
             Caller::realm(realm, 1, Origin::Interface),
             application,
+            panel == "agent",
         )?;
         let document = published.as_ref().map(|p| p.snapshot.doc_id);
         Ok(Self {
@@ -135,26 +136,28 @@ impl Backend {
     pub(crate) fn sync(&mut self) -> Result<(), String> {
         let published = self.published();
         if self.model.is_none() {
-            let stamp = self.kernel.state().revision.to_string();
+            let accounts = self.native.agent_link.accounts_revision();
+            let stamp = format!("{}:{accounts}", self.kernel.state().revision);
             if self.native.stamp != stamp {
                 self.native.stamp = stamp;
                 self.native.settings_sequence += 1;
-                self.native.agent_sequence += 1;
+                self.native.agent_link.touch();
             }
             return Ok(());
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{:?}:{}",
             published.snapshot.doc_id,
             published.revision(),
             published.metadata_revision,
             self.kernel.state().revision,
-            published.selection.primary()
+            published.selection.primary(),
+            self.native.agent_link.accounts_revision()
         );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;
-            self.native.agent_sequence += 1;
+            self.native.agent_link.touch();
             self.native.settings_sequence += 1;
             if !self.native.export.is_null() {
                 self.native.export["sequence"] =

@@ -26,5 +26,18 @@ pub enum Error {
     Host(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+/// What a conversation shows when a run could not start or act.
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Host(message) => f.write_str(message),
+            Error::Busy => f.write_str("The agent is busy. Try again in a moment."),
+            Error::Stale => f.write_str("This run changed before the request reached it."),
+            Error::UnknownId(_) | Error::Invalid(_) | Error::MissingPayload(_) => {
+                f.write_str("The agent could not take this request.")
+            }
+        }
+    }
+}
 
 pub mod work_groups;
