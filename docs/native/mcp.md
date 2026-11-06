@@ -19,17 +19,15 @@ no production caller.
   `media_waveform` read originals through `pm-media`. Layer targets refuse until
   evaluated clip timing exists; pass `assetId`. The `informative` frame scan
   refuses. Loudness is peak level only.
-
 - `import_media`, `replace_media` and `import_media_to_timeline` retain originals
   through `Archive::retain_path` and admit them with `Call::AdmitMedia`, so they
   use normal media Undo. Images aren't converted and videos get no playback proxy.
   3D models import but aren't placed; use `edit_3d`. `list_media` reports
   availability from the kernel's media table.
-
 - `thread_list` and `thread_read` read the durable thread archive. `activity` and
   `questions` stay empty, because a live session isn't reachable from an MCP worker.
 
-Of the 68 tools, 36 have bodies in the app. These refuse with
+Of the 68 tools, 36 have bodies in the app. The other 32 refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
