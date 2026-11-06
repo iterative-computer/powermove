@@ -37,8 +37,9 @@ that the renderer applies. Here the run edits through its MCP session, limited t
 
 Proof is `builtins/src/agent_tests.rs`: real V8 panel, real kernel actor and a fake
 provider over real pipes, for reply and reopen, Stop, question and approval cards,
-pickers reaching the argv, and sign-in and sign-out. The sign-in test calls
-`panel.settings` directly, not through the rendered button. No real provider has
+pickers reaching the argv, and sign-in and sign-out. Sign-in is proven from the
+`panel.settings` command and, separately, from `SettingsModel.perform`; nobody has
+clicked the rendered Settings button. No real provider has
 run: `live-provider-check` is unexecuted, and the Claude model request is unproven
 against the real binary.
 
