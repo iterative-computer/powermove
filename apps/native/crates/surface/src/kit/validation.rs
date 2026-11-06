@@ -176,13 +176,15 @@ fn token_number(value: &Value, table: &Value) -> Option<f64> {
         .as_f64()
 }
 fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
-    if value.is_null() {
+    if value.is_null() || (matches!(key, "flexGrow" | "flexShrink") && value.is_number()) {
         return true;
     }
     // Only structural keywords are literal. Strings like "22px", hex colours,
     // font names and numeric strings are never accepted as visual values.
     let categorical = match key {
         "display" => &["flex", "grid", "none"][..],
+        "position" => &["relative", "absolute"][..],
+        "inset" => &["fill"][..],
         "flexDirection" => &["row", "column"][..],
         "alignItems" | "justifyContent" => {
             &["start", "end", "center", "stretch", "space-between"][..]

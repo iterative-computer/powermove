@@ -376,6 +376,9 @@ impl Controller {
         );
         self.published = Some(p);
         self.update_builtins(cx);
+        if let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |t, cx| t.published(cx));
+        }
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {

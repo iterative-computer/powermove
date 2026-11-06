@@ -93,28 +93,18 @@ fn joined_position_projection_and_selection_keep_all_subframe_key_identities() {
         .into_iter()
         .find(|p| p.panel == "timeline")
         .unwrap();
-    let scene = publication.timeline.unwrap();
-    let row_id = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Property {
-        layer_id: "a".into(),
-        channel: "position".into(),
-    });
-    let row = &scene.rows[&row_id];
-    assert_eq!(
-        row.keys.len(),
-        2,
-        "coincident axes keep distinct stored ids"
+    let index = pm_panel_timeline::TimelineIndex::from_snapshot(
+        &actor.handle().published("synthetic").unwrap().snapshot,
     );
-    assert_ne!(row.keys[0].id, row.keys[1].id);
-    let mut paths = row
-        .keys
+    let keys: Vec<_> = ["position.x", "position.y"]
         .iter()
-        .map(|k| k.channel.as_str())
-        .collect::<Vec<_>>();
-    paths.sort();
-    assert_eq!(paths, ["position.x", "position.y"]);
+        .flat_map(|path| index.channel("a", path).unwrap().keys.iter())
+        .collect();
+    assert_eq!(keys.len(), 2, "coincident axes keep distinct stored ids");
+    assert_ne!(keys[0].id, keys[1].id);
     finish(
         panels
-            .timeline_key("a", "position", &row.keys[0].id, false)
+            .timeline_key("a", "position", &keys[0].id, false)
             .unwrap(),
     );
     let published = actor.handle().published("synthetic").unwrap();

@@ -29,7 +29,6 @@ type TimelineJob = Pin<
 pub(crate) struct Models {
     pub properties: Properties,
     pub timeline: Option<TimelineClient>,
-    pub timeline_scene: Option<std::sync::Arc<crate::timeline_scene::Scene>>,
     pub viewer: pm_panel_viewerchrome::v4::Session,
     viewer_projection: Option<(
         pm_panel_viewerchrome::Stamp,
@@ -75,7 +74,6 @@ impl Models {
         Ok(Self {
             properties: Properties::default(),
             timeline,
-            timeline_scene: None,
             viewer: Default::default(),
             viewer_projection: None,
             project: ProjectBridge::default(),
@@ -201,18 +199,17 @@ impl Backend {
         let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
             .map_err(|e| e.to_string())?;
         let fps = client.model.index.fps;
-        let mut scene = crate::timeline_scene::Scene {
-            duration: client.model.index.duration,
-            fps,
-            time,
-            rows: Default::default(),
-        };
         let mut display = vec![];
         for row in frame["window"]["rows"].as_array().ok_or("timeline rows")? {
             let mut row = row.clone();
-            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
             row["focused"] = json!(false);
             row["hovered"] = json!(false);
+            if row["kind"] == "track" {
+                row["accessibilityLabel"] = row["label"].clone();
+                display.push(row);
+                continue;
+            }
+            let layer = row["layer"].as_str().ok_or("row layer")?.to_owned();
             if row["kind"] == "layer" {
                 let l = client.model.index.layer(&layer).ok_or("layer")?;
                 row["accessibilityLabel"] = json!(format!(
@@ -274,59 +271,8 @@ impl Backend {
                     row["readout"].as_str().unwrap_or("")
                 ));
             }
-            let layer_id = row["layer"].as_str().ok_or("layer")?;
-            if let Some(layer) = client.model.index.layer(layer_id) {
-                let property = row["kind"] == "property";
-                let path = row["path"].as_str();
-                let mut keys = vec![];
-                for channel in &layer.channels {
-                    if property
-                        && path.is_some_and(|p| {
-                            !client
-                                .model
-                                .track_channels(&layer.id, p)
-                                .iter()
-                                .any(|axis| axis.path == channel.path)
-                        })
-                    {
-                        continue;
-                    }
-                    for key in &channel.keys {
-                        let time = layer.from + key.time;
-                        keys.push(crate::timeline_scene::Key {
-                            id: key.id.clone(),
-                            channel: channel.path.clone(),
-                            time,
-                            selected: client.model.selection.keys().contains(&key.id),
-                            interpolation: key
-                                .stored
-                                .get("e")
-                                .and_then(pm_model::Value::as_str)
-                                .unwrap_or("linear")
-                                .into(),
-                        });
-                    }
-                }
-                keys.sort_by(|a, b| a.time.total_cmp(&b.time));
-                // Retain every authored identity. The native renderer culls and
-                // groups using the actual viewport, never an invented 2048px grid.
-                scene.rows.insert(
-                    row["id"].as_str().ok_or("row id")?.into(),
-                    crate::timeline_scene::Row {
-                        layer: layer.id.clone(),
-                        name: layer.name.to_string_lossy(),
-                        kind: layer.kind.clone(),
-                        from: layer.from,
-                        duration: layer.duration,
-                        property,
-                        selected: row["selected"].as_bool().unwrap_or(false),
-                        keys,
-                    },
-                );
-            }
             display.push(row);
         }
-        self.native.timeline_scene = Some(std::sync::Arc::new(scene));
         frame["window"]["rows"] = json!(display);
         let frames = (time * fps).round().max(0.) as u64;
         let nominal = fps.round().max(1.) as u64;

@@ -7,7 +7,6 @@ mod models;
 mod properties;
 mod settings;
 mod timeline_easing;
-pub mod timeline_scene;
 pub mod virtualization;
 use data::Backend;
 use pm_kernel::KernelHandle;
@@ -39,7 +38,6 @@ pub struct Publication {
     pub panel: String,
     pub generation: u64,
     pub surface: Arc<Surface>,
-    pub timeline: Option<Arc<timeline_scene::Scene>>,
 }
 #[derive(Clone, Debug)]
 pub struct PlatformRequest {
@@ -594,13 +592,6 @@ impl EngineProxy for Broker {
                                 panel: panel.into(),
                                 generation: generation.number,
                                 surface: Arc::new(entry.surface.clone()),
-                                timeline: entry
-                                    .backend
-                                    .lock()
-                                    .unwrap()
-                                    .native
-                                    .timeline_scene
-                                    .clone(),
                             },
                         );
                         (self.wake)();

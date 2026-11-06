@@ -6,6 +6,7 @@ use pm_builtins::{Builtins, LIVE_PANELS, PlatformRequest, Publication};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
     sync::Arc,
 };
 #[derive(Default)]
@@ -16,6 +17,7 @@ pub struct Host {
     pending: BTreeMap<String, Publication>,
     pub views: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
+    pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -57,6 +59,27 @@ impl Controller {
         self.builtins.windows = windows;
         self.builtins.project = Some(project.clone());
         self.builtins.application = application;
+        if !application {
+            let delegate = Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let tokens = self.host.borrow().tokens.clone();
+            let (kernel, outline) = (self.kernel.clone(), self.builtins.natives.outline.clone());
+            let surface = cx.new(|cx| {
+                crate::timeline_surface::TimelineSurface::new(
+                    kernel,
+                    project.clone(),
+                    tokens,
+                    delegate,
+                    outline,
+                    cx,
+                )
+            });
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("timeline".into(), surface.clone().into());
+            self.builtins.timeline = Some(surface);
+        }
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
             let _ = tx.try_send(());
@@ -301,8 +324,12 @@ impl Controller {
         let t = self.host.borrow().tokens.clone();
         if let Some(publication) = self.builtins.pending.remove(id) {
             let (tokens, natives) = (t.clone(), self.builtins.natives.clone());
+            let outline = natives.outline.clone();
             let view =
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
+            if id == "timeline" {
+                outline.bind(view.downgrade());
+            }
             self.builtins.views.insert(id.into(), view);
         }
         let view = self.builtins.views.get(id)?.clone();
@@ -339,10 +366,7 @@ impl Controller {
                 .w_full()
                 .h(px((bounds.h - t.metrics.header).max(0.)))
                 .overflow_hidden()
-                .child(
-                    view.clone()
-                        .cached(StyleRefinement::default().size_full()),
-                )
+                .child(view.clone().cached(StyleRefinement::default().size_full()))
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -457,7 +481,7 @@ impl Controller {
         })
         .detach();
     }
-    fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(p) = &self.published else {
             return;
         };
@@ -714,6 +738,43 @@ impl Controller {
             };
             runtime.platform_reply(request.id, result);
         }
+    }
+}
+struct ControllerDelegate(WeakEntity<Controller>);
+impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn time(&self, cx: &App) -> f64 {
+        self.0.upgrade().map_or(0., |c| c.read(cx).time())
+    }
+    fn seek(&self, seconds: f64, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            v.seek(seconds);
+            v.tick_builtins(cx);
+        });
+    }
+    fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
+        use pm_panel_timeline::HostEffect as E;
+        let _ = self.0.update(cx, |v, cx| match effect {
+            E::Seek(time) => v.seek(time),
+            E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
+            E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
+            E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
+            other => v.message = format!("Not available yet: {other:?}"),
+        });
+    }
+    fn report(&self, message: String, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            v.message = message;
+            cx.notify();
+        });
+    }
+    fn menu(
+        &self,
+        items: Vec<Value>,
+        window: &mut Window,
+        cx: &mut App,
+        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+    ) {
+        crate::v4_native::menu(window, &items, cx, choose);
     }
 }
 struct SurfaceWindow {

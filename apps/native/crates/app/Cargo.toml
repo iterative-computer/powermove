@@ -40,6 +40,7 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 
 pm-panel-media = { path = "../panel-media" }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
+pm-panel-timeline = { path = "../panel-timeline" }
 
 [[example]]
 name = "pm-corpus"

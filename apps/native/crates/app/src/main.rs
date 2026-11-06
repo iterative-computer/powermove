@@ -21,6 +21,9 @@ mod rows;
 mod session;
 mod smoke;
 mod surfaces;
+mod timeline_surface;
+#[cfg(test)]
+mod timeline_tests;
 mod v4_compile;
 mod v4_control;
 mod v4_native;

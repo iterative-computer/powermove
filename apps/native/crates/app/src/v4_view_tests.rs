@@ -3,7 +3,7 @@
 use crate::v4_view::{Natives, SurfaceView};
 use gpui::{
     AppContext, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement, Pixels, PinchEvent, Render, ScrollDelta, ScrollWheelEvent,
+    MouseUpEvent, ParentElement, PinchEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
     StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use pm_builtins::{Builtins, Publication};
@@ -33,10 +33,28 @@ pub(crate) struct Rig {
     pub runtime: Arc<Builtins>,
     _actor: KernelActor,
 }
+/// Three adjacent static strips on one lane, with handles: pro-edit material.
+pub(crate) fn strips_json() -> String {
+    let strip = |id: &str, from: f64| {
+        format!(
+            r##"{{"id":"{id}","type":"video","name":"{id}","from":{from},"dur":2,"track":0,"on":true,"d":{{"asset":"source","trim":{{"v":{trim},"kf":[],"expr":null}},"speed":1}},"p":{{}},"fx":[]}}"##,
+            trim = from + 2.
+        )
+    };
+    format!(
+        r##"{{"id":"integration","name":"Strips","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{"source":{{"id":"source","kind":"video","dur":100}}}},"comps":{{}},"layers":[{},{},{}]}}"##,
+        strip("a", 0.),
+        strip("b", 2.),
+        strip("c", 4.)
+    )
+}
 pub(crate) fn rig(panel: &str, layers: usize) -> Rig {
+    rig_project(panel, &project_json(layers))
+}
+pub(crate) fn rig_project(panel: &str, project: &str) -> Rig {
     let actor = KernelActor::spawn(KernelConfig::default());
     let kernel = actor.handle();
-    let project = pm_model::json::parse(&project_json(layers)).unwrap();
+    let project = pm_model::json::parse(project).unwrap();
     kernel
         .open(PROJECT, OpenSource::Untitled(project))
         .wait()
@@ -86,6 +104,8 @@ pub(crate) fn window(
     first: Publication,
     natives: Natives,
 ) -> (Entity<SurfaceView>, VisualTestContext) {
+    // Kernel and V8 workers are real threads: their wakeups are expected here.
+    cx.executor().allow_parking();
     let runtime = rig.runtime.clone();
     let (view, vcx) = cx.add_window_view(|window, cx| {
         SurfaceView::new(runtime, first, tokens(), natives, window, cx)
@@ -143,7 +163,6 @@ fn synthetic(_: &Rig, ops: Vec<Op>) -> Publication {
         panel: "timeline".into(),
         generation: 1,
         surface: Arc::new(surface),
-        timeline: None,
     }
 }
 fn events(view: &Entity<SurfaceView>, vcx: &mut VisualTestContext) -> Vec<(u64, String)> {
@@ -173,8 +192,16 @@ fn press_drag_release_stays_on_the_captured_node_outside_its_bounds(cx: &mut Tes
     vcx.run_until_parked();
     let at = bounds(&mut vcx, "target").center();
     vcx.simulate_mouse_down(at, MouseButton::Left, modifiers_of(true));
-    vcx.simulate_mouse_move(point(px(900.), px(500.)), MouseButton::Left, Modifiers::none());
-    vcx.simulate_mouse_up(point(px(900.), px(500.)), MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(
+        point(px(900.), px(500.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.simulate_mouse_up(
+        point(px(900.), px(500.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
     vcx.simulate_mouse_move(point(px(10.), px(10.)), None, Modifiers::none());
     vcx.run_until_parked();
     let log = view.update(&mut vcx, |v, _| std::mem::take(&mut v.log));
@@ -213,7 +240,10 @@ fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut
     let at = bounds(&mut vcx, "target").center();
     vcx.simulate_mouse_move(at, None, Modifiers::none());
     vcx.run_until_parked();
-    assert_eq!(events(&view, &mut vcx), vec![(1, "pointerenter".to_owned())]);
+    assert_eq!(
+        events(&view, &mut vcx),
+        vec![(1, "pointerenter".to_owned())]
+    );
     vcx.simulate_event(MouseDownEvent {
         button: MouseButton::Right,
         position: at,
@@ -270,15 +300,30 @@ fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut
     assert_eq!(log[1].2.delta_y, Some(-50.));
     vcx.simulate_mouse_move(point(px(900.), px(500.)), None, Modifiers::none());
     vcx.run_until_parked();
-    assert_eq!(events(&view, &mut vcx), vec![(1, "pointerleave".to_owned())]);
+    assert_eq!(
+        events(&view, &mut vcx),
+        vec![(1, "pointerleave".to_owned())]
+    );
 }
 #[gpui::test]
 fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
-    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":600,"height":560}}), &[]);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":600,"height":560}}),
+        &[],
+    );
     let names: Vec<String> = Component::catalog()
-        .map(|c| serde_json::to_value(c).unwrap().as_str().unwrap().to_owned())
+        .map(|c| {
+            serde_json::to_value(c)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect();
     assert_eq!(names.len(), 29);
     for (i, name) in names.iter().enumerate() {
@@ -294,8 +339,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             "progress-row" => props["aria-valuenow"] = json!(0.5),
             "colour-well" => props["value"] = json!("#ff0000"),
             "viewer-gizmo" => {
-                props["metadata"] =
-                    json!({"pmKit":{"kind":"transform","position":{"x":4.,"y":5.}}})
+                props["metadata"] = json!({"pmKit":{"kind":"transform","position":{"x":4.,"y":5.}}})
             }
             _ => {}
         }
@@ -320,8 +364,8 @@ fn cached_panel_does_not_rerender_for_a_parent_frame(cx: &mut TestAppContext) {
     let surface = synthetic(&rig, ops);
     let runtime = rig.runtime.clone();
     let (root, vcx) = cx.add_window_view(|window, cx| {
-        let child =
-            cx.new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
+        let child = cx
+            .new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx));
         Host { child }
     });
     let mut vcx = vcx.clone();

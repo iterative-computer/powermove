@@ -76,7 +76,6 @@ test("one track-area focus stop, non-focusable rows, conditional graph menu and 
     "P0-0:Layers",
     "P0-1:DopeSheet",
     "timeline:snap",
-    "timeline:splitter",
     "timeline:tracks",
   ]);
   await root.render(
@@ -196,72 +195,6 @@ test("property navigation, key toggle and linked scale keep original native IDs"
       direction: "next",
     },
     { type: "scaleLink", layer: "headline" },
-  ]);
-  await root.dispose();
-});
-
-test("ruler, live Shift, cancellation, wheel and structured drop events reach the model unchanged", async () => {
-  const { root } = recorder();
-  const actions: Intent[] = [];
-  await root.render(
-    <TimelinePanel frame={frame()} send={(a) => actions.push(a)} />,
-  );
-  await drive(root, "timeline:ruler", "pointerdown", {
-    pointerId: 7,
-    x: 120.125,
-    y: 4,
-    shiftKey: true,
-    button: 0,
-  });
-  await drive(root, "timeline:ruler", "pointermove", {
-    pointerId: 7,
-    x: 121.25,
-    shiftKey: false,
-  });
-  await drive(root, "timeline:ruler", "pointercancel", { pointerId: 7 });
-  await drive(root, "timeline:tracks", "wheel", {
-    x: 120,
-    deltaX: -2.5,
-    deltaY: 0,
-    altKey: true,
-  });
-  const drag = {
-    types: ["fixture/media"],
-    data: { id: "asset-id" },
-    effect: "copy" as const,
-  };
-  await drive(root, "timeline:tracks", "drop", {
-    x: 120,
-    y: 10,
-    altKey: true,
-    drag,
-  });
-  expect(actions).toEqual([
-    {
-      type: "pointerDown",
-      target: { kind: "ruler" },
-      event: { pointerId: 7, x: 120.125, y: 4, shiftKey: true, button: 0 },
-    },
-    {
-      type: "pointerMove",
-      target: { kind: "ruler" },
-      event: { pointerId: 7, x: 121.25, shiftKey: false },
-    },
-    {
-      type: "pointerCancel",
-      target: { kind: "ruler" },
-      event: { pointerId: 7 },
-    },
-    {
-      type: "wheel",
-      target: { kind: "trackArea" },
-      event: { x: 120, deltaX: -2.5, deltaY: 0, altKey: true },
-    },
-    {
-      type: "drop",
-      target: { kind: "trackArea" },
-      event: { x: 120, y: 10, altKey: true, drag },
-    },
   ]);
   await root.dispose();
 });

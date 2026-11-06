@@ -9,7 +9,6 @@ import type {
   Modifiers,
   PropertyRow,
   Row,
-  Target,
   TimelineFrame,
 } from "./model";
 import { announcementText } from "./model";
@@ -36,28 +35,6 @@ function action(send: Send, intent: Intent) {
   return (event: SurfaceEvent) => {
     event.stopPropagation();
     send(intent);
-  };
-}
-function input(send: Send, target: Target) {
-  const deliver =
-    (type: Extract<Intent, { event: unknown }>["type"]) =>
-    (event: SurfaceEvent) => {
-      event.stopPropagation();
-      send({ type, target, event: nativeEvent(event) });
-    };
-  return {
-    onPointerDown: deliver("pointerDown"),
-    onPointerMove: deliver("pointerMove"),
-    onPointerUp: deliver("pointerUp"),
-    onPointerCancel: deliver("pointerCancel"),
-    onDoubleClick: deliver("doubleClick"),
-    onWheel: deliver("wheel"),
-    onDragEnter: deliver("dragEnter"),
-    onDragOver: deliver("dragOver"),
-    onDragLeave: deliver("dragLeave"),
-    onDrop: deliver("drop"),
-    onKeyDown: deliver("keyDown"),
-    onKeyUp: deliver("keyUp"),
   };
 }
 function Icon(props: {
@@ -127,7 +104,6 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 label="Current time"
                 value={f.timeEditor.value}
                 binding={f.timeEditor.binding}
-                {...input(send, { kind: "currentTime" })}
                 style={{
                   color: t("colors.text"),
                   fontSize: t("typography.timecode"),
@@ -204,7 +180,6 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                         id: tab.id,
                         close: false,
                       })}
-                      {...input(send, { kind: "tab", id: tab.id })}
                       style={{
                         color: t(
                           tab.active ? "colors.text" : "colors.secondary",
@@ -362,7 +337,6 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
             tabIndex={-1}
-            {...input(send, { kind: "row", id: row.id })}
           />
         ) : (
           <text
@@ -561,15 +535,6 @@ const TimelineRow = memo(
             ? { background: t("colors.hover") }
             : {}),
         }}
-        onPointerDown={(event) => {
-          if (event.target === event.currentTarget)
-            send({
-              type: "pointerDown",
-              target: { kind: "row", id: row.id },
-              event: nativeEvent(event),
-            });
-          event.stopPropagation();
-        }}
       >
         {row.kind === "layer" ? (
           <Layer row={row} send={send} />
@@ -664,92 +629,108 @@ export function TimelinePanel({
       ) : (
         <>
           <div
-            id="timeline:ruler"
-            label="Playhead"
-            role="slider"
-            value={f.spokenTime}
-            metadata={{ designTodo: "T4" }}
-            style={{
-              height: t("metrics.ruler"),
-              minWidth: t("metrics.hit"),
-              minHeight: t("metrics.hit"),
-            }}
-            {...input(send, { kind: "ruler" })}
-          />
-          <text id="timeline:render-bar" label={f.renderSummary} />
-          <div
-            id="timeline:splitter"
-            role="separator"
-            label="Layer column"
-            tabIndex={0}
-            metadata={{ designTodo: "T4", widthToken: "metrics.layer_column" }}
-            style={{ minWidth: t("metrics.hit"), minHeight: t("metrics.hit") }}
-            {...input(send, { kind: "splitter" })}
-          />
-          <UI.Tree
-            id="timeline:tracks"
-            label={f.mode}
-            tabIndex={0}
-            style={{ minWidth: t("metrics.hit"), minHeight: t("metrics.hit") }}
-            metadata={{
-              totalRows: f.window.total,
-              firstRow: f.window.first,
-              indexDigits: f.indexDigits,
-              designTodo: "T4",
-            }}
-            {...input(send, { kind: "trackArea" })}
-            onRangeChange={(event) => {
-              if (event.range && event.range[1] > event.range[0])
-                send({
-                  type: "range",
-                  first: event.range[0],
-                  visible: event.range[1] - event.range[0],
-                });
-            }}
+            id="timeline:body"
+            style={{ position: "relative", flexGrow: 1, overflow: "hidden" }}
           >
-            {f.window.rows.map((row) => (
-              <TimelineRow key={row.id} row={row} send={send} />
-            ))}
-            {f.window.total === 0 && (
+            <canvas
+              id="timeline:surface"
+              surface="timeline"
+              label="Timeline tracks"
+              style={{ position: "absolute", inset: "fill" }}
+            />
+            <div
+              id="timeline:outline"
+              metadata={{ nativeColumn: true }}
+              style={{
+                paddingTop: t("metrics.ruler"),
+                width: t("metrics.layer_column"),
+                flexGrow: 1,
+              }}
+            >
               <div
                 style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
+                  position: "relative",
+                  flexGrow: 1,
+                  overflow: "hidden",
                 }}
               >
-                <text style={reading}>
-                  Drag media here or import from your computer.
-                </text>
-                <Icon
-                  id="timeline:import"
-                  label="Import…"
-                  symbol=""
-                  tabIndex={-1}
-                  send={send}
-                  intent={{ type: "import" }}
-                >
-                  <text>Import…</text>
-                </Icon>
+              <UI.Tree
+                id="timeline:tracks"
+                label={f.mode}
+                tabIndex={0}
+                style={{
+                  minWidth: t("metrics.hit"),
+                  minHeight: t("metrics.hit"),
+                }}
+                metadata={{
+                  totalRows: f.window.total,
+                  firstRow: f.window.first,
+                  indexDigits: f.indexDigits,
+                  nativeFirstRow: f.window.rows[0]?.id ?? null,
+                  nativeWindow: [f.window.first, f.window.rows.length],
+                }}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  send({
+                    type: "keyDown",
+                    target: { kind: "trackArea" },
+                    event: nativeEvent(event),
+                  });
+                }}
+                onRangeChange={(event) => {
+                  if (event.range && event.range[1] > event.range[0])
+                    send({
+                      type: "range",
+                      first: event.range[0],
+                      visible: event.range[1] - event.range[0],
+                    });
+                }}
+              >
+                {f.window.rows.map((row) => (
+                  <TimelineRow key={row.id} row={row} send={send} />
+                ))}
+                {f.window.total === 0 && (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <text style={reading}>
+                      Drag media here or import from your computer.
+                    </text>
+                    <Icon
+                      id="timeline:import"
+                      label="Import…"
+                      symbol=""
+                      tabIndex={-1}
+                      send={send}
+                      intent={{ type: "import" }}
+                    >
+                      <text>Import…</text>
+                    </Icon>
+                  </div>
+                )}
+              </UI.Tree>
               </div>
-            )}
-          </UI.Tree>
-          {f.view !== "DopeSheet" && (
-            <div
-              id="timeline:graph"
-              label="Graph Editor"
-              role="group"
-              metadata={{ designTodo: "T4" }}
-              {...input(send, { kind: "graph" })}
-            >
-              {f.graphEmpty && (
-                <text style={reading}>
-                  Select an animated property to see its curve.
-                </text>
-              )}
             </div>
-          )}
+            {f.view !== "DopeSheet" && f.graphEmpty && (
+              <text
+                id="timeline:graph"
+                style={{
+                  ...reading,
+                  position: "absolute",
+                  right: t("metrics.inset"),
+                  bottom: t("metrics.inset"),
+                }}
+              >
+                Select an animated property to see its curve.
+              </text>
+            )}
+          </div>
+          <text id="timeline:render-bar" label={f.renderSummary} />
           {f.selection && f.selection.count > 1 && (
             <text id="timeline:selection" role="status">
               {`${f.selection.count} ${f.selection.kind === "layers" ? "layers" : "keyframes"} selected`}

@@ -41,7 +41,109 @@ pub struct Graph {
 fn valid(p: Point) -> bool {
     p.seconds.is_finite() && p.value.is_finite()
 }
+/// Build evaluated curves for the channels in view. Sampling is the evaluator's:
+/// `value` answers one composition time, so holds, eases and expressions plot exactly.
+pub fn sample(
+    model: &crate::TimelineModel,
+    mut value: impl FnMut(&str, &str, f64) -> Option<f64>,
+) -> Option<Graph> {
+    const SAMPLES: usize = 24;
+    let index = &model.index;
+    let mut candidates: Vec<(String, String)> = vec![];
+    for row in model.rows() {
+        if let crate::RowId::Property { layer_id, channel } = &row.id {
+            candidates.push((layer_id.clone(), channel.clone()));
+        }
+    }
+    // A focused or selected curve plots even while its row is collapsed.
+    candidates.extend(model.graph_focus.clone());
+    for id in model.selection.layers() {
+        if let Some(layer) = index.layer(id) {
+            candidates.extend(
+                layer
+                    .channels
+                    .iter()
+                    .filter(|c| !c.keys.is_empty())
+                    .map(|c| (id.clone(), c.path.clone())),
+            );
+        }
+    }
+    let focus = model
+        .graph_focus
+        .as_ref()
+        .map(|(l, c)| (l.as_str(), c.as_str()));
+    let (layer_id, path) = crate::graph_target(
+        &candidates,
+        focus,
+        model.selection.layers(),
+        model.selection.channel(),
+    )?
+    .clone();
+    let layer = index.layer(&layer_id)?;
+    let selected = model.selection.keys();
+    let mut curves = vec![];
+    let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+    for channel in model.track_channels(&layer_id, &path) {
+        if channel.keys.is_empty() {
+            continue;
+        }
+        let at = |key: &crate::Key| layer.from + key.time;
+        let mut segments = vec![];
+        for pair in channel.keys.windows(2) {
+            let (from, to) = (at(&pair[0]), at(&pair[1]));
+            let mut previous = None;
+            for step in 0..=SAMPLES {
+                let seconds = from + (to - from) * step as f64 / SAMPLES as f64;
+                let point = Point {
+                    seconds,
+                    value: value(&layer_id, &channel.path, seconds)?,
+                };
+                range = (range.0.min(point.value), range.1.max(point.value));
+                if let Some(previous) = previous {
+                    segments.push(Segment {
+                        from: previous,
+                        to: point,
+                        controls: None,
+                    });
+                }
+                previous = Some(point);
+            }
+        }
+        let mut points = vec![];
+        for key in &channel.keys {
+            let seconds = at(key);
+            let point = Point {
+                seconds,
+                value: value(&layer_id, &channel.path, seconds)?,
+            };
+            range = (range.0.min(point.value), range.1.max(point.value));
+            points.push(GraphPoint {
+                id: key.id.clone(),
+                point,
+                selected: selected.contains(&key.id),
+                handles: vec![],
+                active_handle: None,
+            });
+        }
+        curves.push(Curve {
+            id: format!("{layer_id}:{}", channel.path),
+            name: channel.path.clone(),
+            focused: true,
+            segments,
+            points,
+        });
+    }
+    if curves.is_empty() {
+        return None;
+    }
+    let margin = ((range.1 - range.0) * 0.1).max(1.);
+    Graph::new(curves, range.0 - margin, range.1 + margin).ok()
+}
 impl Graph {
+    /// Value change for a vertical pointer travel across `height` points.
+    pub fn value_per_point(&self, height: f64) -> f64 {
+        (self.max - self.min) / height.max(1.)
+    }
     /// Segment endpoints are monotone in time; control points may overshoot.
     pub fn new(mut curves: Vec<Curve>, min: f64, max: f64) -> Result<Self, Error> {
         if !min.is_finite() || !max.is_finite() || max <= min {

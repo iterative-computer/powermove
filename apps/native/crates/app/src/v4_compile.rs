@@ -42,9 +42,7 @@ impl TokenTable {
         value
             .get("token")
             .and_then(Value::as_str)
-            .map_or(value, |name| {
-                self.values.get(name).unwrap_or(&Value::Null)
-            })
+            .map_or(value, |name| self.values.get(name).unwrap_or(&Value::Null))
     }
     fn number(&self, value: &Value) -> Option<f32> {
         self.resolve(value).as_f64().map(|n| n as f32)
@@ -172,6 +170,9 @@ pub struct NodeView {
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
+    pub outline_column: bool,
+    pub outline_first: Option<SharedString>,
+    pub outline_window: Option<(usize, usize)>,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NumberFacts {
@@ -222,7 +223,14 @@ impl Prepared {
         let mut anchors = vec![];
         let mut has_keydown = false;
         for node in surface.nodes().values() {
-            let view = compile(panel_id, &surface, node, &panel, table, axes.remove(&node.id));
+            let view = compile(
+                panel_id,
+                &surface,
+                node,
+                &panel,
+                table,
+                axes.remove(&node.id),
+            );
             if let Some(semantic) = &view.semantic {
                 semantics.entry(semantic.to_string()).or_insert(node.id);
             }
@@ -296,10 +304,9 @@ fn compile(
     if let Some(recipe) = panel.components.get(&node.id) {
         let radius = recipe.radius.unwrap_or(t.metrics.control_radius);
         sheet = match component {
-            Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => sheet
-                .flex_row()
-                .items_center()
-                .min_h(px(t.metrics.row)),
+            Some(Component::InspectorRow | Component::ListItem | Component::TreeItem) => {
+                sheet.flex_row().items_center().min_h(px(t.metrics.row))
+            }
             Some(Component::ToolbarItem | Component::DisclosureButton) => sheet
                 .flex_row()
                 .items_center()
@@ -347,9 +354,7 @@ fn compile(
                 .gap(px(t.metrics.gap)),
             Some(Component::List | Component::Tree) => sheet.flex_1(),
             Some(Component::DisclosureGroup) => sheet.w_full(),
-            Some(Component::ProgressRow) => {
-                sheet.gap(px(t.metrics.inner_radius)).justify_center()
-            }
+            Some(Component::ProgressRow) => sheet.gap(px(t.metrics.inner_radius)).justify_center(),
             Some(Component::Banner) => sheet
                 .flex_row()
                 .items_center()
@@ -415,15 +420,19 @@ fn compile(
         .then(|| {
             let count = node.props.get("count")?.as_u64()?;
             let range = node.props.get("range")?.as_array()?;
-            let size = node.props.get("itemSize").and_then(Value::as_f64).or_else(|| {
-                (node
-                    .props
-                    .get("metadata")
-                    .and_then(|m| m.get("rowHeightToken"))
-                    .and_then(Value::as_str)
-                    == Some("metrics.row"))
-                .then_some(t.metrics.row as f64)
-            })?;
+            let size = node
+                .props
+                .get("itemSize")
+                .and_then(Value::as_f64)
+                .or_else(|| {
+                    (node
+                        .props
+                        .get("metadata")
+                        .and_then(|m| m.get("rowHeightToken"))
+                        .and_then(Value::as_str)
+                        == Some("metrics.row"))
+                    .then_some(t.metrics.row as f64)
+                })?;
             pm_builtins::virtualization::Window::new(
                 count as usize,
                 (
@@ -435,16 +444,28 @@ fn compile(
             .ok()
         })
         .flatten();
+    let meta = node.props.get("metadata");
     NodeView {
+        outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
+        outline_first: meta
+            .and_then(|m| m.get("nativeFirstRow"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned().into()),
+        outline_window: meta
+            .and_then(|m| m.get("nativeWindow"))
+            .and_then(Value::as_array)
+            .and_then(|w| Some((w.first()?.as_u64()? as usize, w.get(1)?.as_u64()? as usize))),
         id: node.id,
         parent: node.parent,
         children: node.children.clone(),
         component,
         style: compiled.sheet,
         hidden,
-        scroll_y: compiled.scroll_y
-            || matches!(component, Some(Component::List | Component::Tree))
-            || matches!(node.r#type.as_str(), "scroll" | "virtual-list"),
+        // The native timeline scrolls its outline; a nested scroller would double it.
+        scroll_y: meta.and_then(|m| m.get("nativeFirstRow")).is_none()
+            && (compiled.scroll_y
+                || matches!(component, Some(Component::List | Component::Tree))
+                || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
@@ -536,9 +557,7 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
         }
         Some(Component::ViewerGizmo) => match decoration {
             Some(Decoration::ViewerGizmo(g)) => Kit::Gizmo {
-                position: g
-                    .position
-                    .map_or((0., 0.), |(x, y)| (x as f32, y as f32)),
+                position: g.position.map_or((0., 0.), |(x, y)| (x as f32, y as f32)),
                 size: g.size.value.unwrap_or(t.metrics.keyframe as f64) as f32,
                 fill: g.fill,
                 stroke: g.stroke,
@@ -562,7 +581,13 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                     .and_then(|m| m.get("pmKit").or(Some(m)))
                     .and_then(|m| m.get("symbol"))
                     .and_then(Value::as_str)
-                    .map(|s| (SharedString::from(s.to_owned()), *symbol_size, *symbol_color)),
+                    .map(|s| {
+                        (
+                            SharedString::from(s.to_owned()),
+                            *symbol_size,
+                            *symbol_color,
+                        )
+                    }),
                 _ => None,
             },
         },
@@ -676,10 +701,12 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "right" => e = with(e, len, |e, v| e.right(Length::from(v))),
             "bottom" => e = with(e, len, |e, v| e.bottom(Length::from(v))),
             "inset" => {
-                if let Some(v) = len {
-                    let v = Length::from(v);
-                    e = e.top(v).left(v).right(v).bottom(v);
-                }
+                let v: Length = match (s, len) {
+                    (Some("fill"), _) => px(0.).into(),
+                    (_, Some(v)) => v.into(),
+                    _ => continue,
+                };
+                e = e.top(v).left(v).right(v).bottom(v);
             }
             "flexDirection" => {
                 e = if s == Some("row") {
@@ -763,18 +790,10 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             }
             "borderRadius" => e = with(e, n, |e, n| e.rounded(px(n))),
             "borderWidth" | "border" => e = with(e, n, |e, n| e.border(px(n))),
-            "borderTopWidth" | "borderTop" => {
-                e = with(e, n, |e, n| e.border_t(px(n)))
-            }
-            "borderBottomWidth" | "borderBottom" => {
-                e = with(e, n, |e, n| e.border_b(px(n)))
-            }
-            "borderLeftWidth" | "borderLeft" => {
-                e = with(e, n, |e, n| e.border_l(px(n)))
-            }
-            "borderRightWidth" | "borderRight" => {
-                e = with(e, n, |e, n| e.border_r(px(n)))
-            }
+            "borderTopWidth" | "borderTop" => e = with(e, n, |e, n| e.border_t(px(n))),
+            "borderBottomWidth" | "borderBottom" => e = with(e, n, |e, n| e.border_b(px(n))),
+            "borderLeftWidth" | "borderLeft" => e = with(e, n, |e, n| e.border_l(px(n))),
+            "borderRightWidth" | "borderRight" => e = with(e, n, |e, n| e.border_r(px(n))),
             "borderColor" => {
                 if let Some(color) = table.color(raw) {
                     e = e.border_color(rgb(color));

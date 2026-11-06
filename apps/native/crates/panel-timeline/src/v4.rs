@@ -322,12 +322,7 @@ pub async fn dispatch(
         "graphOptions" => return Err(Error::MissingHost("native graph menu")),
         "open" | "tab" => return Err(Error::MissingHost("composition/project services")),
         "timeEdit" | "rename" => return Err(Error::MissingHost("native field bindings")),
-        "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel" | "doubleClick" | "wheel"
-        | "keyUp" | "dragEnter" | "dragOver" | "dragLeave" | "drop" => {
-            return Err(Error::MissingHost(
-                "native timeline geometry/gesture adapter",
-            ));
-        }
+        // Pointer gestures on tracks run in the native surface, never through V8.
         _ => return Err(Error::InvalidIntent("action")),
     };
     let effects = client.dispatch(plan).await?;
@@ -364,7 +359,7 @@ pub fn project_window(
         return Err(Error::InvalidIntent("visible rows"));
     }
     if model.mode == TimelineMode::Tracks {
-        return Err(Error::MissingHost("track lane presentation"));
+        return track_window(model, first, visible);
     }
     let window = model.window(first, visible, visible);
     let selected = model
@@ -436,15 +431,75 @@ pub fn project_window(
             Ok(value)
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    Ok(json!({
+    Ok(frame_facts(model, window.first, window.total, rows))
+}
+/// Lanes in the renderer's order, so outline rows and painted rows share ordinals.
+fn track_window(
+    model: &crate::TimelineModel,
+    first: usize,
+    visible: usize,
+) -> Result<Value, Error> {
+    use crate::tracks::Area;
+    let layout = crate::tracks::layout(&model.index, &model.reveal);
+    let mut rows = vec![];
+    for (area, count, short, audio) in [
+        (Area::Video, layout.video, "V", false),
+        (Area::Audio, layout.audio, "A", true),
+        (Area::Captions, layout.captions, "C", false),
+    ] {
+        for lane in 0..count {
+            let clips: Vec<_> = layout
+                .items
+                .iter()
+                .filter(|i| i.area == area && i.lane == lane)
+                .filter_map(|i| model.index.layer(&i.id))
+                .collect();
+            let label = format!("{short}{}", lane + 1);
+            let enabled = clips
+                .iter()
+                .all(|l| if audio { !l.audio_muted } else { l.visible });
+            rows.push(json!({
+                "id": json!(["track", format!("{area:?}"), lane]).to_string(),
+                "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
+                "enabled": enabled, "expanded": false, "selected": false,
+                "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
+            }));
+            for row in model.rows() {
+                let RowId::Property { layer_id, channel } = &row.id else {
+                    continue;
+                };
+                if clips.iter().any(|l| l.id == *layer_id) {
+                    rows.push(json!({
+                        "id": row_id(&row.id), "depth": row.depth, "kind": "property",
+                        "layer": layer_id, "path": channel, "selected": false,
+                        "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
+                        "channels": model.track_channels(layer_id, channel).iter()
+                            .map(|c| c.path.as_str()).collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+    let total = rows.len();
+    let start = first.min(total).saturating_sub(visible);
+    let end = first.saturating_add(visible.saturating_mul(2)).min(total);
+    Ok(frame_facts(model, start, total, rows[start..end].to_vec()))
+}
+fn frame_facts(
+    model: &crate::TimelineModel,
+    first: usize,
+    total: usize,
+    rows: Vec<Value>,
+) -> Value {
+    json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
         "hasComposition": model.index.comp_id.is_some(),
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,
-        "window": { "first": window.first, "total": window.total, "rows": rows },
+        "window": { "first": first, "total": total, "rows": rows },
         "indexDigits": model.index.layers.len().max(1).to_string().len(),
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
             else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
-    }))
+    })
 }

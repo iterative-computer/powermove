@@ -15,7 +15,52 @@ use std::{
 };
 
 /// Native surfaces by the opaque `surface` lease a `canvas`/`frame` node mounts.
-pub type Natives = Rc<RefCell<BTreeMap<String, AnyView>>>;
+#[derive(Clone, Default)]
+pub struct Natives {
+    pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
+    pub outline: Rc<Outline>,
+}
+/// Scroll and column geometry the timeline surface shares with its JSX outline.
+/// The outline row window stays JS; its position follows native scroll at once.
+#[derive(Default)]
+pub struct Outline {
+    scroll_y: Cell<f32>,
+    pub column: Cell<f32>,
+    scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
+    view: RefCell<Option<WeakEntity<SurfaceView>>>,
+}
+impl Outline {
+    pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
+        *self.scene.borrow_mut() = scene;
+    }
+    pub fn bind(&self, view: WeakEntity<SurfaceView>) {
+        *self.view.borrow_mut() = Some(view);
+    }
+    fn offset(&self, first: &str) -> f32 {
+        let top = self
+            .scene
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.scroll_for(first))
+            .unwrap_or(0.) as f32;
+        top - self.scroll_y.get()
+    }
+    pub fn scrolled(&self, scroll_y: f32, column: f32, rows: Option<(usize, usize)>, cx: &mut App) {
+        let moved = self.scroll_y.get() != scroll_y || self.column.get() != column;
+        self.scroll_y.set(scroll_y);
+        self.column.set(column);
+        if let Some(view) = self.view.borrow().as_ref().and_then(|v| v.upgrade()) {
+            view.update(cx, |v, cx| {
+                if moved {
+                    cx.notify();
+                }
+                if let Some(rows) = rows {
+                    v.outline_rows(rows, cx);
+                }
+            });
+        }
+    }
+}
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
@@ -45,6 +90,7 @@ pub struct SurfaceView {
     move_busy: bool,
     queued_move: Option<(Id, EventDetail)>,
     latest: u64,
+    requested: Option<(usize, usize)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -88,6 +134,7 @@ impl SurfaceView {
             move_busy: false,
             queued_move: None,
             latest: 0,
+            requested: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -112,7 +159,12 @@ impl SurfaceView {
         let table = Arc::new(TokenTable::new(tokens));
         self.compile(self.publication.clone(), table, cx);
     }
-    fn compile(&mut self, publication: Publication, table: Arc<TokenTable>, cx: &mut Context<Self>) {
+    fn compile(
+        &mut self,
+        publication: Publication,
+        table: Arc<TokenTable>,
+        cx: &mut Context<Self>,
+    ) {
         self.latest += 1;
         let ticket = self.latest;
         let window = self.window;
@@ -169,7 +221,10 @@ impl SurfaceView {
             if view.scroll_y || view.scroll_x {
                 self.scrolls.entry(id).or_default();
             }
-            let kind = self.appkit.then(|| control_kind(&self.publication.panel, node)).flatten();
+            let kind = self
+                .appkit
+                .then(|| control_kind(&self.publication.panel, node))
+                .flatten();
             if let Some(kind) = kind {
                 self.mount_control(kind, view, node, lease, window, cx);
                 continue;
@@ -363,6 +418,34 @@ impl SurfaceView {
         }
         self.fields.insert(id, field);
     }
+    /// Ask JS for the row window that covers native scroll, when it left the
+    /// published one. Rows already overscan a viewport on each side.
+    pub fn outline_rows(&mut self, rows: (usize, usize), cx: &mut Context<Self>) {
+        let Some(node) = self
+            .prepared
+            .nodes
+            .values()
+            .find(|n| n.outline_window.is_some())
+        else {
+            return;
+        };
+        let (id, (first, count)) = (node.id, node.outline_window.unwrap());
+        if rows.1 > rows.0
+            && (rows.0 < first || rows.1 > first + count)
+            && self.requested != Some(rows)
+        {
+            self.requested = Some(rows);
+            self.send(
+                id,
+                "rangechange",
+                EventDetail {
+                    range: Some(rows),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+    }
     #[cfg(test)]
     pub fn semantic_id_starting(&self, prefix: &str) -> Option<String> {
         self.prepared
@@ -455,7 +538,13 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
-    fn pointer(&mut self, id: Id, event: &'static str, detail: EventDetail, cx: &mut Context<Self>) {
+    fn pointer(
+        &mut self,
+        id: Id,
+        event: &'static str,
+        detail: EventDetail,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
         if event == "pointermove" {
@@ -470,7 +559,9 @@ impl SurfaceView {
         cx.spawn(async move |this, cx| {
             let ticket = cx
                 .background_executor()
-                .spawn(async move { runtime.pointer_event(&p.panel, p.generation, id, event, detail) })
+                .spawn(
+                    async move { runtime.pointer_event(&p.panel, p.generation, id, event, detail) },
+                )
                 .await;
             let result = match ticket {
                 Ok(ticket) => ticket.await.map(|_| ()),
@@ -511,7 +602,13 @@ impl SurfaceView {
             self.run(ticket, cx);
         }
     }
-    fn activate(&mut self, id: Id, detail: EventDetail, window: &mut Window, cx: &mut Context<Self>) {
+    fn activate(
+        &mut self,
+        id: Id,
+        detail: EventDetail,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(node) = self.publication.surface.node(id).cloned() else {
             return;
         };
@@ -569,12 +666,7 @@ impl SurfaceView {
             ..modified(modifiers)
         }
     }
-    fn press(
-        &mut self,
-        id: Id,
-        event: &MouseDownEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
         self.capture = Some(Capture { target: id, button });
         let detail = self.detail(
@@ -647,7 +739,13 @@ impl SurfaceView {
         .absolute()
         .inset_0()
     }
-    fn element(&self, id: Id, window: &mut Window, cx: &mut Context<Self>, skip: Option<Id>) -> AnyElement {
+    fn element(
+        &self,
+        id: Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        skip: Option<Id>,
+    ) -> AnyElement {
         if skip == Some(id) {
             return div().into_any_element();
         }
@@ -665,9 +763,22 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if node.outline_column && self.natives.outline.column.get() > 0. {
+            element = element.w(px(self.natives.outline.column.get()));
+        }
+        if let Some(first) = &node.outline_first {
+            element = element
+                .absolute()
+                .left(px(0.))
+                .right(px(0.))
+                .top(px(self.natives.outline.offset(first)));
+        }
         #[cfg(test)]
         {
-            let name = node.semantic.as_ref().map_or_else(|| format!("n{id}"), |s| s.to_string());
+            let name = node
+                .semantic
+                .as_ref()
+                .map_or_else(|| format!("n{id}"), |s| s.to_string());
             element = element.debug_selector(|| name);
         }
         if let Some(scroll) = self.scrolls.get(&id) {
@@ -732,7 +843,7 @@ impl SurfaceView {
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
         }
         if let Some(surface) = &node.native
-            && let Some(view) = self.natives.borrow().get(surface.as_ref())
+            && let Some(view) = self.natives.views.borrow().get(surface.as_ref())
         {
             children.push(
                 view.clone()
@@ -763,7 +874,10 @@ impl SurfaceView {
         let origin = self.origin.get();
         let position = if node.component == Some(Component::SheetAnchor) {
             let width = window.viewport_size().width;
-            point((width - px(t.metrics.sheet_width)) / 2., px(t.metrics.toolbar))
+            point(
+                (width - px(t.metrics.sheet_width)) / 2.,
+                px(t.metrics.toolbar),
+            )
         } else if let Some(bounds) = anchor.and_then(|id| self.anchors.borrow().get(&id).copied()) {
             bounds.bottom_left()
         } else if let Some((x, y)) = at {
@@ -786,9 +900,14 @@ impl SurfaceView {
                 );
             }));
         }
-        deferred(anchored().position(position).snap_to_window().child(wrapper))
-            .priority(1)
-            .into_any_element()
+        deferred(
+            anchored()
+                .position(position)
+                .snap_to_window()
+                .child(wrapper),
+        )
+        .priority(1)
+        .into_any_element()
     }
     fn accessible(&self, mut element: Stateful<Div>, node: &NodeView) -> Stateful<Div> {
         if let Some(ax) = &node.ax {
@@ -812,10 +931,8 @@ impl SurfaceView {
             }
         }
         if let Some(semantic) = &node.semantic {
-            element = element.accessibility_id(format!(
-                "v4.{}.{}",
-                self.publication.panel, semantic
-            ));
+            element =
+                element.accessibility_id(format!("v4.{}.{}", self.publication.panel, semantic));
         }
         if let Some(count) = node.row_count {
             element = element.aria_row_count(count);
@@ -910,9 +1027,10 @@ impl SurfaceView {
             }));
         }
         if node.parent == Some(0) && self.prepared.has_keydown {
-            element = element.on_key_down(cx.listener(move |v, event: &KeyDownEvent, window, cx| {
-                v.key_down(id, event, window, cx);
-            }));
+            element =
+                element.on_key_down(cx.listener(move |v, event: &KeyDownEvent, window, cx| {
+                    v.key_down(id, event, window, cx);
+                }));
         }
         if let Some(title) = node.title.clone() {
             let tokens = self.table.tokens.clone();
@@ -923,7 +1041,13 @@ impl SurfaceView {
         }
         element
     }
-    fn key_down(&mut self, root: Id, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(
+        &mut self,
+        root: Id,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let key = match event.keystroke.key.as_str() {
             "up" => "ArrowUp",
             "down" => "ArrowDown",
@@ -959,7 +1083,12 @@ impl SurfaceView {
         );
     }
     /// Kit furniture that is not expressible as a generic style.
-    fn decorate(&self, mut element: Stateful<Div>, node: &NodeView, window: &Window) -> Stateful<Div> {
+    fn decorate(
+        &self,
+        mut element: Stateful<Div>,
+        node: &NodeView,
+        window: &Window,
+    ) -> Stateful<Div> {
         let t = &self.table.tokens;
         if self.prepared.anchors.contains(&node.id) {
             let (id, anchors) = (node.id, self.anchors.clone());
@@ -977,7 +1106,11 @@ impl SurfaceView {
         match &node.kit {
             Kit::Check(on) => {
                 element = element.child(pm_shell::symbol::symbol(
-                    if *on { "checkmark.square.fill" } else { "square" },
+                    if *on {
+                        "checkmark.square.fill"
+                    } else {
+                        "square"
+                    },
                     t.metrics.symbol_panel,
                     pm_shell::symbol::Weight::Regular,
                     t.colors.secondary,
@@ -1001,23 +1134,17 @@ impl SurfaceView {
                     .overflow_hidden()
                     .bg(rgb(t.colors.field));
                 let track = match value {
-                    Some(value) => track.child(
-                        div()
-                            .h_full()
-                            .w(relative(*value))
-                            .bg(rgb(t.colors.accent)),
-                    ),
+                    Some(value) => {
+                        track.child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)))
+                    }
                     None => track.child(
-                        div()
-                            .size_full()
-                            .bg(rgb(t.colors.muted))
-                            .with_animation(
-                                "progress",
-                                Animation::new(std::time::Duration::from_secs(1))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.3, 1.)),
-                                |this, delta| this.opacity(delta),
-                            ),
+                        div().size_full().bg(rgb(t.colors.muted)).with_animation(
+                            "progress",
+                            Animation::new(std::time::Duration::from_secs(1))
+                                .repeat()
+                                .with_easing(pulsating_between(0.3, 1.)),
+                            |this, delta| this.opacity(delta),
+                        ),
                     ),
                 };
                 element = element.child(track);
@@ -1241,11 +1368,9 @@ impl HeaderView {
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.view.update(cx, |v, cx| {
-            match v.prepared.header {
-                Some(id) => v.element(id, window, cx, None),
-                None => div().into_any_element(),
-            }
+        self.view.update(cx, |v, cx| match v.prepared.header {
+            Some(id) => v.element(id, window, cx, None),
+            None => div().into_any_element(),
         })
     }
 }
