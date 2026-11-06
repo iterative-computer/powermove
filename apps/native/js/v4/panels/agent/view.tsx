@@ -234,11 +234,7 @@ function Message({
         <text style={title}>{questionTitle}</text>
         {questions.map((q) =>
           q && typeof q === "object" && !Array.isArray(q) ? (
-            <div
-              role="group"
-              label={str(q.question)}
-              style={{ ...vertical }}
-            >
+            <div role="group" label={str(q.question)} style={{ ...vertical }}>
               <text style={body}>{str(q.question)}</text>
               {(Array.isArray(q.options) ? q.options : []).map((o) => {
                 const label =
