@@ -17,6 +17,7 @@ pub(crate) struct Recorder {
     pub seeks: RefCell<Vec<f64>>,
     pub effects: RefCell<Vec<HostEffect>>,
     pub reports: RefCell<Vec<String>>,
+    pub commands: RefCell<Vec<String>>,
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
 }
@@ -34,6 +35,9 @@ impl Delegate for Recording {
     }
     fn report(&self, message: String, _: &mut App) {
         self.0.reports.borrow_mut().push(message);
+    }
+    fn command(&self, name: &str, _: &mut App) {
+        self.0.commands.borrow_mut().push(name.to_owned());
     }
     fn menu(
         &self,
@@ -304,6 +308,48 @@ fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext)
     assert!(value(&s, &ids[0]) > before);
     s.undo(cx);
     assert_eq!(value(&s, &ids[0]), before);
+}
+#[gpui::test]
+fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let value = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.channel("l0", "opacity").unwrap().value.as_f64().unwrap()
+        })
+    };
+    let before = value(&s);
+    let at = s.at(0, 0.5);
+    s.surface.update(&mut s.vcx, |t, _| t.press_property("l0".into(), "opacity".into(), at));
+    s.vcx.simulate_mouse_move(at + point(px(-20.), px(0.)), MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_move(at + point(px(-40.), px(0.)), MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(s.recorder.reports.borrow().is_empty(), "{:?}", s.recorder.reports.borrow());
+    assert_eq!(value(&s), before - 20.);
+    s.undo(cx);
+    assert_eq!(value(&s), before);
+}
+#[gpui::test]
+fn layer_rows_offer_a_native_menu_that_runs_commands(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    *s.recorder.choice.borrow_mut() = Some("duplicate".into());
+    let at = s.origin() + point(px(100.), s.at(1, 0.).y - s.origin().y);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["duplicate"]);
+    assert_eq!(
+        s.rig.kernel.published(PROJECT).unwrap().selection.layers().len(),
+        1,
+        "the row under the pointer becomes the selection"
+    );
 }
 #[gpui::test]
 fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) {

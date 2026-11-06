@@ -170,6 +170,8 @@ pub struct NodeView {
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
+    pub local_change: bool,
+    pub timeline_scrub: Option<(SharedString, SharedString)>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -190,6 +192,14 @@ pub struct Prepared {
     pub header: Option<Id>,
     pub has_keydown: bool,
     pub anchors: Vec<Id>,
+}
+impl NumberFacts {
+    pub fn text(self, value: f64) -> String {
+        match self.precision {
+            Some(digits) => format!("{value:.*}", digits as usize),
+            None => value.to_string(),
+        }
+    }
 }
 impl Prepared {
     pub fn new(panel_id: &str, surface: Arc<Surface>, table: &TokenTable) -> Self {
@@ -446,6 +456,13 @@ fn compile(
         .flatten();
     let meta = node.props.get("metadata");
     NodeView {
+        local_change: node.listeners.contains_key("change"),
+        timeline_scrub: meta.and_then(|m| m.get("timelineScrub")).and_then(|t| {
+            Some((
+                SharedString::from(t.get("layer")?.as_str()?.to_owned()),
+                SharedString::from(t.get("path")?.as_str()?.to_owned()),
+            ))
+        }),
         outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
         outline_first: meta
             .and_then(|m| m.get("nativeFirstRow"))

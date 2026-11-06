@@ -397,6 +397,85 @@ impl Builtins {
             .revision();
         self.event(panel, generation, revision, target, event, detail)
     }
+    /// One kernel gesture for a dragged number field, so a scrub is one undo step.
+    /// Runs off the main thread; no sample passes through V8.
+    pub fn scrub_begin(
+        &self,
+        panel: &str,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.lock().unwrap().caller;
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(
+                caller,
+                pm_kernel::GestureCall::Begin {
+                    label: "Change Property".into(),
+                },
+            ),
+        ))
+    }
+    pub fn scrub_step(
+        &self,
+        panel: &str,
+        handle: &str,
+        gesture: u64,
+        value: Value,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let backend = self.backend(panel)?;
+        let (caller, command) = {
+            let mut backend = backend.lock().unwrap();
+            let command = backend
+                .native_command("panel.binding", &json!({"handle":handle,"value":value}))
+                .map_err(Error::Host)?;
+            (backend.caller, command)
+        };
+        let models::NativeCommand::Kernel(request) = command else {
+            return Err(Error::Invalid("binding is not a document property"));
+        };
+        let pm_kernel::Call::Transact { body, .. } = request.call else {
+            return Err(Error::Invalid("binding is not a scrubbable edit"));
+        };
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(
+                caller,
+                pm_kernel::GestureCall::Step {
+                    gesture,
+                    body,
+                    replace: true,
+                },
+            ),
+        ))
+    }
+    pub fn scrub_finish(
+        &self,
+        panel: &str,
+        gesture: u64,
+        commit: bool,
+    ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
+    {
+        let caller = self.backend(panel)?.lock().unwrap().caller;
+        let call = if commit {
+            pm_kernel::GestureCall::Commit { gesture }
+        } else {
+            pm_kernel::GestureCall::Cancel { gesture }
+        };
+        Ok(self.broker.kernel.call(
+            &self.broker.project,
+            pm_kernel::Request::new(caller, call),
+        ))
+    }
+    fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
+        self.broker
+            .entries
+            .lock()
+            .unwrap()
+            .get(panel)
+            .map(|e| e.backend.clone())
+            .ok_or(Error::Closed)
+    }
     /// Caller drops the owning window without waiting on JS. Runtime disposal
     /// revokes its writer on the isolate owner, including after a failed mount.
     pub fn close_panel(&self, id: &str) {

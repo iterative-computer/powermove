@@ -468,7 +468,10 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
         ) : (
           <text
             label={row.accessibilityLabel}
-            metadata={{ designTodo: "T5" }}
+            metadata={{
+              designTodo: "T5",
+              timelineScrub: { layer: row.layer, path: row.path },
+            }}
             style={{
               color: t(row.locked ? "colors.muted" : "colors.text"),
               fontSize: t("typography.body"),

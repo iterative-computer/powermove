@@ -9,7 +9,7 @@ use pm_surface::{Id, events::EventDetail, kit::Component};
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -28,8 +28,23 @@ pub struct Outline {
     pub column: Cell<f32>,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
+    surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
 }
 impl Outline {
+    pub fn bind_surface(&self, surface: WeakEntity<crate::timeline_surface::TimelineSurface>) {
+        *self.surface.borrow_mut() = Some(surface);
+    }
+    /// A timeline value readout drags as one kernel gesture on the surface.
+    fn scrub_property(&self, layer: &str, path: &str, at: Point<Pixels>, cx: &mut App) -> bool {
+        self.surface
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.upgrade())
+            .is_some_and(|s| {
+                s.update(cx, |s, _| s.press_property(layer.into(), path.into(), at));
+                true
+            })
+    }
     pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
         *self.scene.borrow_mut() = scene;
     }
@@ -64,6 +79,19 @@ impl Outline {
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
+/// A press on a number field: a click edits, a drag scrubs (language.md §9).
+struct ScrubDrag {
+    id: Id,
+    start: Point<Pixels>,
+    number: crate::v4_compile::NumberFacts,
+    binding: Option<SharedString>,
+    active: bool,
+}
+enum ScrubOp {
+    Begin,
+    Value(SharedString, f64),
+    Finish(bool),
+}
 #[derive(Clone, Copy)]
 struct Capture {
     target: Id,
@@ -87,6 +115,11 @@ pub struct SurfaceView {
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
+    scrub: Option<ScrubDrag>,
+    scrub_ops: VecDeque<ScrubOp>,
+    scrub_gesture: Option<u64>,
+    scrub_busy: bool,
+    scrub_shown: Option<(Id, f64)>,
     move_busy: bool,
     queued_move: Option<(Id, EventDetail)>,
     latest: u64,
@@ -131,6 +164,11 @@ impl SurfaceView {
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
             capture: None,
+            scrub: None,
+            scrub_ops: VecDeque::new(),
+            scrub_gesture: None,
+            scrub_busy: false,
+            scrub_shown: None,
             move_busy: false,
             queued_move: None,
             latest: 0,
@@ -447,6 +485,21 @@ impl SurfaceView {
         }
     }
     #[cfg(test)]
+    pub fn first_number(&self) -> Option<String> {
+        let mut numbers: Vec<_> = self
+            .prepared
+            .nodes
+            .values()
+            .filter(|n| n.number.is_some() && n.binding.is_some() && !n.disabled)
+            .collect();
+        numbers.sort_by_key(|n| n.id);
+        numbers.first().map(|n| {
+            n.semantic
+                .as_ref()
+                .map_or_else(|| format!("n{}", n.id), |s| s.to_string())
+        })
+    }
+    #[cfg(test)]
     pub fn semantic_id_starting(&self, prefix: &str) -> Option<String> {
         self.prepared
             .semantics
@@ -678,6 +731,146 @@ impl SurfaceView {
         );
         self.pointer(id, "pointerdown", detail, cx);
     }
+    fn scrub_press(&mut self, id: Id, event: &MouseDownEvent, window: &mut Window) {
+        let Some(node) = self.prepared.node(id) else {
+            return;
+        };
+        let Some(number) = node.number else {
+            return;
+        };
+        // A press must not focus (and so open) the text field before a drag decides.
+        window.prevent_default();
+        self.scrub = Some(ScrubDrag {
+            id,
+            start: event.position,
+            number,
+            binding: node.binding.clone().filter(|_| !node.local_change),
+            active: false,
+        });
+    }
+    fn scrub_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let threshold = self.table.tokens.metrics.drag_threshold;
+        let Some(drag) = &mut self.scrub else {
+            return;
+        };
+        let delta = event.position - drag.start;
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        if !drag.active {
+            if dx.hypot(dy) < threshold {
+                return;
+            }
+            drag.active = true;
+            if drag.binding.is_some() {
+                self.scrub_ops.push_back(ScrubOp::Begin);
+            }
+        }
+        let n = drag.number;
+        let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
+            start: n.value,
+            delta: (dx as f64, dy as f64),
+            step: n.step,
+            speed: n.speed,
+            shift: event.modifiers.shift,
+            alt: event.modifiers.alt,
+            bounds: (n.min, n.max),
+        }) else {
+            return;
+        };
+        let id = drag.id;
+        self.scrub_shown = Some((id, value));
+        match drag.binding.clone() {
+            Some(binding) => {
+                self.scrub_ops.push_back(ScrubOp::Value(binding, value));
+                self.scrub_pump(cx);
+            }
+            None => self.change(id, json!(value), cx),
+        }
+        if let Some(field) = self.fields.get(&id) {
+            let text = n.text(value);
+            field.update(cx, |f, cx| f.set_value(&text, cx));
+        }
+        cx.notify();
+    }
+    fn scrub_release(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(drag) = self.scrub.take() else {
+            return;
+        };
+        if drag.active {
+            if drag.binding.is_some() {
+                self.scrub_ops.push_back(ScrubOp::Finish(commit));
+                self.scrub_pump(cx);
+            }
+        } else if let Some(field) = self.fields.get(&drag.id) {
+            field.update(cx, |f, cx| f.begin_editing(cx));
+        }
+    }
+    /// Escape during a scrub restores the value through the kernel gesture.
+    pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.scrub.is_none() {
+            return false;
+        }
+        self.scrub_release(false, cx);
+        true
+    }
+    fn scrub_pump(&mut self, cx: &mut Context<Self>) {
+        if self.scrub_busy {
+            return;
+        }
+        let Some(mut op) = self.scrub_ops.pop_front() else {
+            return;
+        };
+        // Only the newest value matters while the kernel is busy.
+        while matches!(op, ScrubOp::Value(..))
+            && matches!(self.scrub_ops.front(), Some(ScrubOp::Value(..)))
+        {
+            op = self.scrub_ops.pop_front().unwrap();
+        }
+        self.scrub_busy = true;
+        let runtime = self.runtime.clone();
+        let panel = self.publication.panel.clone();
+        let gesture = self.scrub_gesture;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let pending = match (op, gesture) {
+                        (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
+                        (ScrubOp::Value(handle, value), Some(gesture)) => {
+                            runtime.scrub_step(&panel, &handle, gesture, json!(value))
+                        }
+                        (ScrubOp::Finish(commit), Some(gesture)) => {
+                            runtime.scrub_finish(&panel, gesture, commit)
+                        }
+                        _ => return Err("Scrub gesture was refused".to_owned()),
+                    }
+                    .map_err(|e| e.to_string())?;
+                    pending
+                        .await
+                        .ok_or("Kernel closed")?
+                        .map_err(|e| format!("{e:?}"))
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.scrub_busy = false;
+                match result {
+                    Ok(ack) => match ack.reply {
+                        pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
+                        pm_kernel::Reply::Throw(error) => {
+                            v.error = Some(error.to_string());
+                        }
+                        _ => {}
+                    },
+                    Err(error) => v.error = Some(error),
+                }
+                if v.scrub_ops.is_empty() && v.scrub.is_none() {
+                    v.scrub_gesture = None;
+                    v.scrub_shown = None;
+                }
+                v.scrub_pump(cx);
+            });
+        })
+        .detach();
+    }
     /// Capture-phase window listeners: a pressed pointer keeps its target until
     /// release, wherever it travels, like AppKit drag tracking.
     fn tracking(cx: &mut Context<Self>, origin: Rc<Cell<Point<Pixels>>>) -> impl IntoElement {
@@ -691,6 +884,11 @@ impl SurfaceView {
                         return;
                     }
                     let _ = moved.update(cx, |v, cx| {
+                        if v.scrub.is_some() {
+                            cx.stop_propagation();
+                            v.scrub_move(event, cx);
+                            return;
+                        }
                         let Some(capture) = v.capture else {
                             return;
                         };
@@ -716,6 +914,7 @@ impl SurfaceView {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
+                        v.scrub_release(true, cx);
                         let Some(capture) = v.capture.take() else {
                             return;
                         };
@@ -973,6 +1172,26 @@ impl SurfaceView {
         if disabled {
             return element;
         }
+        if node.number.is_some() {
+            element = element.cursor_col_resize().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    v.scrub_press(id, event, window);
+                    cx.stop_propagation();
+                }),
+            );
+        }
+        if let Some((layer, path)) = node.timeline_scrub.clone() {
+            let outline = self.natives.outline.clone();
+            element = element.cursor_col_resize().on_mouse_down(
+                MouseButton::Left,
+                move |event: &MouseDownEvent, _, cx| {
+                    if outline.scrub_property(&layer, &path, event.position, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            );
+        }
         if events.pointer() {
             element = element.on_mouse_down(
                 MouseButton::Left,
@@ -1213,6 +1432,13 @@ impl SurfaceView {
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
+        if let Some(number) = node.number {
+            let shown = self
+                .scrub_shown
+                .filter(|(id, _)| *id == node.id)
+                .map_or(number.value, |(_, value)| value);
+            element = element.child(number.text(shown));
+        }
         element
     }
     fn field_element(
@@ -1238,6 +1464,16 @@ impl SurfaceView {
         }
         if let Some(focus) = self.focus.get(&id) {
             wrapper = wrapper.track_focus(focus).tab_index(0);
+        }
+        if node.number.is_some() {
+            wrapper = wrapper.cursor_col_resize().capture_any_mouse_down(cx.listener(
+                move |v, event: &MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left {
+                        v.scrub_press(id, event, window);
+                        cx.stop_propagation();
+                    }
+                },
+            ));
         }
         let weak = cx.entity().downgrade();
         wrapper = wrapper.on_a11y_action(AccessibleAction::SetValue, move |data, _, cx| {

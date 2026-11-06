@@ -431,3 +431,69 @@ fn a_real_control_click_edits_the_document_and_undo_reverts(cx: &mut TestAppCont
         .unwrap();
     assert!(solo(&rig));
 }
+/// Dragging a real Properties number field writes through one kernel gesture.
+#[gpui::test]
+fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 1);
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.first_number())
+        .expect("a bound number field");
+    let at = bounds(&mut vcx, &name).center();
+    let opacity = |rig: &Rig| rig.kernel.published(PROJECT).unwrap().revision();
+    let start = opacity(&rig);
+    let history = |rig: &Rig| rig.kernel.published(PROJECT).unwrap().history.can_undo;
+    assert!(!history(&rig));
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in 1..=5 {
+        vcx.simulate_mouse_move(at + point(px(step as f32 * 8.), px(0.)), MouseButton::Left, Modifiers::none());
+        settle(cx, |_| false_after(10));
+    }
+    vcx.simulate_mouse_up(at + point(px(40.), px(0.)), MouseButton::Left, Modifiers::none());
+    let check = rig.kernel.clone();
+    settle(cx, move |_| check.published(PROJECT).unwrap().history.can_undo);
+    assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
+    assert!(opacity(&rig) > start);
+    let root = rig.kernel.published(PROJECT).unwrap();
+    let edited = root.snapshot.root().unwrap().to_value();
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let p = rig.kernel.published(PROJECT).unwrap();
+    assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
+    assert!(!p.history.can_undo, "the whole scrub was one undo step");
+}
+fn false_after(ms: u64) -> bool {
+    std::thread::sleep(Duration::from_millis(ms));
+    true
+}

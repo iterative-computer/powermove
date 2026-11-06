@@ -20,6 +20,8 @@ pub trait Delegate: 'static {
     fn seek(&self, seconds: f64, cx: &mut App);
     fn effect(&self, effect: HostEffect, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
+    /// Run a shell command by name, as its menu item or chord would.
+    fn command(&self, name: &str, cx: &mut App);
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
     fn menu(
         &self,
@@ -40,6 +42,7 @@ enum Spec {
     Slide,
     Keys,
     GraphKeys,
+    Property { layer: String, path: String },
     WorkIn,
     WorkOut,
     WorkMove,
@@ -54,7 +57,7 @@ enum Job {
         additive: bool,
         dragging: bool,
     },
-    Begin(Spec),
+    Begin(Spec, f64),
     Sample(DragSample),
     Finish(bool),
     Apply(Plan),
@@ -94,7 +97,7 @@ enum Gesture {
     Dragging {
         origin: Point<Pixels>,
         proedit: bool,
-        graph: bool,
+        readout: bool,
     },
     Scrub(Scrub),
     Marquee {
@@ -145,6 +148,7 @@ impl TimelineSurface {
             layer_column,
         };
         outline.column.set(layer_column as f32);
+        outline.bind_surface(cx.entity().downgrade());
         let mut this = Self {
             kernel: kernel.clone(),
             project: project.clone(),
@@ -595,6 +599,13 @@ impl TimelineSurface {
             at: event.position,
         };
     }
+    pub fn press_property(&mut self, layer: String, path: String, origin: Point<Pixels>) {
+        self.gesture = Gesture::Pressed(Press {
+            origin,
+            spec: Some(Spec::Property { layer, path }),
+            release: None,
+        });
+    }
     fn press_graph(
         &mut self,
         event: &MouseDownEvent,
@@ -694,22 +705,39 @@ impl TimelineSurface {
                     spec,
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
                 );
-                let graph = matches!(spec, Spec::GraphKeys);
-                self.queue.push_back(Job::Begin(spec));
+                let readout = matches!(spec, Spec::Property { .. });
+                let time = self.delegate.time(cx);
+                self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
-                    graph,
+                    readout,
                 };
             }
             _ => {}
         }
         match &mut self.gesture {
             Gesture::Dragging {
-                origin, proedit, ..
+                origin,
+                proedit,
+                readout,
             } => {
-                let (origin, proedit) = (*origin, *proedit);
+                let (origin, proedit, readout) = (*origin, *proedit, *readout);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if readout {
+                    let delta = event.position - origin;
+                    if let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
+                        start: 0.,
+                        delta: (f32::from(delta.x) as f64, f32::from(delta.y) as f64),
+                        step: 1.,
+                        speed: 0.5,
+                        shift: event.modifiers.shift,
+                        alt: event.modifiers.alt,
+                        bounds: (-f64::MAX, f64::MAX),
+                    }) {
+                        sample.value_delta = value;
+                    }
+                }
                 if proedit {
                     // Pro timing takes exact frames: the kernel never snaps subframes.
                     sample.time_delta = frame(sample.time_delta, self.model.index.fps);
@@ -868,11 +896,18 @@ impl TimelineSurface {
         let Some(frame) = self.frame.clone() else {
             return;
         };
+        let ruler = self.tokens.metrics.ruler as f64;
         if x < self.view.layer_column {
+            let row = self
+                .scene
+                .as_ref()
+                .and_then(|s| s.row_at(y - ruler + self.view.scroll_y))
+                .and_then(|r| pm_panel_timeline::v4::parse_row(&r.id).ok());
+            if let Some(RowId::Layer(id)) = row {
+                self.layer_menu(id, window, cx);
+            }
             return;
         }
-        let ruler = self.tokens.metrics.ruler as f64;
-        let time = self.delegate.time(cx);
         let context = if y < ruler {
             match frame.hit_op("marker:", x, y, 2.) {
                 Some(op) => MenuContext::Marker {
@@ -889,9 +924,9 @@ impl TimelineSurface {
         } else if let Some((_, key)) = frame.hit_key(x, y, 3.) {
             MenuContext::Keys { ids: vec![key] }
         } else if let Some((layer, _)) = frame.hit_clip(x, y) {
-            MenuContext::Layer {
-                id: layer.to_owned(),
-            }
+            let layer = layer.to_owned();
+            self.layer_menu(layer, window, cx);
+            return;
         } else {
             let row = self
                 .scene
@@ -911,7 +946,7 @@ impl TimelineSurface {
         for item in &mut items {
             item.enabled &= !matches!(
                 item.id,
-                "track.paste" | "keys.value" | "keys.velocity" | "keys.scale" | "layer.shared-menu"
+                "track.paste" | "keys.value" | "keys.velocity" | "keys.scale"
             );
         }
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
@@ -939,7 +974,45 @@ impl TimelineSurface {
                 });
             }),
         );
-        let _ = time;
+    }
+    /// The shared layer menu runs ordinary commands on the row's selection.
+    fn layer_menu(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        const ROWS: [(&str, &str); 8] = [
+            ("duplicate", "Duplicate"),
+            ("split", "Split at Playhead"),
+            ("groupLayers", "Group"),
+            ("bringForward", "Bring Forward"),
+            ("sendBackward", "Send Backward"),
+            ("lockSelectedLayers", "Lock"),
+            ("", ""),
+            ("delete", "Delete"),
+        ];
+        if !self.model.selection.contains(&id) {
+            self.queue
+                .push_back(Job::SelectLayer(id, Mods::default()));
+            self.pump(cx);
+        }
+        let rows = ROWS
+            .iter()
+            .map(|(id, label)| {
+                if id.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!({"id":id,"label":label})
+                }
+            })
+            .collect();
+        let delegate = self.delegate.clone();
+        self.delegate.clone().menu(
+            rows,
+            window,
+            cx,
+            Box::new(move |index, cx| {
+                if let Some((command, _)) = index.and_then(|i| ROWS.get(i)) {
+                    delegate.command(command, cx);
+                }
+            }),
+        );
     }
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
@@ -1073,8 +1146,8 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .await
                 .map_err(text)
         }
-        Job::Begin(spec) => {
-            let kind = drag_kind(&client.model, spec).map_err(|e| e.to_string())?;
+        Job::Begin(spec, time) => {
+            let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
             client.begin_drag(kind).await.map_err(text)?;
             Ok(vec![])
         }
@@ -1162,11 +1235,11 @@ fn millis() -> u64 {
         .elapsed()
         .as_millis() as u64
 }
-fn drag_kind(model: &TimelineModel, spec: Spec) -> Result<DragKind, String> {
+fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, String> {
     use pm_kernel::commands::pro_edit::{Edge as ProEdge, ProEditCommand as Pro, TrackTarget};
     let ids = model.selection.layers().to_vec();
     let keys = model.expand_scale_keys(model.selection.keys());
-    let primary = ids.first().cloned().ok_or("Select a clip first")?;
+    let primary = || ids.first().cloned().ok_or("Select a clip first");
     let pro_edge = |edge: Edge| match edge {
         Edge::In => ProEdge::In,
         Edge::Out => ProEdge::Out,
@@ -1198,6 +1271,19 @@ fn drag_kind(model: &TimelineModel, spec: Spec) -> Result<DragKind, String> {
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
         Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
+        Spec::Property { layer, path } => {
+            let paths: Vec<_> = model
+                .track_channels(&layer, &path)
+                .iter()
+                .map(|c| c.path.clone())
+                .collect();
+            DragKind::Property {
+                targets: model
+                    .property_targets(&layer, &paths)
+                    .map_err(|e| e.to_string())?,
+                time,
+            }
+        }
         Spec::WorkIn => DragKind::WorkIn,
         Spec::WorkOut => DragKind::WorkOut,
         Spec::WorkMove => DragKind::WorkMove,
@@ -1207,9 +1293,10 @@ fn drag_kind(model: &TimelineModel, spec: Spec) -> Result<DragKind, String> {
             linked: true,
         }),
         Spec::Ripple(edge) => {
-            let layer = model.index.layer(&primary).ok_or("Unknown clip")?;
+            let id = primary()?;
+            let layer = model.index.layer(&id).ok_or("Unknown clip")?;
             DragKind::ProEdit(Pro::RippleTrim {
-                layer_id: primary.clone(),
+                layer_id: id.clone(),
                 edge: pro_edge(edge),
                 delta: 0.,
                 tracks: vec![TrackTarget {
@@ -1220,10 +1307,11 @@ fn drag_kind(model: &TimelineModel, spec: Spec) -> Result<DragKind, String> {
             })
         }
         Spec::Roll(edge) => {
-            let (before, after) = neighbours(&primary)?;
+            let id = primary()?;
+            let (before, after) = neighbours(&id)?;
             let (left, right) = match edge {
-                Edge::In => (before.ok_or("No clip before this edit")?, primary),
-                Edge::Out => (primary, after.ok_or("No clip after this edit")?),
+                Edge::In => (before.ok_or("No clip before this edit")?, id),
+                Edge::Out => (id, after.ok_or("No clip after this edit")?),
             };
             DragKind::ProEdit(Pro::Roll {
                 left_id: left,
@@ -1233,10 +1321,11 @@ fn drag_kind(model: &TimelineModel, spec: Spec) -> Result<DragKind, String> {
             })
         }
         Spec::Slide => {
-            let (before, after) = neighbours(&primary)?;
+            let id = primary()?;
+            let (before, after) = neighbours(&id)?;
             DragKind::ProEdit(Pro::Slide {
                 previous_id: before.ok_or("No clip before this one")?,
-                layer_id: primary,
+                layer_id: id,
                 next_id: after.ok_or("No clip after this one")?,
                 delta: 0.,
                 linked: true,

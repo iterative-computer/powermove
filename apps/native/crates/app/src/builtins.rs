@@ -767,6 +767,11 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             cx.notify();
         });
     }
+    fn command(&self, name: &str, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade() {
+            controller.read(cx).host.borrow().send_command(name, vec![]);
+        }
+    }
     fn menu(
         &self,
         items: Vec<Value>,
