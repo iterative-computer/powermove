@@ -1,7 +1,7 @@
 //! Permissioned IPC boundary for the confined Store helper. Invoke on workers;
 //! AppKit never waits for this runtime or for the kernel owner.
 use crate::{KernelStoreAdapter, StoreAuthority};
-use pm_kernel::state::{StateOp, StateTransaction};
+use pm_kernel::state::StateOp;
 use pm_runtime_v8::*;
 use pm_store_host::{
     adapter::StoreSession,
@@ -164,21 +164,14 @@ impl StoreRuntimeHost {
             .and_then(Value::as_str)
             .filter(|key| !key.is_empty() && key.encode_utf16().count() <= 128)
             .ok_or(Error::Invalid("Store storage key"))?;
-        let snapshot = kernel.state();
-        let mut entry = snapshot.extensions[self.session.data_store.extension.as_str()].clone();
-        let mut source = entry
-            .source
-            .as_object()
-            .cloned()
-            .ok_or(Error::Invalid("Store source"))?;
-        let mut values = source
-            .get("storePrivateStorageV1")
-            .and_then(pm_model::Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let id = self.session.data_store.extension.as_str();
         if member == "get" {
-            let reply = values
-                .get(key)
+            let snapshot = kernel.state();
+            let reply = snapshot.extensions[id]
+                .source
+                .get("storePrivateStorageV1")
+                .and_then(pm_model::Value::as_object)
+                .and_then(|values| values.get(key))
                 .map(|value| {
                     serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(value))
                 })
@@ -190,39 +183,55 @@ impl StoreRuntimeHost {
                     .unwrap_or_else(|| json!({})),
             ));
         }
-        match member {
-            "set" => {
-                let value = params.get(1).ok_or(Error::Invalid("Store storage value"))?;
-                values.insert(
-                    key,
-                    pm_model::json::parse(&value.to_string())
-                        .map_err(|_| Error::Invalid("Store storage value"))?,
-                );
+        crate::store_kernel::update_state(kernel, |snapshot| {
+            let mut entry = snapshot.extensions[id].clone();
+            let mut source = entry
+                .source
+                .as_object()
+                .cloned()
+                .ok_or(StorageFailure(Error::Invalid("Store source")))?;
+            let mut values = source
+                .get("storePrivateStorageV1")
+                .and_then(pm_model::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            match member {
+                "set" => {
+                    let invalid = StorageFailure(Error::Invalid("Store storage value"));
+                    let value = params.get(1).ok_or(StorageFailure(Error::Invalid(
+                        "Store storage value",
+                    )))?;
+                    values.insert(
+                        key,
+                        pm_model::json::parse(&value.to_string()).map_err(|_| invalid)?,
+                    );
+                }
+                "delete" => {
+                    values.remove(key);
+                }
+                _ => return Err(StorageFailure(Error::Invalid("Store storage method"))),
             }
-            "delete" => {
-                values.remove(key);
+            if pm_model::json::to_canonical_string(&pm_model::Value::Object(values.clone())).len()
+                > 256 * 1024
+            {
+                return Err(StorageFailure(Error::Quota("Store private storage")));
             }
-            _ => return Err(Error::Invalid("Store storage method")),
-        }
-        if pm_model::json::to_canonical_string(&pm_model::Value::Object(values.clone())).len()
-            > 256 * 1024
-        {
-            return Err(Error::Quota("Store private storage"));
-        }
-        source.insert("storePrivateStorageV1", pm_model::Value::Object(values));
-        entry.source = pm_model::Value::Object(source);
-        let revision = snapshot.revision;
-        kernel
-            .transact(StateTransaction {
-                expected_revision: Some(revision),
-                ops: vec![StateOp::Extension(entry)],
-            })
-            .map_err(Error::Host)?;
+            source.insert("storePrivateStorageV1", pm_model::Value::Object(values));
+            entry.source = pm_model::Value::Object(source);
+            Ok(Some(vec![StateOp::Extension(entry)]))
+        })
+        .map_err(|failure| failure.0)?;
         Ok(Some(json!({})))
     }
     /// Private diagnostics only; callers must not publish source strings.
     pub fn private_reports(&self) -> Vec<Value> {
         self.reports.lock().unwrap().0.clone()
+    }
+}
+struct StorageFailure(Error);
+impl From<String> for StorageFailure {
+    fn from(error: String) -> Self {
+        Self(Error::Host(error))
     }
 }
 impl EngineProxy for StoreRuntimeHost {
@@ -336,26 +345,23 @@ impl KernelHooks for StoreRuntimeHost {
         }
         let kernel = &*self.kernel;
         self.admit(kernel, "storage.set")?;
-        let snapshot = kernel.state();
-        let mut entry = snapshot.extensions[self.session.data_store.extension.as_str()].clone();
-        let mut source = entry
-            .source
-            .as_object()
-            .cloned()
-            .ok_or(Error::Invalid("Store source"))?;
-        source.insert(
-            "storeRuntimeStorageV1",
-            pm_model::json::parse(&storage.to_string())
-                .map_err(|_| Error::Invalid("Store storage"))?,
-        );
-        entry.source = pm_model::Value::Object(source);
-        let revision = snapshot.revision;
-        kernel
-            .transact(StateTransaction {
-                expected_revision: Some(revision),
-                ops: vec![StateOp::Extension(entry)],
-            })
-            .map_err(Error::Host)
+        let id = self.session.data_store.extension.as_str();
+        crate::store_kernel::update_state(kernel, |snapshot| {
+            let mut entry = snapshot.extensions[id].clone();
+            let mut source = entry
+                .source
+                .as_object()
+                .cloned()
+                .ok_or(StorageFailure(Error::Invalid("Store source")))?;
+            source.insert(
+                "storeRuntimeStorageV1",
+                pm_model::json::parse(&storage.to_string())
+                    .map_err(|_| StorageFailure(Error::Invalid("Store storage")))?,
+            );
+            entry.source = pm_model::Value::Object(source);
+            Ok(Some(vec![StateOp::Extension(entry)]))
+        })
+        .map_err(|failure: StorageFailure| failure.0)
     }
     fn commit_retained(&self, _: &Generation, _: &[Value]) -> Result<()> {
         Err(Error::Invalid(
@@ -379,7 +385,7 @@ impl HostProxy for StoreRuntimeHost {
         cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
         self.admit(&*self.kernel, "fetch")?;
-        crate::net::fetch(request, cancel)
+        crate::net::fetch(request, crate::net::Reach::Public, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}
 }

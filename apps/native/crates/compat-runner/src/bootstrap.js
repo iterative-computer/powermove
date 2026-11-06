@@ -164,7 +164,6 @@ globalThis.__compat = {
           scheduleDirty();
           this.controls?.sync();
           this.dom?.flush();
-          call("presentation.invalidate");
         },
         GL: {
           bounds: (layer, time) =>
@@ -355,19 +354,21 @@ globalThis.__compat = {
     return (this.api ??= this.realm.extension("powermove-host", 3).api);
   },
   /** Every entry below is called by the native host as one synchronous task. A
-   * promise is never returned to it: long extension work must not hold the owner. */
+   * promise is never returned to it: long extension work must not hold the owner.
+   * Store code runs in its helper; nothing confined ever enters this plan. */
   boot(records) {
     this.loader
-      .boot(records)
+      .boot(this.trusted(records))
       .catch((error) => this.reportFailure(error))
       .finally(() => {
         this.publishContributions();
         runtime.engine("extensions.ready", {});
       });
   },
+  trusted: (records) => records.filter((record) => record.trust !== "store"),
   update(records, ids, reason) {
     this.loader
-      .update(records, ids, reason)
+      .update(this.trusted(records), ids, reason)
       .catch((error) => this.reportFailure(error))
       .finally(() => this.publishContributions());
   },
@@ -477,14 +478,10 @@ globalThis.__compat = {
       definitions: this.definitions(),
     };
   },
-  /** A definition the generators refuse never stops the others publishing. */
   definitions() {
-    try {
-      return PowermoveCompat.definitionSnapshots(this.realm.kernel);
-    } catch (error) {
-      this.errors.push({ name: error?.name, message: error?.message });
-      return [];
-    }
+    return PowermoveCompat.definitionSnapshots(this.realm.kernel, (id, error) =>
+      this.errors.push({ id, name: error?.name, message: error?.message }),
+    );
   },
   publishContributions() {
     runtime.engine("contributions.publish", { value: this.contributions() });

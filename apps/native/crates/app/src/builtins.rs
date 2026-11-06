@@ -138,6 +138,19 @@ impl Controller {
     pub fn surface_ready(&mut self, id: String) {
         self.builtins.ready.insert(id);
     }
+}
+impl Host {
+    /// An unmounted surface: its view and anything it published go with it, so a
+    /// rebuilt graph starts from its own first commit.
+    pub fn forget_surface(&mut self, id: &str) {
+        self.ready.remove(id);
+        self.pending.remove(id);
+        self.views.remove(id);
+        self.headers.remove(id);
+        self.generations.remove(id);
+    }
+}
+impl Controller {
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
         let Some(published) = self.published.clone() else {
             return;
@@ -662,12 +675,17 @@ impl Controller {
                 }
                 "effectMenu" => {
                     let state = self.kernel.state();
-                    let options = state
+                    // Each window's realm holds its own entry for a contributed id.
+                    let ids: BTreeSet<&String> = state
                         .registries
                         .get("effects")
                         .into_iter()
                         .flatten()
-                        .map(|entry| json!({"id":entry.id,"label":entry.id}))
+                        .map(|entry| &entry.id)
+                        .collect();
+                    let options = ids
+                        .into_iter()
+                        .map(|id| json!({"id":id,"label":id}))
                         .collect::<Vec<_>>();
                     let selected = options.clone();
                     let runtime = runtime.clone();

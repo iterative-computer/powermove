@@ -19,7 +19,6 @@ struct State {
     pins: BTreeMap<(String, u64), (Source, usize)>,
     missing: BTreeSet<String>,
     dom: Vec<Value>,
-    invalidated: bool,
     bindings: BTreeMap<u64, String>,
     dom_sequence: u64,
 }
@@ -32,13 +31,10 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn set_enabled(&self, _id: &str, _enabled: bool) {}
     fn contributions(&self, _value: Value) {}
     fn dom_ready(&self) {}
-    fn presentation(&self) {}
+    fn canvases_ready(&self) {}
     fn ready(&self) {}
     fn activating(&self, _id: Option<&str>) {}
     fn watchdog_stop(&self) {}
-    fn panel(&self, _request: &Value) -> Result<Value> {
-        Err(Error::Host("panel host not attached".into()))
-    }
 }
 pub struct NoEvents;
 impl RealmEvents for NoEvents {}
@@ -154,8 +150,9 @@ impl NativeHost {
     pub fn handle_name(&self, handle: u64) -> Option<String> {
         self.kernel.lock().unwrap().handle_name(handle)
     }
-    pub fn take_presentation_request(&self) -> bool {
-        std::mem::take(&mut self.state.lock().unwrap().invalidated)
+    /// This realm is finished; see `KernelAdapter::seal`.
+    pub fn seal(&self) {
+        self.kernel.lock().unwrap().seal();
     }
     pub fn diagnostics(&self) -> Value {
         let state = self.state.lock().unwrap();
@@ -165,25 +162,46 @@ impl NativeHost {
         std::mem::take(&mut self.state.lock().unwrap().dom)
     }
     pub fn canvas_frames(&self) -> Result<Vec<pm_compat_host::CanvasFrame>> {
+        self.changed_canvas_frames(&BTreeMap::new())
+    }
+    /// Bound canvases whose version differs from `known`. Pixels are read under
+    /// the lock V8's recorder calls need; only those that changed, and the PNG
+    /// is encoded after it is released.
+    pub fn changed_canvas_frames(
+        &self,
+        known: &BTreeMap<(u64, String), u64>,
+    ) -> Result<Vec<pm_compat_host::CanvasFrame>> {
         let mut state = self.state.lock().unwrap();
         let bindings = state.bindings.clone();
         let sequence = state.dom_sequence;
         if sequence == 0 && !bindings.is_empty() {
             return Err(Error::Invalid("canvas DOM batch is not flushed"));
         }
-        bindings
+        let mut changed = vec![];
+        for (node, id) in bindings {
+            let canvas = state
+                .surfaces
+                .get_mut(&id)
+                .ok_or(Error::Invalid("bound canvas retired"))?;
+            let version = canvas.key().version;
+            if known.get(&(node, id.clone())) == Some(&version) {
+                continue;
+            }
+            let (width, height) = canvas.size();
+            let source = if width == 0 || height == 0 {
+                None
+            } else {
+                Some(canvas.snapshot().map_err(host_error)?)
+            };
+            changed.push((node, id, version, width, height, source));
+        }
+        drop(state);
+        changed
             .into_iter()
-            .map(|(node, id)| {
-                let canvas = state
-                    .surfaces
-                    .get_mut(&id)
-                    .ok_or(Error::Invalid("bound canvas retired"))?;
-                let (width, height) = canvas.size();
-                let (version, png) = if width == 0 || height == 0 {
-                    (canvas.key().version, Vec::new())
-                } else {
-                    let source = canvas.snapshot().map_err(host_error)?;
-                    (source.key.version, encode_png(&source.pixels)?)
+            .map(|(node, id, version, width, height, source)| {
+                let (version, png) = match source {
+                    Some(source) => (source.key.version, encode_png(&source.pixels)?),
+                    None => (version, Vec::new()),
                 };
                 Ok(pm_compat_host::CanvasFrame {
                     generation: 1,
@@ -839,11 +857,6 @@ impl EngineProxy for NativeHost {
                 let base = self.kernel.lock().unwrap().timebase()?;
                 return self.transport.command(input, base);
             }
-            "presentation.invalidate" => {
-                self.state.lock().unwrap().invalidated = true;
-                self.events.presentation();
-                return Ok(Value::Null);
-            }
             "kernel.call" => {
                 let time = self.transport.time();
                 return self.kernel.lock().unwrap().call(input, time);
@@ -890,7 +903,6 @@ impl EngineProxy for NativeHost {
                 self.events.contributions(input["value"].clone());
                 return Ok(Value::Null);
             }
-            "panel.request" => return self.events.panel(input),
             "kernel.pin" | "kernel.unpin" => {
                 let handle = input["handle"]
                     .as_str()
@@ -979,7 +991,7 @@ impl HostProxy for NativeHost {
         request: FetchRequest,
         cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
-        crate::net::fetch(request, cancel)
+        crate::net::fetch(request, crate::net::Reach::Open, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}
 }

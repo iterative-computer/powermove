@@ -115,6 +115,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, _| v.sync_extension_panels(open));
     }
+    fn shown_panels(&self, shown: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, _| v.hide_extension_panels(shown));
+    }
     fn panel_menu(
         &self,
         id: &str,

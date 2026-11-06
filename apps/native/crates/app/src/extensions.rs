@@ -34,6 +34,8 @@ const INSTALL: &str = "extension.install:";
 /// Longer than the realm's own deadline; a hung realm never holds a menu back.
 const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
+/// Keys this window's list of contributed panels in the shell.
+static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
 struct PageEvents {
@@ -61,7 +63,8 @@ struct Page {
     host: Rc<RefCell<MacDomHost>>,
     events: Rc<PageEvents>,
     ready: bool,
-    /// Which run of a Store helper this page draws; 0 for the trusted realm.
+    /// The run this page belongs to: a realm generation, or a Store helper's
+    /// writer. Batches of any other run never reach it.
     view: u64,
 }
 
@@ -119,8 +122,8 @@ fn external_link(url: &str) -> bool {
     url.len() <= 2048 && (url.starts_with("https://") || url.starts_with("http://"))
 }
 
-#[derive(Default)]
 pub struct Extensions {
+    window: u64,
     pub host: Option<ExtensionHost>,
     /// One WebKit document per trust domain: the trusted realm's under the empty
     /// key, then each Store extension's own. Never shared.
@@ -136,15 +139,47 @@ pub struct Extensions {
     /// Panels whose definition went away while open. They return with it.
     suspended: BTreeSet<String>,
     open_panels: BTreeSet<String>,
+    /// Open panels with no body right now: tabs behind another.
+    hidden: BTreeSet<String>,
     menu: Option<OpenMenu>,
     next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
-    /// Mounted v4 surface extensions and their titles.
-    surfaces: BTreeMap<String, String>,
+    /// Mounted v4 surface extensions by title, with the source they run.
+    surfaces: BTreeMap<String, (String, String)>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
+}
+impl Default for Extensions {
+    fn default() -> Self {
+        Self {
+            window: NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            host: None,
+            pages: BTreeMap::new(),
+            views: Rc::default(),
+            data_stores: StoreDataStores::default(),
+            stores: BTreeMap::new(),
+            owners: Rc::default(),
+            panels: BTreeMap::new(),
+            known_panels: BTreeSet::new(),
+            suspended: BTreeSet::new(),
+            open_panels: BTreeSet::new(),
+            hidden: BTreeSet::new(),
+            menu: None,
+            next_menu: 0,
+            placed: BTreeMap::new(),
+            seen: 0,
+            commands: BTreeSet::new(),
+            surfaces: BTreeMap::new(),
+            resources: Arc::default(),
+        }
+    }
+}
+impl Drop for Extensions {
+    fn drop(&mut self) {
+        layout::set_contributed_panels(self.window, []);
+    }
 }
 impl Extensions {
     pub fn owns_panel(&self, id: &str) -> bool {
@@ -170,7 +205,6 @@ impl Controller {
         drop(shell);
         self.extensions = Extensions::default();
         let Some(session) = &self.session else {
-            layout::set_contributed_panels([]);
             return;
         };
         let project = session.project.clone();
@@ -181,7 +215,7 @@ impl Controller {
             project,
             roots: Extensions::roots(&self.profile),
             cache: self.profile.join("extensions-build"),
-            owner: Some(Box::new(Clock(clock_tx))),
+            owner: Some(Arc::new(Clock(clock_tx))),
             text: self.font_broker.clone().map(|broker| {
                 Box::new(move || {
                     let resolver = BrokerResolver::new(broker.clone(), Default::default());
@@ -335,7 +369,8 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
-        let Some(host) = &self.extensions.host else {
+        // With no realm nothing can add to it, so it opens right away.
+        let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
             return Some(entries);
         };
         self.extensions.next_menu += 1;
@@ -356,12 +391,35 @@ impl Controller {
         None
     }
     /// Each v4 extension gets its own realm and draws through the v4 panel path.
+    /// One that is disabled, removed or rebuilt loses that realm here.
     fn mount_surfaces(&mut self, cx: &mut Context<Self>) {
         let (Some(host), Some(runtime)) = (&self.extensions.host, self.builtins.runtime.clone())
         else {
             return;
         };
-        for surface in host.surfaces() {
+        let wanted = host.surfaces();
+        let source = |surface: &Value| surface["graph"]["hash"].as_str().map(str::to_owned);
+        let gone: Vec<String> = self
+            .extensions
+            .surfaces
+            .iter()
+            .filter(|(id, (_, hash))| {
+                !wanted
+                    .iter()
+                    .any(|s| s["id"] == id.as_str() && source(s).as_ref() == Some(hash))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &gone {
+            runtime.unmount_extension(id);
+            self.builtins.forget_surface(id);
+            self.extensions.surfaces.remove(id);
+            if !wanted.iter().any(|s| s["id"] == id.as_str()) {
+                let shell = self.host.borrow();
+                shell.send_command(&format!("panel:close:{id}"), vec![]);
+            }
+        }
+        for surface in wanted {
             let Some(id) = surface["id"].as_str().map(str::to_owned) else {
                 continue;
             };
@@ -372,7 +430,8 @@ impl Controller {
                 .as_str()
                 .unwrap_or(&id)
                 .to_owned();
-            self.extensions.surfaces.insert(id.clone(), title);
+            let hash = source(&surface).unwrap_or_default();
+            self.extensions.surfaces.insert(id.clone(), (title, hash));
             let ticket = runtime.mount_extension(&id, &surface["graph"]);
             cx.spawn(async move |this, cx| {
                 let mounted = match ticket {
@@ -418,6 +477,19 @@ impl Controller {
             .iter()
             .map(|(panel, (store, _))| (panel.clone(), store.clone()))
             .collect();
+        // A Store extension that stopped takes its document with it.
+        let running: BTreeSet<&String> = self.extensions.stores.values().map(|(s, _)| s).collect();
+        let stopped: Vec<String> = self
+            .extensions
+            .pages
+            .keys()
+            .filter(|key| !key.is_empty() && !running.contains(key))
+            .cloned()
+            .collect();
+        for key in stopped {
+            self.extensions.pages.remove(&key);
+            self.extensions.views.borrow_mut().remove(&key);
+        }
         let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
         // As in the shipped app: the workspace keeps a retired panel's place, and
         // it comes back if something registers the id again.
@@ -434,12 +506,18 @@ impl Controller {
         }
         drop(shell);
         self.extensions.known_panels = known;
-        let surfaces = self.extensions.surfaces.clone().into_iter();
-        layout::set_contributed_panels(panels.into_iter().chain(surfaces));
-        let store = Choice {
+        let surfaces = self
+            .extensions
+            .surfaces
+            .iter()
+            .map(|(id, (title, _))| (id.clone(), title.clone()));
+        let contributed: Vec<_> = panels.iter().cloned().chain(surfaces).collect();
+        layout::set_contributed_panels(self.extensions.window, contributed);
+        // New installs need a pinned Store key; until one ships there is no entry.
+        let store = pm_compat_runner::store_install::available().then(|| Choice {
             label: "Install Extension from Store…".into(),
             command: STORE.into(),
-        };
+        });
         let choices: Vec<Choice> = value["commands"]
             .as_array()
             .into_iter()
@@ -455,7 +533,7 @@ impl Controller {
                     command: format!("{COMMAND}{id}"),
                 })
             })
-            .chain(std::iter::once(store))
+            .chain(store)
             .collect();
         self.extensions.commands = choices
             .iter()
@@ -557,6 +635,7 @@ impl Controller {
             w: (bounds.w - t.metrics.border * 2.).max(0.),
             h: (bounds.h - t.metrics.header - t.metrics.border).max(0.),
         };
+        self.extensions.hidden.remove(id);
         if self.extensions.panels.insert(id.to_owned(), body).is_none()
             && let Some(host) = &self.extensions.host
         {
@@ -579,7 +658,12 @@ impl Controller {
             .stores
             .get(id)
             .map_or(String::new(), |(store, _)| store.clone());
-        let view = self.extensions.stores.get(id).map_or(0, |(_, view)| *view);
+        let trusted = self.extensions.host.as_ref().map_or(0, |h| h.view());
+        let view = self
+            .extensions
+            .stores
+            .get(id)
+            .map_or(trusted, |(_, view)| *view);
         if self
             .extensions
             .pages
@@ -588,7 +672,9 @@ impl Controller {
         {
             return;
         }
+        // That run is over: its document goes, and its replacement starts empty.
         self.extensions.pages.remove(&key);
+        self.extensions.views.borrow_mut().remove(&key);
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -696,9 +782,9 @@ impl Controller {
         // Feedback reaches its realm on a worker, never inside the page's callback.
         let host = self.extensions.host.as_ref();
         let sink: Option<Box<dyn Fn(Value) + Send>> = if key.is_empty() {
-            host.map(|h| Box::new(h.page_sink()) as _)
+            host.map(|h| Box::new(h.page_sink(view)) as _)
         } else {
-            host.map(|h| Box::new(h.store_page_sink(&key)) as _)
+            host.map(|h| Box::new(h.store_page_sink(&key, view)) as _)
         };
         std::thread::spawn(move || {
             while let Ok(message) = output.recv() {
@@ -725,11 +811,31 @@ impl Controller {
             return;
         }
         for (id, rect) in &self.extensions.panels {
-            if self.extensions.placed.get(id) != Some(rect) {
-                host.place_panel(id, [rect.x, rect.y, rect.w, rect.h]);
+            if !self.extensions.hidden.contains(id) && self.extensions.placed.get(id) != Some(rect)
+            {
+                host.place_panel(id, Some([rect.x, rect.y, rect.w, rect.h]));
             }
         }
-        self.extensions.placed = self.extensions.panels.clone();
+        self.extensions.placed = self
+            .extensions
+            .panels
+            .iter()
+            .filter(|(id, _)| !self.extensions.hidden.contains(*id))
+            .map(|(id, rect)| (id.clone(), *rect))
+            .collect();
+    }
+    /// A tab behind another stays open in the realm but leaves the shared
+    /// document's paint and hit testing; `extension_panel` brings it back.
+    pub fn hide_extension_panels(&mut self, shown: &[&str]) {
+        let Some(host) = &self.extensions.host else {
+            return;
+        };
+        for id in self.extensions.panels.keys() {
+            if !shown.contains(&id.as_str()) && self.extensions.hidden.insert(id.clone()) {
+                self.extensions.placed.remove(id);
+                host.place_panel(id, None);
+            }
+        }
     }
     /// The workspace closed a contributed panel: unmount it in the realm.
     pub fn sync_extension_panels(&mut self, open: &[&str]) {
@@ -747,6 +853,7 @@ impl Controller {
     }
     fn close_extension_panel(&mut self, id: &str) {
         self.extensions.placed.remove(id);
+        self.extensions.hidden.remove(id);
         if self.extensions.panels.remove(id).is_some()
             && let Some(host) = &self.extensions.host
         {
@@ -771,9 +878,9 @@ impl Controller {
                 continue;
             }
             let mut batches = if key.is_empty() {
-                host.take_batches()
+                host.take_batches(page.view)
             } else {
-                host.take_store_batches(key)
+                host.take_store_batches(key, page.view)
             };
             let mut web = page.host.borrow_mut();
             while let Some(batch) = batches.front() {
@@ -783,12 +890,14 @@ impl Controller {
                 batches.pop_front();
             }
             if key.is_empty() {
-                host.return_batches(batches);
-                for frame in host.take_canvases() {
-                    let _ = web.present_canvas(PAGE_PANEL, &frame);
+                host.return_batches(page.view, batches);
+                if page.view == host.view() {
+                    for frame in host.take_canvases() {
+                        let _ = web.present_canvas(PAGE_PANEL, &frame);
+                    }
                 }
             } else {
-                host.return_store_batches(key, batches);
+                host.return_store_batches(key, page.view, batches);
             }
         }
     }

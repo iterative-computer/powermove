@@ -45,6 +45,9 @@ pub trait Integration {
     }
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
+    /// The native panels with a body this frame: open ones outside it are tabs
+    /// behind another, drawn by no one.
+    fn shown_panels(&self, _shown: &[&str], _cx: &mut App) {}
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);

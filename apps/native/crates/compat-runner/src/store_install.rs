@@ -15,6 +15,12 @@ const MAX_ARCHIVE: usize = 64 * 1024 * 1024;
 /// releases; extension or catalog input can never add to this list.
 const PINNED_KEYS: &[(&str, &str, [u8; 32])] = &[];
 
+/// Whether a new install can succeed. Without a pinned key every one is refused
+/// before download, so the app offers none.
+pub fn available() -> bool {
+    !PINNED_KEYS.is_empty()
+}
+
 pub fn pinned() -> Result<TrustStore> {
     let mut trust = TrustStore::default();
     for (publisher, key, bytes) in PINNED_KEYS {

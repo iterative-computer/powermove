@@ -990,33 +990,56 @@ pub fn empty_state(
     }
 }
 thread_local! {
-    /// Panels contributed at runtime: id and interned title, in menu order.
-    static CONTRIBUTED: std::cell::RefCell<Vec<(String, &'static str)>> = const { std::cell::RefCell::new(vec![]) };
+    /// Panels contributed at runtime, per window: id and interned title, in menu
+    /// order. Layout has no window at hand, so it reads the union; each window's
+    /// extension host replaces its own list and no one else's.
+    static CONTRIBUTED: std::cell::RefCell<Vec<(u64, Vec<(String, &'static str)>)>> = const { std::cell::RefCell::new(vec![]) };
 }
-/// Replaces the contributed panels. Layout, menus and palette read these like
+/// Replaces what `window` contributes. Layout, menus and palette read these like
 /// built-ins, so a contributed panel docks, tabs and persists the same way.
-pub fn set_contributed_panels(panels: impl IntoIterator<Item = (String, String)>) {
+pub fn set_contributed_panels(window: u64, panels: impl IntoIterator<Item = (String, String)>) {
     CONTRIBUTED.with(|list| {
         let mut list = list.borrow_mut();
-        let known = std::mem::take(&mut *list);
-        *list = panels
+        let intern = |list: &[(u64, Vec<(String, &'static str)>)], title: String| {
+            list.iter()
+                .flat_map(|(_, panels)| panels)
+                .find(|(_, t)| **t == *title)
+                .map(|(_, t)| *t)
+                .unwrap_or_else(|| Box::leak(title.into_boxed_str()))
+        };
+        let next: Vec<_> = panels
             .into_iter()
             .map(|(id, title)| {
-                let interned = known
-                    .iter()
-                    .find(|(_, t)| **t == *title)
-                    .map(|(_, t)| *t)
-                    .unwrap_or_else(|| Box::leak(title.into_boxed_str()));
-                (id, interned)
+                let title = intern(&list, title);
+                (id, title)
             })
             .collect();
+        list.retain(|(owner, _)| *owner != window);
+        if !next.is_empty() {
+            list.push((window, next));
+        }
     });
 }
 pub fn contributed_panels() -> Vec<String> {
-    CONTRIBUTED.with(|list| list.borrow().iter().map(|(id, _)| id.clone()).collect())
+    CONTRIBUTED.with(|list| {
+        let list = list.borrow();
+        let mut ids: Vec<String> = vec![];
+        for (id, _) in list.iter().flat_map(|(_, panels)| panels) {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    })
 }
 fn contributed_title(id: &str) -> Option<&'static str> {
-    CONTRIBUTED.with(|list| list.borrow().iter().find(|(p, _)| p == id).map(|(_, t)| *t))
+    CONTRIBUTED.with(|list| {
+        list.borrow()
+            .iter()
+            .flat_map(|(_, panels)| panels)
+            .find(|(p, _)| p == id)
+            .map(|(_, t)| *t)
+    })
 }
 /// Built-ins, then contributions, in Window ▸ Panels order.
 pub fn all_panels() -> Vec<String> {
@@ -1101,7 +1124,7 @@ mod contributed_tests {
     use super::*;
     #[test]
     fn contributed_panels_dock_title_and_survive_like_builtins() {
-        set_contributed_panels([("synthetic.panel".to_owned(), "Synthetic".to_owned())]);
+        set_contributed_panels(1, [("synthetic.panel".to_owned(), "Synthetic".to_owned())]);
         assert_eq!(panel_title("synthetic.panel"), "Synthetic");
         assert!(all_panels().iter().any(|p| p == "synthetic.panel"));
         let mut layout = Layout::preset("edit");
@@ -1110,7 +1133,11 @@ mod contributed_tests {
         layout.validate().unwrap();
         layout.close_panel("synthetic.panel").unwrap();
         assert!(!layout.open_panels().contains(&"synthetic.panel"));
-        set_contributed_panels([]);
+        // One window clearing its list leaves the other's panels alone.
+        set_contributed_panels(2, [("synthetic.other".to_owned(), "Other".to_owned())]);
+        set_contributed_panels(2, []);
+        assert_eq!(panel_title("synthetic.panel"), "Synthetic");
+        set_contributed_panels(1, []);
         assert!(layout.show_panel("synthetic.panel").is_err());
         assert_eq!(panel_title("synthetic.panel"), "synthetic.panel");
     }

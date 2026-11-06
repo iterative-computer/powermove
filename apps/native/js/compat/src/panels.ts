@@ -4,6 +4,12 @@ import type { Registry } from "./registry";
  * dock together in one panel beside it and rebuild with the selection. */
 export const SECTIONS_PANEL = "extension-properties";
 
+export const panelStyle = (rect: [number, number, number, number] | null) => {
+  if (!rect) return "display:none";
+  const [x, y, w, h] = rect;
+  return `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`;
+};
+
 /** Mounts actual contribution builds in the V8 DOM mirror. The rendering host
  * still owns placement and paint acknowledgements; opening is not a paint ack.
  */
@@ -80,15 +86,10 @@ export class CompatPanels {
       entry.root.remove();
     }
   }
-  /** Window points of the shell's panel body. The root is host-owned geometry. */
-  place = (id: string, rect: [number, number, number, number]) => {
-    const [x, y, w, h] = rect;
-    this.openPanels
-      .get(id)
-      ?.root.setAttribute(
-        "style",
-        `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`,
-      );
+  /** Window points of the shell's panel body. The root is host-owned geometry;
+   * `null` is a tab behind another, which neither paints nor takes pointers. */
+  place = (id: string, rect: [number, number, number, number] | null) => {
+    this.openPanels.get(id)?.root.setAttribute("style", panelStyle(rect));
   };
   close = (id: string) => {
     this.hidden.add(id);

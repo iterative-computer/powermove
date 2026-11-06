@@ -3,7 +3,7 @@
 use pm_kernel::Published;
 use pm_runtime_v8::{Error, Result};
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Timing facts of the open composition, read from the published tree.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,7 +76,7 @@ impl Default for Clock {
 /// With an owner, it mirrors the app's clock; without one, it runs its own.
 pub struct Transport {
     clock: Mutex<Clock>,
-    owner: Option<Box<dyn TransportOwner>>,
+    owner: Option<Arc<dyn TransportOwner>>,
 }
 impl Default for Transport {
     fn default() -> Self {
@@ -84,7 +84,7 @@ impl Default for Transport {
     }
 }
 impl Transport {
-    pub fn new(owner: Option<Box<dyn TransportOwner>>) -> Self {
+    pub fn new(owner: Option<Arc<dyn TransportOwner>>) -> Self {
         Self {
             clock: Mutex::default(),
             owner,
@@ -92,6 +92,9 @@ impl Transport {
     }
     pub fn time(&self) -> f64 {
         self.clock.lock().unwrap().time
+    }
+    pub fn playing(&self) -> bool {
+        self.clock.lock().unwrap().playing
     }
     /// The clock owner's latest position. Returns what changed for the realm.
     pub fn publish(&self, time: f64, playing: bool) -> (bool, bool) {
@@ -258,7 +261,7 @@ mod tests {
             }
         }
         let requests = std::sync::Arc::default();
-        let clock = Transport::new(Some(Box::new(Owner(std::sync::Arc::clone(&requests)))));
+        let clock = Transport::new(Some(Arc::new(Owner(Arc::clone(&requests)))));
         clock
             .command(&json!({"method":"seek","time":0.51}), BASE)
             .unwrap();

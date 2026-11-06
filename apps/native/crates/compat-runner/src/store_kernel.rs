@@ -72,6 +72,33 @@ impl StoreAuthority for Mutex<Kernel> {
     }
 }
 
+/// Extension entries change as whole values, and several threads write them: a
+/// helper's storage, the host's records, Settings. Each write re-reads and
+/// retries when another landed between its read and its commit, so none is lost.
+pub fn update_state<E: From<String>>(
+    kernel: &dyn StoreAuthority,
+    mut build: impl FnMut(&StateSnapshot) -> std::result::Result<Option<Vec<StateOp>>, E>,
+) -> std::result::Result<(), E> {
+    for _ in 0..64 {
+        let snapshot = kernel.state();
+        let Some(ops) = build(&snapshot)? else {
+            return Ok(());
+        };
+        match kernel.transact(StateTransaction {
+            expected_revision: Some(snapshot.revision),
+            ops,
+        }) {
+            Ok(()) => return Ok(()),
+            // The state did not move, so this failure is not a lost race.
+            Err(error) if kernel.state().revision == snapshot.revision => {
+                return Err(error.into());
+            }
+            Err(_) => (),
+        }
+    }
+    Err(String::from("Kernel state kept changing").into())
+}
+
 pub struct KernelStoreAdapter<'a> {
     kernel: &'a dyn StoreAuthority,
 }
@@ -135,51 +162,60 @@ impl StoreKernel for KernelStoreAdapter<'_> {
         expected: Option<u64>,
         next: &ExtensionState,
     ) -> Result<()> {
-        let current = self.load(id)?;
-        if current.as_ref().map(|state| state.revision) != expected {
-            return Err(Error::Conflict);
-        }
-        if next.data_store.extension != *id
-            || next.revision
-                != expected
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .ok_or(Error::Invalid("Store revision"))?
-            || current
-                .as_ref()
-                .is_some_and(|state| state.data_store != next.data_store)
-        {
-            return Err(Error::Invalid("Store state identity/revision"));
-        }
-        let snapshot = self.kernel.state();
-        let previous = snapshot.extensions.get(id.as_str());
-        let mut source = previous
-            .and_then(|entry| entry.source.as_object())
-            .cloned()
-            .unwrap_or_default();
-        let value = serde_json::to_string(next).map_err(|_| Error::Invalid("Store state"))?;
-        source.insert(
-            SLOT,
-            pm_model::json::parse(&value).map_err(|_| Error::Invalid("Store state"))?,
-        );
-        let entry = ExtensionEntry {
-            id: id.as_str().into(),
-            installed: next.active.is_some(),
-            enabled: previous.is_none_or(|entry| entry.enabled),
-            version: next
-                .active
-                .as_ref()
-                .map(|release| release.manifest.version.clone())
-                .unwrap_or_default(),
-            source: pm_model::Value::Object(source),
-        };
-        self.kernel
-            .transact(StateTransaction {
-                expected_revision: Some(snapshot.revision),
-                ops: vec![StateOp::Extension(entry)],
-            })
-            .map_err(Error::Io)?;
-        Ok(())
+        let kernel = self.kernel;
+        update_state(kernel, |snapshot| {
+            let current = self.load(id).map_err(StoreWrite::Refused)?;
+            if current.as_ref().map(|state| state.revision) != expected {
+                return Err(StoreWrite::Refused(Error::Conflict));
+            }
+            if next.data_store.extension != *id
+                || next.revision
+                    != expected
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(StoreWrite::Refused(Error::Invalid("Store revision")))?
+                || current
+                    .as_ref()
+                    .is_some_and(|state| state.data_store != next.data_store)
+            {
+                return Err(StoreWrite::Refused(Error::Invalid(
+                    "Store state identity/revision",
+                )));
+            }
+            let previous = snapshot.extensions.get(id.as_str());
+            let mut source = previous
+                .and_then(|entry| entry.source.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let invalid = || StoreWrite::Refused(Error::Invalid("Store state"));
+            let value = serde_json::to_string(next).map_err(|_| invalid())?;
+            source.insert(SLOT, pm_model::json::parse(&value).map_err(|_| invalid())?);
+            Ok(Some(vec![StateOp::Extension(ExtensionEntry {
+                id: id.as_str().into(),
+                installed: next.active.is_some(),
+                enabled: previous.is_none_or(|entry| entry.enabled),
+                version: next
+                    .active
+                    .as_ref()
+                    .map(|release| release.manifest.version.clone())
+                    .unwrap_or_default(),
+                source: pm_model::Value::Object(source),
+            })]))
+        })
+        .map_err(|error| match error {
+            StoreWrite::Refused(error) => error,
+            StoreWrite::Kernel(error) => Error::Io(error),
+        })
+    }
+}
+
+enum StoreWrite {
+    Refused(Error),
+    Kernel(String),
+}
+impl From<String> for StoreWrite {
+    fn from(error: String) -> Self {
+        Self::Kernel(error)
     }
 }
 

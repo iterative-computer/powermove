@@ -31,13 +31,19 @@ impl KernelStoreDispatch {
     pub fn failures(&self) -> Vec<String> {
         self.failures.lock().unwrap().clone()
     }
+    /// Registrations of this extension, from any window's helper.
+    fn prefix(&self) -> String {
+        format!("store:{}:", self.session.data_store.extension.as_str())
+    }
     fn token(&self, token: &str) -> Result<String> {
         if token.is_empty() || token.encode_utf16().count() > 128 {
             return Err(Error::Invalid("Store registration token"));
         }
         Ok(format!(
-            "store:{}:{}:{token}",
-            self.owner.realm, self.owner.generation
+            "{}{}:{}:{token}",
+            self.prefix(),
+            self.owner.realm,
+            self.owner.generation
         ))
     }
     fn qualify(&self, id: &str) -> String {
@@ -48,10 +54,11 @@ impl KernelStoreDispatch {
             format!("{owner}.{id}")
         }
     }
+    /// Registrations commute, so these never wait on anyone else's revision.
     fn apply(&self, kernel: &dyn StoreAuthority, ops: Vec<StateOp>) -> Result<()> {
         kernel
             .transact(StateTransaction {
-                expected_revision: Some(kernel.state().revision),
+                expected_revision: None,
                 ops,
             })
             .map_err(Error::Host)
@@ -155,10 +162,11 @@ impl StoreDispatch for KernelStoreDispatch {
                 {
                     return Err(Error::Quota("Store registrations"));
                 }
-                if state
-                    .provider(registry, &id)
-                    .is_some_and(|entry| entry.owner != self.owner)
-                {
+                // The kernel is app-wide and each window runs its own helper, so
+                // this extension's other helpers may hold the id; no one else may.
+                if state.provider(registry, &id).is_some_and(|entry| {
+                    entry.owner != self.owner && !entry.token.starts_with(&self.prefix())
+                }) {
                     return Err(Error::Invalid("Store registration collision"));
                 }
                 self.apply(
@@ -196,8 +204,12 @@ impl StoreDispatch for KernelStoreDispatch {
                 );
                 let state = kernel.state();
                 let entry = state
-                    .provider("commands", &id)
-                    .filter(|entry| entry.owner == self.owner)
+                    .registries
+                    .get("commands")
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find(|entry| entry.id == id && entry.owner == self.owner)
                     .ok_or(Error::Invalid("Store command owner"))?;
                 let definition: Value =
                     serde_json::from_str(&pm_model::json::to_canonical_string(&entry.definition))

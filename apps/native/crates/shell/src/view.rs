@@ -1519,6 +1519,10 @@ impl Render for Editor {
             }
             root = root.child(panel);
         }
+        if let Some(integration) = &self.integration {
+            let shown: Vec<&str> = native_bodies.iter().map(|(id, _)| id.as_str()).collect();
+            integration.shown_panels(&shown, cx);
+        }
         if let Some(h) = &self.host {
             *h.borrow().native_panels.borrow_mut() = native_bodies;
         }

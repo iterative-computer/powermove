@@ -69,15 +69,20 @@ fn adopt(
     let id = ExtensionId::new(found.id.clone()).map_err(|_| Error::Invalid("Store id"))?;
     let mut store = KernelStoreAdapter::new(kernel);
     let current = store.load(&id).map_err(|e| Error::Host(format!("{e:?}")))?;
-    if current.as_ref().is_some_and(|state| state.active.is_some()) {
-        return Ok(());
-    }
     let raw = found
         .manifest
         .as_ref()
         .map_err(|_| Error::Invalid("Store manifest"))?;
     let manifest: Manifest =
         serde_json::from_value(raw.clone()).map_err(|_| Error::Invalid("Store manifest"))?;
+    // Only a legacy adoption follows the disk: the shipped app may have updated
+    // these bytes. A signed native install keeps exactly what it verified.
+    if let Some(active) = current.as_ref().and_then(|state| state.active.as_ref())
+        && (active.publisher != LEGACY_PUBLISHER
+            || (active.bundle == graph.hash && active.manifest == manifest))
+    {
+        return Ok(());
+    }
     let release_id = marker["releaseId"]
         .as_str()
         .filter(|id| !id.is_empty())
@@ -117,7 +122,16 @@ fn adopt(
         },
         manifest,
     };
+    // Decisions already made stand; only what is new takes the legacy grant.
+    let mut permissions = permissions;
+    if let Some(state) = &current {
+        permissions.extend(state.permissions.clone());
+    }
     let expected = current.as_ref().map(|state| state.revision);
+    let previous_archives = current
+        .as_ref()
+        .map(|state| state.archives.clone())
+        .unwrap_or_default();
     let state = ExtensionState {
         revision: expected.unwrap_or(0) + 1,
         data_store: match current {
@@ -127,7 +141,7 @@ fn adopt(
         },
         data_status: DataStoreStatus::Active,
         active: Some(release),
-        archives: vec![],
+        archives: previous_archives,
         permissions,
     };
     store
@@ -233,7 +247,8 @@ impl StoreExtension {
             .runner
             .eval(&format!("void __storeCheck.closePanel({})", json!(panel)));
     }
-    pub fn place_panel(&self, panel: &str, rect: [f32; 4]) {
+    /// `None` is a tab behind another: it stays open and neither paints nor hits.
+    pub fn place_panel(&self, panel: &str, rect: Option<[f32; 4]>) {
         let _ = self.runner.eval(&format!(
             "void __storeCheck.placePanel({},{})",
             json!(panel),
@@ -271,6 +286,10 @@ impl StoreExtension {
                 "__storeCheck.dom.receive({message});__storeCheck.dom.flush()"
             ));
         }
+    }
+    /// The page queue has room again for what the helper's document held back.
+    pub fn flush(&self) {
+        let _ = self.runner.eval("void __storeCheck.dom.flush()");
     }
     pub fn run(&self, handle: u64, args: &Value) {
         let _ = self.runner.eval(&format!(

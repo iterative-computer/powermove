@@ -123,13 +123,9 @@ globalThis.__storeCheck = {
     this.dom.flush();
   },
   placePanel(id, rect) {
-    const [x, y, w, h] = rect;
     this.views
       .get(id)
-      ?.root.setAttribute(
-        "style",
-        `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`,
-      );
+      ?.root.setAttribute("style", StoreCompat.panelStyle(rect));
     this.dom.flush();
   },
   closePanel(id) {

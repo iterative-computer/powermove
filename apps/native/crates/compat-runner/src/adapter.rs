@@ -3,7 +3,7 @@
 //! as operations against the last one sent, or whole when those can't express it.
 use pm_kernel::{
     Ack, Call, Caller, Direction, EditCall, HistoryCall, KernelHandle, Origin, Published,
-    QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, WriteBody,
+    QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, Writer, WriteBody,
     state::{StateOp, StateTransaction},
 };
 use pm_model::{Op, PathPart, canonical};
@@ -108,12 +108,15 @@ pub struct KernelAdapter {
     mirror: Option<(u64, QueryMirror)>,
 }
 impl KernelAdapter {
-    pub fn new(kernel: KernelHandle, project: &str, realm: &str, realm_id: u32) -> Self {
+    /// `writer` is the kernel identity of this realm's run: a rebuilt realm is a
+    /// new generation, so its transaction ids can never meet an old one's. The
+    /// realm itself always speaks as generation 1 of its own short life.
+    pub fn new(kernel: KernelHandle, project: &str, realm: &str, writer: Writer) -> Self {
         Self {
             kernel,
             project: project.into(),
             realm: realm.into(),
-            caller: Caller::realm(realm_id, 1, Origin::Extension),
+            caller: Caller::realm(writer.realm, writer.generation, Origin::Extension),
             generation: 1,
             sent: None,
             handles: BTreeMap::new(),
@@ -249,6 +252,22 @@ impl KernelAdapter {
             .call_blocking(&self.project, request)
             .map_err(|e| Error::Host(e.to_string()))?;
         self.reply(ack)
+    }
+    /// A later step of one composite request. The kernel keeps one acknowledgement
+    /// per txid, so only the first step carries it; `replies` makes the whole
+    /// request idempotent.
+    fn step(&mut self, call: Call) -> Result<Value> {
+        let ack = self
+            .kernel
+            .call_blocking(&self.project, Request::new(self.caller, call))
+            .map_err(|e| Error::Host(e.to_string()))?;
+        self.reply(ack)
+    }
+    /// This realm is gone: its open entry records whole, its later calls are
+    /// refused and its external entries become undo barriers.
+    pub fn seal(&self) {
+        let request = Request::new(self.caller, Call::RealmFailed);
+        let _ = self.kernel.call_blocking(&self.project, request);
     }
     fn reply(&mut self, ack: Ack) -> Result<Value> {
         let mut result = match ack.reply {
@@ -521,14 +540,13 @@ impl KernelAdapter {
                 let write = self.direct_write(args, &p)?;
                 let written = self.execute(txid, write)?;
                 if written.get("error").is_some() {
-                    let _ = self.execute(txid, HistoryCall::Rollback.into());
+                    let _ = self.step(HistoryCall::Rollback.into());
                     let message = written["error"]["message"].clone();
                     return Ok(
                         json!({"value":{"ok":false,"message":message},"publication":self.publication()?}),
                     );
                 }
-                let mut reply = self.execute(
-                    txid,
+                let mut reply = self.step(
                     HistoryCall::Commit {
                         label: args["label"].as_str().map(str::to_owned),
                     }
@@ -633,7 +651,15 @@ mod tests {
             .wait()
             .unwrap()
             .unwrap();
-        let mut adapter = KernelAdapter::new(handle, "compat", "compat", 2);
+        let mut adapter = KernelAdapter::new(
+            handle,
+            "compat",
+            "compat",
+            Writer {
+                realm: 2,
+                generation: 1,
+            },
+        );
         adapter.snapshot().unwrap();
         (actor, adapter)
     }
@@ -676,6 +702,38 @@ mod tests {
             .unwrap();
         assert_eq!(undo["value"], true);
         assert_eq!(undo["publication"]["ops"][0]["path"], json!(["markers"]));
+        drop(adapter);
+        actor.shutdown();
+    }
+    #[test]
+    fn a_mutation_commits_its_entry_and_a_failed_one_rolls_back() {
+        let (actor, mut adapter) = adapter();
+        let begin = |txid| request(txid, "edit.mutateBegin", json!({"label":"Synthetic"}));
+        let marker = json!({"ops":[{"path":["markers"],"exists":true,"value":[{"id":"synthetic-marker","t":0,"name":"Synthetic"}]}],"label":"Synthetic"});
+        adapter.call(&begin(1), 0.).unwrap();
+        let finish = request(2, "edit.mutateFinish", marker);
+        let reply = adapter.call(&finish, 0.).unwrap();
+        assert_eq!(reply["value"]["ok"], true);
+        // The retry is the stored reply, not a second commit.
+        assert_eq!(adapter.call(&finish, 0.).unwrap()["value"]["ok"], true);
+        let busy = |adapter: &mut KernelAdapter, txid| {
+            adapter
+                .call(&request(txid, "history.busy", json!({})), 0.)
+                .unwrap()["value"]
+                .clone()
+        };
+        assert_eq!(busy(&mut adapter, 3), false, "the entry closed");
+        let undo = adapter
+            .call(&request(4, "history.undo", json!({})), 0.)
+            .unwrap();
+        assert_eq!(undo["value"], true);
+        adapter.call(&begin(5), 0.).unwrap();
+        let bad = json!({"ops":[{"path":["markers",0,"t"],"exists":true,"value":1}]});
+        let reply = adapter
+            .call(&request(6, "edit.mutateFinish", bad), 0.)
+            .unwrap();
+        assert_eq!(reply["value"]["ok"], false);
+        assert_eq!(busy(&mut adapter, 7), false, "the failed entry rolled back");
         drop(adapter);
         actor.shutdown();
     }

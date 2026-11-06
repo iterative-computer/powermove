@@ -115,7 +115,15 @@ impl CompatRunner {
             .ok_or(Error::Closed)?
             .map_err(|e| Error::Host(e.to_string()))?;
         let host = Arc::new(NativeHost::new(
-            adapter::KernelAdapter::new(kernel, PROJECT, PROJECT, COMPAT_REALM),
+            adapter::KernelAdapter::new(
+                kernel,
+                PROJECT,
+                PROJECT,
+                pm_kernel::Writer {
+                    realm: COMPAT_REALM,
+                    generation: 1,
+                },
+            ),
             transport::Transport::default(),
             Box::new(NoEvents),
         ));
@@ -168,9 +176,6 @@ impl CompatRunner {
     /// Ordered mutations for the rendering host. Admission alone is never a paint oracle.
     pub fn take_dom_batches(&self) -> Vec<Value> {
         self.host.take_dom_batches()
-    }
-    pub fn take_presentation_request(&self) -> bool {
-        self.host.take_presentation_request()
     }
     /// Called by the worker after flushing DOM and before queueing presentation.
     /// Immutable native resources are separate from the DOM JSON stream.
@@ -326,14 +331,6 @@ mod tests {
     fn missing_kernel_method_is_acknowledged_without_poisoning_the_channel() {
         let runner = runner();
         assert_eq!(runner.json("(()=>{try{__compat.realm.channel.call('synthetic.unavailable')}catch{}return [__compat.realm.channel.pending,PM.hist.canUndo()]})()").unwrap(),json!([false,false]));
-    }
-    #[test]
-    fn invalidation_publishes_coalesced_demand_to_the_native_presenter() {
-        let runner = runner();
-        assert!(!runner.take_presentation_request());
-        runner.eval("PM.invalidate();PM.invalidate() ").unwrap();
-        assert!(runner.take_presentation_request());
-        assert!(!runner.take_presentation_request());
     }
     #[test]
     fn recorder_pixels_are_native_and_source_versions_survive_disposal() {
