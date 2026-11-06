@@ -210,12 +210,17 @@ impl Controller {
         .detach();
     }
     fn facts(&self) -> Value {
-        let playing = self.viewer.as_ref().is_some_and(|v| {
-            v.status()
-                .clock
+        let status = self.viewer.as_ref().map(|v| v.status());
+        let playing = status.as_ref().is_some_and(|s| {
+            s.clock
                 .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
         });
-        json!({"time":self.time(),"playing":playing,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
+        // Auto's measured resolution; 0 until a frame has drawn.
+        let effective = status
+            .map(|s| s.effective_quality)
+            .filter(|q| *q > 0.)
+            .unwrap_or(1.);
+        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
     }
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
         let playing = self.playing();
@@ -345,9 +350,11 @@ impl Controller {
             self.host
                 .borrow_mut()
                 .viewer_transform(self.dimensions, Some(self.zoom.unwrap_or(fit)));
+            // A cropped canvas has its edges outside the pane: no outline.
+            let cropped = self.host.borrow().viewer_crop.get().is_some();
             crate::playback::frame_outline(
                 &self.host.borrow(),
-                crate::panels::needs_frame_outline(self.background, t.colors.viewer),
+                !cropped && crate::panels::needs_frame_outline(self.background, t.colors.viewer),
                 t.colors.separator,
                 t.metrics.border,
             );

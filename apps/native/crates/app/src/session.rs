@@ -358,6 +358,20 @@ impl Controller {
         self.selected = p.selection.primary().map(str::to_owned);
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
+            // Preview Resolution in the viewer bar: the engine renders at it.
+            use pm_engine_service::Quality as Q;
+            use pm_panel_viewerchrome::state::Quality as Chosen;
+            let quality = match chrome.quality {
+                Chosen::Auto => Q::Auto,
+                Chosen::Full => Q::Full,
+                Chosen::Half => Q::Half,
+                Chosen::Quarter => Q::Quarter,
+            };
+            if let Some(viewer) = &self.viewer
+                && let Err(e) = viewer.quality(quality)
+            {
+                self.message = format!("Viewer: {e}");
+            }
         }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
