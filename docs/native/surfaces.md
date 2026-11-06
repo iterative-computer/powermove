@@ -81,8 +81,9 @@ and `app/src/first_run.rs`.
 | N001–N003 | launch; Window ▸ Migration Report | Welcome gate, Keychain consent, summary, report |
 | S107–S110 | first launch | Welcome with animation, Timeline, Agent, Speech Model (unavailable state), Suitcase |
 | S017, S005, S019 | File ▸ Projects… | Project Library window: sections, search, rename, duplicate, trash, put back |
-| S018 | File ▸ New Project | AppKit sheet, kernel create |
+| S018 | File ▸ New Project; Project Library | AppKit sheet over `LibraryController`, kernel create |
 | S021 | Composition ▸ New Composition…, Composition Settings…; Project panel | AppKit sheet, guarded kernel edit |
+| S022 | Composition ▸ Pre-compose… (handled in `session.rs`) | `dialogs::appkit::precompose_sheet`, then `CompCommand::Precompose` as one Undo step. Delete Composition still needs the Project panel confirm reply path |
 | S029 | Composition ▸ Edit Keyframe Value…, Keyframe Velocity…, Scale Keyframes… | AppKit sheets; the keyframe context menu is the Timeline lane’s |
 | S001 | opening a project with recovery data | recovery alert and kernel decision. `Discard Edits` stays out until a Recently Deleted destination exists |
 | S002, S004 | closing a dirty project; quitting with two or more; a failed open | alerts with spec copy. `Finishing Up` and saving over a changed file are not attached |
@@ -99,7 +100,6 @@ Waiting for a route, and who owns it:
 | S011, S012 | extension runtime in the app; needs a values service on Keychain |
 | S013, S054 | extension hosting; slowdown data source |
 | S003, S014, S016, S020, S055 | document tabs in the shell; `documents.rs` keeps alerts and notices for them |
-| S022 | `CompCommand::Precompose` is `NotImplemented`, so the menu item says so and no sheet opens. Delete also needs the Project panel confirm reply path |
 | S036, S043 | property menu; Export panel RPC |
 | S025, S051 | Viewer lane; panel text host |
 
@@ -1097,9 +1097,9 @@ Outside-owned-path integration still required:
    apply input/AX plans, route focus/IME/clipboard events and register the v4
    section. The existing temporary app panels are untouched beyond module
    registration. `EditingServices` is a queue contract, not an installed service.
-2. Kernel text commands `AddAnimator`, `RemoveAnimator`, `SetStyleRange` remain
-   `NotImplemented`; rename/duplicate/reorder/enable/property structural commands
-   are also needed. The current property resolver lacks `ta.*`, `ts.*`, `g.*`
+2. Kernel text commands `AddAnimator`, `RemoveAnimator`, `SetStyleRange` exist;
+   rename/duplicate/reorder/enable/property structural commands are still
+   needed. The current property resolver lacks `ta.*`, `ts.*`, `g.*`
    and `mp.*` channels. Path create/add/close/delete and text/box edits are backed;
    the drag reducer alone is not an admitted vertex/tangent mutation.
 3. The actor needs an atomic document-session guard for `Transact` and gestures.

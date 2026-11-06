@@ -5,7 +5,7 @@ use crate::{
     library::LibraryStore,
     locks::{self, CopyReason, FileLock, OpenDecision},
     persistence::{DiskFormat, LibraryWriter},
-    project_io::{self, OpenOptions, SaveOptions, SaveTarget},
+    project_io::{self, OpenOptions, SaveTarget},
 };
 use pm_model::json::{Map, Value};
 use std::path::PathBuf;
@@ -47,6 +47,8 @@ pub enum ShellCall {
     SaveAs {
         session: SessionHandle,
         path: PathBuf,
+        /// The save panel asked; the displaced file is kept as a backup.
+        replace: bool,
     },
     Close(SessionHandle),
     /// Leave journal recoverable, without saving the base.
@@ -363,9 +365,13 @@ impl Kernel {
                 self.check_session(&handle)?;
                 self.save_session(&handle, None)
             }
-            ShellCall::SaveAs { session, path } => {
+            ShellCall::SaveAs {
+                session,
+                path,
+                replace,
+            } => {
                 self.check_session(&session)?;
-                self.save_session(&session, Some(path))
+                self.save_session(&session, Some((path, replace)))
             }
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
@@ -523,6 +529,7 @@ impl Kernel {
         &mut self,
         session: SessionHandle,
         path: Option<PathBuf>,
+        replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
         let mut lock = None;
@@ -543,14 +550,15 @@ impl Kernel {
             .clone()
             .map_or(SaveTarget::InPlace, |path| SaveTarget::SaveAs {
                 path,
-                replace: false,
+                replace,
             });
+        let options = self.save_options(&session.project);
         let p = self.project_mut(&session.project).unwrap();
         let workspace = p.workspace().clone();
         p.store_mut().set_workspace(Some(workspace));
         let plan = p
             .store_mut()
-            .prepare_save(target, SaveOptions::default())
+            .prepare_save(target, options)
             .map_err(failure)?;
         let ticket = crate::new_id("save");
         self.sessions
@@ -654,7 +662,7 @@ impl Kernel {
                         path,
                         replace: false,
                     },
-                    SaveOptions::default(),
+                    self.save_options(id),
                 )
                 .map_err(failure)?
                 .run()
@@ -1269,7 +1277,7 @@ impl Kernel {
                         path: path.clone(),
                         replace: false,
                     },
-                    SaveOptions::default(),
+                    self.save_options(&id),
                 )
                 .map_err(failure)?
                 .run()
@@ -1290,12 +1298,12 @@ impl Kernel {
     fn save_session(
         &mut self,
         handle: &SessionHandle,
-        save_as: Option<PathBuf>,
+        save_as: Option<(PathBuf, bool)>,
     ) -> Result<ShellReply, KernelFailure> {
         self.ensure_idle(handle)?;
         let id = &handle.project;
         let mut new_lock = None;
-        if let Some(path) = &save_as {
+        if let Some((path, _)) = &save_as {
             let decision = locks::open_decision(path, None);
             if decision != OpenDecision::Writable {
                 return Err(failure(format!(
@@ -1305,27 +1313,27 @@ impl Kernel {
             new_lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
         }
         let mut recovery_copy = None;
-        let file_path = save_as
-            .clone()
-            .or_else(|| match &self.sessions[id].destination {
+        let file_path = save_as.as_ref().map(|(path, _)| path.clone()).or_else(|| {
+            match &self.sessions[id].destination {
                 Destination::File(path) => Some(path.clone()),
                 _ => None,
-            });
+            }
+        });
         if let Some(path) = file_path {
             let ws = self.project(id).unwrap().workspace().clone();
+            let options = self.save_options(id);
             let p = self.project_mut(id).unwrap();
             p.store_mut().set_workspace(Some(ws));
-            let target = if save_as.is_some() {
-                SaveTarget::SaveAs {
+            let target = match &save_as {
+                Some((path, replace)) => SaveTarget::SaveAs {
                     path: path.clone(),
-                    replace: false,
-                }
-            } else {
-                SaveTarget::InPlace
+                    replace: *replace,
+                },
+                None => SaveTarget::InPlace,
             };
             let result = p
                 .store_mut()
-                .prepare_save(target, SaveOptions::default())
+                .prepare_save(target, options)
                 .and_then(|plan| plan.run())
                 .and_then(|receipt| p.store_mut().finish_save(receipt));
             if let Err(e) = result {
@@ -1401,6 +1409,7 @@ impl Kernel {
                 .join(format!("{slot}.pmv"));
             std::fs::create_dir_all(path.parent().unwrap()).map_err(failure)?;
             let ws = self.project(id).unwrap().workspace().clone();
+            let options = self.save_options(slot);
             let p = self.project_mut(id).unwrap();
             p.store_mut().set_workspace(Some(ws));
             let target = if p.store().path() == Some(path.as_path()) {
@@ -1413,7 +1422,7 @@ impl Kernel {
             };
             let receipt = p
                 .store_mut()
-                .prepare_save(target, SaveOptions::default())
+                .prepare_save(target, options)
                 .map_err(failure)?
                 .run()
                 .map_err(failure)?;

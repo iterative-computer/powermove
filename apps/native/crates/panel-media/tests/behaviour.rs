@@ -1728,11 +1728,15 @@ fn nested_delete_button_targets_unselected_asset_and_reveal_button_selects_it() 
 }
 
 #[test]
-fn explicit_import_order_drives_paging_keyboard_ranges_and_drag_payloads() {
-    let (c, _, r) = setup();
-    let c = c
-        .with_asset_order(["c", "b", "a", "d", "e"].map(str::to_owned).to_vec())
-        .unwrap();
+fn authored_order_drives_paging_keyboard_ranges_and_drag_payloads() {
+    let mut root = parse(PROJECT).unwrap();
+    root.as_object_mut().unwrap().insert(
+        pm_kernel::asset_order::FIELD,
+        parse(r#"{"c":0,"b":1,"a":2,"d":3,"e":4}"#).unwrap(),
+    );
+    let snapshot = DocumentStore::new_untitled(root).snapshot();
+    let c = Catalog::new("P".into(), snapshot).unwrap();
+    let r = Runtime::ready();
     let mut p = MediaPanel::default();
     p.refresh(&c, &r);
     pointer(&mut p, &c, &r, "c", Modifiers::default());
@@ -1755,20 +1759,6 @@ fn explicit_import_order_drives_paging_keyboard_ranges_and_drag_payloads() {
             .map(|row| row.id.clone())
             .collect::<Vec<_>>(),
         [asset("c"), asset("b"), asset("a"), asset("d")]
-    );
-}
-
-#[test]
-fn incomplete_or_duplicated_asset_order_hint_is_rejected() {
-    let c = catalog();
-    assert_eq!(
-        c.clone().with_asset_order(vec!["a".into()]).unwrap_err(),
-        Error::InvalidTarget
-    );
-    assert_eq!(
-        c.with_asset_order(["a", "b", "c", "d", "d"].map(str::to_owned).to_vec())
-            .unwrap_err(),
-        Error::InvalidTarget
     );
 }
 

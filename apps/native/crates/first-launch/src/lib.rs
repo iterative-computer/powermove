@@ -6,6 +6,7 @@ mod closure;
 mod delta;
 mod disk;
 pub mod integration;
+pub mod recovery;
 pub mod report;
 pub mod secrets;
 pub mod sparkle;

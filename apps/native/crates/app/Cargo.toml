@@ -18,6 +18,7 @@ pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
 pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
 metal = "0.33"
@@ -30,6 +31,7 @@ block2 = "0.6"
 async-channel = "2"
 serde_json = "1"
 tempfile = "3"
+sha2 = "0.10"
 
 pm-builtins = { path = "../builtins" }
 pm-surface = { path = "../surface" }
@@ -42,6 +44,10 @@ pm-panel-media = { path = "../panel-media" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
+
+[[test]]
+name = "text_commands"
+harness = false
 
 [[example]]
 name = "pm-corpus"
@@ -62,7 +68,5 @@ version = "0.4"
 path = "../../../../engine/crates/pm-export"
 [dev-dependencies.pm-audio]
 path = "../../../../engine/crates/pm-audio"
-[dev-dependencies.pm-eval]
-path = "../../../../engine/crates/pm-eval"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"

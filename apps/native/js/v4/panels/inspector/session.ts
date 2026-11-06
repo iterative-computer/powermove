@@ -215,6 +215,8 @@ export class InspectorSession {
             row: request.row,
             value: choice,
           });
+        } else if (request.type === "animator-menu") {
+          await this.dispatch({ type: "add-animator", preset: choice });
         } else if (request.type === "row-menu") {
           const item = request.items.find(
             (item) => item.action === choice && item.enabled,

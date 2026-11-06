@@ -21,11 +21,6 @@ impl Controller {
             "projects" | "openRecent" => self.show_project_library(cx),
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
-            "precompose" => {
-                // The kernel command is `NotImplemented`, so no sheet can promise it.
-                self.message = "Pre-compose isn’t available yet.".into();
-                cx.notify();
-            }
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }

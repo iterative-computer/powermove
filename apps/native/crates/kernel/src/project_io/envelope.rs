@@ -11,6 +11,7 @@
 //! instead of materializing a second copy of the project as a `Value`. A
 //! test checks the bytes equal `to_canonical_string(realize_project(..))`.
 
+use crate::asset_order;
 use pm_model::canonical::COMP_FIELDS;
 use pm_model::json::ObjectMap;
 use pm_model::json::write::{Sink, push_quoted, write_canonical};
@@ -42,6 +43,8 @@ enum Member<'a> {
     Node(&'a Node),
     /// `comps` without the open composition.
     Comps(&'a ObjectMap<Node>, &'a JsString),
+    /// `assets` in authored order, which is how the shipped app shows them.
+    Assets(&'a ObjectMap<Node>, Vec<JsString>),
 }
 
 fn object_of(node: &Node) -> Option<&ObjectMap<Node>> {
@@ -83,32 +86,53 @@ pub(crate) fn stored_comp_fields(root: &Node) -> &Node {
 }
 
 fn write_project(root: &Node, had_comps: bool, sink: &mut impl Sink) {
-    let Some((members, id, comps, comp)) = realizable(root) else {
+    let Some(project) = object_of(root) else {
         write_canonical(root, sink);
         return;
     };
-    let mut out: Vec<(JsString, Member)> = Vec::with_capacity(members.len() + comp.len());
-    for (k, v) in members.iter() {
-        if k.as_bytes() == b"comps" {
+    let ordered = project.contains_key(asset_order::FIELD.as_bytes());
+    let realized = realizable(root);
+    if realized.is_none() && !ordered {
+        write_canonical(root, sink);
+        return;
+    }
+    let mut out: Vec<(JsString, Member)> = Vec::with_capacity(project.len() + 12);
+    for (k, v) in project.iter() {
+        if k.as_bytes() == asset_order::FIELD.as_bytes() {
+            continue;
+        }
+        if k.as_bytes() == b"comps"
+            && let Some((_, id, comps, _)) = realized
+        {
             let others = comps.len() - 1;
             if others == 0 && !had_comps {
                 continue;
             }
             out.push((k.clone(), Member::Comps(comps, id)));
+        } else if k.as_bytes() == b"assets"
+            && ordered
+            && let Some(assets) = object_of(v)
+        {
+            out.push((
+                k.clone(),
+                Member::Assets(assets, asset_order::node_keys(root)),
+            ));
         } else {
             out.push((k.clone(), Member::Node(v)));
         }
     }
-    for (k, v) in comp.iter() {
-        let target = match k.as_str() {
-            Some("name") => "compName",
-            Some(f) if COMP_FIELDS.contains(&f) => f,
-            _ => continue,
-        };
-        let target = JsString::from(target);
-        // The composition's value wins over a stale top-level member.
-        out.retain(|(existing, _)| *existing != target);
-        out.push((target, Member::Node(v)));
+    if let Some((_, _, _, comp)) = realized {
+        for (k, v) in comp.iter() {
+            let target = match k.as_str() {
+                Some("name") => "compName",
+                Some(f) if COMP_FIELDS.contains(&f) => f,
+                _ => continue,
+            };
+            let target = JsString::from(target);
+            // The composition's value wins over a stale top-level member.
+            out.retain(|(existing, _)| *existing != target);
+            out.push((target, Member::Node(v)));
+        }
     }
     out.sort_by(|a, b| a.0.cmp_utf16(&b.0));
     sink.push_str("{");
@@ -132,6 +156,19 @@ fn write_project(root: &Node, had_comps: bool, sink: &mut impl Sink) {
                     js_key(sink, cid);
                     sink.push_str(":");
                     write_canonical(*c, sink);
+                }
+                sink.push_str("}");
+            }
+            Member::Assets(assets, order) => {
+                sink.push_str("{");
+                for (j, id) in order.iter().enumerate() {
+                    if j > 0 {
+                        sink.push_str(",");
+                    }
+                    js_key(sink, id);
+                    sink.push_str(":");
+                    let asset = assets.get(id.as_bytes()).expect("ordered asset");
+                    write_canonical(asset, sink);
                 }
                 sink.push_str("}");
             }

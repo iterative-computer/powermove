@@ -272,7 +272,7 @@ fn cues_mut(layer: &mut Value) -> Option<&mut Vec<Value>> {
 }
 
 /// `startPatch(L, nextFrom)` applied to `layer`.
-fn start_patch(layer: &mut Value, source: &Value, next_from: f64) {
+pub(super) fn start_patch(layer: &mut Value, source: &Value, next_from: f64) {
     let from = values::num(source, "from").unwrap_or(0.0);
     if is_timed(source) {
         let trim = (trim_of(source) + (next_from - from) * rate(source)).max(0.0);

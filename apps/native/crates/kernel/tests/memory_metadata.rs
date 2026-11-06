@@ -503,10 +503,12 @@ fn metadata_storage_failure_remains_visible_on_retry_and_lost_ack_query() {
     let dir = TempDir::new("memory-ack-failure");
     let mut kernel = Kernel::new(KernelConfig {
         journal_root: Some(dir.path("journals")),
+        backup_root: None,
         journal: pm_kernel::journal::JournalConfig {
             max_segment_bytes: 1,
             ..Default::default()
         },
+        ..Default::default()
     });
     kernel
         .open("P", OpenSource::Untitled(parse(SOURCE).unwrap()))

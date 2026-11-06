@@ -5,7 +5,7 @@ use pm_builtins::{Builtins, Publication};
 use pm_shell::text::{TextEvent, TextField, TextKind};
 use pm_surface::{
     Id,
-    events::EventDetail,
+    events::{DragData, DragEffect, EventDetail},
     kit::{Component, Panel},
 };
 use serde_json::{Value, json};
@@ -866,6 +866,17 @@ impl SurfaceView {
                     v.activate(id, window, cx);
                 }));
         }
+        // Finder drops reach the Project panel's own targets; the window's
+        // drop handler places anything landing elsewhere at the playhead.
+        if !disabled && node.listeners.contains_key("drop") && self.publication.panel == "assets" {
+            let target = rgb(self.tokens.colors.selected_fill);
+            element = element
+                .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))
+                .on_drop(cx.listener(move |v, paths: &ExternalPaths, window, cx| {
+                    let detail = file_drop(paths.paths(), window.modifiers().alt);
+                    v.send(id, "drop", detail, cx);
+                }));
+        }
         if node.parent == Some(0)
             && surface
                 .nodes()
@@ -1171,6 +1182,24 @@ impl SurfaceView {
         track.into_any_element()
     }
 }
+/// A file drop as the panel's JS reads it (`public.file-url`, as on AppKit).
+fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
+    const FILES: &str = "public.file-url";
+    let files = paths
+        .iter()
+        .map(|path| json!(path.to_string_lossy()))
+        .collect();
+    EventDetail {
+        alt_key: Some(alt),
+        drag: Some(DragData {
+            types: vec![FILES.into()],
+            data: BTreeMap::from([(FILES.to_owned(), Value::Array(files))]),
+            effect: DragEffect::Copy,
+        }),
+        ..Default::default()
+    }
+}
+
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -1362,5 +1391,23 @@ impl Render for HeaderView {
                 v.header_id().map(|id| v.element(id, window, cx, None))
             })
             .unwrap_or_else(|| div().into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_drop;
+    use serde_json::json;
+
+    #[test]
+    fn a_file_drop_carries_paths_under_the_key_the_project_panel_reads() {
+        let detail = file_drop(&["/a b/clip.mov".into(), "/c.png".into()], true);
+        assert_eq!(detail.alt_key, Some(true));
+        let drag = detail.drag.unwrap();
+        assert_eq!(drag.types, ["public.file-url"]);
+        assert_eq!(
+            drag.data["public.file-url"],
+            json!(["/a b/clip.mov", "/c.png"])
+        );
     }
 }

@@ -32,6 +32,7 @@ struct FlatRow {
     id: String,
     effect: usize,
     parameter: Option<(PropertyId, String, Option<crate::ParamDefinition>)>,
+    action: Option<crate::effect_definitions::ColorAction>,
 }
 #[derive(Default)]
 pub struct EffectsPanel {
@@ -39,6 +40,7 @@ pub struct EffectsPanel {
     range: Range<usize>,
     cache_key: Option<(u64, u64, String, Vec<bool>)>,
     cached_definitions: HashMap<String, crate::EffectDefinition>,
+    cached_definition_generation: u64,
     flat: Vec<FlatRow>,
 }
 /// A document plan's selection must not be installed before kernel success.
@@ -48,6 +50,14 @@ pub struct Plan {
     pub selection: Option<EffectSelection>,
     layer: String,
     document: u64,
+}
+impl Plan {
+    fn pin_document(mut self) -> Self {
+        if let Some(request) = &mut self.request {
+            request.expected_document = Some(self.document);
+        }
+        self
+    }
 }
 impl EffectsPanel {
     pub fn new(presentation: Presentation, range: Range<usize>) -> Self {
@@ -73,7 +83,10 @@ impl EffectsPanel {
             layer.to_owned(),
             open.clone(),
         );
-        if self.cache_key.as_ref() == Some(&key) && self.cached_definitions == model.definitions {
+        if self.cache_key.as_ref() == Some(&key)
+            && self.cached_definitions == model.definitions
+            && self.cached_definition_generation == model.definition_generation
+        {
             return Ok(());
         }
         let anchor = self
@@ -89,11 +102,24 @@ impl EffectsPanel {
                 id: format!("effect:{}", text(effect, "id")),
                 effect: index,
                 parameter: None,
+                action: None,
             });
             if !open[index] {
                 continue;
             }
             let id = text(effect, "id");
+            for action in model.color_actions(effect)? {
+                let mut action_id = format!("action:{id}:{}", action.index);
+                while fx.iter().any(|f| text(f, "id") == action_id) {
+                    action_id.push('#');
+                }
+                self.flat.push(FlatRow {
+                    id: action_id,
+                    effect: index,
+                    parameter: None,
+                    action: Some(action),
+                });
+            }
             match model.effect_parameters(layer, id) {
                 Ok(params) => self
                     .flat
@@ -101,6 +127,7 @@ impl EffectsPanel {
                         id: pm_model::json::to_canonical_string(&id.value()),
                         effect: index,
                         parameter: Some((id, param.key.clone(), Some(param))),
+                        action: None,
                     })),
                 Err(InspectorError::MissingDefinition(_)) => {
                     if let Some(params) = effect.get("p").and_then(Value::as_object) {
@@ -114,6 +141,7 @@ impl EffectsPanel {
                                     .value(),
                                 ),
                                 effect: index,
+                                action: None,
                                 parameter: Some((
                                     PropertyId::new(
                                         layer,
@@ -133,6 +161,7 @@ impl EffectsPanel {
             self.range = index..index.saturating_add(length);
         }
         self.cached_definitions = model.definitions.clone();
+        self.cached_definition_generation = model.definition_generation;
         self.cache_key = Some(key);
         Ok(())
     }
@@ -233,17 +262,30 @@ impl EffectsPanel {
         for entry in &self.flat[start..end] {
             let effect = &fx[entry.effect];
             let id = text(effect, "id");
-            let definition = model.definitions.get(text(effect, "type")).cloned();
+            let definition = model.saved_effect_definition(effect);
             let label = definition
                 .as_ref()
                 .map(|d| d.label.clone())
                 .unwrap_or_else(|| text(effect, "type").into());
             let enabled = enabled(model, &layer, effect, time)?;
+            if let Some(action) = &entry.action {
+                rows.push(object([
+                    ("kind", "action".into()),
+                    ("id", entry.id.clone().into()),
+                    ("effect", id.into()),
+                    ("index", (action.index as f64).into()),
+                    ("label", action.label.clone().into()),
+                    ("readonly", (!model.editable(&layer)).into()),
+                ]));
+                continue;
+            }
             if let Some((property, key, param)) = &entry.parameter {
-                let display = self
-                    .presentation
-                    .parameters
-                    .get(&(text(effect, "type").into(), key.clone()));
+                let saved_display = model.saved_parameter_presentation(effect, key);
+                let display = saved_display.as_ref().or_else(|| {
+                    self.presentation
+                        .parameters
+                        .get(&(text(effect, "type").into(), key.clone()))
+                });
                 let raw = effect
                     .get("p")
                     .and_then(|p| p.get(key))
@@ -401,11 +443,11 @@ impl EffectsPanel {
                 return Err(InspectorError::InvalidInput);
             }
             self.range = start..end;
-            return Ok(plan);
+            return Ok(plan.pin_document());
         }
         if action == "clear" {
             model.effects.clear();
-            return Ok(plan);
+            return Ok(plan.pin_document());
         }
         if !model.editable(&layer)
             || ["audio", "camera"].contains(&text(&model.layer(&layer)?, "type"))
@@ -434,7 +476,7 @@ impl EffectsPanel {
                         ..Default::default()
                     },
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "navigate" => {
                 let focused = model
@@ -450,7 +492,7 @@ impl EffectsPanel {
                     direction()?,
                     intent.get("shift").and_then(Value::as_bool) == Some(true),
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "disclose" => {
                 model.set_effect_disclosure(
@@ -461,11 +503,11 @@ impl EffectsPanel {
                         .and_then(Value::as_bool)
                         .ok_or(InspectorError::InvalidInput)?,
                 )?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "copy" => {
                 model.copy_effects(&layer, id)?;
-                return Ok(plan);
+                return Ok(plan.pin_document());
             }
             "toggle" => {
                 let effect = model.effect(&layer, id)?;
@@ -528,20 +570,68 @@ impl EffectsPanel {
                 )?);
                 label = "Reorder Effect".into();
             }
+            "action" => {
+                let effect = model.effect(&layer, id)?;
+                let index = ordinal(intent.get("index").ok_or(InspectorError::InvalidInput)?)?;
+                let action = model
+                    .color_actions(&effect)?
+                    .into_iter()
+                    .find(|a| a.index == index)
+                    .ok_or(InspectorError::InvalidInput)?;
+                let bindings = action
+                    .keys
+                    .iter()
+                    .map(|key| PropertyId::new(&layer, format!("{id}.{key}")))
+                    .collect::<Vec<_>>();
+                let first = model
+                    .binding_state(&Binding::Property(bindings[0].clone()), time)?
+                    .value;
+                let second = model
+                    .binding_state(&Binding::Property(bindings[1].clone()), time)?
+                    .value;
+                let commands = bindings
+                    .into_iter()
+                    .zip([second, first])
+                    .map(|(id, value)| {
+                        let mut c = pm_kernel::commands::properties::SetProperty::new(
+                            id.layer, id.path, value, time,
+                        );
+                        c.preserve_hand_edits = false;
+                        pm_kernel::Command::Property(
+                            pm_kernel::commands::properties::PropertyCommand::Set(c),
+                        )
+                    })
+                    .collect();
+                plan.request = Some(model.commands(caller, commands)?);
+                label = action.label;
+            }
             "reset" => {
                 let effect = model.effect(&layer, id)?;
-                let definition = model
-                    .definitions
-                    .get(text(&effect, "type"))
-                    .ok_or_else(|| InspectorError::MissingDefinition(text(&effect, "type").into()))?
-                    .clone();
-                let reset = EffectCommand::Reset {
-                    layer_id: layer.clone(),
-                    effect_id: id.into(),
-                    definition,
-                };
-                plan.request = Some(model.commands(caller, vec![reset.into()])?);
-                label = "Reset Effect".into();
+                let definition = model.saved_effect_definition(&effect).ok_or_else(|| {
+                    InspectorError::MissingDefinition(text(&effect, "type").into())
+                })?;
+                let definition = model.contextual_effect_definition(&layer, definition, time)?;
+                let commands: Vec<Command> = definition
+                    .params
+                    .iter()
+                    .filter(|p| effect.get("p").and_then(|v| v.get(&p.key)).is_some())
+                    .map(|p| {
+                        let mut c = pm_kernel::commands::properties::SetProperty::new(
+                            &layer,
+                            format!("{id}.{}", p.key),
+                            p.default.clone(),
+                            time,
+                        );
+                        c.preserve_hand_edits = false;
+                        pm_kernel::Command::Property(
+                            pm_kernel::commands::properties::PropertyCommand::Set(c),
+                        )
+                    })
+                    .collect();
+                if !commands.is_empty() {
+                    plan.request = Some(model.commands(caller, commands)?);
+                }
+                label = format!("Reset {}", definition.label);
             }
             "add" => {
                 let kind = text(intent, "definition");
@@ -550,7 +640,7 @@ impl EffectsPanel {
                     .get(kind)
                     .ok_or_else(|| InspectorError::MissingDefinition(kind.into()))?;
                 label = format!("Add {}", definition.label);
-                let mut request = model.add_effect(caller, &layer, kind)?;
+                let mut request = model.add_effect_at(caller, &layer, kind, time)?;
                 if let Call::Transact {
                     body: WriteBody::Commands(commands),
                     ..
@@ -591,7 +681,7 @@ impl EffectsPanel {
                         .binding_state(&Binding::Property(property.clone()), time)?
                         .animated
                 {
-                    return Ok(plan);
+                    return Ok(plan.pin_document());
                 }
                 let action = match text(intent, "action") {
                     "diamond" => PropertyAction::Diamond,
@@ -602,7 +692,7 @@ impl EffectsPanel {
                 // Keep the kernel's exact action-specific undo name for diamond
                 // add/remove, rather than labelling a removal as an addition.
                 if text(intent, "action") == "diamond" {
-                    return Ok(plan);
+                    return Ok(plan.pin_document());
                 }
                 label = "Remove Animation".into();
             }
@@ -619,7 +709,7 @@ impl EffectsPanel {
         {
             *request_label = Some(label);
         }
-        Ok(plan)
+        Ok(plan.pin_document())
     }
     pub fn acknowledge(
         &mut self,

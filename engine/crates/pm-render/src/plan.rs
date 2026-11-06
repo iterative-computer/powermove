@@ -62,16 +62,18 @@ pub struct OutputView {
     pub resolution: [f64; 2],
 }
 
-/// The [`OutputView`] of a level with output origin `origin` (`None` at
-/// `(0, 0)`).
-pub(crate) fn level_view(
+/// The [`OutputView`] of a level with output origin `origin`. A level at
+/// `(0, 0)` has none unless `windowed`: then it shows only part of its
+/// composition, so the output is not the composition's whole resolution.
+fn level_view(
     scope: &Scope<'_, '_>,
     origin: (f64, f64),
+    windowed: bool,
     width: u32,
     height: u32,
     scale: (f64, f64),
 ) -> Option<OutputView> {
-    if origin == (0.0, 0.0) {
+    if origin == (0.0, 0.0) && !windowed {
         return None;
     }
     let (cw, ch) = scope.comp_size();
@@ -308,6 +310,9 @@ pub struct Build<'r> {
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
     pub(crate) origin: (f64, f64),
+    /// The level is a window onto its composition: the request gave an
+    /// origin, which can be `(0, 0)`. Follows `origin` into nested levels.
+    windowed: bool,
     /// What every pass over one composition's layers reads of all of them
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
@@ -326,6 +331,15 @@ pub struct Build<'r> {
 use crate::pass_facts::PassFacts;
 
 impl Build<'_> {
+    pub(crate) fn level_view(
+        &self,
+        scope: &Scope<'_, '_>,
+        width: u32,
+        height: u32,
+        scale: (f64, f64),
+    ) -> Option<OutputView> {
+        level_view(scope, self.origin, self.windowed, width, height, scale)
+    }
     fn charge_source(&mut self, bytes: u64) -> Result<(), Feature> {
         let total = self.source_bytes.checked_add(bytes);
         if total.is_none_or(|n| n > 384 * 1024 * 1024) {
@@ -529,6 +543,7 @@ pub(crate) fn build_reusing<'r>(
         studio_shutters: 1,
         sampling: options.sampling,
         origin: options.origin.unwrap_or((0.0, 0.0)),
+        windowed: options.origin.is_some(),
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -583,7 +598,7 @@ pub(crate) fn comp_pass<'d>(
     } else {
         background(scope.comp)
     };
-    let view = level_view(scope, b.origin, width, height, scale);
+    let view = b.level_view(scope, width, height, scale);
     let mut plan = CompPlan {
         composition: comp_id.clone(),
         group: group_parent.is_some(),
@@ -934,7 +949,7 @@ fn draw_layer<'d>(
                         height,
                         background: Background::Transparent,
                         draws,
-                        view: level_view(scope, b.origin, width, height, scale),
+                        view: b.level_view(scope, width, height, scale),
                     })),
                     uv: [0., 0., 1., 1.],
                     alpha: 1.,
@@ -1260,7 +1275,7 @@ fn matte_pass<'d>(
         height,
         background: Background::Transparent,
         draws: Vec::new(),
-        view: level_view(scope, b.origin, width, height, scale),
+        view: b.level_view(scope, width, height, scale),
     };
     let all = [source];
     let solo = js::flag(source, "solo");
@@ -1629,6 +1644,7 @@ fn native_content_quad<'d>(
             // preview viewport applies only to the open composition's
             // canvas).
             let outer_origin = std::mem::replace(&mut b.origin, (0.0, 0.0));
+            let outer_windowed = std::mem::take(&mut b.windowed);
             let project = scope.project;
             let inner = {
                 let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
@@ -1646,6 +1662,7 @@ fn native_content_quad<'d>(
             };
             b.precomp_depth -= 1;
             b.origin = outer_origin;
+            b.windowed = outer_windowed;
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
@@ -2559,6 +2576,7 @@ fn source_plan<'d>(
         raster,
     ));
     let old_origin = std::mem::replace(&mut b.origin, (0., 0.));
+    let old_windowed = std::mem::take(&mut b.windowed);
     let old_preview = b.preview.take();
     // Typed source requests and source-owner shutter samples select their exact
     // time, rather than the ordinary motion path's held center video frame.
@@ -2616,6 +2634,7 @@ fn source_plan<'d>(
     })();
     b.source_raster = old_raster;
     b.origin = old_origin;
+    b.windowed = old_windowed;
     b.preview = old_preview;
     b.video_center = old_video_center;
     Ok(result?.map(|p| (p, raster)))
@@ -2680,10 +2699,9 @@ fn effect_inputs<'d>(
         };
         if matches!(js::layer_type(source).as_str(), "group" | "adjustment")
             || js::flag(source, "threeD")
-            || js::flag(source, "matteSource")
         {
             return Ok(Err(Feature::Definition(
-                "Effect input group/3D/matte adapter unavailable".into(),
+                "Effect input group/3D adapter unavailable".into(),
             )));
         }
         let at = request.time().unwrap_or(time);
@@ -2802,6 +2820,14 @@ fn effect_inputs<'d>(
             } else {
                 None
             };
+            // Source and mask stages precede the track matte. A complete
+            // composition-space effects producer includes it; an exclusive
+            // effect prefix (including Echo history) deliberately omits it.
+            let matte = if active && request.stage == Stage::Effects && request.prefix.is_none() {
+                layer_matte(scope, b, source, at, width, height, scale)?
+            } else {
+                None
+            };
             let draws = vec![Draw {
                 layer: js::layer_id(owner),
                 matrix: [width as f64, 0., 0., height as f64, 0., 0.],
@@ -2811,7 +2837,7 @@ fn effect_inputs<'d>(
                         content,
                         masks,
                         effects: nested,
-                        matte: None,
+                        matte,
                         blend: pm_protocol::color::BlendMode::Normal,
                         alpha: 1.,
                         transition: None,
@@ -2830,7 +2856,7 @@ fn effect_inputs<'d>(
                     height,
                     background: Background::Transparent,
                     draws,
-                    view: level_view(scope, b.origin, width, height, scale),
+                    view: b.level_view(scope, width, height, scale),
                 }),
             }))
         })();

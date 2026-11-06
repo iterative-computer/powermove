@@ -134,13 +134,6 @@ pub enum EffectCommand {
         effect_ids: Vec<String>,
         new_ids: Vec<String>,
     },
-    /// Reset: every parameter back to its definition default (keys and
-    /// expressions removed), inputs cleared. Label "Reset Effect".
-    Reset {
-        layer_id: String,
-        effect_id: String,
-        definition: EffectDefinition,
-    },
     /// `set_transition` (`setTransition`): `None` removes the edge's
     /// transition. Label "Set Transition" / "Remove Transition".
     SetTransition {
@@ -173,7 +166,6 @@ impl EffectCommand {
                 _ => "Edit Effect",
             },
             EffectCommand::Duplicate { .. } => "Duplicate Effect",
-            EffectCommand::Reset { .. } => "Reset Effect",
             EffectCommand::SetTransition {
                 transition: Some(_),
                 ..
@@ -197,11 +189,6 @@ impl EffectCommand {
                 effect_ids,
                 new_ids,
             } => duplicate(cx, layer_id, effect_ids, new_ids),
-            EffectCommand::Reset {
-                layer_id,
-                effect_id,
-                definition,
-            } => reset(cx, layer_id, effect_id, definition),
             EffectCommand::SetTransition {
                 layer_id,
                 edge,
@@ -627,32 +614,6 @@ fn renew_effect_keys(fx: &mut Value) {
 }
 
 /// Reset: parameters back to their defaults, inputs emptied.
-fn reset(
-    cx: &mut Cx<'_>,
-    layer_id: &str,
-    effect_id: &str,
-    def: &EffectDefinition,
-) -> Result<(), CommandError> {
-    let (loc, mut layer) = effect_layer(cx, layer_id)?;
-    let list = fx_list(&mut layer);
-    let index = list
-        .iter()
-        .position(|e| values::text(e, "id") == Some(effect_id))
-        .ok_or_else(|| CommandError::EffectNotFound(effect_id.to_owned()))?;
-    let fresh = make_effect(effect_id, def);
-    let e = values::obj(&mut list[index]);
-    e.insert("p", fresh.get("p").cloned().unwrap_or_default());
-    match fresh.get("inputs") {
-        Some(i) => {
-            e.insert("inputs", i.clone());
-        }
-        None => {
-            e.remove("inputs");
-        }
-    }
-    cx.put_layer(&loc, layer)
-}
-
 fn is_hex_color(v: &Value) -> bool {
     v.as_str().is_some_and(|s| {
         let h = s.strip_prefix('#').unwrap_or("");
