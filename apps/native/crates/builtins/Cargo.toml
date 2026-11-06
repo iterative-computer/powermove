@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-runtime-v8 = { path = "../runtime-v8" }
 pm-surface = { path = "../surface" }
 pm-design = { path = "../design" }

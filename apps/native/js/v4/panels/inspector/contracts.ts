@@ -61,12 +61,20 @@ export interface Row {
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
 }
+export type SectionAction = "mask" | "animator" | "release-precomp";
+export interface AnimatorPreset {
+  id: string | null;
+  label: string;
+  disabled: boolean;
+}
 export interface Section {
   id: string;
   title: string;
   collapsed: boolean;
   rows: Row[];
-  action?: "mask" | "animator";
+  action?: SectionAction;
+  animators?: { id: string; name: string }[];
+  presets?: AnimatorPreset[];
 }
 export interface InspectorSnapshot {
   target: Target;
@@ -96,8 +104,10 @@ export type Intent =
   | { type: "row-action"; row: string; action: RowAction }
   | { type: "align"; alignment: Alignment }
   | { type: "collapse"; section: string; collapsed: boolean }
-  | { type: "section-action"; section: string; action: "mask" | "animator" }
+  | { type: "section-action"; section: string; action: SectionAction }
   | { type: "drop-effect"; effect: Json; target: string }
+  | { type: "add-animator"; preset: string }
+  | { type: "remove-animator"; animator: string }
   | { type: "set-value"; row: string; value: Json };
 export type ModelOperation = Extract<
   HostOperation,
@@ -123,6 +133,7 @@ export type NativeRequest =
   | { type: "add-effect-menu"; anchor: number; target: string }
   | { type: "new-layer-menu"; anchor: number; items: (string | null)[] }
   | { type: "row-menu"; anchor: number; row: string; items: MenuItem[] }
+  | { type: "animator-menu"; anchor: number; items: AnimatorPreset[] }
   | { type: "font-menu"; anchor: number; row: string }
   | { type: "fill-popover"; anchor: number; row: string }
   | { type: "point-pad"; anchor: number; row: string }

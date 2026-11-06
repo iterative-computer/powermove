@@ -385,8 +385,7 @@ impl TimelineModel {
         }
         Ok(Plan::edit(commands, self.index.revision))
     }
-    /// Produces the typed caption request. Current kernel returns NotImplemented;
-    /// keep that rejection visible until the owning lane implements the body.
+    /// Produces the typed caption request.
     pub fn caption_edit(&self, layer: &str, edit: CaptionEdit) -> Result<Plan, ModelError> {
         let l = self
             .index

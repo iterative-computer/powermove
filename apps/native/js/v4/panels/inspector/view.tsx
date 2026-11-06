@@ -15,7 +15,14 @@ import {
 } from "../../src/components";
 import type { SurfaceProps } from "../../src/jsx-runtime";
 import type { SurfaceEvent } from "../../src/protocol";
-import type { Alignment, Binding, MenuItem, Row, RowAction } from "./contracts";
+import type {
+  Alignment,
+  Binding,
+  MenuItem,
+  Row,
+  RowAction,
+  SectionAction,
+} from "./contracts";
 import { InspectorSession } from "./session";
 
 const well = {
@@ -27,6 +34,11 @@ const horizontal = {
   display: "flex",
   flexDirection: "row",
   alignItems: "center",
+};
+const sectionActions: Record<SectionAction, string> = {
+  mask: "Add Mask",
+  animator: "Add Text Animator",
+  "release-precomp": "Release Pre-comp",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -553,18 +565,40 @@ export function InspectorPanel({
             {section.action ? (
               <Action
                 id={`section-action:${section.id}`}
-                label={
-                  section.action === "mask" ? "Add Mask" : "Add Text Animator"
-                }
-                onActivate={() =>
-                  session.send({
-                    type: "section-action",
-                    section: section.id,
-                    action: section.action!,
-                  })
+                label={sectionActions[section.action]}
+                disabled={target.kind === "layers" && target.first.locked}
+                onActivate={(event) =>
+                  section.action === "animator"
+                    ? session.nativeRequest({
+                        type: "animator-menu",
+                        anchor: event.currentTarget,
+                        items: section.presets ?? [],
+                      })
+                    : session.send({
+                        type: "section-action",
+                        section: section.id,
+                        action: section.action!,
+                      })
                 }
               />
             ) : null}
+            {section.animators?.map((animator) => (
+              <InspectorRow key={animator.id} label={animator.name}>
+                <Action
+                  id={`remove-animator:${animator.id}`}
+                  label={`Remove ${animator.name}`}
+                  tooltip="Remove Text Animator"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({
+                      type: "remove-animator",
+                      animator: animator.id,
+                    })
+                  }
+                />
+              </InspectorRow>
+            ))}
             {section.rows.map((row) => (
               <Property key={row.id} row={row} session={session} />
             ))}

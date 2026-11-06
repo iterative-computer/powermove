@@ -157,6 +157,12 @@ Every `Ack` carries `revision`, `folded: Option<entry>`, `notice`, and the
 * Checkpoints every 50 revisions or 4 MiB (today's constants), written by a
   background thread (temp, `F_FULLFSYNC`, rename, dir sync); older segments
   are pruned only after the newer checkpoint is durable.
+* A line holds the edit's operations, id-keyed where possible, so it costs what
+  changed. A whole-value history form is kept only below 1 MiB; larger
+  structural edits save as operations, which shipped readers refuse as history
+  (the document still opens). A document of 4 MiB or more checkpoints by segment
+  size alone (`VERIFY_MIN_CHARS`), and Undo skips an id-keyed operation a write
+  outside history made stale.
 * **Recovery** (`journal::recover` / `KernelHandle::recover`) loads the
   newest valid checkpoint, replays segments, stops at a torn tail
   (`truncated`), and returns `Recovered`, or **`Copy` when the current base

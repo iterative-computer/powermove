@@ -300,6 +300,8 @@ impl Controller {
                     }
                     v.session = None;
                     v.published = None;
+                    v.media_refresh.reset();
+                    v.media = Default::default();
                     v.mirror = None;
                     v.rows.clear();
                     v.saving_note = false;
@@ -427,6 +429,7 @@ mod tests {
             ShellCall::SaveAs {
                 session: session.clone(),
                 path: path.clone(),
+                replace: false,
             },
         );
         let base = std::fs::read(&path).unwrap();

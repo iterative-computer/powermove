@@ -75,6 +75,9 @@ pub struct Container {
     pub format: ContainerFormat,
     /// The saved document (`{ proj, history, ... }` or a bare project).
     pub document: Value,
+    /// `Object.keys` of the project's `assets`, which `document` cannot carry:
+    /// trees keep object members sorted, and authored media order is visible.
+    pub asset_order: Option<Vec<JsString>>,
     pub media: Vec<MediaRecord>,
     /// Native-retained records without a current known consumer. Same range,
     /// overlap and checksum validation as live media; never discarded.
@@ -269,6 +272,7 @@ pub fn read_container<R: RandomAccess + ?Sized>(
     Ok(Container {
         format: ContainerFormat::Json,
         document: json::parse_file_text(&text)?,
+        asset_order: asset_order(&text, &[]),
         media: Vec::new(),
         archived_media: Vec::new(),
         index: None,
@@ -284,6 +288,13 @@ fn safe_integer(value: Option<&Value>) -> Option<f64> {
     }
 }
 
+/// `document.proj || document`, as projects are read everywhere.
+fn asset_order(text: &[u8], document: &[&str]) -> Option<Vec<JsString>> {
+    let path = |tail: &[&'static str]| document.iter().chain(tail).copied().collect::<Vec<&str>>();
+    json::member_order(text, &path(&["proj", "assets"]))
+        .or_else(|| json::member_order(text, &path(&["assets"])))
+}
+
 fn read_pmv3<R: RandomAccess + ?Sized>(source: &R, size: u64) -> Result<Container, ContainerError> {
     if size < 9 {
         return Err(TRUNCATED);
@@ -295,12 +306,15 @@ fn read_pmv3<R: RandomAccess + ?Sized>(source: &R, size: u64) -> Result<Containe
     if header_length < 2 || body_start > size {
         return Err(BAD_HEADER);
     }
-    let header = json::parse_file_text(&read_vec(source, 9, header_length)?)?;
+    let text = read_vec(source, 9, header_length)?;
+    let header = json::parse_file_text(&text)?;
+    let asset_order = asset_order(&text, &["document"]);
     let legacy_metadata = pmv3_metadata(&header);
     let (document, media) = pmv3_index(header, body_start, size)?;
     Ok(Container {
         format: ContainerFormat::Pmv3,
         document,
+        asset_order,
         media,
         archived_media: Vec::new(),
         index: None,
@@ -506,10 +520,12 @@ fn read_pmv4<R: RandomAccess + ?Sized>(
         return Err(BAD_CONTENT_CHECKSUM);
     }
     let document = json::parse_file_text(&bytes)?;
+    let asset_order = asset_order(&bytes, &[]);
     let archived_media = media.split_off(items.len());
     let container = Container {
         format: ContainerFormat::Pmv4,
         document,
+        asset_order,
         media,
         archived_media,
         index: Some(index),

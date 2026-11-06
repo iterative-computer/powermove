@@ -230,12 +230,10 @@ pub fn definition_for_file(
     app_version: Option<&str>,
 ) -> Result<&'static Definition, CatalogError> {
     let generation = saving_generation(app_version);
-    // Explicit versions added after the tag remain explicit even with unknown
-    // provenance. Version one retains the tag's exact historical definition.
+    // Versions and effects added after the tag cannot come from the tag, even
+    // with unknown provenance. Version one retains its exact tagged definition.
     let version = effect_version(saved)?;
-    if version > 1
-        || (saved.is_some_and(|v| !v.is_null()) && v120_catalog().get(id, version).is_none())
-    {
+    if version > 1 || v120_catalog().get(id, version).is_none() {
         return main_catalog().instance(id, saved);
     }
     saved_definition(id, saved, Some(generation))

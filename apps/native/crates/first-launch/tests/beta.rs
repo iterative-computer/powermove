@@ -38,7 +38,7 @@ impl Evidence for Proof {
             six_owner_domains: true,
             state_complete: true,
             secrets_complete: !self.force_secret_gap,
-            restore_verified: self.ready,
+            installer_recovery_verified: self.ready,
             source_generation: 2,
             checkpoint_generation: if self.changed { 1 } else { 2 },
         })
@@ -169,6 +169,7 @@ fn release() -> Release {
         schema: 1,
         channel: Channel::Beta,
         version: "2.0.0-beta.2".into(),
+        sparkle_version: None,
         architecture: Architecture::Arm64,
         bundle_id: pm_first_launch::BETA_BUNDLE_ID.into(),
         minimum_macos: 14,

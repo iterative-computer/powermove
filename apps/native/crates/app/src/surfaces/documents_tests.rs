@@ -898,6 +898,7 @@ fn real_discard_flow_archives_rejected_edits_and_quit_keeps_original_bytes() {
         ShellCall::SaveAs {
             session: s.clone(),
             path: path.clone(),
+            replace: false,
         },
     )
     .wait()
@@ -1131,6 +1132,7 @@ fn real_clean_release_does_not_write_and_quit_keeps_external_authored_intent() {
         ShellCall::SaveAs {
             session: s,
             path: path.clone(),
+            replace: false,
         },
     )
     .wait()
@@ -1151,6 +1153,7 @@ fn real_clean_release_does_not_write_and_quit_keeps_external_authored_intent() {
         ShellCall::SaveAs {
             session: other_session,
             path: other_path.clone(),
+            replace: false,
         },
     )
     .wait()

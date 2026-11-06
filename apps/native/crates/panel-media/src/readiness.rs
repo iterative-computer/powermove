@@ -14,6 +14,12 @@ impl ObservedRuntime {
             states,
         }
     }
+    /// Carry these observations to a revision that changed no media input.
+    /// The caller proves that; `state` still refuses every other stamp.
+    pub fn rebound(mut self, stamp: Stamp) -> Self {
+        self.stamp = Some(stamp);
+        self
+    }
 }
 impl MediaRuntime for ObservedRuntime {
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState {
@@ -50,8 +56,13 @@ mod tests {
         changed = stamp.clone();
         changed.document += 1;
         assert_eq!(observed.state(&changed, "asset"), RuntimeState::default());
-        changed = stamp;
+        changed = stamp.clone();
         changed.project = "other".into();
         assert_eq!(observed.state(&changed, "asset"), RuntimeState::default());
+        changed = stamp.clone();
+        changed.revision += 1;
+        let rebound = observed.rebound(changed.clone());
+        assert_eq!(rebound.state(&changed, "asset"), ready);
+        assert_eq!(rebound.state(&stamp, "asset"), RuntimeState::default());
     }
 }

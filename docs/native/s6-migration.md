@@ -1,5 +1,14 @@
 # S6: distribution and migration readers
 
+Current owner policy and implementation are recorded in
+[beta3 preparation](beta2-readiness.md#beta3-implementation-preparation): verified
+main flat-file/source-link import, retained source dispositions and owned
+fallbacks, isolated checkpoint-copy recovery and signed installer proof tooling.
+There is no reverse migration or archive Restore UI. Earlier reverse/Restore
+plans below are historical and do not override the owner decision. The old app
+must safely refuse native files it cannot fully read.
+
+
 Status: implemented reader/importer spike, **not a cutover approval**. Contract:
 plan v6 §0 N4, all of §6, P0 S6 and §9; storage baseline is
 [D-STATE](d-state.md), shipped `v1.2.0`. Only synthetic fixtures are checked in.
