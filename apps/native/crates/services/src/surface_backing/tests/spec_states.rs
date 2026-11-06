@@ -5,14 +5,11 @@ use crate::surface_backing::{
     copy,
     generated::*,
     maintenance::*,
-    native::{colour::*, tasks::*, *},
+    native::{tasks::*, *},
     projects::*,
 };
 use pm_first_launch::{Event, Outcome, Step};
-use pm_promedia::{
-    scopes::ScopeConfig,
-    tasks::{BackgroundTasks, ProgressUnit, TaskFailureCode, TaskKind, TaskSpec},
-};
+use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskFailureCode, TaskKind, TaskSpec};
 
 #[test]
 fn notes_readonly_and_focused_external_change_follow_spec() {
@@ -147,63 +144,6 @@ fn migration_cannot_ack_pause_before_durable_publication_and_delta_does_not_gate
     m.event(&r, Event::Published(Step::Media)).unwrap();
     m.paused(&r).unwrap();
     assert!(m.library_may_attach());
-}
-#[test]
-fn scopes_keep_previous_result_waiting_and_limit_playback_sampling_to_10_hz() {
-    let f = FrameIdentity {
-        session: session(1),
-        revision: 2,
-        frame: 1,
-        colour_pipeline: "p".into(),
-    };
-    let mut a = ColourAnalysis::default();
-    let r = a
-        .try_begin(
-            f.clone(),
-            AnalysisStage::DisplayEncoded,
-            ScopeConfig::default(),
-            0,
-            true,
-            true,
-        )
-        .unwrap();
-    let data = compute(&r, AnalysisStage::DisplayEncoded, &[[0.; 3]], 1, 1).unwrap();
-    a.settle(&r, &f, Ok(data)).unwrap();
-    assert!(
-        a.try_begin(
-            f.clone(),
-            AnalysisStage::DisplayEncoded,
-            ScopeConfig::default(),
-            99,
-            true,
-            true
-        )
-        .is_none()
-    );
-    assert!(
-        a.try_begin(
-            f.clone(),
-            AnalysisStage::DisplayEncoded,
-            ScopeConfig::default(),
-            100,
-            true,
-            false
-        )
-        .is_none()
-    );
-    let r = a
-        .try_begin(
-            f.clone(),
-            AnalysisStage::DisplayEncoded,
-            ScopeConfig::default(),
-            100,
-            true,
-            true,
-        )
-        .unwrap();
-    assert!(a.previous.is_some());
-    a.settle(&r, &f, Err(failure())).unwrap_err();
-    assert!(a.previous.is_none());
 }
 #[test]
 fn one_task_view_cannot_leak_previous_window_rows() {

@@ -42,6 +42,14 @@ v1.2.0: the preset row is `Resolution`, with `4K UHD · 3840×2160`, `HD 1080p �
 Every number has AX units: `Width, 1920 pixels`. Undo: edits are ordinary project edits
 named for the row.
 
+## HDR and camera log
+
+Project Settings, group `Color`: `HDR` switch, then `Mastering Peak` (600, 1000, 2000, 4000
+nits), disabled while HDR is off. Turning HDR on sets `Color Depth` to `32-bit float` in the
+same Undo step. Export adds `Dynamic Range` (`SDR`, `HDR · PQ`, `HDR · HLG`) for ProRes and MP4
+when the project is HDR. View adds `Viewer Output ▸ HDR EDR`, `Apply LUT…` and `Interpret
+Selection As ▸`. Behaviour: [hdr.md](../../../engine/hdr.md).
+
 ## N004 Scopes panel
 
 Dockable panel `scopes`, title `Scopes`, not in any default workspace. `Window ▸ Scopes`.
@@ -73,10 +81,11 @@ Dockable panel `scopes`, title `Scopes`, not in any default workspace. `Window �
 is being measured. Default: `Output`, `Rec. 709`, `Standard`. A Rec. 2020 project defaults
 to `Rec. 2020`. Settings are per panel instance, and saved with the workspace.
 
-**HDR.** `Range ▸ Extended` widens the plot to the project's headroom, and the graticule
-adds a line at 100 labelled `SDR White`. There is no tone mapping in the scope: values
+**HDR.** `Range ▸ Extended` reads BT.2100 PQ, so the axis carries cd/m² up to 10000, with a
+line at 203 labelled `SDR White`. There is no tone mapping in the scope: values
 above range stay counted, and appear in `Over`. Extended is disabled with tooltip `This
-project has no values above SDR.` for 8-bit projects.
+project has no values above SDR.` for 8-bit projects. An HDR project defaults to Extended
+and `Rec. 2020`.
 
 | State | Spec |
 |---|---|

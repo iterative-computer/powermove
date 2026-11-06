@@ -36,8 +36,9 @@ say what the table expects. Working passes values through, which suits a vendor 
 uninterpreted log. Saved revision 1 effects keep main's trilinear shader.
 
 **Scopes** are a panel: Window ▸ Panels ▸ Scopes. `pm_render::scopes` bins the viewer's frame
-in a compute pass ten times a second at most, only while the panel paints. SDR views read
-display code values with Rec.709 weights; HDR views read PQ with BT.2020 weights.
+in a compute pass ten times a second at most, only while the panel paints. The standard range
+reads display code values. The extended range, an HDR project's default, reads BT.2100 PQ, so
+its axis is cd/m² with `SDR White` at 203. The stage is always Output.
 
 **Still refused:** display rotations off the quarter turns, Dolby Vision profile 5 (no base
 layer), and primaries with no chromaticities (XYZ).

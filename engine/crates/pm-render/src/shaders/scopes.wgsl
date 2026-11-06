@@ -2,11 +2,14 @@
 // finished frame into storage counters. `pm_color::scopes` is the f64 reference.
 //
 // Counters, in order: waveform, red, green and blue parade (levels × columns
-// each), vectorscope (bins²), then luma, red, green and blue histograms.
+// each), vectorscope (bins²), luma, red, green and blue histograms, then the
+// pixels under the range, over it, outside the vectorscope, and not finite.
 
 struct Params {
     // columns, levels, vector bins, signal (0 display code values, 1 BT.2100 PQ).
     a: vec4<u32>,
+    // Luma weights.
+    weights: vec4<f32>,
     to_2020_0: vec4<f32>,
     to_2020_1: vec4<f32>,
     to_2020_2: vec4<f32>,
@@ -30,19 +33,33 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let levels = P.a.y;
     let bins = P.a.z;
     var rgb = textureLoad(frame, vec2<i32>(id.xy), 0).rgb;
-    var weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let plane = levels * columns;
+    let vector_start = plane * 4u;
+    let histogram_start = vector_start + bins * bins;
+    let totals = histogram_start + levels * 4u;
+    // NaN fails its own comparison, infinity the bound.
+    if (!all(abs(rgb) <= vec3<f32>(1e30))) {
+        atomicAdd(&counters[totals + 3u], 1u);
+        return;
+    }
     if (P.a.w == 1u) {
         let to_2020 = mat3x3<f32>(P.to_2020_0.xyz, P.to_2020_1.xyz, P.to_2020_2.xyz);
         rgb = pm_pq_inverse_eotf(to_2020 * pm_e_decode3(rgb) * 203.0);
-        weights = vec3<f32>(0.2627, 0.6780, 0.0593);
     }
+    if (any(rgb < vec3<f32>(0.0))) {
+        atomicAdd(&counters[totals], 1u);
+    }
+    if (any(rgb > vec3<f32>(1.0))) {
+        atomicAdd(&counters[totals + 1u], 1u);
+    }
+    let weights = P.weights.xyz;
     let luma = dot(rgb, weights);
     let cb = (rgb.b - luma) / (2.0 * (1.0 - weights.b));
     let cr = (rgb.r - luma) / (2.0 * (1.0 - weights.r));
     let x = id.x * columns / dims.x;
-    let plane = levels * columns;
-    let vector_start = plane * 4u;
-    let histogram_start = vector_start + bins * bins;
+    if (abs(cb) > 0.5 || abs(cr) > 0.5) {
+        atomicAdd(&counters[totals + 2u], 1u);
+    }
     atomicAdd(&counters[level(luma, levels) * columns + x], 1u);
     atomicAdd(&counters[histogram_start + level(luma, levels)], 1u);
     for (var c = 0u; c < 3u; c++) {

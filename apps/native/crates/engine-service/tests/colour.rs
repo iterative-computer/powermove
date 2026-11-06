@@ -3,7 +3,10 @@
 //! delivers counts from the service's own worker.
 use pm_engine_service::*;
 use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const W: u32 = 320;
 const H: u32 = 180;
@@ -58,10 +61,10 @@ fn project(hdr: bool) -> pm_model::Value {
     .unwrap()
 }
 
-fn scene(hdr: bool, content: u64, clip: &PathBuf) -> (Snapshot, Scene, MediaCatalog) {
+fn scene(hdr: bool, content: u64, clip: &Path) -> (Snapshot, Scene, MediaCatalog) {
     let snapshot = pm_kernel::document::DocumentStore::new_untitled(project(hdr)).snapshot();
     let mut media = MediaCatalog::default();
-    media.originals.insert("clip".into(), clip.clone());
+    media.originals.insert("clip".into(), clip.to_owned());
     let scene = Scene {
         doc: snapshot.document.clone(),
         comp: snapshot.open_comp().unwrap(),
@@ -165,7 +168,8 @@ fn the_scope_tap_reports_a_paused_frame_and_stops_when_cleared() {
         })
         .unwrap();
     let (frames, inbox) = async_channel::bounded(1);
-    viewer.scopes(Some(frames)).unwrap();
+    let config = pm_render::scopes::ScopeConfig::PANEL;
+    viewer.scopes(Some((config, frames))).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let frame = loop {
         assert!(
@@ -174,7 +178,7 @@ fn the_scope_tap_reports_a_paused_frame_and_stops_when_cleared() {
             viewer.status().error
         );
         match inbox.try_recv() {
-            Ok(frame) => break frame,
+            Ok(frame) => break frame.unwrap(),
             Err(_) => {
                 assert!(std::time::Instant::now() < deadline, "no scope frame");
                 std::thread::sleep(Duration::from_millis(5));
@@ -182,8 +186,7 @@ fn the_scope_tap_reports_a_paused_frame_and_stops_when_cleared() {
         }
     };
     assert_eq!(frame.pixels, u64::from(W * H));
-    // The default view is an HDR project's SDR picture: display code values.
-    assert_eq!(frame.config.signal, pm_render::scopes::ScopeSignal::Display);
+    assert_eq!(frame.config, config);
     assert_eq!(
         frame.waveform.iter().map(|v| u64::from(*v)).sum::<u64>(),
         frame.pixels

@@ -59,5 +59,7 @@ path = "../../../../engine/crates/pm-export"
 path = "../../../../engine/crates/pm-audio"
 [dev-dependencies.pm-eval]
 path = "../../../../engine/crates/pm-eval"
+[dev-dependencies.pm-media]
+path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"

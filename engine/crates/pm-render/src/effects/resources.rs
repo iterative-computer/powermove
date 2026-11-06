@@ -102,8 +102,8 @@ impl Assets {
                     let cube = pm_color::lut::CubeLut::parse(
                         std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
                     )
-                    .map_err(|e| e.to_string())?
-                    .gpu();
+                    .and_then(|lut| lut.gpu())
+                    .map_err(|e| e.to_string())?;
                     Asset {
                         key,
                         width: cube.width,

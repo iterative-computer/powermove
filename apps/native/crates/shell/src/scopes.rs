@@ -1,6 +1,7 @@
-//! The Scopes panel: waveform, RGB parade, vectorscope and histogram of the
-//! viewer's frame. Counts come from the engine's GPU analysis; [`raster`] runs
-//! on a background thread and the view only places the finished picture.
+//! The Scopes panel (design/surfaces/colour.md, N004): waveform, RGB parade,
+//! vectorscope and histogram of the viewer's frame. Counts come from the
+//! engine's GPU analysis; [`raster`] runs on a background thread and the view
+//! only places the finished picture.
 use gpui::{prelude::*, *};
 use pm_design::{Colors, Tokens};
 use std::sync::Arc;
@@ -8,34 +9,60 @@ use std::sync::Arc;
 /// What the panel shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
+    Histogram,
     #[default]
     Waveform,
     Parade,
     Vectorscope,
-    Histogram,
 }
 
 impl Kind {
     pub const ALL: [Kind; 4] = [
+        Kind::Histogram,
         Kind::Waveform,
         Kind::Parade,
         Kind::Vectorscope,
-        Kind::Histogram,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Kind::Waveform => "Waveform",
-            Kind::Parade => "Parade",
+            Kind::Parade => "RGB Parade",
             Kind::Vectorscope => "Vectorscope",
             Kind::Histogram => "Histogram",
         }
     }
 }
 
+/// Graticule levels: (fraction of the signal range, label).
+pub fn scale(extended: bool) -> &'static [(f32, &'static str)] {
+    if extended {
+        // ST 2084 signal of each light level, in cd/m².
+        &[
+            (0.0, "0"),
+            (0.5081, "100"),
+            (0.5807, "SDR White"),
+            (0.7518, "1000"),
+            (0.9026, "4000"),
+            (1.0, "10000"),
+        ]
+    } else {
+        &[
+            (0.0, "0"),
+            (0.25, "25"),
+            (0.5, "50"),
+            (0.75, "75"),
+            (1.0, "100"),
+        ]
+    }
+}
+
 /// One frame's counters, as the engine reports them.
 #[derive(Clone, Copy, Debug)]
 pub struct Counts<'a> {
+    /// The counters hold BT.2100 PQ, not display code values.
+    pub extended: bool,
+    pub rec2020: bool,
     pub columns: usize,
     pub levels: usize,
     pub vector_bins: usize,
@@ -45,6 +72,9 @@ pub struct Counts<'a> {
     pub vectorscope: &'a [u32],
     pub luma_histogram: &'a [u32],
     pub histogram: [&'a [u32]; 3],
+    pub under: u32,
+    pub over: u32,
+    pub outside: u32,
 }
 
 /// A finished trace, BGRA rows, top row first.
@@ -75,12 +105,69 @@ impl Raster {
     }
 }
 
-/// Maps a count to trace brightness: one sample shows, a dense bin saturates.
+/// Horizontal lines at the signal levels, under the trace.
+fn level_lines(out: &mut Raster, extended: bool, color: u32) {
+    let (width, height) = (out.width as usize, out.height as usize);
+    for (fraction, _) in scale(extended) {
+        let y = ((1.0 - fraction) * (height - 1) as f32).round() as usize;
+        for x in 0..width {
+            out.add(x, y, color, 0.5);
+        }
+    }
+}
+
+/// The vectorscope's frame: the codable circle, centre cross and the 75 %
+/// Rec.709 primary and secondary targets.
+fn vector_lines(out: &mut Raster, c: &Counts, color: u32) {
+    let n = c.vector_bins;
+    let middle = (n - 1) as f32 / 2.0;
+    for i in 0..n {
+        out.add(i, n / 2, color, 0.25);
+        out.add(n / 2, i, color, 0.25);
+    }
+    for step in 0..n * 8 {
+        let a = step as f32 / (n * 8) as f32 * core::f32::consts::TAU;
+        let (x, y) = (middle * (1.0 + a.cos()), middle * (1.0 + a.sin()));
+        out.add(x as usize, y as usize, color, 0.12);
+    }
+    if !c.rec2020 {
+        let (kr, kg, kb) = (0.2126f32, 0.7152f32, 0.0722f32);
+        for rgb in [
+            [0.75, 0.0, 0.0],
+            [0.0, 0.75, 0.0],
+            [0.0, 0.0, 0.75],
+            [0.75, 0.75, 0.0],
+            [0.0, 0.75, 0.75],
+            [0.75, 0.0, 0.75],
+        ] {
+            let y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+            let cb = (rgb[2] - y) / (2.0 * (1.0 - kb));
+            let cr = (rgb[0] - y) / (2.0 * (1.0 - kr));
+            let (x, row) = (
+                ((cb + 0.5) * (n - 1) as f32) as usize,
+                ((0.5 - cr) * (n - 1) as f32) as usize,
+            );
+            for d in 0..=3usize {
+                for (dx, dy) in [(d, 0), (d, 3), (0, d), (3, d)] {
+                    out.add(
+                        (x + dx).saturating_sub(1).min(n - 1),
+                        (row + dy).saturating_sub(1).min(n - 1),
+                        color,
+                        0.6,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Maps a count to trace brightness on a log scale: one sample shows, a dense
+/// bin saturates.
 fn glow(count: u32, reference: f32) -> f32 {
     if count == 0 {
         0.
     } else {
-        (0.25 + (count as f32 / reference).sqrt()).min(1.)
+        (0.25 + (1. + count as f32).ln() / (1. + reference).ln()).min(1.)
     }
 }
 
@@ -102,11 +189,13 @@ pub fn raster(c: &Counts, kind: Kind, colors: &Colors) -> Raster {
     match kind {
         Kind::Waveform => {
             let mut out = Raster::new(c.columns, c.levels, colors.viewer);
+            level_lines(&mut out, c.extended, colors.separator);
             plane(&mut out, 0, c.waveform, c, colors.text, bins_per_column);
             out
         }
         Kind::Parade => {
             let mut out = Raster::new(c.columns * 3, c.levels, colors.viewer);
+            level_lines(&mut out, c.extended, colors.separator);
             let traces = [colors.scope_red, colors.scope_green, colors.scope_blue];
             for (i, (counts, color)) in c.parade.iter().zip(traces).enumerate() {
                 plane(&mut out, i * c.columns, counts, c, color, bins_per_column);
@@ -116,6 +205,7 @@ pub fn raster(c: &Counts, kind: Kind, colors: &Colors) -> Raster {
         Kind::Vectorscope => {
             let n = c.vector_bins;
             let mut out = Raster::new(n, n, colors.viewer);
+            vector_lines(&mut out, c, colors.secondary);
             let reference = c.pixels as f32 / (n * n) as f32 * 4.;
             for row in 0..n {
                 for column in 0..n {
@@ -130,6 +220,12 @@ pub fn raster(c: &Counts, kind: Kind, colors: &Colors) -> Raster {
         Kind::Histogram => {
             let height = c.levels / 2;
             let mut out = Raster::new(c.levels, height, colors.viewer);
+            for (fraction, _) in scale(c.extended) {
+                let x = (fraction * (c.levels - 1) as f32).round() as usize;
+                for y in 0..height {
+                    out.add(x, y, colors.separator, 0.5);
+                }
+            }
             let traces = [colors.scope_red, colors.scope_green, colors.scope_blue];
             let peak = c
                 .histogram
@@ -139,32 +235,97 @@ pub fn raster(c: &Counts, kind: Kind, colors: &Colors) -> Raster {
                 .max()
                 .unwrap_or(1)
                 .max(1) as f32;
+            let bar = |count: u32| ((count as f32 / peak).sqrt() * height as f32) as usize;
             for (counts, color) in c.histogram.iter().zip(traces) {
                 for (level, count) in counts.iter().enumerate() {
-                    let bar = ((*count as f32 / peak).sqrt() * height as f32) as usize;
-                    for y in 0..bar.min(height) {
+                    for y in 0..bar(*count).min(height) {
                         out.add(level, height - 1 - y, color, 0.6);
                     }
                 }
+            }
+            for (level, count) in c.luma_histogram.iter().enumerate() {
+                let top = bar(*count).min(height - 1);
+                out.add(level, height - 1 - top, colors.text, 0.8);
             }
             out
         }
     }
 }
 
-/// The panel's view: a picker and the newest picture.
+/// What the frame says at a glance: the footer's counts and the plot's value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reading {
+    /// `{stage} · {matrix}`.
+    pub stage: String,
+    /// `Under {n} %` and `Over {n} %`, or `Outside {n} %` on the vectorscope.
+    pub limits: Vec<String>,
+    pub peak: u32,
+    pub minimum: u32,
+}
+
+fn percent(count: u32, pixels: u64) -> String {
+    let share = f64::from(count) / pixels.max(1) as f64 * 100.;
+    if share < 0.1 {
+        "< 0.1".into()
+    } else {
+        format!("{share:.1}")
+    }
+}
+
+/// Reads the footer and the plot's accessibility value from the counts.
+pub fn reading(c: &Counts, kind: Kind) -> Reading {
+    let mut limits = vec![];
+    if kind == Kind::Vectorscope {
+        if c.outside > 0 {
+            limits.push(format!("Outside {} %", percent(c.outside, c.pixels)));
+        }
+    } else {
+        if c.under > 0 {
+            limits.push(format!("Under {} %", percent(c.under, c.pixels)));
+        }
+        if c.over > 0 {
+            limits.push(format!("Over {} %", percent(c.over, c.pixels)));
+        }
+    }
+    let level = |bin: usize| (bin * 100 / c.levels.saturating_sub(1).max(1)) as u32;
+    let lit = |bin: &usize| c.luma_histogram[*bin] > 0;
+    let bins = 0..c.luma_histogram.len();
+    Reading {
+        stage: format!(
+            "Output · {}",
+            if c.rec2020 { "Rec. 2020" } else { "Rec. 709" }
+        ),
+        limits,
+        peak: bins.clone().rev().find(lit).map_or(0, level),
+        minimum: bins.clone().find(lit).map_or(0, level),
+    }
+}
+
+/// The header control that asks the host for a native menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Scope,
+    More,
+}
+
+type MenuRequest = Box<dyn Fn(Menu, &mut Window, &mut App)>;
+
+/// The panel's view: the newest picture and its footer. Header controls ask the
+/// host for AppKit menus; settings live here, per panel.
 pub struct ScopesView {
     pub tokens: Tokens,
     pub kind: Kind,
-    /// Read PQ, in BT.2020 with absolute light, rather than display codes.
-    pub hdr: bool,
+    pub rec2020: bool,
+    /// The extended range: PQ, with absolute light on the axis.
+    pub extended: bool,
     image: Option<Arc<RenderImage>>,
+    reading: Option<Reading>,
+    error: Option<SharedString>,
     /// Replaced pictures, released at the next paint.
     retired: Vec<Arc<RenderImage>>,
     /// When the panel last painted: a hidden panel stops the analysis.
     painted: std::time::Instant,
-    /// The picker's latest choice, for the host's next raster.
-    on_kind: Option<Box<dyn Fn(Kind, &mut App)>>,
+    on_menu: Option<MenuRequest>,
 }
 
 impl ScopesView {
@@ -172,11 +333,14 @@ impl ScopesView {
         Self {
             tokens,
             kind: Kind::default(),
-            hdr: false,
+            rec2020: false,
+            extended: false,
             image: None,
+            reading: None,
+            error: None,
             retired: Vec::new(),
             painted: std::time::Instant::now(),
-            on_kind: None,
+            on_menu: None,
         }
     }
 
@@ -184,16 +348,25 @@ impl ScopesView {
         self.painted
     }
 
-    pub fn on_kind(&mut self, callback: impl Fn(Kind, &mut App) + 'static) {
-        self.on_kind = Some(Box::new(callback));
+    pub fn on_menu(&mut self, request: impl Fn(Menu, &mut Window, &mut App) + 'static) {
+        self.on_menu = Some(Box::new(request));
     }
 
     /// Shows a finished trace.
-    pub fn show(&mut self, raster: Raster, hdr: bool, cx: &mut Context<Self>) {
-        self.hdr = hdr;
+    pub fn show(&mut self, raster: Raster, reading: Reading, cx: &mut Context<Self>) {
+        self.error = None;
+        self.reading = Some(reading);
         self.retired.extend(self.image.take());
         self.image = image::RgbaImage::from_raw(raster.width, raster.height, raster.bgra)
             .map(|buffer| Arc::new(RenderImage::new([image::Frame::new(buffer)])));
+        cx.notify();
+    }
+
+    /// Clears the plot: nothing stale stays up beside an error.
+    pub fn fail(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.error = Some(message.into());
+        self.reading = None;
+        self.retired.extend(self.image.take());
         cx.notify();
     }
 
@@ -201,92 +374,142 @@ impl ScopesView {
         self.image.is_some()
     }
 
-    fn choose(&mut self, kind: Kind, cx: &mut Context<Self>) {
-        self.kind = kind;
-        if let Some(callback) = &self.on_kind {
-            callback(kind, cx);
-        }
-        cx.notify();
+    /// The panel header's controls: Scope pop-up and More.
+    pub fn header(&self, cx: &mut Context<Self>) -> Div {
+        let t = &self.tokens;
+        let (c, m, ty) = (&t.colors, &t.metrics, t.typography);
+        let button = |id: &'static str, label: String, ax: &'static str, menu: Menu| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(ax)
+                .tab_index(0)
+                .px(px(m.gap))
+                .rounded(px(m.control_radius))
+                .text_size(px(ty.reading))
+                .text_color(rgb(c.secondary))
+                .child(label)
+                .on_click(cx.listener(move |v, _, window, cx| {
+                    if let Some(request) = &v.on_menu {
+                        request(menu, window, cx);
+                    }
+                }))
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(m.gap))
+            .h_full()
+            .child(button(
+                "scope-kind",
+                format!("{} ⌄", self.kind.label()),
+                "Scope",
+                Menu::Scope,
+            ))
+            .child(button("scope-more", "⋯".into(), "More", Menu::More))
     }
 }
 
 impl Render for ScopesView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.painted = std::time::Instant::now();
         for image in self.retired.drain(..) {
             window.drop_image(image).ok();
         }
         let t = &self.tokens;
         let (c, m, ty) = (&t.colors, &t.metrics, t.typography);
-        let mut picker = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(m.gap))
-            .px(px(m.inset))
-            .h(px(m.row));
-        for kind in Kind::ALL {
-            let selected = kind == self.kind;
-            picker = picker.child(
-                div()
-                    .id(kind.label())
-                    .role(Role::Button)
-                    .aria_label(kind.label())
-                    .tab_index(0)
-                    .px(px(m.gap))
-                    .rounded(px(m.control_radius))
-                    .text_size(px(ty.reading))
-                    .text_color(rgb(if selected { c.text } else { c.secondary }))
-                    .when(selected, |d| d.bg(rgb(c.selected_fill)))
-                    .child(kind.label())
-                    .on_click(cx.listener(move |v, _, _, cx| v.choose(kind, cx))),
-            );
-        }
-        let picture = div()
+        let label = |text: SharedString| {
+            div()
+                .text_size(px(ty.minimum))
+                .text_color(rgb(c.muted))
+                .child(text)
+        };
+        let value = self.reading.as_ref().map_or(String::new(), |r| {
+            format!(", Peak {} percent, minimum {} percent", r.peak, r.minimum)
+        });
+        let mut plot = div()
+            .id("scope-plot")
+            .role(Role::Image)
+            .aria_label(format!("{} of the current frame{value}", self.kind.label()))
+            .relative()
             .flex_1()
             .min_h_0()
             .w_full()
+            .rounded(px(m.control_radius))
+            .overflow_hidden()
             .bg(rgb(c.viewer))
             .flex()
             .items_center()
             .justify_center();
-        let picture = match &self.image {
-            Some(image) => {
-                picture.child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
+        plot = match (&self.image, &self.error) {
+            (_, Some(error)) => plot.child(
+                div()
+                    .text_size(px(ty.reading))
+                    .text_color(rgb(c.danger))
+                    .child(error.clone()),
+            ),
+            (Some(image), _) => {
+                plot.child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
             }
-            None => picture.child(crate::view::empty_state(
+            _ => plot.child(crate::view::empty_state(
                 t,
                 crate::layout::empty_state("scopes").0,
                 crate::layout::empty_state("scopes").1,
             )),
         };
-        let scale = div()
+        let traces = self.image.is_some() && self.error.is_none();
+        if traces && matches!(self.kind, Kind::Waveform | Kind::Parade) {
+            plot = plot.children(scale(self.extended).iter().map(|(fraction, text)| {
+                label((*text).into())
+                    .absolute()
+                    .left(px(m.gap))
+                    .top(relative(1.0 - fraction))
+                    .mt(px(if *fraction > 0.5 {
+                        0.
+                    } else {
+                        -ty.minimum * 1.3
+                    }))
+            }));
+        }
+        if traces && self.kind == Kind::Parade {
+            plot = plot.children(["R", "G", "B"].into_iter().enumerate().map(|(i, name)| {
+                label(name.into())
+                    .absolute()
+                    .top(px(m.gap))
+                    .left(relative(i as f32 / 3. + 0.15))
+            }));
+        }
+        let mut footer = div()
             .h(px(m.row))
-            .px(px(m.inset))
+            .px(px(m.gap))
             .flex()
+            .flex_row()
             .items_center()
-            .text_size(px(ty.reading))
-            .text_color(rgb(c.muted))
-            .child(if self.hdr {
-                "BT.2100 PQ, BT.2020"
-            } else {
-                "Display code values, Rec.709"
-            });
+            .justify_between()
+            .text_size(px(ty.minimum))
+            .text_color(rgb(c.secondary));
+        if let Some(reading) = &self.reading {
+            footer = footer
+                .child(reading.stage.clone())
+                .child(reading.limits.join("  "));
+        }
         div()
             .id("scopes")
             .size_full()
+            .p(px(m.gap))
             .flex()
             .flex_col()
-            .child(picker)
-            .child(picture)
-            .child(scale)
+            .child(plot)
+            .child(footer)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, point};
+    use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, point};
 
     fn tokens() -> Tokens {
         Tokens::new(pm_design::Scheme::Dark, Default::default())
@@ -310,6 +533,8 @@ mod tests {
         luma: &'a [u32],
     ) -> Counts<'a> {
         Counts {
+            extended: false,
+            rec2020: false,
             columns: 4,
             levels: 8,
             vector_bins: 4,
@@ -319,6 +544,9 @@ mod tests {
             vectorscope: vector,
             luma_histogram: luma,
             histogram,
+            under: 0,
+            over: 0,
+            outside: 0,
         }
     }
 
@@ -339,9 +567,9 @@ mod tests {
         );
         let waveform = raster(&view, Kind::Waveform, &t.colors);
         assert_eq!((waveform.width, waveform.height), (4, 8));
-        let background = Raster::new(1, 1, t.colors.viewer).bgra;
-        let lit = (0..waveform.bgra.len() / 4)
-            .find(|i| waveform.bgra[i * 4..i * 4 + 4] != background[..])
+        let trace = |p: &[u8]| p[1];
+        let lit = (0..4)
+            .max_by_key(|x| trace(&waveform.bgra[x * 4..x * 4 + 4]))
             .unwrap();
         assert_eq!(lit, 1, "the top row is the highest level");
         let parade = raster(&view, Kind::Parade, &t.colors);
@@ -354,25 +582,73 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn a_real_click_and_the_keyboard_choose_a_scope() {
+    fn the_graticule_follows_the_signal() {
+        let t = tokens();
+        let empty = [0u32; 32];
+        let vector = [0u32; 16];
+        let hist = [0u32; 8];
+        let mut view = counts(&empty, [&empty; 3], &vector, [&hist; 3], &hist);
+        let lines = |view: &Counts| {
+            let image = raster(view, Kind::Waveform, &t.colors);
+            let background = Raster::new(1, 1, t.colors.viewer).bgra;
+            (0..8)
+                .filter(|y| image.bgra[y * 16..y * 16 + 4] != background[..])
+                .count()
+        };
+        assert_eq!(scale(false).len(), 5);
+        assert!(lines(&view) >= 4);
+        view.extended = true;
+        assert!(scale(true).iter().any(|(_, label)| *label == "SDR White"));
+        assert!(lines(&view) >= 4);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_footer_states_the_stage_and_only_nonzero_limits() {
+        let empty = [0u32; 32];
+        let vector = [0u32; 16];
+        let mut luma = [0u32; 8];
+        luma[1] = 16;
+        luma[6] = 16;
+        let hist = [0u32; 8];
+        let mut view = counts(&empty, [&empty; 3], &vector, [&hist; 3], &luma);
+        let quiet = reading(&view, Kind::Waveform);
+        assert_eq!(quiet.stage, "Output · Rec. 709");
+        assert!(quiet.limits.is_empty());
+        assert_eq!((quiet.peak, quiet.minimum), (85, 14));
+        view.over = 8;
+        view.under = 1;
+        view.outside = 2;
+        view.rec2020 = true;
+        let loud = reading(&view, Kind::Waveform);
+        assert_eq!(loud.stage, "Output · Rec. 2020");
+        assert_eq!(loud.limits, ["Under 3.1 %", "Over 25.0 %"]);
+        assert_eq!(reading(&view, Kind::Vectorscope).limits, ["Outside 6.2 %"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn real_clicks_on_the_header_ask_for_its_menus() {
+        struct Header(Entity<ScopesView>);
+        impl Render for Header {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |view, cx| view.header(cx))
+            }
+        }
         let mut cx = app();
-        let window = cx
-            .open_window(size(px(640.), px(360.)), |_, cx| {
-                cx.new(|_| ScopesView::new(tokens()))
-            })
-            .unwrap();
         let chosen = Arc::new(std::sync::Mutex::new(vec![]));
         let sink = chosen.clone();
-        window
-            .update(&mut cx, |v, _, _| {
-                v.on_kind(move |kind, _| sink.lock().unwrap().push(kind));
+        let window = cx
+            .open_window(size(px(320.), px(32.)), move |_, cx| {
+                let view = cx.new(|_| {
+                    let mut view = ScopesView::new(tokens());
+                    view.on_menu(move |menu, _, _| sink.lock().unwrap().push(menu));
+                    view
+                });
+                cx.new(|_| Header(view))
             })
             .unwrap();
         cx.run_until_parked();
-        // Sweep the picker row with a pointer until a segment answers.
-        let y = px(tokens().metrics.row / 2.);
-        for x in (0..640).step_by(8) {
-            let position = point(px(x as f32), y);
+        for x in (0..320).step_by(6) {
+            let position = point(px(x as f32), px(16.));
             cx.update_window(window.into(), |_, w, cx| {
                 for event in [
                     MouseDownEvent {
@@ -397,40 +673,13 @@ mod tests {
             .unwrap();
             cx.run_until_parked();
         }
-        let clicked = chosen.lock().unwrap().clone();
-        for kind in Kind::ALL {
-            assert!(
-                clicked.contains(&kind),
-                "{kind:?} takes a click: {clicked:?}"
-            );
-        }
-        window
-            .update(&mut cx, |_, w, cx| {
-                w.focus_next(cx);
-                w.focus_next(cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, w, cx| {
-            let keystroke = Keystroke::parse("enter").unwrap();
-            w.dispatch_event(
-                KeyDownEvent {
-                    keystroke: keystroke.clone(),
-                    is_held: false,
-                    prefer_character_input: false,
-                }
-                .to_platform_input(),
-                cx,
-            );
-            w.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert_eq!(chosen.lock().unwrap().last(), Some(&Kind::Parade));
+        let asked = chosen.lock().unwrap().clone();
+        assert!(asked.contains(&Menu::Scope), "{asked:?}");
+        assert!(asked.contains(&Menu::More), "{asked:?}");
     }
 
     #[::core::prelude::v1::test]
-    fn a_picture_replaces_the_empty_state_and_states_its_signal() {
+    fn a_picture_replaces_the_empty_state_and_an_error_clears_it() {
         let mut cx = app();
         let window = cx
             .open_window(size(px(640.), px(360.)), |_, cx| {
@@ -446,10 +695,17 @@ mod tests {
                         height: 2,
                         bgra: vec![255; 16],
                     },
-                    true,
+                    Reading {
+                        stage: "Output · Rec. 709".into(),
+                        limits: vec![],
+                        peak: 100,
+                        minimum: 0,
+                    },
                     cx,
                 );
-                assert!(v.has_picture() && v.hdr);
+                assert!(v.has_picture());
+                v.fail("This frame has invalid values.", cx);
+                assert!(!v.has_picture());
             })
             .unwrap();
         cx.run_until_parked();

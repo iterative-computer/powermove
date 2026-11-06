@@ -2,8 +2,8 @@
 //! frame, for the Scopes panel. Counts come back through a buffer mapped off
 //! the render thread; `pm_color::scopes` is their f64 reference.
 //!
-//! SDR projects read display code values with Rec.709 weights. HDR projects
-//! read BT.2100 PQ with BT.2020 weights, so the axes carry absolute light.
+//! The standard range reads display code values. The extended range reads
+//! BT.2100 PQ in BT.2020, so its axis carries absolute light.
 
 /// Which signal the scopes read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,13 +12,30 @@ pub enum ScopeSignal {
     Pq,
 }
 
-/// The counters' resolution.
+/// The luma and chroma weights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeMatrix {
+    Rec709,
+    Rec2020,
+}
+
+impl ScopeMatrix {
+    fn weights(self) -> [f32; 4] {
+        match self {
+            ScopeMatrix::Rec709 => [0.2126, 0.7152, 0.0722, 0.0],
+            ScopeMatrix::Rec2020 => [0.2627, 0.6780, 0.0593, 0.0],
+        }
+    }
+}
+
+/// The counters' resolution and what they read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeConfig {
     pub columns: u32,
     pub levels: u32,
     pub vector_bins: u32,
     pub signal: ScopeSignal,
+    pub matrix: ScopeMatrix,
 }
 
 impl ScopeConfig {
@@ -27,6 +44,7 @@ impl ScopeConfig {
         levels: 256,
         vector_bins: 256,
         signal: ScopeSignal::Display,
+        matrix: ScopeMatrix::Rec709,
     };
 
     fn plane(&self) -> usize {
@@ -34,9 +52,12 @@ impl ScopeConfig {
     }
 
     fn counters(&self) -> usize {
-        self.plane() * 4 + (self.vector_bins as usize).pow(2) + self.levels as usize * 4
+        self.plane() * 4 + (self.vector_bins as usize).pow(2) + self.levels as usize * 4 + TOTALS
     }
 }
+
+/// Under, over, outside and not finite.
+const TOTALS: usize = 4;
 
 /// One frame's counts. Planes are rows of levels, low to high, then columns.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,12 +70,21 @@ pub struct ScopeFrame {
     pub vectorscope: Vec<u32>,
     pub luma_histogram: Vec<u32>,
     pub histogram: [Vec<u32>; 3],
+    /// Pixels with a channel below the range.
+    pub under: u32,
+    /// Pixels with a channel above the range.
+    pub over: u32,
+    /// Pixels outside the vectorscope.
+    pub outside: u32,
+    /// Pixels that aren't finite numbers.
+    pub invalid: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Params {
     a: [u32; 4],
+    weights: [f32; 4],
     to_2020: [[f32; 4]; 3],
 }
 
@@ -130,6 +160,7 @@ impl ScopePass {
                 config.vector_bins,
                 u32::from(config.signal == ScopeSignal::Pq),
             ],
+            weights: config.matrix.weights(),
             to_2020: [column(0), column(1), column(2)],
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -218,6 +249,10 @@ impl ScopeReadback {
             vectorscope: slice(plane * 4, vector),
             luma_histogram: slice(histograms, levels),
             histogram: std::array::from_fn(|i| slice(histograms + levels * (i + 1), levels)),
+            under: counts[histograms + levels * 4],
+            over: counts[histograms + levels * 4 + 1],
+            outside: counts[histograms + levels * 4 + 2],
+            invalid: counts[histograms + levels * 4 + 3],
         })
     }
 }
@@ -277,6 +312,7 @@ mod tests {
             levels: 128,
             vector_bins: 96,
             signal: ScopeSignal::Display,
+            matrix: ScopeMatrix::Rec709,
         };
         let counts = pass
             .analyze(&gpu.device, &gpu.queue, &target.texture, config)
@@ -324,6 +360,33 @@ mod tests {
             counts.waveform.iter().map(|v| u64::from(*v)).sum::<u64>(),
             counts.pixels
         );
+        assert_eq!(
+            u64::from(counts.outside),
+            expected.vector_outside,
+            "outside"
+        );
+        let any = |test: &dyn Fn(f64) -> bool| {
+            rgb.iter().filter(|p| p.iter().any(|v| test(*v))).count() as u32
+        };
+        assert_eq!(counts.under, any(&|v| v < 0.0));
+        assert_eq!(counts.over, any(&|v| v > 1.0));
+        assert_eq!(counts.invalid, 0);
+    }
+
+    #[test]
+    fn non_finite_pixels_are_counted_and_left_out_of_the_traces() {
+        let gpu = pm_gpu::Gpu::new("scope invalid test").unwrap();
+        let pass = ScopePass::new(&gpu.device);
+        let mut pixels = [[0.5, 0.5, 0.5, 1.0]; 16];
+        pixels[3] = [f32::NAN, 0.5, 0.5, 1.0];
+        pixels[7] = [0.5, f32::INFINITY, 0.5, 1.0];
+        let target = frame(&gpu, &pixels, 4);
+        let counts = pass
+            .analyze(&gpu.device, &gpu.queue, &target.texture, ScopeConfig::PANEL)
+            .wait(&gpu.device)
+            .unwrap();
+        assert_eq!(counts.invalid, 2);
+        assert_eq!(counts.luma_histogram.iter().sum::<u32>(), 14);
     }
 
     #[test]
@@ -334,6 +397,7 @@ mod tests {
         let target = frame(&gpu, &[[1.0, 1.0, 1.0, 1.0]; 16], 4);
         let config = ScopeConfig {
             signal: ScopeSignal::Pq,
+            matrix: ScopeMatrix::Rec2020,
             ..ScopeConfig::PANEL
         };
         let counts = pass

@@ -1031,9 +1031,11 @@ fn plan_export_checked(
             "HDR delivery needs an HDR project".into(),
         ));
     }
-    let content = hdr_project
-        .then(|| pm_render::media::hdr_content(doc, &*job.media))
-        .unwrap_or_default();
+    let content = if hdr_project {
+        pm_render::media::hdr_content(doc, &*job.media)
+    } else {
+        Default::default()
+    };
     let output_tone = delivery_tone(hdr_project, tags.is_hdr(), &project, &content);
     set_hdr_metadata(&mut tags, hdr_metadata(&project, &content));
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)

@@ -1,8 +1,7 @@
 use super::*;
-use crate::surface_backing::native::{colour::*, tasks::*, *};
+use crate::surface_backing::native::{tasks::*, *};
 use pm_first_launch::{Event, Outcome, Step};
 use pm_promedia::{
-    scopes::ScopeConfig,
     storage::{Location, Storage, StorageClass, StorageSettings},
     tasks::{BackgroundTasks, ProgressUnit, Task, TaskKind, TaskSpec, TaskState},
 };
@@ -151,65 +150,6 @@ fn migration_rollback_is_not_an_optimistic_capability() {
         Host.rollback("review").unwrap_err().code,
         ServiceErrorCode::Unavailable
     );
-}
-fn frame(n: i64) -> FrameIdentity {
-    FrameIdentity {
-        session: session(1),
-        revision: 2,
-        frame: n,
-        colour_pipeline: "bt2020-linear".into(),
-    }
-}
-#[test]
-fn colour_scopes_run_real_worker_without_clamping_hdr() {
-    let mut a = ColourAnalysis::default();
-    let r = a.begin(
-        frame(1),
-        AnalysisStage::WorkingLinear,
-        ScopeConfig::default(),
-    );
-    let output = compute(&r, AnalysisStage::WorkingLinear, &[[2., -0.2, 0.5]], 1, 1).unwrap();
-    assert_eq!(output.histogram[0].above, 1);
-    assert_eq!(output.histogram[1].below, 1);
-    a.settle(&r, &frame(1), Ok(output)).unwrap();
-    assert!(matches!(a.state, AnalysisState::Ready(_)));
-}
-#[test]
-fn scope_analysis_rejects_wrong_stage_invalid_pixels_and_dimensions() {
-    let mut a = ColourAnalysis::default();
-    let r = a.begin(
-        frame(1),
-        AnalysisStage::SourceCodeValues,
-        ScopeConfig::default(),
-    );
-    assert!(compute(&r, AnalysisStage::DisplayEncoded, &[[0.; 3]], 1, 1).is_err());
-    assert!(compute(&r, AnalysisStage::SourceCodeValues, &[[f64::NAN; 3]], 1, 1).is_err());
-    assert!(compute(&r, AnalysisStage::SourceCodeValues, &[], 1, 1).is_err());
-}
-#[test]
-fn stale_scope_jobs_cannot_replace_newer_frame_or_pending_result() {
-    let mut a = ColourAnalysis::default();
-    let old = a.begin(
-        frame(1),
-        AnalysisStage::WorkingLinear,
-        ScopeConfig::default(),
-    );
-    let new = a.begin(
-        frame(2),
-        AnalysisStage::WorkingLinear,
-        ScopeConfig::default(),
-    );
-    assert!(a.settle(&old, &frame(2), Err(failure())).is_err());
-    assert_eq!(a.state, AnalysisState::Pending);
-    assert!(a.settle(&new, &frame(3), Err(failure())).is_err());
-    assert_eq!(a.state, AnalysisState::Empty);
-}
-#[test]
-fn lut_inspection_uses_real_parser_and_does_not_apply_to_document() {
-    let lut = parse_lut("LUT_1D_SIZE 2\n0 0 0\n2 3 4\n").unwrap();
-    assert_eq!(inspect_lut(&lut, [0.5; 3]).unwrap(), [1., 1.5, 2.]);
-    assert!(parse_lut("LUT_3D_SIZE 2\n0 0 0").is_err());
-    assert!(inspect_lut(&lut, [f64::NAN, 0., 0.]).is_err());
 }
 fn task(queue: &mut BackgroundTasks, total: u64) -> pm_promedia::tasks::TaskId {
     queue

@@ -2,7 +2,7 @@
 //! times a second; one other thread waits for the GPU, so neither the render
 //! worker nor the main thread ever does.
 use async_channel::Sender;
-use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopePass, ScopeReadback, ScopeSignal};
+use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopePass, ScopeReadback};
 use std::{
     sync::{
         Arc,
@@ -14,9 +14,12 @@ use std::{
 
 const INTERVAL: Duration = Duration::from_millis(100);
 
+/// What a tap reports: counts, or why the frame can't be read.
+pub type ScopeResult = Result<ScopeFrame, String>;
+
 struct Job {
     readback: ScopeReadback,
-    frames: Sender<ScopeFrame>,
+    frames: Sender<ScopeResult>,
 }
 
 /// Lives with the engine; the pass and its worker start on first use.
@@ -51,8 +54,8 @@ impl Tap {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         texture: &wgpu::Texture,
-        hdr: bool,
-        frames: &Sender<ScopeFrame>,
+        config: ScopeConfig,
+        frames: &Sender<ScopeResult>,
     ) {
         let now = Instant::now();
         if self.busy.load(Ordering::Acquire) || self.last.is_some_and(|last| now - last < INTERVAL)
@@ -60,14 +63,6 @@ impl Tap {
             return;
         }
         self.last = Some(now);
-        let config = ScopeConfig {
-            signal: if hdr {
-                ScopeSignal::Pq
-            } else {
-                ScopeSignal::Display
-            },
-            ..ScopeConfig::PANEL
-        };
         let readback = self.pass.analyze(device, queue, texture, config);
         self.busy.store(true, Ordering::Release);
         let job = Job {
@@ -89,11 +84,6 @@ fn worker(device: wgpu::Device, inbox: Receiver<Job>, busy: Arc<AtomicBool>) {
     for job in inbox {
         let result = job.readback.wait(&device);
         busy.store(false, Ordering::Release);
-        match result {
-            Ok(frame) => {
-                let _ = job.frames.try_send(frame);
-            }
-            Err(error) => eprintln!("scopes: {error}"),
-        }
+        let _ = job.frames.try_send(result);
     }
 }

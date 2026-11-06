@@ -5,8 +5,8 @@ use crate::session::Controller;
 use gpui::{AppContext, Context, Entity, prelude::*};
 use pm_kernel::{Call, Caller, Command, Published, Request, WriteBody};
 use pm_model::{Map, Value};
-use pm_render::scopes::{ScopeFrame, ScopeSignal};
-use pm_shell::scopes::{Counts, Kind, ScopesView, raster};
+use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal};
+use pm_shell::scopes::{Counts, Kind, Menu, ScopesView, raster, reading};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
@@ -149,7 +149,9 @@ pub fn lut_commands(
 /// Worker: validates the `.cube` and keeps a copy that outlives the original.
 fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    pm_color::lut::CubeLut::parse(&text).map_err(|e| e.to_string())?;
+    pm_color::lut::CubeLut::parse(&text)
+        .and_then(|lut| lut.gpu())
+        .map_err(|e| e.to_string())?;
     let archive = pm_kernel::media_archive::Archive::open(profile).map_err(|e| e.to_string())?;
     let original = archive
         .retain_path(path, "text/plain", &AtomicBool::new(false))
@@ -173,13 +175,51 @@ fn transact(p: &Published, label: &str, commands: Vec<Command>) -> Request {
 #[derive(Default)]
 pub struct Scopes {
     view: Option<Entity<ScopesView>>,
-    /// The viewer analyzed now.
-    tapped: Option<u64>,
+    /// The viewer analyzed now, and what it was asked for.
+    tapped: Option<(u64, ScopeConfig)>,
     latest: Option<Arc<ScopeFrame>>,
+    /// The project's defaults were applied to this document.
+    defaults: Option<u64>,
+}
+
+/// What the panel's settings ask the engine to count.
+fn scope_config(rec2020: bool, extended: bool) -> ScopeConfig {
+    ScopeConfig {
+        signal: if extended {
+            ScopeSignal::Pq
+        } else {
+            ScopeSignal::Display
+        },
+        matrix: if rec2020 {
+            ScopeMatrix::Rec2020
+        } else {
+            ScopeMatrix::Rec709
+        },
+        ..ScopeConfig::PANEL
+    }
+}
+
+/// The More menu, as AppKit rows.
+fn more_menu(rec2020: bool, extended: bool, depth8: bool) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut range = json!({ "label": "Range: Extended", "checked": extended });
+    if depth8 {
+        range["disabled"] = true.into();
+        range["tooltip"] = "This project has no values above SDR.".into();
+    }
+    vec![
+        json!({ "label": "Matrix: Rec. 709", "checked": !rec2020 }),
+        json!({ "label": "Matrix: Rec. 2020", "checked": rec2020 }),
+        json!({ "separator": true }),
+        json!({ "label": "Range: Standard", "checked": !extended }),
+        range,
+    ]
 }
 
 fn counts(frame: &ScopeFrame) -> Counts<'_> {
     Counts {
+        extended: frame.config.signal == ScopeSignal::Pq,
+        rec2020: frame.config.matrix == ScopeMatrix::Rec2020,
         columns: frame.config.columns as usize,
         levels: frame.config.levels as usize,
         vector_bins: frame.config.vector_bins as usize,
@@ -193,6 +233,9 @@ fn counts(frame: &ScopeFrame) -> Counts<'_> {
             &frame.histogram[1],
             &frame.histogram[2],
         ],
+        under: frame.under,
+        over: frame.over,
+        outside: frame.outside,
     }
 }
 
@@ -295,49 +338,140 @@ impl Controller {
 
     /// The Scopes panel's content, and its tap on the viewer.
     pub fn scopes_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let view = match &self.scopes.view {
-            Some(view) => view.clone(),
-            None => {
-                let tokens = self.host.borrow().tokens.clone();
-                let controller = cx.entity().downgrade();
-                let view = cx.new(|_| {
-                    let mut view = ScopesView::new(tokens);
-                    view.on_kind(move |kind, cx| {
-                        controller
-                            .update(cx, |v, cx| v.draw_scope(None, kind, cx))
-                            .ok();
-                    });
-                    view
-                });
-                self.scopes.view = Some(view.clone());
-                view
-            }
-        };
-        let id = self.viewer.as_ref().map(|viewer| viewer.identity());
-        if id.is_some() && self.scopes.tapped != id {
-            let (frames, inbox) = async_channel::bounded(1);
-            if let Some(viewer) = &self.viewer
-                && viewer.scopes(Some(frames)).is_ok()
-            {
-                self.scopes.tapped = id;
-                cx.spawn(async move |this, cx| {
-                    while let Ok(frame) = inbox.recv().await {
-                        let stop = this
-                            .update(cx, |v, cx| v.scope_frame(Arc::new(frame), cx))
-                            .unwrap_or(true);
-                        if stop {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-            }
+        let view = self.scopes_view(cx);
+        let tokens = self.host.borrow().tokens.clone();
+        view.update(cx, |view, _| view.tokens = tokens);
+        // An HDR project reads as Rec. 2020, on the extended range.
+        if let Some(p) = self.published.clone()
+            && self.scopes.defaults != Some(p.snapshot.doc_id)
+        {
+            self.scopes.defaults = Some(p.snapshot.doc_id);
+            let hdr = self.project_hdr;
+            view.update(cx, |view, _| {
+                view.rec2020 = hdr;
+                view.extended = hdr;
+            });
         }
+        self.tap_scopes(cx);
         view.into_any_element()
     }
 
+    /// The panel header's Scope pop-up and More menu.
+    pub fn scopes_header(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view = self.scopes_view(cx);
+        view.update(cx, |view, cx| view.header(cx))
+            .into_any_element()
+    }
+
+    fn scopes_view(&mut self, cx: &mut Context<Self>) -> Entity<ScopesView> {
+        if let Some(view) = &self.scopes.view {
+            return view.clone();
+        }
+        let tokens = self.host.borrow().tokens.clone();
+        let controller = cx.entity().downgrade();
+        let view = cx.new(|_| {
+            let mut view = ScopesView::new(tokens);
+            view.on_menu(move |menu, window, cx| {
+                controller
+                    .update(cx, |v, cx| v.scopes_menu(menu, window, cx))
+                    .ok();
+            });
+            view
+        });
+        self.scopes.view = Some(view.clone());
+        view
+    }
+
+    fn scopes_menu(&mut self, menu: Menu, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(view) = self.scopes.view.clone() else {
+            return;
+        };
+        let (kind, rec2020, extended) = {
+            let view = view.read(cx);
+            (view.kind, view.rec2020, view.extended)
+        };
+        let this = cx.entity().downgrade();
+        match menu {
+            Menu::Scope => {
+                let options: Vec<_> = Kind::ALL
+                    .iter()
+                    .map(|k| serde_json::json!({ "label": k.label(), "checked": *k == kind }))
+                    .collect();
+                crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
+                    let Some(kind) = chosen.and_then(|i| Kind::ALL.get(i).copied()) else {
+                        return;
+                    };
+                    this.update(cx, |v, cx| {
+                        view.update(cx, |view, _| view.kind = kind);
+                        v.draw_scope(None, cx);
+                    })
+                    .ok();
+                });
+            }
+            Menu::More => {
+                let depth8 = self
+                    .published
+                    .as_ref()
+                    .and_then(|p| p.snapshot.root())
+                    .and_then(|root| root.get("colorDepth"))
+                    .is_some_and(|d| d.to_value().as_f64() == Some(8.));
+                let options = more_menu(rec2020, extended, depth8);
+                crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
+                    let (rec2020, extended) = match chosen {
+                        Some(0) => (false, extended),
+                        Some(1) => (true, extended),
+                        Some(3) => (rec2020, false),
+                        Some(4) => (rec2020, true),
+                        _ => return,
+                    };
+                    this.update(cx, |v, cx| {
+                        view.update(cx, |view, _| {
+                            view.rec2020 = rec2020;
+                            view.extended = extended;
+                        });
+                        v.tap_scopes(cx);
+                    })
+                    .ok();
+                });
+            }
+        }
+    }
+
+    /// Keeps the engine's tap on this viewer, with the panel's settings.
+    fn tap_scopes(&mut self, cx: &mut Context<Self>) {
+        let (Some(view), Some(viewer)) = (&self.scopes.view, &self.viewer) else {
+            return;
+        };
+        let settings = view.read(cx);
+        let config = scope_config(settings.rec2020, settings.extended);
+        let wanted = (viewer.identity(), config);
+        if self.scopes.tapped == Some(wanted) {
+            return;
+        }
+        let (frames, inbox) = async_channel::bounded(1);
+        if viewer.scopes(Some((config, frames))).is_err() {
+            return;
+        }
+        self.scopes.tapped = Some(wanted);
+        cx.spawn(async move |this, cx| {
+            while let Ok(result) = inbox.recv().await {
+                let stop = this
+                    .update(cx, |v, cx| v.scope_result(result, cx))
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Returns whether the panel stopped showing.
-    fn scope_frame(&mut self, frame: Arc<ScopeFrame>, cx: &mut Context<Self>) -> bool {
+    fn scope_result(
+        &mut self,
+        result: pm_engine_service::ScopeResult,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(view) = self.scopes.view.clone() else {
             return true;
         };
@@ -348,12 +482,25 @@ impl Controller {
             self.scopes.tapped = None;
             return true;
         }
-        let kind = view.read(cx).kind;
-        self.draw_scope(Some(frame), kind, cx);
+        match result {
+            Ok(frame) if frame.invalid > 0 => {
+                self.message = format!("Scopes: {} pixels are not finite", frame.invalid);
+                view.update(cx, |view, cx| {
+                    view.fail("This frame has invalid values.", cx)
+                });
+            }
+            Ok(frame) => self.draw_scope(Some(Arc::new(frame)), cx),
+            Err(error) => {
+                self.message = format!("Scopes: {error}");
+                view.update(cx, |view, cx| {
+                    view.fail("Scopes can’t read this frame.", cx)
+                });
+            }
+        }
         false
     }
 
-    fn draw_scope(&mut self, frame: Option<Arc<ScopeFrame>>, kind: Kind, cx: &mut Context<Self>) {
+    fn draw_scope(&mut self, frame: Option<Arc<ScopeFrame>>, cx: &mut Context<Self>) {
         if frame.is_some() {
             self.scopes.latest = frame;
         }
@@ -361,15 +508,18 @@ impl Controller {
         else {
             return;
         };
+        let kind = view.read(cx).kind;
         let colors = self.host.borrow().tokens.colors.clone();
         cx.spawn(async move |_, cx| {
-            let hdr = frame.config.signal == ScopeSignal::Pq;
-            let image = cx
-                .background_spawn(async move { raster(&counts(&frame), kind, &colors) })
+            let (image, values) = cx
+                .background_spawn(async move {
+                    let counts = counts(&frame);
+                    (raster(&counts, kind, &colors), reading(&counts, kind))
+                })
                 .await;
             view.update(cx, |view, cx| {
                 if view.kind == kind {
-                    view.show(image, hdr, cx);
+                    view.show(image, values, cx);
                 }
             });
         })

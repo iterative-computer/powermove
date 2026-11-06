@@ -52,7 +52,10 @@ pub struct Engine {
     hdr: Option<((u64, u64), Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
     /// Where the viewer's analysis goes, while a Scopes panel is showing.
-    pub scope_frames: Option<async_channel::Sender<pm_render::scopes::ScopeFrame>>,
+    pub scope_frames: Option<(
+        pm_render::scopes::ScopeConfig,
+        async_channel::Sender<crate::scopes::ScopeResult>,
+    )>,
     scopes: Option<crate::scopes::Tap>,
 }
 pub struct Submission {
@@ -294,14 +297,14 @@ impl Engine {
             }
             surface
         };
-        if let Some(frames) = &self.scope_frames {
+        if let Some((config, frames)) = &self.scope_frames {
             self.scopes
                 .get_or_insert_with(|| crate::scopes::Tap::new(self.gpu.device.clone()))
                 .frame(
                     &self.gpu.device,
                     &self.gpu.queue,
                     &surface.texture,
-                    hdr.is_some() && self.output_tone.is_none(),
+                    *config,
                     frames,
                 );
         }

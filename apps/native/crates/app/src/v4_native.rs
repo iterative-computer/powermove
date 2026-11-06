@@ -66,6 +66,12 @@ pub fn menu(
             )
         };
         item.setTag(index as isize);
+        if option.get("checked") == Some(&Value::Bool(true)) {
+            item.setState(objc2_app_kit::NSControlStateValueOn);
+        }
+        if let Some(tooltip) = option.get("tooltip").and_then(Value::as_str) {
+            item.setToolTip(Some(&NSString::from_str(tooltip)));
+        }
         item.setEnabled(
             option.get("disabled") != Some(&Value::Bool(true))
                 && option.get("enabled") != Some(&Value::Bool(false)),

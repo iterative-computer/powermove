@@ -1,5 +1,4 @@
 //! N001–N005. Native-only worker adapters, explicitly separate from tag parity.
-pub mod colour;
 pub mod tasks;
 
 use super::{Ticket, invalid, stale, ticket, unavailable};

@@ -983,11 +983,7 @@ pub fn empty_state(
             "Notes you add to this project appear here.",
             None,
         ),
-        "scopes" => (
-            "No Picture",
-            "Open a composition to read its levels.",
-            None,
-        ),
+        "scopes" => ("No Picture", "Open a composition to see its scopes.", None),
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }

@@ -170,9 +170,6 @@ impl CubeLut {
                         return Err(fail("expected RGB row or known header"));
                     }
                     let values = numbers(&fields)?;
-                    if values.iter().any(|v| v.abs() > MAX_VALUE) {
-                        return Err(fail("value outside half-float range"));
-                    }
                     let expected = one.unwrap_or(0) + three.map_or(0, |n| n * n * n);
                     if rows.len() >= expected {
                         return Err(fail("extra data or missing size header"));
@@ -215,8 +212,18 @@ impl CubeLut {
         Ok(result)
     }
 
-    /// The texture and layout the renderer samples.
-    pub fn gpu(&self) -> GpuLut {
+    /// The texture and layout the renderer samples, or why it can't hold
+    /// this table: working targets stop at half-float's finite range.
+    pub fn gpu(&self) -> Result<GpuLut, LutError> {
+        if self
+            .shaper
+            .iter()
+            .chain(&self.cube)
+            .flatten()
+            .any(|v| v.abs() > MAX_VALUE)
+        {
+            return Err(LutError("value outside half-float range".into()));
+        }
         let n = self.size;
         let columns = if n == 0 { 1 } else { n.min(MAX_ROW / n) };
         let rows_per_blue = if n == 0 { 0 } else { n.div_ceil(columns) };
@@ -245,7 +252,7 @@ impl CubeLut {
             put(i % width, cube_rows + i / width, *v);
         }
         let to_f32 = |v: [f64; 3]| v.map(|c| c as f32);
-        GpuLut {
+        Ok(GpuLut {
             width: width as u32,
             height: height as u32,
             rgba,
@@ -257,7 +264,7 @@ impl CubeLut {
             domain_min: to_f32(self.domain[0]),
             domain_max: to_f32(self.domain[1]),
             cube_range: self.cube_range.map(|v| v as f32),
-        }
+        })
     }
 
     /// Clamp input coordinates to declared domains; preserve extended table output.
@@ -339,7 +346,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(one.title.as_deref(), Some("A # title"));
-        let gpu = one.gpu();
+        let gpu = one.gpu().unwrap();
         assert_eq!((gpu.size, gpu.cube_size, gpu.shaper_size), (2, 0, 2));
         assert_eq!((gpu.width, gpu.height), (2, 1));
         assert_eq!(gpu.rgba, [0., 1., 2., 1., 3., 4., 5., 1.]);
@@ -348,11 +355,12 @@ mod tests {
             "LUT_3D_SIZE 130",
             "LUT_1D_SIZE 65537",
             "LUT_1D_SIZE 2\n0 0 0\nNaN 0 0",
-            "LUT_1D_SIZE 2\n0 0 0\n65505 0 0",
             "DOMAIN_MIN 1 1 1\nDOMAIN_MAX 1 1 1\nLUT_1D_SIZE 2\n0 0 0\n1 1 1",
         ] {
             assert!(CubeLut::parse(bad).is_err(), "{bad}");
         }
+        let large = CubeLut::parse("LUT_1D_SIZE 2\n0 0 0\n65505 0 0").unwrap();
+        assert!(large.gpu().is_err());
     }
 
     #[test]
@@ -374,7 +382,7 @@ mod tests {
                 text += &format!("{} {} 0\n", i % 60000, i % 7);
             }
             let lut = CubeLut::parse(&text).unwrap();
-            let gpu = lut.gpu();
+            let gpu = lut.gpu().unwrap();
             assert!(gpu.width as usize <= MAX_ROW, "{n}");
             let columns = gpu.cube_columns as usize;
             let rows = n.div_ceil(columns);
@@ -399,7 +407,7 @@ mod tests {
             "LUT_1D_SIZE 3\nLUT_3D_SIZE 2\n0 0 0\n0.5 0.5 0.5\n1 1 1\n{}",
             identity_cube(2).split_once('\n').unwrap().1
         );
-        let gpu = CubeLut::parse(&text).unwrap().gpu();
+        let gpu = CubeLut::parse(&text).unwrap().gpu().unwrap();
         assert_eq!((gpu.cube_size, gpu.shaper_size), (2, 3));
         assert_eq!(gpu.shaper_row, 2);
         let o = (gpu.shaper_row * gpu.width) as usize * 4;

@@ -8,6 +8,7 @@ mod present;
 mod render;
 pub mod resources;
 mod scopes;
+pub use scopes::ScopeResult;
 pub mod studio;
 pub mod trace;
 pub mod transport;
@@ -216,12 +217,16 @@ struct State {
     stop: bool,
     subscribers: Vec<async_channel::Sender<()>>,
 }
+type ScopeTap = (
+    pm_render::scopes::ScopeConfig,
+    async_channel::Sender<ScopeResult>,
+);
 struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
     /// The viewer the Scopes panel analyzes, and where results go.
-    scopes: Mutex<Option<(u64, async_channel::Sender<pm_render::scopes::ScopeFrame>)>>,
+    scopes: Mutex<Option<(u64, ScopeTap)>>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -481,13 +486,10 @@ impl Viewer {
             Ok(())
         })
     }
-    /// Sends this viewer's scope analysis to `frames` while it is set. Results
-    /// arrive off the main thread, at most ten a second.
-    pub fn scopes(
-        &self,
-        frames: Option<async_channel::Sender<pm_render::scopes::ScopeFrame>>,
-    ) -> Result<()> {
-        *self.shared.scopes.lock().unwrap() = frames.map(|frames| (self.id, frames));
+    /// Sends this viewer's scope analysis while `tap` is set. Results arrive
+    /// off the main thread, at most ten a second.
+    pub fn scopes(&self, tap: Option<ScopeTap>) -> Result<()> {
+        *self.shared.scopes.lock().unwrap() = tap.map(|tap| (self.id, tap));
         self.edit(|v| {
             v.stamp.sequence += 1;
             v.dirty = true;
@@ -1110,7 +1112,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 .unwrap()
                 .as_ref()
                 .filter(|(viewer, _)| *viewer == id)
-                .map(|(_, frames)| frames.clone());
+                .map(|(_, tap)| tap.clone());
             if tap.is_some() && engine.scope_frames.is_none() {
                 engine.scopes_changed();
             }

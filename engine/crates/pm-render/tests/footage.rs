@@ -1000,6 +1000,10 @@ fn interpreted_icc_stills_read_alpha_and_profile_overrides() {
 }
 
 /// A still's stored samples as 0..1 RGBA (8- or 16-bit RGBA planes).
+fn half_to_f32(bits: u16) -> f32 {
+    pm_gpu::readback::half_to_f32(bits)
+}
+
 fn stored_rgba(path: &Path) -> (Vec<[f64; 4]>, pm_media::image::StillImage) {
     let pool = pm_media::pool::FramePool::new(0);
     let s = pm_media::image::read(path, &pool).unwrap();
@@ -1008,12 +1012,22 @@ fn stored_rgba(path: &Path) -> (Vec<[f64; 4]>, pm_media::image::StillImage) {
     let px = f
         .with_planes(|p| {
             let sixteen = p[0].desc.format == pm_media::frame::PlaneFormat::Rgba16;
+            let half = p[0].desc.format == pm_media::frame::PlaneFormat::Rgba16Float;
             let mut out = Vec::with_capacity(w * h);
             for y in 0..h {
                 for x in 0..w {
                     out.push([0, 1, 2, 3].map(|c| unsafe {
                         let row = p[0].ptr.add(y * p[0].stride);
-                        if sixteen {
+                        if half {
+                            // Linear float: as the display-encoded codes below.
+                            let b = row.add(x * 8 + c * 2);
+                            let v = half_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+                            if c == 3 {
+                                f64::from(v)
+                            } else {
+                                f64::from(pm_color::transfer::display_encode_f32(v))
+                            }
+                        } else if sixteen {
                             let b = row.add(x * 8 + c * 2);
                             f64::from(u16::from_le_bytes([*b, *b.add(1)])) / 65535.0
                         } else {
@@ -1173,6 +1187,40 @@ fn interpreted_probes_follow_the_file_stamp() {
             assert!(probe_interpreted_video(&copy, i).is_err());
         }
     }
+}
+
+/// A log reading through the whole video path: the same decoded codes, read
+/// raw and read as camera log, agree with the vendor curve in f64.
+#[test]
+fn camera_log_interpretation_reads_real_video_through_the_vendor_curve() {
+    use pm_reference::camera_log::Curve;
+    use pm_reference::color::{Primaries as P, Transfer as T, apply, invert, mul};
+    let Some(path) = formats("video/bars709-prores4444.mov") else {
+        return;
+    };
+    let src = MediaSource::open(&path).unwrap();
+    let v = src.probe.video.as_ref().unwrap();
+    let size = (v.width, v.height);
+    let mut r = Renderer::headless().unwrap();
+    let mut read = |interpret: Value| {
+        let (mut doc, res) = document(&path, size, 25.0, Some(interpret));
+        doc["colorDepth"] = json!(32);
+        render(&mut r, &doc, size, 0.0, &res)
+    };
+    let raw = read(json!({ "transfer": "linear", "primaries": "bt709" }));
+    let log = read(json!({ "transfer": "sLog3", "primaries": "sGamut3Cine" }));
+    let gamut = mul(&invert(&P::BT709.to_xyz()), &P::S_GAMUT3_CINE.to_xyz());
+    let mut worst = 0f64;
+    for (a, b) in raw.chunks_exact(4).zip(log.chunks_exact(4)) {
+        // Linear codes reach the E-encoded output; undo that to get the code.
+        let codes = [a[0], a[1], a[2]].map(|c| T::Srgb.to_linear(f64::from(c)));
+        let light = apply(&gamut, codes.map(|c| Curve::SLog3.to_linear(c)));
+        for c in 0..3 {
+            let expected = T::Srgb.from_linear(light[c]);
+            worst = worst.max((f64::from(b[c]) - expected).abs());
+        }
+    }
+    assert!(worst < 5e-3, "worst {worst}");
 }
 
 /// Anamorphic video fills the quad the document authors: the coded frame is

@@ -15,8 +15,8 @@ fn channel(value: f64) -> serde_json::Value {
 
 fn layer(id: &str, ty: &str, d: serde_json::Value) -> serde_json::Value {
     let p: serde_json::Map<_, _> = [
-        ("position.x", 8.0),
-        ("position.y", 8.0),
+        ("position.x", 0.0),
+        ("position.y", 0.0),
         ("position.z", 0.0),
         ("anchor.x", 0.0),
         ("anchor.y", 0.0),
@@ -82,6 +82,32 @@ fn fixture() -> (tempfile::TempDir, KernelActor, SessionHandle) {
 
 fn published(k: &KernelHandle) -> Arc<Published> {
     k.published("test").unwrap()
+}
+
+#[test]
+fn panel_settings_choose_what_the_engine_counts() {
+    let config = scope_config(true, true);
+    assert_eq!(config.signal, ScopeSignal::Pq);
+    assert_eq!(config.matrix, ScopeMatrix::Rec2020);
+    let config = scope_config(false, false);
+    assert_eq!(config.signal, ScopeSignal::Display);
+    assert_eq!(config.matrix, ScopeMatrix::Rec709);
+    let more = more_menu(false, false, true);
+    assert_eq!(more.len(), 5);
+    assert_eq!(more[0]["checked"], true);
+    assert_eq!(more[1]["checked"], false);
+    assert_eq!(more[4]["disabled"], true);
+    assert_eq!(more[4]["tooltip"], "This project has no values above SDR.");
+}
+
+#[test]
+fn every_camera_reading_is_one_the_engine_parses() {
+    for log in CAMERA_LOGS {
+        let member = serde_json::json!({ "transfer": log.transfer, "primaries": log.primaries });
+        let (reading, issues) = pm_media::interpret::Interpretation::from_json(&member);
+        assert!(issues.is_empty(), "{}: {issues:?}", log.label);
+        assert!(reading.transfer.is_some() && reading.primaries.is_some());
+    }
 }
 
 #[test]

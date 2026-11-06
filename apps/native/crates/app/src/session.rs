@@ -117,8 +117,12 @@ impl pm_shell::integration::Integration for Bridge {
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        self.0
-            .update(cx, |v, cx| v.builtin_header(id, bounds, w, cx))
+        self.0.update(cx, |v, cx| {
+            if id == "scopes" {
+                return Some(v.scopes_header(cx));
+            }
+            v.builtin_header(id, bounds, w, cx)
+        })
     }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())

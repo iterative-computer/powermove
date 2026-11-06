@@ -183,8 +183,6 @@ pub const GO_BACK_LINE: &str = "Work you did in Powermove Native stays here. Sav
 pub const SCOPES_READ_FAILED: &str = "Scopes can’t read this frame.";
 pub const SCOPES_INVALID_FRAME: &str = "This frame has invalid values.";
 pub const SCOPES_NO_PROJECT: &str = "Open a composition to see its scopes.";
-pub const LUT_TOO_LARGE: &str = "This LUT is too large.";
-pub const LUT_CLAMPED: &str = "Values outside this range are clamped before the LUT.";
 pub fn task_failure(code: TaskFailureCode) -> Option<&'static str> {
     match code {
         TaskFailureCode::SourceOffline => Some("The source is offline. Relink it and try again."),

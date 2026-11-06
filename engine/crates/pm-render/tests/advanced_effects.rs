@@ -1359,6 +1359,11 @@ fn metal_lut_revision_two_reads_large_cubes_shapers_and_keeps_revision_one_exact
     );
 }
 
+type Pair = (
+    Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+    Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+);
+
 #[test]
 fn metal_lut_spaces_convert_through_the_stated_camera_encoding() {
     use pm_reference::camera_log::Curve;
@@ -1375,12 +1380,7 @@ fn metal_lut_spaces_convert_through_the_stated_camera_encoding() {
     let code = "void main(){fragColor=vec4(0.40,0.55,0.70,1.0);}";
     let input = [0.40f64, 0.55, 0.70];
     let rec709 = input.map(e_decode);
-    let log = |curve: Curve,
-               gamut: P|
-     -> (
-        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
-        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
-    ) {
+    let log = |curve: Curve, gamut: P| -> Pair {
         let to = mul(&invert(&gamut.to_xyz()), &P::BT709.to_xyz());
         let from = invert(&to);
         (
@@ -1388,10 +1388,6 @@ fn metal_lut_spaces_convert_through_the_stated_camera_encoding() {
             Box::new(move |e| apply(&from, e.map(|v| curve.to_linear(v)))),
         )
     };
-    type Pair = (
-        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
-        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
-    );
     let pq = || -> Pair {
         let to = mul(&invert(&P::BT2020.to_xyz()), &P::BT709.to_xyz());
         let from = invert(&to);

@@ -5092,6 +5092,7 @@ dependencies = [
  "pm-gpu",
  "pm-kernel",
  "pm-mcp",
+ "pm-media",
  "pm-model",
  "pm-native-migrate",
  "pm-node",
