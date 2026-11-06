@@ -14,10 +14,8 @@ use pm_compat_runner::{
     host::{ExtensionHost, HostConfig},
     transport::{TransportOwner, TransportRequest},
 };
-use pm_protocol::{
-    clock::TransportCommand,
-    common::PlaybackRate,
-};
+use pm_node::fonts::render::BrokerResolver;
+use pm_protocol::{clock::TransportCommand, common::PlaybackRate};
 use pm_shell::{Command as ShellCommand, keyboard::Binding, layout, transient::Choice};
 use serde_json::Value;
 use std::{
@@ -115,6 +113,12 @@ impl Controller {
             roots: Extensions::roots(&self.profile),
             cache: self.profile.join("extensions-build"),
             owner: Some(Box::new(Clock(clock_tx))),
+            text: self.font_broker.clone().map(|broker| {
+                Box::new(move || {
+                    let resolver = BrokerResolver::new(broker.clone(), Default::default());
+                    Box::new(pm_recorder::TextEngine::new(resolver)) as pm_compat_runner::CanvasText
+                }) as Box<dyn Fn() -> pm_compat_runner::CanvasText + Send>
+            }),
             wake: Arc::new(move || {
                 let _ = wake_tx.try_send(());
             }),

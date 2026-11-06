@@ -1095,3 +1095,23 @@ pub struct DropPreview {
     pub target: DropTarget,
     pub rect: Rect,
 }
+
+#[cfg(test)]
+mod contributed_tests {
+    use super::*;
+    #[test]
+    fn contributed_panels_dock_title_and_survive_like_builtins() {
+        set_contributed_panels([("synthetic.panel".to_owned(), "Synthetic".to_owned())]);
+        assert_eq!(panel_title("synthetic.panel"), "Synthetic");
+        assert!(all_panels().iter().any(|p| p == "synthetic.panel"));
+        let mut layout = Layout::preset("edit");
+        layout.show_panel("synthetic.panel").unwrap();
+        assert!(layout.open_panels().contains(&"synthetic.panel"));
+        layout.validate().unwrap();
+        layout.close_panel("synthetic.panel").unwrap();
+        assert!(!layout.open_panels().contains(&"synthetic.panel"));
+        set_contributed_panels([]);
+        assert!(layout.show_panel("synthetic.panel").is_err());
+        assert_eq!(panel_title("synthetic.panel"), "synthetic.panel");
+    }
+}

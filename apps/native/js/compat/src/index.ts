@@ -1,6 +1,6 @@
 /** Pure ECMAScript entrypoint: embeddable in rusty_v8, with no Node or DOM imports. */
 export { CompatRealm, EditGesture } from "./realm";
-export { CompatPanels } from "./panels";
+export { CompatPanels, SECTIONS_PANEL } from "./panels";
 export { connectControlState } from "./control-state";
 export { definitionSnapshots } from "./definitions";
 export type { RealmOptions } from "./realm";

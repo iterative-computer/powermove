@@ -141,7 +141,11 @@ globalThis.__compat = {
       this.panels = new PowermoveCompat.CompatPanels(
         this.realm.kernel.panels,
         this.dom.document,
+        this.realm.kernel.inspectorSections,
+        () => [...this.realm.PM.sel.layers],
       );
+    if (this.panels)
+      this.realm.PM.bus.on("sel", () => this.panels.selectionChanged());
     // Transient playback belongs to the native worker, separately from the
     // kernel's document/history writer. Publications are read through getters.
     const transport = (method, extra = {}) =>
@@ -355,7 +359,18 @@ globalThis.__compat = {
     };
     return {
       commands: entries(kernel.commands),
-      panels: entries(kernel.panels),
+      panels: [
+        ...entries(kernel.panels),
+        ...(kernel.inspectorSections.list().length
+          ? [
+              {
+                id: PowermoveCompat.SECTIONS_PANEL,
+                title: "Extension Properties",
+                owner: "powermove-host",
+              },
+            ]
+          : []),
+      ],
       inspector: entries(kernel.inspectorSections),
       effects: entries(kernel.effects),
       transitions: entries(kernel.transitions),

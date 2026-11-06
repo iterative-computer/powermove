@@ -81,6 +81,7 @@ mod mac {
             roots: vec![root.path().join("extensions")],
             cache: root.path().join("cache"),
             owner: None,
+            text: None,
             wake: Arc::new(|| ()),
         });
         let (feedback, messages) = mpsc::channel();

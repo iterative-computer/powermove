@@ -5,7 +5,7 @@ use crate::{
     adapter::KernelAdapter,
     compile,
     discovery::{self, Discovered},
-    recorder::{NativeHost, RealmEvents},
+    recorder::{CanvasText, NativeHost, RealmEvents},
     transport::{Transport, TransportOwner},
 };
 use crate::store_host::StoreExtension;
@@ -44,6 +44,8 @@ pub struct HostConfig {
     /// Compiled module graphs, keyed by source digest.
     pub cache: PathBuf,
     pub owner: Option<Box<dyn TransportOwner>>,
+    /// Canvas text against the app's font service, built on the owner thread.
+    pub text: Option<Box<dyn Fn() -> CanvasText + Send>>,
     /// Published state changed. Runs on any thread; must only schedule.
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -821,6 +823,9 @@ impl Owner {
         );
         let transport = Transport::new(self.config.owner.take());
         let host = Arc::new(NativeHost::new(adapter, transport, Box::new(events.clone())));
+        if let Some(text) = &self.config.text {
+            host.set_text(text());
+        }
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         crate::boot_realm(&realm, &host, "")?;
@@ -987,6 +992,7 @@ mod tests {
                 roots: vec![root.path().join("extensions")],
                 cache: root.path().join("cache"),
                 owner: None,
+                text: None,
                 wake: Arc::new(|| ()),
             });
             Self {

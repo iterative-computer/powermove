@@ -119,6 +119,9 @@ def new_destination(path):
     return path
 
 
+HELPERS = ("pm-store-helper", "pm-glsl-compiler")
+
+
 def bundle(executable, destination, channel, version, build, update_config,
            sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True):
     metadata = info(channel, version, build, sparkle_feed, sparkle_key)
@@ -153,6 +156,12 @@ def bundle(executable, destination, channel, version, build, update_config,
     (contents / "MacOS").mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(executable, contents / "MacOS" / "powermove-native")
+    # Worker executables the app starts by path: the confined Store helper and
+    # the killable shader compiler. They sit beside the build's main binary.
+    for helper in HELPERS:
+        sibling = executable.with_name(helper)
+        if sibling.is_file():
+            shutil.copy2(sibling, contents / "MacOS" / helper)
     with (contents / "Info.plist").open("wb") as file:
         plistlib.dump(metadata, file, sort_keys=True)
     (contents / "PkgInfo").write_bytes(b"APPL????")

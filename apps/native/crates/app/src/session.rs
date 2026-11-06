@@ -23,6 +23,7 @@ struct CompositionView {
 pub struct Controller {
     pub builtins: crate::builtins::Host,
     pub extensions: crate::extensions::Extensions,
+    pub font_broker: Option<pm_node::fonts::render::FontBroker>,
     /// Per-composition navigation view, scoped to the live document identity.
     composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
     pub kernel: KernelHandle,
@@ -231,6 +232,7 @@ impl Controller {
         Self {
             builtins: Default::default(),
             extensions: Default::default(),
+            font_broker: None,
             composition_views: Default::default(),
             kernel,
             engine,

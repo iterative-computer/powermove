@@ -1,5 +1,9 @@
 import type { Registry } from "./registry";
 
+/** v1–3 inspector sections are DOM, and the Inspector is a native surface: they
+ * dock together in one panel beside it and rebuild with the selection. */
+export const SECTIONS_PANEL = "extension-properties";
+
 /** Mounts actual contribution builds in the V8 DOM mirror. The rendering host
  * still owns placement and paint acknowledgements; opening is not a paint ack.
  */
@@ -10,10 +14,35 @@ export class CompatPanels {
   constructor(
     private registry: Registry<any>,
     private document: any,
+    private sections?: Registry<any>,
+    private layerIds: () => string[] = () => [],
   ) {
     this.subscription = registry.onChange(({ id }) => {
       if (this.openPanels.has(id)) this.refresh(id);
     });
+    sections?.onChange(() => this.refresh(SECTIONS_PANEL));
+  }
+  /** Sections rebuild against the new selection, as the Inspector does. */
+  selectionChanged = () => this.refresh(SECTIONS_PANEL);
+  private buildSections(root: any): () => void {
+    const cleanups: (() => void)[] = [];
+    const context = { layerIds: this.layerIds() };
+    for (const section of this.sections?.list() ?? []) {
+      if (section.when && !section.when(context)) continue;
+      const wrapper = this.document.createElement("section");
+      const title = this.document.createElement("h3");
+      title.textContent = section.title;
+      const body = this.document.createElement("div");
+      wrapper.append(title, body);
+      root.append(wrapper);
+      const cleanup = section.build(body, context);
+      if (typeof cleanup === "function") cleanups.push(cleanup);
+      else if (typeof cleanup?.dispose === "function")
+        cleanups.push(() => cleanup.dispose());
+    }
+    return () => {
+      for (const cleanup of cleanups) cleanup();
+    };
   }
   list = () => this.registry.ids();
   isOpen = (id: string) => this.openPanels.has(id);
@@ -21,7 +50,10 @@ export class CompatPanels {
   open = (id: string, _dock?: unknown) => {
     this.hidden.delete(id);
     if (this.openPanels.has(id)) return;
-    const definition = this.registry.get(id);
+    const definition =
+      id === SECTIONS_PANEL
+        ? { build: (root: any) => this.buildSections(root) }
+        : this.registry.get(id);
     if (!definition) return;
     const root = this.document.createElement("section");
     root.setAttribute("data-pm-contribution", id);

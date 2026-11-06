@@ -24,7 +24,7 @@ mod store_kernel;
 mod store_runtime;
 pub use store_dispatch::KernelStoreDispatch;
 pub mod transport;
-pub use recorder::{NativeHost, NoEvents, RealmEvents};
+pub use recorder::{CanvasText, NativeHost, NoEvents, RealmEvents};
 pub use store_kernel::{KernelStoreAdapter, StoreArchive, StoreAuthority};
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
 

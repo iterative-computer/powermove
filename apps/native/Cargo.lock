@@ -5108,6 +5108,7 @@ dependencies = [
  "pm-panel-viewerchrome",
  "pm-promedia",
  "pm-protocol",
+ "pm-recorder",
  "pm-render",
  "pm-runtime-v8",
  "pm-shell",
