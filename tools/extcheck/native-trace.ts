@@ -133,10 +133,10 @@ root.__extcheckDriver = {
       result = { open: api.panels.isOpen(step.id) };
     } else if (step.op === "command") {
       const api = root.__compat.hostAPI();
-      result = await call(
-        "commands.run",
-        [step.id, ...(step.args ?? [])],
-        () => api.commands.run(step.id, ...(step.args ?? [])),
+      result = await call("commands.run", [step.id, ...(step.args ?? [])], () =>
+        call("command.kernel", [], () =>
+          api.commands.run(step.id, ...(step.args ?? [])),
+        ),
       );
     } else if (step.op === "advance") {
       await root.__extcheckClock.advance(step.ms);

@@ -50,6 +50,7 @@ try {
   // public archive bytes may enter the confined helper.
   if (request.case.startsWith("store-")) {
     status.reason = "native-store-release-admission-unavailable";
+    if (request.trace_only) status.reason = "native-store-trace-driver-unavailable";
   } else {
     status.reason = "native-runner-failed";
     const reply = JSON.parse(

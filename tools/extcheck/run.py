@@ -362,7 +362,7 @@ def capture_unlocked(command, request, output, timeout):
                           "reference-store-profile-adapter-unavailable", "native-reference-revision-mismatch",
                           "reference-capture-failed", "reference-clock-fixture-unavailable", "native-integrated-runner-unavailable",
                           "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
-                          "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
+                          "native-webkit-script-adapter-unavailable", "native-activation-needs-backend", "native-store-trace-driver-unavailable"):
             reason = "capture-driver-blocked"
         raise Blocked(reason)
     if status.get("clock_fixture") != request.get("clock_fixture") or not request.get("clock_fixture"):

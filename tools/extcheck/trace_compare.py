@@ -25,6 +25,9 @@ def unordered(value, ids):
     out = {}
     for key in sorted(value):
         item = value[key]
+        # The reference records the whole Electron kernel object here.
+        if key == "args" and value.get("name") == "command.kernel":
+            continue
         if key in ("$id", "$ref", "$token") and isinstance(item, str):
             out[key] = ids.setdefault(item, f"o{len(ids)+1}")
         else:
@@ -89,6 +92,7 @@ def main():
     parser.add_argument("--native-runner", type=Path, required=True)
     parser.add_argument("--corpus-root", type=Path, default=run.ROOT/"apps/desktop/e2e/fixtures/compat-corpus")
     parser.add_argument("--owner-root", type=Path)
+    parser.add_argument("--store", action="store_true")
     parser.add_argument("--only", help="Public fixture directory name")
     parser.add_argument("--scripts", type=Path)
     parser.add_argument("--repeat", type=int, default=3)
@@ -108,6 +112,9 @@ def main():
     populations = {"local-corpus": run.discover(args.corpus_root)}
     if args.owner_root:
         populations["owner"] = run.discover(args.owner_root)
+    public = run.PublicStore() if args.store else None
+    if public:
+        populations["store"] = public.catalog()
     summary = {"evidence": "trace-only", "gate": "OPEN", "accepted_matches": 0,
                "reference": args.reference_revision, "sources": {}, "families": {}, "reasons": {}}
     families, reasons = Counter(), Counter()
@@ -115,16 +122,17 @@ def main():
         counts = Counter(total=len(paths))
         for index, path in enumerate(paths, 1):
             case = f"{source}-{index:04d}"
-            if args.only and path.name != args.only:
+            if args.only and getattr(path, "name", None) != args.only:
                 counts["total"] -= 1
                 continue
             with tempfile.TemporaryDirectory(prefix="trace-", dir=run.WORK) as temporary:
                 root = Path(temporary)
                 try:
-                    sha = run.copy_extension(path, root/"input")
+                    sha = public.source(path, root/"input") if source == "store" else run.copy_extension(path, root/"input")
+                    store = {"repoId": path["repoId"], "releaseId": path["latest"]["id"]} if source == "store" else None
                     script = run.load_trace_script(args.scripts, case, DEFAULT_SCRIPT)
                     check_script(script)
-                    exact, behavior = compare_case(args, source, case, root/"input", sha, native, reference, script)
+                    exact, behavior = compare_case(args, source, case, root/"input", sha, native, reference, script, store)
                     if behavior:
                         counts["trace_mismatch"] += 1
                         summary.setdefault("rows", {})[case] = {"exact": len(exact), "behavior": len(behavior)}
