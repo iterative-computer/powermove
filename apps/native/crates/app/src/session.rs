@@ -566,7 +566,8 @@ impl Controller {
             source,
             electron_profile,
         });
-        self.settle_open(operation, name, path, pending, cx);
+        let saved = path.as_ref().is_none_or(|p| p.exists());
+        self.settle_open(operation, name, path, saved, pending, cx);
     }
     /// A project the Library's worker already opened.
     pub fn adopt_reply(
@@ -587,13 +588,22 @@ impl Controller {
             }
             return;
         };
-        self.settle_open(operation, name, file, async move { Some(Ok(reply)) }, cx);
+        // A library project's saved version is in the library, wherever its file went.
+        self.settle_open(
+            operation,
+            name,
+            file,
+            true,
+            async move { Some(Ok(reply)) },
+            cx,
+        );
     }
     fn settle_open(
         &mut self,
         operation: crate::mcp::Operation,
         name: String,
         path: Option<PathBuf>,
+        saved: bool,
         pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -610,7 +620,6 @@ impl Controller {
             let _operation = operation;
             let mut result = pending.await;
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
-                let saved = path.as_ref().is_none_or(|p| p.exists());
                 let recovery = crate::surfaces::recovery_kernel::PreparedRecovery::from_reply(
                     reply, &name, false, saved,
                 );

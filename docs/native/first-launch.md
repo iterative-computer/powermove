@@ -24,6 +24,9 @@ profile and user projects are read-only inputs.
 
 The library, and the MCP server after it, attach only after this. `--powermove-mcp`
 refuses while a copy is pending, because a library made first would block the copy.
+If the library can't open, the editor stays closed: the Welcome window says so, with
+Details, `Try Again` and `Quit`. A failed later merge doesn't stop the launch. It goes to
+Window ▸ Error Log and the status bar, and resumes next launch.
 
 ## Bootstrap
 
@@ -40,8 +43,9 @@ refuses while a copy is pending, because a library made first would block the co
 5. Import localStorage, register extensions (`extensions-shared` read-only, plus an
    overlay), then secrets.
 
-Every step publishes durably, so a kill or `Pause` resumes where it stopped. Quitting is
-always safe. Disk needs 6 GiB plus worst-case bytes; low space stops with real numbers.
+Every step publishes durably, so a kill or `Pause` resumes where it stopped. `Pause` reads
+`Pausing…` until the worker reaches its next boundary, and only then can it be resumed:
+there is never a second worker. Quitting is always safe. Disk needs 6 GiB plus worst-case bytes; low space stops with real numbers.
 
 Secrets: the Keychain is read only after a click for that request (`secrets::PROMPT`),
 never on retry or relaunch. `Not Now` finishes without it. Settings ▸ Accounts ▸ `Bring

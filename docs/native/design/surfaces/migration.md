@@ -46,8 +46,17 @@ no percentage is invented, and a step with no total is indeterminate:
 
 Names and paths never appear here: the event carries counts only.
 
+`Pause` shows `Pausing…` with Pause disabled until the copy reaches a safe stop, then
+`Copying Is Paused`.
+
 `Details` shows selectable `MONO_FONT` text and goes to the Error Log. No secret or user
-path is included.
+path is included. There is no editor during the gate, so its copy points at Details, never
+at a menu.
+
+**The library won't open.** Title `Your Library Couldn’t Open`, line `Nothing was changed.
+If Powermove Native is open in another window or on another account, quit it, then try
+again.`, Details, `Quit Powermove Native` and `Try Again`. This also opens the window on a
+launch that had none. The editor never opens without its library.
 
 **Normal path.** With nothing to review, `Your Library Is Ready` is skipped and the editor
 opens by itself. No click is needed unless encrypted values exist (N002) or a row below

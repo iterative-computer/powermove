@@ -37,8 +37,10 @@ fn n001_raw_progress_pause_resume_and_announcement_are_bounded() {
 }
 #[test]
 fn n001_low_disk_says_how_much_and_a_stranger_asks_for_a_check() {
-    let mut model = m::Model::default();
-    model.gate = m::Gate::WaitingUnknown;
+    let mut model = m::Model {
+        gate: m::Gate::WaitingUnknown,
+        ..Default::default()
+    };
     assert_eq!(model.view().default, Some("check_again"));
     model.gate = m::Gate::LowDisk;
     assert_eq!(

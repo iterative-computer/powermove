@@ -83,12 +83,12 @@ and `app/src/first_run.rs`.
 | S017, S005, S019 | File ▸ Projects… | Project Library window: sections, search, rename, duplicate, trash, put back |
 | S018 | File ▸ New Project | AppKit sheet, kernel create |
 | S021 | Composition ▸ New Composition…, Composition Settings…; Project panel | AppKit sheet, guarded kernel edit |
-| S022 | Composition ▸ Pre-compose… | Sheet; the kernel refuses (`Precompose` is not implemented) and the project is untouched |
 | S029 | Composition ▸ Edit Keyframe Value…, Keyframe Velocity…, Scale Keyframes… | AppKit sheets; the keyframe context menu is the Timeline lane’s |
-| S001 | opening a project with recovery data | recovery alert and kernel decision |
-| S002, S004 | closing a dirty project; a failed open | alerts with spec copy |
-| S053 | Window ▸ Error Log | window |
-| S035, S034 | Inspector fill and font rows | system colour panel, sampler, font menu |
+| S001 | opening a project with recovery data | recovery alert and kernel decision. `Discard Edits` stays out until a Recently Deleted destination exists |
+| S002, S004 | closing a dirty project; quitting with two or more; a failed open | alerts with spec copy. `Finishing Up` and saving over a changed file are not attached |
+| S053 | Window ▸ Error Log | window; one log per app, first-launch and later-merge failures included |
+| S035 | any Inspector colour well | system colour panel or sampler, then the row's binding. Plain colours only: no `fill` row is published, so gradients can't be edited here |
+| S034 | Inspector font row | family menu, then `set-value`. Faces, search and preview are not built |
 
 Waiting for a route, and who owns it:
 
@@ -99,7 +99,8 @@ Waiting for a route, and who owns it:
 | S011, S012 | extension runtime in the app; needs a values service on Keychain |
 | S013, S054 | extension hosting; slowdown data source |
 | S003, S014, S016, S020, S055 | document tabs in the shell; `documents.rs` keeps alerts and notices for them |
-| S022 delete, S036, S043 | Project panel confirm reply path; property menu; Export panel RPC |
+| S022 | `CompCommand::Precompose` is `NotImplemented`, so the menu item says so and no sheet opens. Delete also needs the Project panel confirm reply path |
+| S036, S043 | property menu; Export panel RPC |
 | S025, S051 | Viewer lane; panel text host |
 
 Specs exist for every remaining **nothing** row, so none needs design first. Not built:

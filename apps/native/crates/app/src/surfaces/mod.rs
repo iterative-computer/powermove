@@ -30,7 +30,8 @@ pub mod recovery_native;
 #[allow(dead_code)]
 pub mod recovery_wire;
 
-// Alerts are attached; notices, popouts and pickers wait for the shell's document tabs.
+// Alerts are attached, except saving over a changed file, which needs a watcher.
+// Notices, popouts and pickers wait for the shell's document tabs.
 #[allow(dead_code)]
 pub mod documents;
 
