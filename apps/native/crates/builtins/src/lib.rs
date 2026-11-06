@@ -1,5 +1,6 @@
 //! Application v4 embedding. JavaScript owns presentation; the kernel remains
 //! the only document writer. GPUI consumes immutable accepted surfaces.
+#![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
 mod data;
 pub mod delivery;

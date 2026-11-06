@@ -53,6 +53,7 @@ pub(crate) struct Backend {
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
     last_effects: BTreeMap<String, Value>,
+    last_registries: Option<Arc<BTreeMap<String, Vec<state::Registration>>>>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
 impl Backend {
@@ -108,6 +109,7 @@ impl Backend {
             panel_id: panel.into(),
             service_revision: 0,
             last_effects: BTreeMap::new(),
+            last_registries: None,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
             binding_owners: BTreeMap::new(),
@@ -158,6 +160,15 @@ impl Backend {
             .ok_or("No open project")?
             .sync(published);
         let state = self.kernel.state();
+        // Definitions carry whole shaders; only a new registry pays to convert them.
+        if self
+            .last_registries
+            .as_ref()
+            .is_some_and(|last| Arc::ptr_eq(last, &state.registries))
+        {
+            return Ok(());
+        }
+        self.last_registries = Some(state.registries.clone());
         let mut latest = BTreeMap::new();
         for registration in state.registries.get("effects").into_iter().flatten() {
             latest.insert(registration.id.clone(), wire(&registration.definition));
@@ -277,17 +288,26 @@ impl Backend {
     }
     pub fn registry(&self) -> Value {
         let state = self.kernel.state();
+        // Registration order, the winning provider's presentation in its first slot.
+        let mut order = Vec::new();
         let mut items = BTreeMap::new();
-        let mut groups = std::collections::BTreeSet::new();
-        if let Some(registry) = state.registries.get("effects") {
-            for entry in registry {
-                let d = wire(&entry.definition);
-                let group = d["group"].as_str().unwrap_or("");
-                groups.insert(group.to_owned());
-                items.insert(entry.id.clone(), json!({"id":entry.id,"label":d["label"].as_str().unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
+        let mut groups: Vec<String> = Vec::new();
+        for entry in state.registries.get("effects").into_iter().flatten() {
+            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+            let group = text("group").unwrap_or("").to_owned();
+            if !groups.contains(&group) {
+                groups.push(group.clone());
             }
+            if !items.contains_key(&entry.id) {
+                order.push(entry.id.clone());
+            }
+            items.insert(entry.id.clone(), json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
         }
-        json!({"items":items.into_values().collect::<Vec<_>>(),"groups":groups})
+        let items = order
+            .iter()
+            .filter_map(|id| items.remove(id))
+            .collect::<Vec<_>>();
+        json!({"items":items,"groups":groups})
     }
     pub fn target(&mut self) -> Result<Value, String> {
         self.sync()?;

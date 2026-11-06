@@ -1323,5 +1323,6 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
 }
 
 mod effect_delta;
+mod effect_registry;
 
 mod precomp_delta;

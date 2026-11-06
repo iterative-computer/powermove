@@ -139,7 +139,7 @@ impl Kernel {
             compacting: false,
             pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
-            state: Default::default(),
+            state: crate::state::StateSnapshot::seeded(),
         }
     }
 
