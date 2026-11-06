@@ -5,11 +5,16 @@ fn setup() -> (KernelActor, data::Backend) {
     setup_with_saved_effect(None)
 }
 fn setup_with_saved_effect(saved: Option<Value>) -> (KernelActor, data::Backend) {
+    setup_project(|value| {
+        if let Some(saved) = saved {
+            value["layers"][0]["fx"] = json!([saved]);
+        }
+    })
+}
+fn setup_project(edit: impl FnOnce(&mut Value)) -> (KernelActor, data::Backend) {
     let actor = KernelActor::spawn(KernelConfig::default());
     let mut value = json!({"id":"synthetic","name":"Effect contract","compId":"synthetic-root","w":160,"h":90,"fps":30,"dur":3,"bg":"#000000","backgroundFill":{"type":"none","angle":0,"stops":[]},"colorDepth":16,"assets":{},"comps":{},"layers":[{"id":"a","type":"solid","name":"Owner","from":0,"dur":3,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"skew":{"v":0,"kf":[]}},"d":{"w":80,"h":40,"color":"#FFFFFF"},"fx":[]}]});
-    if let Some(saved) = saved {
-        value["layers"][0]["fx"] = json!([saved]);
-    }
+    edit(&mut value);
     let kernel = actor.handle();
     kernel
         .open(
@@ -84,7 +89,7 @@ fn e07_application_add_ramp_resolves_source_dimensions_and_keeps_defaults_on_und
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "gradient")
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let created = effect(&kernel);
@@ -143,7 +148,7 @@ fn e07_e05_application_declared_color_swaps_are_real_actions_and_undo_atomically
             .model
             .as_mut()
             .unwrap()
-            .add_effect(Caller::native(), "a", id)
+            .add_effect_at(Caller::native(), "a", id, 0.)
             .unwrap();
         kernel.call("synthetic", request).wait().unwrap().unwrap();
         let before = effect(&kernel);
@@ -214,7 +219,7 @@ fn e07_application_reset_at_playhead_keeps_animation_and_is_one_undo_step() {
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "gradient")
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let id = effect(&kernel)["id"].as_str().unwrap().to_owned();
@@ -458,7 +463,7 @@ fn e07_application_ramp_swap_and_undo_render_the_published_project_offscreen() {
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "gradient")
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let before = effect(&kernel);
@@ -525,7 +530,7 @@ fn e04_effect_control_requests_cannot_edit_a_reopened_document_with_reused_ids_a
             .model
             .as_mut()
             .unwrap()
-            .add_effect(Caller::native(), "a", "gradient")
+            .add_effect_at(Caller::native(), "a", "gradient", 0.)
             .unwrap();
         kernel.call("synthetic", request).wait().unwrap().unwrap();
         backend.sync().unwrap();
@@ -637,4 +642,59 @@ fn e04_effect_control_requests_cannot_edit_a_reopened_document_with_reused_ids_a
             before
         );
     }
+}
+
+/// The inspector's mirror has no fonts, so it cannot measure a text layer.
+/// Add and Reset take main's next sizes (layer, then composition) and work.
+#[test]
+fn ramp_on_a_text_layer_adds_and_resets_without_font_bounds() {
+    use pm_panel_inspector::{Binding, PropertyId};
+    let (actor, mut backend) = setup_project(|value| {
+        value["layers"][0]["type"] = json!("text");
+        value["layers"][0]["d"] = json!({"text":"Ramp","size":24,"color":"#FFFFFF"});
+    });
+    let kernel = actor.handle();
+    backend.sync().unwrap();
+    let request = backend
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "gradient", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let created = effect(&kernel);
+    assert_eq!(created["p"]["startX"]["v"], 80.);
+    assert_eq!(created["p"]["endY"]["v"], 90.);
+    let id = created["id"].as_str().unwrap().to_owned();
+    backend.sync().unwrap();
+    let request = backend
+        .model
+        .as_mut()
+        .unwrap()
+        .set(
+            Caller::native(),
+            Binding::Property(PropertyId::new("a", format!("{id}.startX"))),
+            pm_model::Value::Number(10.),
+            0.,
+        )
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert_eq!(effect(&kernel)["p"]["startX"]["v"], 10.);
+    let projection = backend.projection().unwrap();
+    let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],"layer":"a","intent":{"type":"reset","id":id}});
+    let mut panel = pm_panel_inspector::v4_effects::EffectsPanel::new(Default::default(), 0..200);
+    let plan = panel
+        .plan(
+            backend.model.as_mut().unwrap(),
+            Caller::native(),
+            &data::model(&args).unwrap(),
+            0.,
+        )
+        .unwrap();
+    kernel
+        .call("synthetic", plan.request.unwrap())
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(effect(&kernel)["p"]["startX"]["v"], 80.);
 }

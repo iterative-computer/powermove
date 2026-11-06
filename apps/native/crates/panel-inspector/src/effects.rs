@@ -424,14 +424,6 @@ impl Inspector {
             },
         ))
     }
-    pub fn add_effect(
-        &mut self,
-        caller: Caller,
-        layer: &str,
-        kind: &str,
-    ) -> Result<Request, InspectorError> {
-        self.add_effect_at(caller, layer, kind, 0.)
-    }
     pub fn add_effect_at(
         &mut self,
         caller: Caller,

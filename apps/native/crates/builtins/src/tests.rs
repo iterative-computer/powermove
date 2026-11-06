@@ -783,7 +783,7 @@ fn effect_controls_native_binding_and_diamond_use_published_playhead() {
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .add_effect_at(Caller::native(), "a", "synthetic.glow", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
@@ -1110,7 +1110,7 @@ fn effect_controls_edits_every_supported_scalar_type_through_registered_native_f
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .add_effect_at(Caller::native(), "a", "synthetic.glow", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
