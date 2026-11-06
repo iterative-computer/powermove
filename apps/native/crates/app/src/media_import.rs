@@ -72,15 +72,8 @@ impl Controller {
     }
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
-            matches!(
-                path.extension().and_then(|x| x.to_str()),
-                Some("pmv" | "json")
-            )
-        });
-        if let Some(path) = projects.into_iter().next() {
-            self.open_file(path, cx);
-        } else if !media.is_empty() && self.session.is_none() {
+        let media = self.open_dropped_project(paths, cx);
+        if !media.is_empty() && self.session.is_none() {
             self.message = "Open a project before importing media".into();
             cx.notify();
         } else if !media.is_empty() {
@@ -93,6 +86,43 @@ impl Controller {
                 },
                 cx,
             );
+        }
+    }
+    /// Files dropped on the Project panel: assets in `folder`, no layers.
+    pub(crate) fn import_to_panel(
+        &mut self,
+        paths: Vec<PathBuf>,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = self.open_dropped_project(paths, cx);
+        if !paths.is_empty() {
+            let request = ImportRequest {
+                paths,
+                folder,
+                ..Default::default()
+            };
+            self.import(request, cx);
+        }
+    }
+    /// A dropped project opens instead of importing. Returns the media to import.
+    fn open_dropped_project(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Vec<PathBuf> {
+        let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
+            matches!(
+                path.extension().and_then(|x| x.to_str()),
+                Some("pmv" | "json")
+            )
+        });
+        match projects.into_iter().next() {
+            Some(path) => {
+                self.open_file(path, cx);
+                vec![]
+            }
+            None => media,
         }
     }
     /// Batches run in order: user order and project identity both depend on it.

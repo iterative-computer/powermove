@@ -563,12 +563,9 @@ impl Controller {
                                 // separates a folder from a sequence, and no sequence
                                 // imports yet, so it changes nothing here.
                                 pm_panel_media::Effect::Import { files, folder, .. } => self
-                                    .import(
-                                        pm_builtins::media_import::ImportRequest {
-                                            paths: files.into_iter().map(Into::into).collect(),
-                                            folder,
-                                            ..Default::default()
-                                        },
+                                    .import_to_panel(
+                                        files.into_iter().map(Into::into).collect(),
+                                        folder,
                                         cx,
                                     ),
                                 pm_panel_media::Effect::Focus(_)
