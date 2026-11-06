@@ -680,7 +680,6 @@ export function TimelinePanel({
                   event.stopPropagation();
                   send({
                     type: "keyDown",
-                    target: { kind: "trackArea" },
                     event: nativeEvent(event),
                   });
                 }}

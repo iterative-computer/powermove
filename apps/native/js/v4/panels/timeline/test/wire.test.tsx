@@ -249,7 +249,6 @@ test("native key admission owns shortcuts; panel forwards modifiers/repeat, addi
   expect(actions).toEqual(
     keys.map((key) => ({
       type: "keyDown",
-      target: { kind: "trackArea" },
       event: { key, shiftKey: true, metaKey: true, repeat: true },
     })),
   );

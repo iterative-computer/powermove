@@ -150,31 +150,18 @@ test("actions are serialized, detached before enqueue, and retain exact live mod
   const { model, session } = fixture();
   await session.start();
   await session.settled();
-  const e = { pointerId: 1, shiftKey: true, x: -0.25 };
-  const first = session.act({
-    type: "pointerDown",
-    target: { kind: "ruler" },
-    event: e,
-  });
+  const e = { key: "ArrowRight", shiftKey: true, repeat: false };
+  const first = session.act({ type: "keyDown", event: e });
   e.shiftKey = false;
-  e.x = 400;
-  const second = session.act({
-    type: "pointerCancel",
-    target: { kind: "ruler" },
-    event: { pointerId: 1 },
-  });
+  e.repeat = true;
+  const second = session.act({ type: "snap" });
   await Promise.all([first, second]);
   expect(model.actions).toEqual([
     {
-      type: "pointerDown",
-      target: { kind: "ruler" },
-      event: { pointerId: 1, shiftKey: true, x: -0.25 },
+      type: "keyDown",
+      event: { key: "ArrowRight", shiftKey: true, repeat: false },
     },
-    {
-      type: "pointerCancel",
-      target: { kind: "ruler" },
-      event: { pointerId: 1 },
-    },
+    { type: "snap" },
   ]);
   await session.dispose();
 });

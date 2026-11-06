@@ -68,10 +68,8 @@ pub struct Events {
     pub pointer_down: bool,
     pub pointer_move: bool,
     pub pointer_up: bool,
-    pub pointer_cancel: bool,
     pub hover: bool,
     pub wheel: bool,
-    pub drag_start: bool,
     pub drop: bool,
     pub key_down: bool,
 }
@@ -85,10 +83,8 @@ impl Events {
             pointer_down: has("pointerdown"),
             pointer_move: has("pointermove"),
             pointer_up: has("pointerup"),
-            pointer_cancel: has("pointercancel"),
             hover: has("pointerenter") || has("pointerleave"),
             wheel: has("wheel"),
-            drag_start: has("dragstart"),
             drop: has("drop") || has("dragover"),
             key_down: has("keydown"),
         }

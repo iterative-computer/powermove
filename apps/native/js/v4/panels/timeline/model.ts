@@ -132,14 +132,6 @@ export interface TimelineFrame {
   /** Semantic feedback only. Metadata is inspectable, never a paint API. */
   feedback: Json;
 }
-export type Target =
-  | { kind: "currentTime" }
-  | { kind: "tab"; id: string }
-  | { kind: "trackArea" }
-  | { kind: "row"; id: string }
-  | { kind: "ruler" }
-  | { kind: "splitter" }
-  | { kind: "graph" };
 export type Intent =
   | NativeAction
   | { type: "play" }
@@ -169,22 +161,8 @@ export type Intent =
       direction: "previous" | "next";
     }
   | { type: "scaleLink"; layer: string }
-  | { type: "keyDown" | "keyUp"; target: Target; event: EventDetail }
-  | {
-      type:
-        | "pointerDown"
-        | "pointerMove"
-        | "pointerUp"
-        | "pointerCancel"
-        | "doubleClick"
-        | "wheel"
-        | "dragEnter"
-        | "dragOver"
-        | "dragLeave"
-        | "drop";
-      target: Target;
-      event: EventDetail;
-    }
+  /** Pointer, wheel and drop gestures run in the native surface, not here. */
+  | { type: "keyDown"; event: EventDetail }
   | { type: "range"; first: number; visible: number };
 
 export interface NativeTimelineModel {
