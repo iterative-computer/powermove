@@ -11,7 +11,7 @@
 //!    component in the PQ domain, from the content's peak (the mastering
 //!    display's, else 1000 cd/m²) to the target's peak, with black at zero.
 //!    An SDR project does this at input ([`to_sdr`]); an HDR project's SDR
-//!    delivery does it at output ([`tone_map_working`]).
+//!    delivery does it at output (`pm_tone_map_output` in [`wgsl`]).
 //!
 //! The result stays in the source's primaries. The caller converts primaries
 //! in linear light and encodes for the working space; out-of-gamut values are
@@ -113,7 +113,7 @@ pub fn eetf(e: f64, source_peak: f64) -> f64 {
 
 /// The BT.2390 EETF from `source_peak` to `target_peak` cd/m². Black stays at
 /// zero, so the toe term is zero.
-pub fn eetf_to(e: f64, source_peak: f64, target_peak: f64) -> f64 {
+fn eetf_to(e: f64, source_peak: f64, target_peak: f64) -> f64 {
     let pw = pq_inverse_eotf(source_peak);
     let max_lum = pq_inverse_eotf(target_peak) / pw;
     let e1 = (e / pw).clamp(0.0, 1.0);
@@ -161,7 +161,9 @@ pub fn to_working_light(signal: HdrSignal, rgb: [f64; 3]) -> [f64; 3] {
 
 /// HDR working light in BT.2020 tone mapped from `source_peak` to
 /// `target_peak`; [`to_sdr`] of a working pixel when the target is SDR white.
-pub fn tone_map_working(light: [f64; 3], source_peak: f64, target_peak: f64) -> [f64; 3] {
+/// The f64 reference for `pm_tone_map_output`.
+#[cfg(test)]
+fn tone_map_working(light: [f64; 3], source_peak: f64, target_peak: f64) -> [f64; 3] {
     light.map(|c| {
         pq_eotf(eetf_to(
             pq_inverse_eotf(c * SDR_WHITE),
@@ -180,7 +182,7 @@ pub fn bt2020_to_709() -> Mat3 {
 /// -> vec3<f32>` and `pm_hdr_to_working(signal: vec3<f32>, hlg: bool)`, which
 /// are [`to_sdr`] and [`to_working_light`] in f32, and
 /// `pm_tone_map_output(c: vec4<f32>, source: f32, target: f32)`, which takes a
-/// premultiplied E pixel through [`tone_map_working`] in BT.2020. The module
+/// premultiplied E pixel through the BT.2390 EETF in BT.2020. The module
 /// needs [`crate::wgsl::COLOR`] before it.
 pub fn wgsl() -> String {
     let matrix = |m: Mat3| {

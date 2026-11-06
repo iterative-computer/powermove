@@ -48,7 +48,8 @@ Project Settings, group `Color`: `HDR` switch, then `Mastering Peak` (600, 1000,
 nits), disabled while HDR is off. Turning HDR on sets `Color Depth` to `32-bit float` in the
 same Undo step. Export adds `Dynamic Range` (`SDR`, `HDR · PQ`, `HDR · HLG`) for ProRes and MP4
 when the project is HDR. View adds `Viewer Output ▸ HDR EDR`, `Apply LUT…` and `Interpret
-Selection As ▸`. Behaviour: [hdr.md](../../../engine/hdr.md).
+Selection As ▸`, whose last item, `Crop to Clean Aperture`, switches a clip from its full encoded
+frame. `LogC3 EI 800` reads ARRI's EI 800 curve only. Behaviour: [hdr.md](../../../engine/hdr.md).
 
 ## N004 Scopes panel
 

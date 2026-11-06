@@ -6,7 +6,9 @@ use gpui::{AppContext, Context, Entity, prelude::*};
 use pm_kernel::{Call, Caller, Command, Published, Request, WriteBody};
 use pm_model::{Map, Value};
 use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal};
-use pm_shell::scopes::{Counts, Kind, Menu, ScopesView, raster, reading};
+use pm_shell::scopes::{
+    Counts, INVALID_FRAME, Kind, Menu, READ_FAILED, ScopesView, raster, reading,
+};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
@@ -44,7 +46,7 @@ pub const CAMERA_LOGS: [CameraLog; 6] = [
         primaries: "vGamut",
     },
     CameraLog {
-        label: "LogC3 (AWG3)",
+        label: "LogC3 EI 800 (AWG3)",
         transfer: "logC3",
         primaries: "awgGen3",
     },
@@ -64,11 +66,11 @@ fn layer_asset(p: &Published, layer: &str) -> Option<String> {
     value.as_str().map(str::to_owned)
 }
 
-/// Reads the selected clip's asset with `log`, or as the file says with `None`.
-pub fn interpret_command(
+/// Edits the Interpret Footage overrides of the asset `layer` shows.
+fn edit_interpretation(
     p: &Published,
     layer: &str,
-    log: Option<CameraLog>,
+    edit: impl FnOnce(&mut Map),
 ) -> Result<Command, String> {
     let asset_id = layer_asset(p, layer).ok_or("Select a video clip to interpret")?;
     let root = p.snapshot.root().ok_or("Project closed")?;
@@ -80,7 +82,21 @@ pub fn interpret_command(
     let mut interpret = saved
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_else(Map::new);
-    match log {
+    edit(&mut interpret);
+    Ok(pm_kernel::MediaCommand::SetInterpretation {
+        asset_id,
+        interpret: (!interpret.is_empty()).then_some(Value::Object(interpret)),
+    }
+    .into())
+}
+
+/// Reads the selected clip's asset with `log`, or as the file says with `None`.
+pub fn interpret_command(
+    p: &Published,
+    layer: &str,
+    log: Option<CameraLog>,
+) -> Result<Command, String> {
+    edit_interpretation(p, layer, |interpret| match log {
         Some(log) => {
             interpret.insert("transfer", Value::from(log.transfer));
             interpret.insert("primaries", Value::from(log.primaries));
@@ -89,16 +105,41 @@ pub fn interpret_command(
             interpret.remove("transfer");
             interpret.remove("primaries");
         }
-    }
-    Ok(pm_kernel::MediaCommand::SetInterpretation {
-        asset_id,
-        interpret: (!interpret.is_empty()).then_some(Value::Object(interpret)),
-    }
-    .into())
+    })
 }
 
-/// Adds the LUT as an asset and an Apply Color LUT effect on `layer`, in one
-/// Undo step. `path` is the retained copy of the file.
+/// Switches the selected clip between its full encoded frame, the default, and
+/// the file's clean aperture. A file without one stays full.
+pub fn clean_aperture_command(p: &Published, layer: &str) -> Result<Command, String> {
+    edit_interpretation(p, layer, |interpret| {
+        if interpret.get("cleanAperture").is_some() {
+            interpret.remove("cleanAperture");
+        } else {
+            interpret.insert("cleanAperture", Value::from(true));
+        }
+    })
+}
+
+/// The first Apply Color LUT on `layer` with no file yet, as the Effects browser
+/// adds it.
+fn empty_lut_effect(p: &Published, layer: &str) -> Option<String> {
+    let root = p.snapshot.root()?;
+    let at = pm_kernel::model::find_layer(root, layer)?;
+    let effects = pm_kernel::model::layer_at(root, &at)?.get("fx")?.to_value();
+    effects.as_array()?.iter().find_map(|effect| {
+        let id = effect.get("id")?.as_str()?;
+        let empty = effect.get("type")?.as_str()? == "applyColorLut"
+            && effect
+                .get("inputs")
+                .and_then(|inputs| inputs.get("lut"))
+                .and_then(|lut| lut.get("assetId"))
+                .is_none_or(Value::is_null);
+        empty.then(|| id.to_owned())
+    })
+}
+
+/// Adds the LUT as an asset on `layer`'s empty Apply Color LUT, or on a new
+/// one, in one Undo step. `path` is the retained copy of the file.
 pub fn lut_commands(
     p: &Published,
     layer: &str,
@@ -106,43 +147,55 @@ pub fn lut_commands(
     name: &str,
     path: &Path,
 ) -> Result<Vec<Command>, String> {
-    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    use pm_kernel::commands::effects::{
+        AddEffect, EffectCommand, EffectPatch, saved_builtin_definition,
+    };
     let mut asset = Map::new();
     asset.insert("name", Value::from(name));
     asset.insert("kind", Value::from("lut"));
     asset.insert("format", Value::from("cube"));
     asset.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
-    let definition = saved_builtin_definition(
-        &p.snapshot.document,
-        "applyColorLut",
-        Some(&Value::from(2)),
-        0.,
-        0.,
-    )
-    .map_err(|e| e.to_string())?;
     let mut input = Map::new();
     input.insert("kind", Value::from("asset"));
     input.insert("assetId", Value::from(asset_id));
     let mut inputs = Map::new();
     inputs.insert("lut", Value::Object(input));
+    let inputs = Some(Value::Object(inputs));
+    let effect = match empty_lut_effect(p, layer) {
+        Some(effect) => EffectCommand::Set {
+            layer_id: layer.to_owned(),
+            effect,
+            patch: EffectPatch {
+                inputs,
+                ..Default::default()
+            },
+        },
+        None => EffectCommand::Add(Box::new(AddEffect {
+            layer_id: layer.to_owned(),
+            effect_id: pm_kernel::new_id("f"),
+            definition: saved_builtin_definition(
+                &p.snapshot.document,
+                "applyColorLut",
+                Some(&Value::from(2)),
+                0.,
+                0.,
+            )
+            .map_err(|e| e.to_string())?,
+            parameters: Map::new(),
+            inputs,
+            open: true,
+            enabled: true,
+            enabled_animation: None,
+            index: None,
+        })),
+    };
     Ok(vec![
         pm_kernel::MediaCommand::AddAsset {
             asset_id: asset_id.to_owned(),
             asset: Value::Object(asset),
         }
         .into(),
-        EffectCommand::Add(Box::new(AddEffect {
-            layer_id: layer.to_owned(),
-            effect_id: pm_kernel::new_id("f"),
-            definition,
-            parameters: Map::new(),
-            inputs: Some(Value::Object(inputs)),
-            open: true,
-            enabled: true,
-            enabled_animation: None,
-            index: None,
-        }))
-        .into(),
+        effect.into(),
     ])
 }
 
@@ -252,12 +305,25 @@ const HIDDEN: Duration = Duration::from_secs(1);
 impl Controller {
     /// `Interpret Selection As`: the selected clip's camera log.
     pub fn interpret_selection(&mut self, log: Option<CameraLog>, cx: &mut Context<Self>) {
+        self.change_interpretation(|p, layer| interpret_command(p, layer, log), cx);
+    }
+
+    /// `Crop to Clean Aperture`, on and off.
+    pub fn crop_selection(&mut self, cx: &mut Context<Self>) {
+        self.change_interpretation(clean_aperture_command, cx);
+    }
+
+    fn change_interpretation(
+        &mut self,
+        change: impl FnOnce(&Published, &str) -> Result<Command, String>,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(p), Some(layer)) = (self.published.clone(), self.selected.clone()) else {
             self.message = "Select a video clip to interpret".into();
             cx.notify();
             return;
         };
-        let command = match interpret_command(&p, &layer, log) {
+        let command = match change(&p, &layer) {
             Ok(command) => command,
             Err(message) => {
                 self.message = message;
@@ -324,7 +390,7 @@ impl Controller {
                     }
                 }
                 Err(message) => {
-                    v.message = format!("“{name}” is not a LUT this app reads: {message}");
+                    v.message = message;
                     cx.notify();
                     None
                 }
@@ -492,16 +558,12 @@ impl Controller {
         match result {
             Ok(frame) if frame.invalid > 0 => {
                 self.message = format!("Scopes: {} pixels are not finite", frame.invalid);
-                view.update(cx, |view, cx| {
-                    view.fail("This frame has invalid values.", cx)
-                });
+                view.update(cx, |view, cx| view.fail(INVALID_FRAME, cx));
             }
             Ok(frame) => self.draw_scope(Some(Arc::new(frame)), cx),
             Err(error) => {
                 self.message = format!("Scopes: {error}");
-                view.update(cx, |view, cx| {
-                    view.fail("Scopes can’t read this frame.", cx)
-                });
+                view.update(cx, |view, cx| view.fail(READ_FAILED, cx));
             }
         }
         false

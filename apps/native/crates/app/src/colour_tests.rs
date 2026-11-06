@@ -190,6 +190,95 @@ fn applying_a_cube_reaches_rendered_pixels_through_the_kernel() {
 }
 
 #[test]
+fn the_clean_aperture_switches_on_and_off_and_keeps_other_overrides() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let apply = |command| {
+        k.call_blocking(
+            "test",
+            transact(&published(&k), "Interpret Footage", vec![command]),
+        )
+        .unwrap();
+    };
+    let reading = || {
+        let p = published(&k);
+        let root = p.snapshot.root().unwrap();
+        root.get("assets")
+            .and_then(|assets| assets.get("A"))
+            .and_then(pm_render::footage::interpretation)
+            .unwrap_or_default()
+    };
+    apply(interpret_command(&published(&k), "clip", Some(CAMERA_LOGS[0])).unwrap());
+    apply(clean_aperture_command(&published(&k), "clip").unwrap());
+    assert_eq!(reading().clean_aperture, Some(true));
+    assert!(reading().transfer.is_some(), "the log reading stays");
+    apply(clean_aperture_command(&published(&k), "clip").unwrap());
+    assert_eq!(reading().clean_aperture, None);
+    assert!(reading().transfer.is_some(), "the log reading stays");
+    assert!(clean_aperture_command(&published(&k), "solid").is_err());
+    actor.shutdown();
+}
+
+#[test]
+fn a_cube_fills_the_effects_browsers_empty_lut_effect() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let p = published(&k);
+    let definition = saved_builtin_definition(
+        &p.snapshot.document,
+        "applyColorLut",
+        Some(&Value::from(2)),
+        0.,
+        0.,
+    )
+    .unwrap();
+    let add = EffectCommand::Add(Box::new(AddEffect {
+        layer_id: "solid".into(),
+        effect_id: "browser".into(),
+        definition,
+        parameters: Map::new(),
+        inputs: None,
+        open: true,
+        enabled: true,
+        enabled_animation: None,
+        index: None,
+    }));
+    k.call_blocking("test", transact(&p, "Add Effect", vec![add.into()]))
+        .unwrap();
+    let p = published(&k);
+    let path = dir.path().join("Grade.cube");
+    let commands = lut_commands(&p, "solid", "grade", "Grade.cube", &path).unwrap();
+    k.call_blocking("test", transact(&p, "Apply LUT", commands))
+        .unwrap();
+    let p = published(&k);
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, "solid").unwrap();
+    let effects = pm_kernel::model::layer_at(root, &at)
+        .unwrap()
+        .get("fx")
+        .unwrap()
+        .to_value();
+    let effects = effects.as_array().unwrap();
+    assert_eq!(effects.len(), 1, "the empty effect takes the file");
+    let asset = effects[0].get("inputs").unwrap().get("lut").unwrap();
+    assert_eq!(asset.get("assetId").unwrap().as_str(), Some("grade"));
+    actor.shutdown();
+}
+
+#[test]
+fn a_cube_over_the_size_limit_is_refused_at_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Huge.cube");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(pm_color::lut::MAX_FILE_BYTES + 1).unwrap();
+    assert_eq!(
+        retain_lut(dir.path(), &path).unwrap_err(),
+        "This LUT is too large."
+    );
+}
+
+#[test]
 fn a_malformed_cube_never_reaches_the_kernel() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Broken.cube");

@@ -1,4 +1,5 @@
-use pm_promedia::{cache::*, cache_frame::*, render::*, scopes::*};
+use pm_color::scopes::*;
+use pm_promedia::{cache::*, cache_frame::*, render::*};
 use std::io;
 use tempfile::TempDir;
 fn request() -> FrameRequest {

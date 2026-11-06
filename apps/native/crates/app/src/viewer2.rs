@@ -146,9 +146,10 @@ pub enum Action {
     ApplyLut,
     /// An index of [`crate::colour::CAMERA_LOGS`], or the file's own reading.
     Interpret(Option<usize>),
+    CleanAperture,
 }
 impl Action {
-    const ALL: [Action; 15] = [
+    const ALL: [Action; 16] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -164,6 +165,7 @@ impl Action {
         Action::Interpret(Some(3)),
         Action::Interpret(Some(4)),
         Action::Interpret(Some(5)),
+        Action::CleanAperture,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -262,6 +264,14 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
                 let action = Action::Interpret(Some(index));
                 interpret.addItem(&menu_item(mtm, log.label, action, &target, ""));
             }
+            interpret.addItem(&NSMenuItem::separatorItem(mtm));
+            interpret.addItem(&menu_item(
+                mtm,
+                "Crop to Clean Aperture",
+                Action::CleanAperture,
+                &target,
+                "",
+            ));
             let parent = menu_item(
                 mtm,
                 "Interpret Selection As",
@@ -352,7 +362,7 @@ pub fn update_checks(output: OutputMode, safe: bool, guides: bool, popout: bool)
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
-                    Action::ApplyLut | Action::Interpret(_) => false,
+                    Action::ApplyLut | Action::Interpret(_) | Action::CleanAperture => false,
                 };
                 item.setState(if on { 1 } else { 0 });
             }
@@ -631,6 +641,7 @@ impl Controller {
                 let log = log.map(|index| crate::colour::CAMERA_LOGS[index]);
                 self.interpret_selection(log, cx);
             }
+            Action::CleanAperture => self.crop_selection(cx),
         }
     }
     pub fn set_output_mode(&mut self, mode: OutputMode, cx: &mut Context<Self>) {

@@ -89,16 +89,16 @@ impl PathMaskPipelines {
     fn pipelines(&self) -> Vec<(&'static str, &LazyComputePipeline)> {
         let mut all = self.separable.pipelines().to_vec();
         all.extend(self.area.pipelines());
-        all.extend([("fill", &self.fill), ("composite", &self.composite)]);
+        all.extend([
+            ("fill", &self.fill),
+            ("composite", &self.composite),
+        ]);
         all
     }
 
     #[cfg(test)]
     pub(crate) fn built_count(&self) -> usize {
-        self.pipelines()
-            .iter()
-            .filter(|(_, p)| p.is_built())
-            .count()
+        self.pipelines().iter().filter(|(_, p)| p.is_built()).count()
             + usize::from(self.store.is_built())
             + usize::from(self.single.is_built())
     }
@@ -223,9 +223,9 @@ impl PathMaskPipelines {
         }
         .uniform(device);
         let run = |pass: &mut wgpu::ComputePass<'_>,
-                   pipeline: &LazyComputePipeline,
-                   entries: &[(u32, wgpu::BindingResource<'_>)],
-                   size: [u32; 3]| {
+                       pipeline: &LazyComputePipeline,
+                       entries: &[(u32, wgpu::BindingResource<'_>)],
+                       size: [u32; 3]| {
             let pipeline = pipeline.get();
             let group = bind(device, &pipeline.get_bind_group_layout(0), entries);
             pass.set_pipeline(pipeline);
@@ -244,15 +244,8 @@ impl PathMaskPipelines {
             run(
                 &mut begin(encoder),
                 &self.fill,
-                &[
-                    (0, canvas.as_entire_binding()),
-                    (7, acc.as_entire_binding()),
-                ],
-                [
-                    groups(reach.width as i32, 16),
-                    groups(reach.height as i32, 16),
-                    1,
-                ],
+                &[(0, canvas.as_entire_binding()), (7, acc.as_entire_binding())],
+                [groups(reach.width as i32, 16), groups(reach.height as i32, 16), 1],
             );
         }
         let mut last = None;
@@ -309,10 +302,7 @@ impl PathMaskPipelines {
             ),
             None => (
                 self.store.get(),
-                vec![
-                    (0, canvas.as_entire_binding()),
-                    (7, acc.as_entire_binding()),
-                ],
+                vec![(0, canvas.as_entire_binding()), (7, acc.as_entire_binding())],
             ),
         };
         let group = bind(device, &pipeline.get_bind_group_layout(0), &entries);
@@ -372,11 +362,7 @@ impl Scratch {
                 Some(b) if b.size() >= need[i] => b.clone(),
                 _ => {
                     // Whole MiB, so small growth does not reallocate.
-                    let b = scratch(
-                        device,
-                        "pm path mask scratch",
-                        need[i].next_multiple_of(1 << 20),
-                    );
+                    let b = scratch(device, "pm path mask scratch", need[i].next_multiple_of(1 << 20));
                     *slot = Some(b.clone());
                     b
                 }

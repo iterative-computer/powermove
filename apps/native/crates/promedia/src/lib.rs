@@ -18,7 +18,6 @@ pub mod worker;
 #[path = "../../../../../engine/crates/pm-media/src/proxy.rs"]
 pub mod proxy;
 
-pub use pm_color::{lut, scopes};
 
 // Process-local lifetimes fence late work after a catalog/queue is replaced.
 pub(crate) fn next_epoch() -> u64 {

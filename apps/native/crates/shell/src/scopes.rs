@@ -310,6 +310,10 @@ pub enum Menu {
 
 type MenuRequest = Box<dyn Fn(Menu, &mut Window, &mut App)>;
 
+/// The plot's errors.
+pub const READ_FAILED: &str = "Scopes can’t read this frame.";
+pub const INVALID_FRAME: &str = "This frame has invalid values.";
+
 /// The panel's view: the newest picture and its footer. Header controls ask the
 /// host for AppKit menus; settings live here, per panel.
 pub struct ScopesView {
@@ -704,7 +708,7 @@ mod tests {
                     cx,
                 );
                 assert!(v.has_picture());
-                v.fail("This frame has invalid values.", cx);
+                v.fail(INVALID_FRAME, cx);
                 assert!(!v.has_picture());
             })
             .unwrap();

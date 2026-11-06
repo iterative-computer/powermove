@@ -30,10 +30,12 @@ carry a tag for these curves, so nothing is detected. A curve reads the code aft
 file's range is removed, Resolve's convention; set Range to Full for a camera that writes
 codes unscaled. Light above 1.0 stays in the working space. There's no display transform:
 an SDR project clips it at output, so use a LUT or an HDR project. Uninterpreted log
-footage stays flat, as it does in the shipped app.
+footage stays flat, as it does in the shipped app. LogC3 is ARRI's EI 800 curve, and the menu
+says so; footage shot at another EI decodes slightly off.
 
 **LUTs.** View ▸ Apply LUT… copies the `.cube` into the profile's archive, adds a `lut` asset
-and an Apply Color LUT effect on the selected layer, in one Undo step. Input and Output Space
+and fills the selected layer's empty Apply Color LUT or adds one, in one Undo step. A file is
+read when its stamp changes and its table uploads once. Input and Output Space
 say what the table expects. Working passes values through, which suits a vendor LUT on
 uninterpreted log. Saved revision 1 effects keep main's trilinear shader.
 
