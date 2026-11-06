@@ -1026,7 +1026,9 @@ impl TimelineSurface {
             }
         };
         let mut items = self.model.menu(&context);
-        // The value dialogs have no host yet: never offer them live.
+        // Keyframe dialogs run from the Animation menu on the selection; these
+        // rows would target the clicked keys, which no sheet takes yet. Graph
+        // Fit and Merge have no host. Never offer them live.
         for item in &mut items {
             item.enabled &= !matches!(
                 item.id,

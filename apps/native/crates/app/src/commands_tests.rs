@@ -124,10 +124,16 @@ fn every_keymap_and_menu_command_has_an_owner(_: &mut TestAppContext) {
     let session = include_str!("session.rs");
     let view = include_str!("../../shell/src/view.rs");
     let native = include_str!("../../shell/src/native.rs");
+    // `Controller::command` falls through to the surface routes, which hand
+    // keyframe dialogs to `keyframe_sheets::Kind::of`.
+    let surfaces = include_str!("surface_routes.rs");
+    let keyframes = include_str!("keyframe_sheets.rs");
     let known = |name: &str| {
         route(name, &[]).is_some()
             || UNAVAILABLE.contains(&name)
-            || [session, view, native].iter().any(|s| match_arm(s, name))
+            || [session, view, native, surfaces, keyframes]
+                .iter()
+                .any(|s| match_arm(s, name))
             || name.starts_with("tool")
     };
     let mut names: Vec<String> = pm_shell::keyboard::shipped()

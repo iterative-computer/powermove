@@ -607,7 +607,15 @@ pub fn disabled(
     for name in ["copyLayers", "cutLayers", "delete"] {
         set(name, chosen || keys);
     }
-    for name in ["nudgeKeyframes", "easyEase", "easyEaseIn", "easyEaseOut"] {
+    for name in [
+        "nudgeKeyframes",
+        "easyEase",
+        "easyEaseIn",
+        "easyEaseOut",
+        "keyframeValue",
+        "keyframeVelocity",
+        "scaleKeyframes",
+    ] {
         set(name, keys);
     }
     for name in [
