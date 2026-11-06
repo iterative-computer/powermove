@@ -50,7 +50,7 @@ pub struct Engine {
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
     /// The peaks of the content on screen, and the output tone of its frames.
-    hdr: Option<((u64, u64), Option<crate::color::HdrView>)>,
+    hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
     /// Where the viewer's analysis goes, while a Scopes panel is showing.
     pub scope_frames: Option<(
@@ -151,11 +151,12 @@ impl Engine {
     }
     /// The HDR view of this content, and the frame cache kept to its tone.
     fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
-        let key = (scene.content, scene.doc.revision());
-        if self.hdr.is_none_or(|(k, _)| k != key) {
-            self.hdr = Some((key, crate::color::HdrView::of(&scene.doc, &scene.media)));
+        let key = (scene.content, scene.doc.revision(), scene.comp.clone());
+        if self.hdr.as_ref().is_none_or(|(k, _)| *k != key) {
+            let view = crate::color::HdrView::of(&scene.doc, &scene.comp, &scene.media);
+            self.hdr = Some((key, view));
         }
-        let view = self.hdr.and_then(|(_, view)| view);
+        let view = self.hdr.as_ref().and_then(|(_, view)| *view);
         let tone = view.and_then(|v| v.tone(self.mastering));
         if tone != self.output_tone {
             self.output_tone = tone;

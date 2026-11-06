@@ -281,6 +281,54 @@ fn sdr_delivery_of_an_hdr_project_equals_input_tone_mapping_in_an_sdr_project() 
 }
 
 #[test]
+fn only_what_the_composition_shows_sets_the_tone_map() {
+    let Some(path) = source() else {
+        eprintln!("hdr/hdr10.mov missing: run the format corpus (skipped)");
+        return;
+    };
+    let mut media = MediaPaths::default();
+    media.insert("clip", path.clone());
+    media.insert("log", path);
+    let plan_of = |doc: &Value| {
+        let job = export_job(
+            doc,
+            &media,
+            ExportFormat::H264,
+            OutputColor::Rec709QuickTime {
+                candidate: QuickTimeTag::Cicp1_13_1,
+            },
+            std::env::temp_dir().join("pm-unused-log.mp4"),
+        );
+        plan_export(&job).unwrap().request.output_tone.unwrap()
+    };
+    let base = project_doc(true);
+    let shown = plan_of(&base);
+    assert_eq!(shown.source_peak, 1000.0);
+    let log = |on: bool| {
+        let mut clip = base["layers"][0].clone();
+        clip["id"] = json!("log");
+        clip["on"] = json!(on);
+        clip["d"]["asset"] = json!("log");
+        clip
+    };
+    let mut doc = base.clone();
+    doc["assets"]["log"] = doc["assets"]["clip"].clone();
+    doc["assets"]["log"]["id"] = json!("log");
+    doc["assets"]["log"]["interpret"] = json!({ "transfer": "sLog3", "primaries": "sGamut3Cine" });
+    // A clip in a composition nothing shows, and one switched off.
+    let mut unused = doc.clone();
+    unused["comps"]["unused"] = json!({ "id": "unused", "layers": [log(true)] });
+    assert_eq!(plan_of(&unused), shown);
+    let mut off = doc.clone();
+    off["layers"].as_array_mut().unwrap().push(log(false));
+    assert_eq!(plan_of(&off), shown);
+    // A log clip the delivery shows states what the curve can hold.
+    let mut on = doc;
+    on["layers"].as_array_mut().unwrap().push(log(true));
+    assert!(plan_of(&on).source_peak > 7000.0);
+}
+
+#[test]
 fn hdr_delivery_needs_an_hdr_project_and_a_deep_codec() {
     let Some(path) = source() else {
         return;

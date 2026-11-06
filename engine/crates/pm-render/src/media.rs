@@ -391,46 +391,51 @@ struct SourceLight {
     content_light: Option<ContentLight>,
 }
 
-/// Summarizes the HDR video the document's layers show: asset ids under
-/// layers' `d.asset`, read through their Interpret Footage overrides.
+/// Summarizes the HDR video `composition` can show, through its precomps and
+/// read through Interpret Footage. Comp-wide rather than per frame, so the tone
+/// map doesn't move between shots. Only headers are read, one file per thread
+/// up to four, once per file stamp.
 pub fn hdr_content(
     document: &pm_model::Document,
+    composition: &str,
     resolver: &dyn crate::assets::AssetResolver,
 ) -> HdrContent {
     use pm_eval::node;
-    fn walk(n: &pm_model::Node, out: &mut std::collections::BTreeSet<String>) {
-        match n.kind() {
-            pm_model::NodeKind::Object(map) => {
-                if let Some(asset) = node::string(node::member(node::member(Some(n), "d"), "asset"))
-                {
-                    out.insert(asset.to_string_lossy());
-                }
-                map.values().for_each(|child| walk(child, out));
-            }
-            pm_model::NodeKind::Array(array) => array.iter().for_each(|child| walk(child, out)),
-            _ => {}
-        }
-    }
     let mut content = HdrContent::default();
     let Some(root) = document.root() else {
         return content;
     };
-    let mut assets = std::collections::BTreeSet::new();
-    walk(root, &mut assets);
+    let clips: Vec<_> = crate::capability::shown_assets(root, composition)
+        .into_iter()
+        .filter_map(|id| {
+            let record = node::member(node::member(Some(root), "assets"), &id);
+            if !node::is_str(node::member(record, "kind"), "video") {
+                return None;
+            }
+            let path = resolver.path(&id, record)?;
+            Some((path, record.and_then(crate::footage::interpretation)))
+        })
+        .collect();
+    let lights: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = clips
+            .chunks(clips.len().div_ceil(4).max(1))
+            .map(|clips| {
+                scope.spawn(move || {
+                    clips
+                        .iter()
+                        .filter_map(|(path, interpret)| source_light(path, interpret.as_ref()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_default())
+            .collect()
+    });
     let mut all_stated = true;
     let mut levels = (0, 0);
-    for id in assets {
-        let record = node::member(node::member(Some(root), "assets"), &id);
-        if !node::is_str(node::member(record, "kind"), "video") {
-            continue;
-        }
-        let Some(path) = resolver.path(&id, record) else {
-            continue;
-        };
-        let interpret = record.and_then(crate::footage::interpretation);
-        let Some(light) = source_light(&path, interpret.as_ref()) else {
-            continue;
-        };
+    for light in lights {
         if light.peak_nits > content.peak_nits {
             content.peak_nits = light.peak_nits;
             content.mastering = light.mastering;
@@ -450,9 +455,7 @@ pub fn hdr_content(
 /// `None` for SDR sources and unreadable files.
 fn source_light(path: &Path, interp: Option<&Interpretation>) -> Option<SourceLight> {
     static CACHE: StampCache<Option<VideoProbe>> = OnceLock::new();
-    let video = per_stamp(&CACHE, path, || {
-        MediaSource::open(path).ok()?.probe.video.clone()
-    })??;
+    let video = per_stamp(&CACHE, path, || pm_media::probe::probe(path).ok()?.probe.video)??;
     let none = Interpretation::default();
     let reading = resolve_video(&video, interp.unwrap_or(&none));
     match reading.transfer.value {

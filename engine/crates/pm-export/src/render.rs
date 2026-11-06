@@ -649,29 +649,6 @@ fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
     }
 }
 
-/// BT.2390 only when the delivery holds less light than the frame: an HDR
-/// project's SDR delivery, or HDR delivery below the sources' peak.
-fn delivery_tone(
-    hdr_project: bool,
-    hdr_delivery: bool,
-    project: &pm_protocol::color::ProjectColor,
-    content: &pm_render::media::HdrContent,
-) -> Option<pm_render::OutputTone> {
-    if !hdr_project {
-        return None;
-    }
-    let mastering = f32::from(project.mastering_peak);
-    let (source_peak, target_peak) = if hdr_delivery {
-        (content.peak_nits as f32, mastering)
-    } else {
-        (mastering.max(content.peak_nits as f32), 203.0)
-    };
-    (source_peak > target_peak).then_some(pm_render::OutputTone {
-        source_peak,
-        target_peak,
-    })
-}
-
 /// The mastering display and light levels an HDR delivery states: the
 /// sources' where they carry them, within the project's mastering peak.
 fn hdr_metadata(
@@ -1032,11 +1009,19 @@ fn plan_export_checked(
         ));
     }
     let content = if hdr_project {
-        pm_render::media::hdr_content(doc, &*job.media)
+        pm_render::media::hdr_content(doc, &job.composition, &*job.media)
     } else {
         Default::default()
     };
-    let output_tone = delivery_tone(hdr_project, tags.is_hdr(), &project, &content);
+    let output_tone = hdr_project
+        .then(|| {
+            pm_render::OutputTone::for_target(
+                content.peak_nits as f32,
+                f32::from(project.mastering_peak),
+                tags.is_hdr(),
+            )
+        })
+        .flatten();
     set_hdr_metadata(&mut tags, hdr_metadata(&project, &content));
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
         .iter()

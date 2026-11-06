@@ -17,7 +17,7 @@ fn hdr_clip() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn project(hdr: bool) -> pm_model::Value {
+fn project(peak: Option<u32>) -> pm_model::Value {
     let channel = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
     let names = [
         ("position.x", 160.),
@@ -44,11 +44,9 @@ fn project(hdr: bool) -> pm_model::Value {
         .map(|(k, v)| format!(r#""{k}":{}"#, channel(*v)))
         .collect::<Vec<_>>()
         .join(",");
-    let color = if hdr {
-        r#""color":{"mode":"hdr","masteringPeak":1000},"colorDepth":32,"#
-    } else {
-        ""
-    };
+    let color = peak.map_or(String::new(), |peak| {
+        format!(r#""color":{{"mode":"hdr","masteringPeak":{peak}}},"colorDepth":32,"#)
+    });
     pm_model::json::parse(&format!(
         r##"{{"id":"P","name":"P","compId":"root","compName":"P","w":{W},"h":{H},"fps":25,"dur":1,
         "bg":"#000000","work":[0,1],{color}
@@ -61,8 +59,8 @@ fn project(hdr: bool) -> pm_model::Value {
     .unwrap()
 }
 
-fn scene(hdr: bool, content: u64, clip: &Path) -> (Snapshot, Scene, MediaCatalog) {
-    let snapshot = pm_kernel::document::DocumentStore::new_untitled(project(hdr)).snapshot();
+fn scene(peak: Option<u32>, content: u64, clip: &Path) -> (Snapshot, Scene, MediaCatalog) {
+    let snapshot = pm_kernel::document::DocumentStore::new_untitled(project(peak)).snapshot();
     let mut media = MediaCatalog::default();
     media.originals.insert("clip".into(), clip.to_owned());
     let scene = Scene {
@@ -86,8 +84,8 @@ fn edr_keeps_light_and_the_sdr_view_equals_input_tone_mapping() {
         return;
     };
     let time = Ticks::ZERO;
-    let (_, hdr_scene, _) = scene(true, 1, &clip);
-    let (_, sdr_scene, _) = scene(false, 2, &clip);
+    let (_, hdr_scene, _) = scene(Some(1000), 1, &clip);
+    let (_, sdr_scene, _) = scene(None, 2, &clip);
     let mut h = Headless::new().unwrap();
     h.mastering(color::Mastering::Edr).unwrap();
     let edr = h
@@ -144,11 +142,61 @@ fn edr_keeps_light_and_the_sdr_view_equals_input_tone_mapping() {
 }
 
 #[test]
+fn edr_shows_the_delivery_when_the_content_outshines_the_project() {
+    let Some(clip) = hdr_clip() else {
+        return;
+    };
+    let (_, scene, _) = scene(Some(600), 4, &clip);
+    let mut h = Headless::new().unwrap();
+    h.mastering(color::Mastering::Edr).unwrap();
+    let edr = h
+        .frame(&scene, Ticks::ZERO, SIZE, &Default::default())
+        .unwrap();
+    // The PQ mode rolls off the same light with the delivery's curve.
+    h.mastering(color::Mastering::Pq {
+        source_peak: 1000.,
+        target_peak: 600.,
+    })
+    .unwrap();
+    let pq = h
+        .frame(&scene, Ticks::ZERO, SIZE, &Default::default())
+        .unwrap();
+    use pm_protocol::color::Primaries;
+    let to_2020 = pm_color::primaries::conversion(Primaries::DisplayP3, Primaries::Bt2020).unwrap();
+    let light: Vec<[f64; 3]> = edr
+        .iter()
+        .map(|light| pm_color::primaries::apply(&to_2020, *light))
+        .collect();
+    let brightest = light.iter().flatten().copied().fold(0.0, f64::max);
+    assert!(
+        (2.5..3.0).contains(&brightest),
+        "BT.2100 light held to 600 nits: {brightest}"
+    );
+    let mut errors: Vec<f64> = light
+        .iter()
+        .zip(&pq)
+        .flat_map(|(light, signal)| {
+            light
+                .iter()
+                .zip(signal)
+                .filter(|(light, _)| **light > 0.05)
+                .map(|(light, signal)| {
+                    (pm_color::tonemap::pq_inverse_eotf(light * 203.) - signal).abs()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    errors.sort_by(f64::total_cmp);
+    let p99 = errors[errors.len() * 99 / 100];
+    assert!(p99 < 2e-3, "PQ against EDR light: p99 {p99}");
+}
+
+#[test]
 fn the_scope_tap_reports_a_paused_frame_and_stops_when_cleared() {
     let Some(clip) = hdr_clip() else {
         return;
     };
-    let (snapshot, _, media) = scene(true, 3, &clip);
+    let (snapshot, _, media) = scene(Some(1000), 3, &clip);
     let service = EngineService::start(pm_gpu::Gpu::new("scope-service").unwrap()).unwrap();
     let viewer = service
         .viewer(ViewerConfig {

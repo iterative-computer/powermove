@@ -6,7 +6,7 @@ projects render as they always have.
 | | SDR project | HDR project |
 |---|---|---|
 | PQ, HLG sources | BT.2390 to SDR white at input | BT.2100 light; 1.0 is SDR white, 203 cd/m² |
-| Viewer | SDR | HDR EDR by default; View ▸ Viewer Output also offers SDR, PQ, HLG |
+| Viewer | SDR | HDR EDR by default, the HDR delivery's picture; View ▸ Viewer Output also offers SDR, PQ, HLG |
 | SDR delivery | as authored | BT.2390 at output, from the content's peak to 203 cd/m² |
 | HDR delivery | refused | PQ or HLG, HEVC Main10 or ProRes, with `mdcv` and `clli` |
 
@@ -14,9 +14,11 @@ The working space stays Rec.709 primaries, extended, E-encoded or linear. Wide c
 negative values, so effects written for 0 to 1 can clip them.
 
 **Tone mapping** runs only where the target holds less light than the frame:
-`RenderRequest::output_tone`, in the final encode pass. The viewer's SDR view uses the same
-pass as SDR delivery. HDR delivery tone maps only when a source is brighter than
-`color.masteringPeak`.
+`OutputTone::for_target`, in the final encode pass. The viewer's SDR and EDR views use the
+same pass and rule as SDR and HDR delivery. HDR delivery tone maps only when a source is
+brighter than `color.masteringPeak`. The content's peak comes from what the composition can
+show: switched-off layers and unused compositions don't count. Camera log has no stated peak,
+so a shown log clip counts as what its curve can hold (S-Log3 about 7800 cd/m²).
 
 **Metadata.** Mastering primaries and content light come from the sources
 (`media::hdr_content`), held to the project's peak. With no stated display, delivery states
