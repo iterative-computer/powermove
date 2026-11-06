@@ -121,6 +121,8 @@ export interface LoaderOptions {
   link(graph: string): [Promise<unknown>, Data];
   /** Durable native health, Settings and toasts. Never re-enters this loader. */
   report(id: string, health: Data): void;
+  /** The extension on the stack, so a host can name what hung. */
+  activating?(id: string | null): void;
   toast?(text: string, options: Data): void;
   document?: any;
   vars?(record: Data): Data;
@@ -240,8 +242,11 @@ export function createLoader(options: LoaderOptions) {
       if (module.__powermoveAcquireStyles)
         handle.api.onDispose(module.__powermoveAcquireStyles(addStyle));
       handle.setActivating(true);
+      options.activating?.(id);
+      const started = realm.task(() => module.default(handle.api));
+      options.activating?.(null);
       const result = await withTimeout(
-        Promise.resolve(realm.task(() => module.default(handle.api))),
+        Promise.resolve(started),
         timeoutMs,
         `activate() of "${id}" timed out`,
       );

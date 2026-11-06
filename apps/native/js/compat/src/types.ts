@@ -55,9 +55,10 @@ export interface Publication {
   revision: number;
   /** Whole document on a full sync; omitted when `ops` or nothing changed it. */
   document?: Data;
-  ops?: Patch[];
-  selection: Data;
-  workspace: Data;
+  ops?: Data[];
+  /** Omitted unless they moved. */
+  selection?: Data;
+  workspace?: Data;
   facts: {
     historyBusy: boolean;
     canUndo: boolean;

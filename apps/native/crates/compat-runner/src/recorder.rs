@@ -26,6 +26,9 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn contributions(&self, _value: Value) {}
     fn dom_ready(&self) {}
     fn presentation(&self) {}
+    fn ready(&self) {}
+    fn activating(&self, _id: Option<&str>) {}
+    fn watchdog_stop(&self) {}
     fn panel(&self, _request: &Value) -> Result<Value> {
         Err(Error::Host("panel host not attached".into()))
     }
@@ -634,6 +637,14 @@ impl EngineProxy for NativeHost {
                     .toast(input["text"].as_str().unwrap_or_default(), &input["options"]);
                 return Ok(Value::Null);
             }
+            "extensions.ready" => {
+                self.events.ready();
+                return Ok(Value::Null);
+            }
+            "extension.activating" => {
+                self.events.activating(input["id"].as_str());
+                return Ok(Value::Null);
+            }
             "contributions.publish" => {
                 self.events.contributions(input["value"].clone());
                 return Ok(Value::Null);
@@ -737,7 +748,9 @@ impl HostProxy for NativeHost {
 }
 impl WatchdogHooks for NativeHost {
     fn notice(&self, _: &Generation, _: u64) {}
+    /// Eight seconds on one task: stop it and rebuild the realm without it.
     fn prompt(&self, _: &Generation, _: u64) -> WatchdogDecision {
+        self.events.watchdog_stop();
         WatchdogDecision::Stop
     }
 }

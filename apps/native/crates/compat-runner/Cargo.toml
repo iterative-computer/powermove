@@ -16,6 +16,7 @@ pm-mcp = { path = "../mcp" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-store-host = { path = "../store-host" }
 pm-compat-host = { path = "../compat-host" }
+pm-remote-dom = { path = "../remote-dom" }
 serde_json = "=1.0.150"
 png = "0.18"
 base64 = "0.22"

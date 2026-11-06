@@ -231,23 +231,36 @@ export class DocumentMirror {
     this.base = copy(document);
     reconcile(this.document, document);
   }
-  dirtyAgainst(document: Data): boolean {
-    return diff(document, this.document).length > 0;
+  /** The last authoritative tree. Callers treat it as read-only. */
+  get acknowledged(): Data {
+    return this.base;
+  }
+  setAcknowledged(document: Data): void {
+    this.base = copy(document);
   }
   /** Native operations against `base`, without rebuilding the whole tree. */
-  applyOps(ops: Patch[]): Data {
+  applyOps(ops: Data[]): void {
     for (const op of ops) {
       if (!op.path.length) {
         this.base = copy(op.value);
         continue;
       }
       let parent = this.base;
-      for (const part of op.path.slice(0, -1)) parent = parent[part];
+      for (const part of op.op ? op.path : op.path.slice(0, -1))
+        parent = parent[part];
       const key = op.path.at(-1)!;
-      if (op.exists) parent[key] = copy(op.value);
+      if (op.op === "order") {
+        const items = new Map(parent.map((item: Data) => [item.id, item]));
+        parent.splice(0, parent.length, ...op.ids.map((id: string) => items.get(id)));
+      } else if (op.op === "insert") parent.splice(op.index, 0, copy(op.value));
+      else if (op.op === "delete")
+        parent.splice(
+          parent.findIndex((item: Data) => item.id === op.id),
+          1,
+        );
+      else if (op.exists) parent[key] = copy(op.value);
       else delete parent[key];
     }
-    return this.base;
   }
   /** Native writes received before our flush win only where we did not write. */
   receive(document: Data, previous: Data = this.base): void {

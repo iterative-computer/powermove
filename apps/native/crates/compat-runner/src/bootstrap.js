@@ -186,9 +186,32 @@ globalThis.__compat = {
       link: (graph) => __linkModules(graph),
       report: (id, health) => call("extension.health", { id, health }),
       toast: (text, options) => call("ui.toast", { text, options }),
+      activating: (id) => call("extension.activating", { id }),
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;
+    const kernel = this.realm.kernel;
+    let publishing = false;
+    const changed = () => {
+      if (publishing) return;
+      publishing = true;
+      queueMicrotask(() => {
+        publishing = false;
+        this.publishContributions();
+      });
+    };
+    for (const registry of [
+      kernel.commands,
+      kernel.panels,
+      kernel.inspectorSections,
+      kernel.effects,
+      kernel.transitions,
+      kernel.layerTypes,
+      kernel.themes,
+      kernel.keybindings,
+      kernel.status,
+    ])
+      registry.onChange(changed);
     if (this.dom && PowermoveCompat.controlStores)
       this.controls = PowermoveCompat.connectControlState(
         this.realm,
@@ -207,10 +230,119 @@ globalThis.__compat = {
       ? { ok: true }
       : { ok: false, error: { message: health.error } };
   },
-  driverAPI() {
-    return (this.driver ??= this.realm.extension(
-      "synthetic-extcheck-driver",
-      3,
-    ).api);
+  hostAPI() {
+    return (this.api ??= this.realm.extension("powermove-host", 3).api);
+  },
+  /** Every entry below is called by the native host as one synchronous task. A
+   * promise is never returned to it: long extension work must not hold the owner. */
+  boot(records) {
+    this.loader
+      .boot(records)
+      .catch((error) => this.reportFailure(error))
+      .finally(() => {
+        this.publishContributions();
+        call("extensions.ready");
+      });
+  },
+  update(records, ids, reason) {
+    this.loader
+      .update(records, ids, reason)
+      .catch((error) => this.reportFailure(error))
+      .finally(() => this.publishContributions());
+  },
+  reportFailure(error) {
+    runtime.engine("ui.toast", {
+      text: String(error?.message ?? error),
+      options: {},
+    });
+  },
+  sync() {
+    this.realm.task(() =>
+      this.realm.receive(runtime.engine("kernel.publication", {})),
+    );
+  },
+  moved(time, timeChanged, playingChanged) {
+    this.realm.task(() => {
+      if (timeChanged) this.realm.PM.bus.emit("time", time);
+      if (playingChanged) this.realm.PM.bus.emit("transport");
+      this.realm.PM.invalidate();
+    });
+  },
+  run(id, args) {
+    this.realm.task(() => {
+      Promise.resolve(this.hostAPI().commands.run(id, ...args)).catch((error) =>
+        this.realm.reportError(error),
+      );
+    });
+  },
+  openPanel(id) {
+    this.realm.task(() => this.panels.open(id));
+    this.dom.flush();
+  },
+  closePanel(id) {
+    this.realm.task(() => this.panels.close(id));
+    this.dom.flush();
+  },
+  retire(handle) {
+    this.realm.task(() => this.realm.retireExternal(handle, true));
+  },
+  runExternal(next) {
+    this.realm.task(() => this.realm.runExternal(next));
+  },
+  /** Definitions as data. Callbacks stay here and are reached by id. */
+  contributions() {
+    const kernel = this.realm.kernel;
+    const data = (value, seen = new Set()) => {
+      if (value === null || typeof value !== "object")
+        return typeof value === "function" || value === undefined
+          ? undefined
+          : value;
+      if (seen.has(value)) return undefined;
+      seen.add(value);
+      const out = Array.isArray(value)
+        ? value.map((item) => data(item, seen) ?? null)
+        : Object.fromEntries(
+            Object.entries(value)
+              .map(([key, item]) => [key, data(item, seen)])
+              .filter(([, item]) => item !== undefined),
+          );
+      seen.delete(value);
+      return out;
+    };
+    const entries = (registry) =>
+      registry.entries().map(({ id, ownerId, item }) => ({
+        ...data(item),
+        id,
+        owner: ownerId,
+      }));
+    const label = (fn) => {
+      try {
+        return typeof fn === "function" ? String(fn() ?? "") : "";
+      } catch {
+        return "";
+      }
+    };
+    return {
+      commands: entries(kernel.commands),
+      panels: entries(kernel.panels),
+      inspector: entries(kernel.inspectorSections),
+      effects: entries(kernel.effects),
+      transitions: entries(kernel.transitions),
+      layers: entries(kernel.layerTypes),
+      themes: entries(kernel.themes),
+      keybindings: kernel.listBindings().map((binding) => data(binding)),
+      status: kernel.status
+        .entries()
+        .map(({ id, ownerId, item }) => ({
+          id,
+          owner: ownerId,
+          text: label(item.text),
+          side: item.side,
+        })),
+      theme: kernel.theme.activeId,
+    };
+  },
+  publishContributions() {
+    runtime.engine("contributions.publish", { value: this.contributions() });
   },
 };

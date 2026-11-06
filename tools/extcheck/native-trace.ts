@@ -95,7 +95,10 @@ root.__extcheckDriver = {
         Object.getOwnPropertyDescriptors(value),
       )) {
         if (!("value" in descriptor)) continue;
-        if (typeof descriptor.value === "string" && key === "id")
+        if (
+          typeof descriptor.value === "string" &&
+          (key === "id" || key === "compId")
+        )
           recorder!.token(descriptor.value);
         else visit(descriptor.value, seen);
       }
@@ -125,11 +128,11 @@ root.__extcheckDriver = {
       call("PM.setTime", [step.time], () => PM.setTime(step.time));
       result = { time: PM.time };
     } else if (step.op === "panel") {
-      const api = root.__compat.driverAPI();
+      const api = root.__compat.hostAPI();
       call("panels.open", [step.id], () => api.panels.open(step.id));
       result = { open: api.panels.isOpen(step.id) };
     } else if (step.op === "command") {
-      const api = root.__compat.driverAPI();
+      const api = root.__compat.hostAPI();
       result = await call(
         "commands.run",
         [step.id, ...(step.args ?? [])],

@@ -178,12 +178,12 @@ impl KernelAdapter {
             }
             events.push(json!({"name":"project:changed","value":{"kind":"values"}}));
         }
-        out["selection"] = selection.clone();
         if selection != sent.selection {
+            out["selection"] = selection.clone();
             events.push(json!({"name":"sel"}));
         }
-        out["workspace"] = wire(&p.workspace);
         if p.workspace != sent.workspace {
+            out["workspace"] = wire(&p.workspace);
             events.push(json!({"name":"workspace:changed"}));
         }
         if !events.is_empty() {
@@ -384,7 +384,7 @@ impl KernelAdapter {
             "history.label" => Some(json!(p.history.undo_label)),
             "history.traceState" => Some(json!({"depth":p.entry.as_ref().map_or(0,|e|e.depth),
                 "index":p.history.applied as i64-1,"pending":p.entry.as_ref().map(|e|json!({"label":e.label})),
-                "entries":p.history.entries,"totalBytes":0})),
+                "entries":vec![json!({}); p.history.entries],"totalBytes":0})),
             "workspace.prepare" | "document.touch" => Some(Value::Null),
             "edit.admitMutation" => {
                 let live = p.entry.as_ref().is_some_and(|e| e.source_edit_live);
@@ -600,7 +600,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result["error"]["code"], "Rejected");
-        assert_eq!(result["publication"]["selection"]["layers"], json!([]));
+        assert!(result["publication"].get("selection").is_none());
         drop(adapter);
         actor.shutdown();
     }

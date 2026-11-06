@@ -25,7 +25,7 @@ def unordered(value, ids):
     out = {}
     for key in sorted(value):
         item = value[key]
-        if key in ("$id", "$ref") and isinstance(item, str):
+        if key in ("$id", "$ref", "$token") and isinstance(item, str):
             out[key] = ids.setdefault(item, f"o{len(ids)+1}")
         else:
             out[key] = unordered(item, ids)
