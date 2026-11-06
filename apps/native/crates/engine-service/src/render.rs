@@ -309,7 +309,7 @@ impl Engine {
     /// The extension definitions the next frames render with (the viewer's
     /// pinned resource snapshot). A new snapshot installs them again.
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
-        if !Arc::ptr_eq(&self.resources, &resources) {
+        if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
             self.resources = resources;
             self.studio_content = None;
             self.cache.clear();

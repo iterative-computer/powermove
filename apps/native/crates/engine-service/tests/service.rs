@@ -255,6 +255,36 @@ fn worker_exact_cache_and_revision_resize_retirement() {
     b.retire();
 }
 
+/// A main viewer and a popout share one engine. Drawing one must not drop
+/// the other's cached frames or reinstall definitions: neither pins resources.
+#[test]
+fn two_viewers_keep_each_others_cached_frames() {
+    let service = EngineService::start(pm_gpu::Gpu::new("two-viewers-test").unwrap()).unwrap();
+    let a = service.viewer(config(snapshot())).unwrap();
+    let b = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&a, a.stamp().unwrap());
+    wait_frame(&b, b.stamp().unwrap());
+    let seek = |v: &pm_engine_service::Viewer, seconds| {
+        v.command(C::Seek {
+            time: Ticks::from_whole_seconds(seconds),
+            mode: SeekMode::Scrub,
+        })
+        .unwrap();
+        wait_frame(v, v.stamp().unwrap())
+    };
+    for v in [&a, &b] {
+        assert!(!seek(v, 1).cache_hit);
+        seek(v, 0);
+    }
+    for v in [&a, &b] {
+        assert!(
+            seek(v, 1).cache_hit,
+            "the other viewer's frame cleared this one's cache"
+        );
+    }
+    a.retire();
+    b.retire();
+}
 #[test]
 fn worker_evaluates_locked_geometry_at_the_rendered_time() {
     let service = EngineService::start(pm_gpu::Gpu::new("locked-overlay-test").unwrap()).unwrap();

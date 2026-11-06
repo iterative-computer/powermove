@@ -1,7 +1,7 @@
 //! P2 resource snapshot seam. Pins belong to the viewer/export request, not
 //! mutable global registries. Unsupported requirements fail visibly.
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResourceSnapshot {
     pub generation: u64,
     pub extension_generations: std::collections::BTreeMap<String, u64>,
@@ -13,9 +13,11 @@ pub struct ResourceSnapshot {
 }
 impl ResourceSnapshot {
     pub fn validate(&self) -> anyhow::Result<()> {
+        // Definitions arrive whole in `definitions`; a pinned extension
+        // generation names content nothing here can load.
         anyhow::ensure!(
-            self.project_fonts.is_empty(),
-            "project font activation requires the P2 snapshot host"
+            self.extension_generations.is_empty() && self.project_fonts.is_empty(),
+            "extension/font resource activation requires the P2 snapshot host"
         );
         let mut seen = std::collections::BTreeSet::new();
         for d in &self.definitions {
@@ -27,6 +29,11 @@ impl ResourceSnapshot {
         }
         Ok(())
     }
+    /// The same pins, whichever viewer holds them: switching between viewers
+    /// on one engine must not reinstall definitions or drop cached frames.
+    pub fn same_pins(a: &std::sync::Arc<Self>, b: &std::sync::Arc<Self>) -> bool {
+        std::sync::Arc::ptr_eq(a, b) || (a.generation == b.generation && a == b)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -35,6 +42,9 @@ mod tests {
     fn unavailable_resources_never_silently_render_with_builtins() {
         let mut s = ResourceSnapshot::default();
         assert!(s.validate().is_ok());
+        s.extension_generations.insert("fixture".into(), 7);
+        assert!(s.validate().is_err());
+        s.extension_generations.clear();
         s.project_fonts.push("fixture-font".into());
         assert!(s.validate().is_err());
         s.project_fonts.clear();
