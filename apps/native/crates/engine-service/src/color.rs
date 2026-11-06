@@ -113,7 +113,11 @@ mod tests {
             source_peak: 4000.,
             target_peak: 1000.,
         };
-        assert_eq!(view.tone(encoded), None, "the encoded mode rolls off itself");
+        assert_eq!(
+            view.tone(encoded),
+            None,
+            "the encoded mode rolls off itself"
+        );
     }
     #[test]
     fn published_ciede2000_reference_pair() {

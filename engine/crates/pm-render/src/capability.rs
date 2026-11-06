@@ -770,7 +770,9 @@ mod tests {
             ["animated", "inner", "shown"]
         );
         assert_eq!(
-            shown_assets(root, "skipped").into_iter().collect::<Vec<_>>(),
+            shown_assets(root, "skipped")
+                .into_iter()
+                .collect::<Vec<_>>(),
             ["unused"]
         );
     }

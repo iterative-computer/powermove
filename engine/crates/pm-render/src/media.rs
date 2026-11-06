@@ -455,7 +455,9 @@ pub fn hdr_content(
 /// `None` for SDR sources and unreadable files.
 fn source_light(path: &Path, interp: Option<&Interpretation>) -> Option<SourceLight> {
     static CACHE: StampCache<Option<VideoProbe>> = OnceLock::new();
-    let video = per_stamp(&CACHE, path, || pm_media::probe::probe(path).ok()?.probe.video)??;
+    let video = per_stamp(&CACHE, path, || {
+        pm_media::probe::probe(path).ok()?.probe.video
+    })??;
     let none = Interpretation::default();
     let reading = resolve_video(&video, interp.unwrap_or(&none));
     match reading.transfer.value {

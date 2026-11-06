@@ -18,7 +18,6 @@ pub mod worker;
 #[path = "../../../../../engine/crates/pm-media/src/proxy.rs"]
 pub mod proxy;
 
-
 // Process-local lifetimes fence late work after a catalog/queue is replaced.
 pub(crate) fn next_epoch() -> u64 {
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
