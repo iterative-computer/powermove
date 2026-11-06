@@ -1,14 +1,14 @@
 //! Footage as interpreted, through the renderer (plan sections 9 and 13):
 //!
-//! - HDR10 and HLG sources tone mapped with BT.2446 Method A equal the f64
+//! - HDR10 and HLG sources tone mapped with the BT.2390 EETF equal the f64
 //!   oracle (`pm_color::tonemap`) applied to the same decode;
 //! - interlaced sources (4:2:2 8- and 10-bit, 4:2:0, 4:1:1) at field rate
 //!   equal FFmpeg's bwdif (`mode=send_field`) run on the same decode and
 //!   converted with the same matrix and chroma filter, and at frame rate
 //!   show each frame's first field;
 //! - HDR, interlaced, non-square-pixel, cropping-clean-aperture and
-//!   wide-gamut video route to the legacy renderer unless the asset carries
-//!   `interpret` (they have no parity test against today's viewer);
+//!   wide-gamut video draw by default, with the same pictures as an
+//!   `interpret` member restating what the file says;
 //! - display rotations and the clean aperture are exact permutations and
 //!   crops of the unrotated picture, rotated as FFmpeg's autorotate does;
 //! - `interpret` overrides in the document change the reading (matrix,
@@ -286,13 +286,9 @@ fn deinterlaces_like_bwdif(path: &Path, order: &str) {
         other => panic!("{name}: {other:?}"),
     };
     assert_eq!(probed, order, "{name}: field order");
-    // Uninterpreted, interlaced video routes to the legacy renderer (today's
-    // viewer shows the woven frame); an override restating the field order
-    // draws it.
-    assert!(
-        pm_render::media::probe_video(path).is_err(),
-        "{name} is drawn without an interpretation"
-    );
+    // The file's field order deinterlaces with no override (today's viewer
+    // shows the woven frame; native has one path).
+    assert_eq!(pm_render::media::probe_video(path), Ok(()), "{name}");
     let interp = json!({ "fieldOrder": order });
     let reading = resolve_video(v, &Interpretation::from_json(&interp).0);
     let (w, h) = (v.width as usize, v.height as usize);
@@ -506,9 +502,11 @@ fn rotations_and_clean_aperture_are_exact() {
     );
     // The clean aperture: the full frame by default, the crop on request.
     let clap = formats("video/geom-clap.mov").unwrap();
-    assert!(
-        pm_render::media::probe_video(&clap).is_err(),
-        "a cropping clean aperture is drawn without an interpretation"
+    assert_eq!(pm_render::media::probe_video(&clap), Ok(()));
+    let (doc_c, res_c) = document(&clap, (w as u32, h as u32), 25.0, None);
+    assert_eq!(
+        render(&mut r, &doc_c, (w as u32, h as u32), t, &res_c),
+        plain
     );
     let (doc_c, res_c) = document(
         &clap,
@@ -1177,41 +1175,56 @@ fn interpreted_probes_follow_the_file_stamp() {
     }
 }
 
-/// Capability reasons leave only with a reference proof against today's
-/// viewer (`tests/video_reading.rs`): default PQ/HLG and wide-gamut SDR are
-/// drawn; metadata-driven HDR and geometry/field readings not compared with
-/// today's viewer keep their reasons. Interpretation draws all cases.
+/// Anamorphic video fills the quad the document authors: the coded frame is
+/// stretched to it, so pixel aspect moves no authored geometry.
 #[test]
-fn video_capability_gate_tracks_measured_classes_and_interpretation() {
-    let cases = [
-        ("hdr/hdr10.mov", Some("HDR video")),
-        ("hdr/hlg.mov", None),
-        ("hdr/pq-av1.mkv", None),
-        ("hdr/pq-vp9.webm", Some("HDR video")),
-        ("hdr/dovi-8.4.mov", Some("HDR video")),
-        ("video/interlaced-bff.mxf", Some("interlaced video")),
-        ("video/interlaced-tff.mov", Some("interlaced video")),
-        ("video/dv-pal.dv", Some("interlaced video")),
-        ("video/geom-rot90.mov", None),
-        ("video/geom-rot180.mov", None),
-        ("video/geom-rot270.mov", None),
-        ("video/geom-clap.mov", Some("a cropping clean aperture")),
-        ("video/meta-pasp.mov", Some("non-square pixels")),
-        ("video/color-p3.mov", None),
-    ];
+fn anamorphic_video_fills_its_authored_display_size() {
+    let Some(path) = formats("video/meta-pasp.mov") else {
+        return;
+    };
+    let src = MediaSource::open(&path).unwrap();
+    let v = src.probe.video.as_ref().unwrap();
+    assert_ne!(v.pixel_aspect.0, v.pixel_aspect.1);
+    let reading = resolve_video(v, &Interpretation::default());
+    let display = reading.display_size((v.width, v.height));
+    assert_ne!(display, (v.width, v.height));
+    let mut r = Renderer::headless().unwrap();
+    let (doc, res) = document(&path, display, 25.0, None);
+    let drawn = render(&mut r, &doc, display, 0.0, &res);
+    let (restated, res2) = document(
+        &path,
+        display,
+        25.0,
+        Some(json!({ "pixelAspect": [v.pixel_aspect.0, v.pixel_aspect.1] })),
+    );
+    assert_eq!(render(&mut r, &restated, display, 0.0, &res2), drawn);
+}
+
+/// Native has no fallback: everything with a reading draws by default, and
+/// the default draws what an override restating the file would draw.
+#[test]
+fn every_source_with_a_reading_draws_without_an_interpretation() {
     let (restated, _) = Interpretation::from_json(&json!({ "cleanAperture": false }));
-    for (file, reason) in cases {
+    for file in [
+        "hdr/hdr10.mov",
+        "hdr/hlg.mov",
+        "hdr/pq-av1.mkv",
+        "hdr/pq-vp9.webm",
+        "hdr/dovi-8.4.mov",
+        "video/interlaced-bff.mxf",
+        "video/interlaced-tff.mov",
+        "video/dv-pal.dv",
+        "video/geom-rot90.mov",
+        "video/geom-rot180.mov",
+        "video/geom-rot270.mov",
+        "video/geom-clap.mov",
+        "video/meta-pasp.mov",
+        "video/color-p3.mov",
+    ] {
         let Some(path) = formats(file) else {
             return;
         };
-        let routed = pm_render::media::probe_video(&path);
-        match reason {
-            Some(reason) => assert!(
-                routed.as_ref().is_err_and(|m| m.contains(reason)),
-                "{file}: {routed:?}"
-            ),
-            None => assert_eq!(routed, Ok(()), "{file}: compared reading"),
-        }
+        assert_eq!(pm_render::media::probe_video(&path), Ok(()), "{file}");
         assert_eq!(
             pm_render::media::probe_interpreted_video(&path, &restated),
             Ok(()),

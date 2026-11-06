@@ -20,7 +20,7 @@ use pm_protocol::color::{BlendMode, WorkingEncoding};
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
     FLAG_BLEND_IN_E, FLAG_FLIP, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED,
-    FLAG_MATTE_LUMA, FLAG_PATH_MASKS, FLAG_SRGB8, Op, OpUniform,
+    FLAG_MATTE_LUMA, FLAG_PATH_MASKS, FLAG_SRGB8, FLAG_TONE_MAP, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -916,10 +916,12 @@ impl Exec<'_> {
         source: &Target,
         target: &Target,
         flip: bool,
+        tone: Option<crate::request::OutputTone>,
     ) {
         if self.working == WorkingEncoding::Standard
             && target.format() != wgpu::TextureFormat::Rgba8Unorm
             && flip
+            && tone.is_none()
         {
             self.flip(encoder, source, target);
             return;
@@ -931,6 +933,11 @@ impl Exec<'_> {
         }
         if target.format() == wgpu::TextureFormat::Rgba8Unorm {
             u.i[1] |= FLAG_SRGB8;
+        }
+        if let Some(tone) = tone {
+            u.i[1] |= FLAG_TONE_MAP;
+            u.f[0] = tone.source_peak;
+            u.f[1] = tone.target_peak;
         }
         self.run_op(
             encoder,

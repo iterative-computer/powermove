@@ -51,6 +51,10 @@ pub fn any_str(s: &CFString) -> Retained<AnyObject> {
     any_cf(s.as_ref())
 }
 
+pub fn any_data(bytes: &[u8]) -> Retained<AnyObject> {
+    any_cf(objc2_core_foundation::CFData::from_bytes(bytes).as_ref())
+}
+
 pub fn any_num_f64(v: f64) -> Retained<AnyObject> {
     Retained::into_super(Retained::into_super(NSNumber::new_f64(v))).into()
 }

@@ -5,4 +5,4 @@ import type { ViewerColorSpace } from "./ViewerColorSpace";
 /**
  * An output's color tag choice (section 9, output tags).
  */
-export type OutputColor = { "kind": "srgbImage" } | { "kind": "rec709Broadcast" } | { "kind": "rec709Image" } | { "kind": "rec709QuickTime", candidate: QuickTimeTag, } | { "kind": "viewer", space: ViewerColorSpace, };
+export type OutputColor = { "kind": "srgbImage" } | { "kind": "rec709Broadcast" } | { "kind": "rec709Image" } | { "kind": "rec709QuickTime", candidate: QuickTimeTag, } | { "kind": "viewer", space: ViewerColorSpace, } | { "kind": "rec2100Pq" } | { "kind": "rec2100Hlg" };

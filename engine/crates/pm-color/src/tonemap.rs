@@ -1,18 +1,21 @@
-//! HDR input tone mapping (plan section 9; owner decision HDR-1): PQ and
-//! HLG sources are decoded per BT.2100 and mapped to SDR with the BT.2390
-//! EETF.
+//! BT.2100 light and the BT.2390 EETF (plan section 9; owner decision HDR-1).
 //!
-//! Per pixel, in f64 here and in f32 in [`wgsl`]:
+//! In f64 here and in f32 in [`wgsl`]:
 //!
 //! 1. The signal to display light in cd/m²: PQ through the ST 2084 EOTF;
 //!    HLG through its inverse OETF and the BT.2100 OOTF for a 1000 cd/m²
 //!    display (system gamma 1.2), BT.2408's route from HLG to PQ light.
-//! 2. The BT.2390 EETF on each component in the PQ domain, from the
-//!    content's peak (the mastering display's, else 1000 cd/m²) to SDR
-//!    reference white, 203 cd/m² (BT.2408), with black at zero.
-//! 3. Display light / 203: linear light with SDR white at 1.0, in the
-//!    source's primaries. The caller converts primaries in linear light and
-//!    encodes for the working space; out-of-gamut values are not clipped.
+//! 2. HDR projects stop here and keep [`to_working_light`]: light / 203, with
+//!    SDR reference white (BT.2408) at 1.0 and highlights above it.
+//! 3. A target that cannot hold that light takes the BT.2390 EETF on each
+//!    component in the PQ domain, from the content's peak (the mastering
+//!    display's, else 1000 cd/m²) to the target's peak, with black at zero.
+//!    An SDR project does this at input ([`to_sdr`]); an HDR project's SDR
+//!    delivery does it at output ([`tone_map_working`]).
+//!
+//! The result stays in the source's primaries. The caller converts primaries
+//! in linear light and encodes for the working space; out-of-gamut values are
+//! not clipped.
 
 use crate::primaries::{Mat3, conversion};
 use pm_protocol::color::Primaries;
@@ -103,11 +106,16 @@ pub fn to_normalized_display(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f6
 }
 
 /// The BT.2390 EETF on one PQ-encoded component (0..1, ST 2084), mapping
-/// content mastered at `source_peak` cd/m² to SDR white. Black stays at
-/// zero, so the toe term is zero.
+/// content mastered at `source_peak` cd/m² to SDR white.
 pub fn eetf(e: f64, source_peak: f64) -> f64 {
+    eetf_to(e, source_peak, SDR_WHITE)
+}
+
+/// The BT.2390 EETF from `source_peak` to `target_peak` cd/m². Black stays at
+/// zero, so the toe term is zero.
+pub fn eetf_to(e: f64, source_peak: f64, target_peak: f64) -> f64 {
     let pw = pq_inverse_eotf(source_peak);
-    let max_lum = pq_inverse_eotf(SDR_WHITE) / pw;
+    let max_lum = pq_inverse_eotf(target_peak) / pw;
     let e1 = (e / pw).clamp(0.0, 1.0);
     if max_lum >= 1.0 {
         return e1 * pw;
@@ -124,17 +132,43 @@ pub fn eetf(e: f64, source_peak: f64) -> f64 {
     p * pw
 }
 
-/// HDR signal R′G′B′ (0..1) to tone-mapped linear light, SDR white 1.0, in
-/// the signal's primaries. `peak` is the content peak in cd/m² (PQ).
-pub fn to_sdr(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f64; 3] {
-    let (nits, peak) = match signal {
+/// HDR signal R′G′B′ (0..1) to display light in cd/m², and the content peak
+/// the signal implies.
+fn display_light(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> ([f64; 3], f64) {
+    match signal {
         HdrSignal::Pq => (rgb.map(pq_eotf), peak),
         HdrSignal::Hlg => (
             to_normalized_display(HdrSignal::Hlg, rgb, HLG_PEAK).map(|c| c * HLG_PEAK),
             HLG_PEAK,
         ),
-    };
+    }
+}
+
+/// HDR signal R′G′B′ (0..1) to tone-mapped linear light, SDR white 1.0, in
+/// the signal's primaries. `peak` is the content peak in cd/m² (PQ).
+pub fn to_sdr(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f64; 3] {
+    let (nits, peak) = display_light(signal, rgb, peak);
     nits.map(|c| pq_eotf(eetf(pq_inverse_eotf(c), peak)) / SDR_WHITE)
+}
+
+/// HDR signal R′G′B′ (0..1) to HDR working light: SDR white 1.0, highlights
+/// above it, nothing compressed, in the signal's primaries.
+pub fn to_working_light(signal: HdrSignal, rgb: [f64; 3]) -> [f64; 3] {
+    display_light(signal, rgb, HLG_PEAK)
+        .0
+        .map(|c| c / SDR_WHITE)
+}
+
+/// HDR working light in BT.2020 tone mapped from `source_peak` to
+/// `target_peak`; [`to_sdr`] of a working pixel when the target is SDR white.
+pub fn tone_map_working(light: [f64; 3], source_peak: f64, target_peak: f64) -> [f64; 3] {
+    light.map(|c| {
+        pq_eotf(eetf_to(
+            pq_inverse_eotf(c * SDR_WHITE),
+            source_peak,
+            target_peak,
+        )) / SDR_WHITE
+    })
 }
 
 /// The BT.2020 to Rec.709 matrix in linear light.
@@ -143,8 +177,18 @@ pub fn bt2020_to_709() -> Mat3 {
 }
 
 /// WGSL defining `pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32)
-/// -> vec3<f32>`, [`to_sdr`] in f32.
+/// -> vec3<f32>` and `pm_hdr_to_working(signal: vec3<f32>, hlg: bool)`, which
+/// are [`to_sdr`] and [`to_working_light`] in f32, and
+/// `pm_tone_map_output(c: vec4<f32>, source: f32, target: f32)`, which takes a
+/// premultiplied E pixel through [`tone_map_working`] in BT.2020. The module
+/// needs [`crate::wgsl::COLOR`] before it.
 pub fn wgsl() -> String {
+    let matrix = |m: Mat3| {
+        (0..3)
+            .map(|j| format!("vec3<f32>({}, {}, {})", f(m[0][j]), f(m[1][j]), f(m[2][j])))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
         r#"
 fn pm_pq_eotf(e: vec3<f32>) -> vec3<f32> {{
@@ -177,9 +221,9 @@ fn pm_hlg_inverse_oetf(e: vec3<f32>) -> vec3<f32> {{
     return select(hi, lo, x <= vec3<f32>(0.5));
 }}
 
-fn pm_eetf(e: vec3<f32>, source_peak: f32) -> vec3<f32> {{
+fn pm_eetf(e: vec3<f32>, source_peak: f32, target_peak: f32) -> vec3<f32> {{
     let pw = pm_pq_inverse_eotf(vec3<f32>(source_peak)).x;
-    let max_lum = pm_pq_inverse_eotf(vec3<f32>({white})).x / pw;
+    let max_lum = pm_pq_inverse_eotf(vec3<f32>(target_peak)).x / pw;
     let e1 = clamp(e / pw, vec3<f32>(0.0), vec3<f32>(1.0));
     if (max_lum >= 1.0) {{
         return e1 * pw;
@@ -193,18 +237,31 @@ fn pm_eetf(e: vec3<f32>, source_peak: f32) -> vec3<f32> {{
     return select(p, e1, e1 < vec3<f32>(ks)) * pw;
 }}
 
-fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32) -> vec3<f32> {{
-    var nits: vec3<f32>;
-    var source_peak = peak;
+fn pm_hdr_nits(signal: vec3<f32>, hlg: bool) -> vec3<f32> {{
     if (hlg) {{
         let s = pm_hlg_inverse_oetf(signal);
         let ys = dot(vec3<f32>({kr}, {kg}, {kb}), s);
-        nits = {hlg_peak} * s * select(0.0, pow(ys, {gamma} - 1.0), ys > 0.0);
-        source_peak = {hlg_peak};
-    }} else {{
-        nits = pm_pq_eotf(signal);
+        return {hlg_peak} * s * select(0.0, pow(ys, {gamma} - 1.0), ys > 0.0);
     }}
-    return pm_pq_eotf(pm_eetf(pm_pq_inverse_eotf(nits), source_peak)) / {white};
+    return pm_pq_eotf(signal);
+}}
+
+fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32) -> vec3<f32> {{
+    let source_peak = select(peak, {hlg_peak}, hlg);
+    let nits = pm_hdr_nits(signal, hlg);
+    return pm_pq_eotf(pm_eetf(pm_pq_inverse_eotf(nits), source_peak, {white})) / {white};
+}}
+
+fn pm_hdr_to_working(signal: vec3<f32>, hlg: bool) -> vec3<f32> {{
+    return pm_hdr_nits(signal, hlg) / {white};
+}}
+
+fn pm_tone_map_output(c: vec4<f32>, source_peak: f32, target_peak: f32) -> vec4<f32> {{
+    let a = select(1.0, c.a, c.a <= 1.0 && pm_may_unpremultiply(c.a));
+    let light = mat3x3<f32>({to_2020}) * pm_e_decode3(c.rgb / a);
+    let nits = pm_pq_inverse_eotf(light * {white});
+    let mapped = pm_pq_eotf(pm_eetf(nits, source_peak, target_peak)) / {white};
+    return vec4<f32>(pm_e_encode3(mat3x3<f32>({to_709}) * mapped) * a, c.a);
 }}
 "#,
         white = f(SDR_WHITE),
@@ -213,6 +270,8 @@ fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32) -> vec3<f32> {{
         kr = f(KR),
         kg = f(KG),
         kb = f(KB),
+        to_2020 = matrix(conversion(Primaries::Bt709, Primaries::Bt2020).expect("known primaries")),
+        to_709 = matrix(bt2020_to_709()),
     )
 }
 
@@ -288,6 +347,35 @@ mod tests {
         for c in to_sdr(HdrSignal::Hlg, [1.0; 3], 1000.0) {
             assert!((c - 1.0).abs() < 1e-6, "{c}");
         }
+    }
+
+    #[test]
+    fn working_light_keeps_highlights_and_tone_maps_only_on_request() {
+        let peak = pq_inverse_eotf(1000.0);
+        for c in to_working_light(HdrSignal::Pq, [peak; 3]) {
+            assert!((c - 1000.0 / 203.0).abs() < 1e-9, "{c}");
+        }
+        for c in to_working_light(HdrSignal::Hlg, [1.0; 3]) {
+            assert!((c - 1000.0 / 203.0).abs() < 1e-6, "{c}");
+        }
+        // Input tone mapping equals working light tone mapped at output.
+        for code in [0.1, 0.4, 0.58, 0.7, peak] {
+            let rgb = [code, code * 0.8, code * 0.6];
+            let input = to_sdr(HdrSignal::Pq, rgb, 1000.0);
+            let output = tone_map_working(to_working_light(HdrSignal::Pq, rgb), 1000.0, SDR_WHITE);
+            for (a, b) in input.iter().zip(output) {
+                assert!((a - b).abs() < 1e-9, "{code}: {a} {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn eetf_maps_to_any_target_peak() {
+        let target = pq_inverse_eotf(600.0);
+        assert!((eetf_to(pq_inverse_eotf(4000.0), 4000.0, 600.0) - target).abs() < 1e-12);
+        // A target at or above the source passes through.
+        let e = pq_inverse_eotf(500.0);
+        assert_eq!(eetf_to(e, 1000.0, 1000.0), e);
     }
 
     #[test]

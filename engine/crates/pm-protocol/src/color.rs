@@ -24,6 +24,24 @@ pub enum Primaries {
     Bt2020,
     /// Display P3, D65 white (code 12).
     DisplayP3,
+    /// BT.470 System M, illuminant C white (code 4).
+    Bt470M,
+    /// Generic film, illuminant C white (code 8).
+    GenericFilm,
+    /// SMPTE RP 431-2, DCI white (code 11).
+    DciP3,
+    /// EBU Tech. 3213-E (code 22).
+    Ebu3213,
+    /// Sony S-Gamut3. No H.273 code.
+    SGamut3,
+    /// Sony S-Gamut3.Cine. No H.273 code.
+    SGamut3Cine,
+    /// Panasonic V-Gamut. No H.273 code.
+    VGamut,
+    /// ARRI Wide Gamut 3. No H.273 code.
+    AwgGen3,
+    /// ARRI Wide Gamut 4. No H.273 code.
+    AwgGen4,
     /// Not tagged; the interpretation rules in section 9 choose.
     Unspecified,
 }
@@ -36,7 +54,16 @@ impl Primaries {
             Primaries::Bt601_525 => 6,
             Primaries::Bt2020 => 9,
             Primaries::DisplayP3 => 12,
-            Primaries::Unspecified => 2,
+            Primaries::Bt470M => 4,
+            Primaries::GenericFilm => 8,
+            Primaries::DciP3 => 11,
+            Primaries::Ebu3213 => 22,
+            Primaries::SGamut3
+            | Primaries::SGamut3Cine
+            | Primaries::VGamut
+            | Primaries::AwgGen3
+            | Primaries::AwgGen4
+            | Primaries::Unspecified => 2,
         }
     }
 }
@@ -61,10 +88,20 @@ pub enum Transfer {
     Log100,
     /// H.273 transfer 10: logarithmic, 100 × sqrt(10):1 range.
     Log316,
-    /// SMPTE ST 2084 (HDR input; HDR projects after cutover).
+    /// SMPTE ST 2084 (HDR input; preserved in HDR projects).
     Pq,
-    /// ARIB STD-B67 (HDR input; HDR projects after cutover).
+    /// ARIB STD-B67 (HDR input; preserved in HDR projects).
     Hlg,
+    /// Apple Log (Apple Log Profile White Paper, September 2023).
+    AppleLog,
+    /// Sony S-Log3 (Technical Summary for S-Gamut3.Cine/S-Log3).
+    SLog3,
+    /// Panasonic V-Log (V-Log/V-Gamut Reference Manual).
+    VLog,
+    /// ARRI LogC3 at EI 800 (ALEXA Log C Curve, usage in VFX).
+    LogC3,
+    /// ARRI LogC4 (ARRI LogC4 specification).
+    LogC4,
 }
 
 /// Y′CbCr matrix coefficients.
@@ -262,12 +299,15 @@ pub enum BlendDomain {
     DisplayEncoded,
 }
 
-/// Project color mode. Only `Standard` exists before cutover.
+/// Project color mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ColorMode {
+    /// SDR delivery: HDR sources are tone mapped to SDR white at input.
     Standard,
+    /// HDR: PQ and HLG keep their light, with SDR white (203 cd/m²) at 1.0.
+    Hdr,
 }
 
 /// The project's `color` field as the engine sees it (Settings › Project › Color).
@@ -279,6 +319,22 @@ pub struct ProjectColor {
     pub linear_blending: bool,
     pub precision: Precision,
     pub blend_domain: BlendDomain,
+    /// An HDR project's mastering display peak in cd/m²: the light its HDR
+    /// delivery and viewer hold before BT.2390 rolls highlights off.
+    #[serde(
+        default = "default_mastering_peak",
+        skip_serializing_if = "is_default_mastering_peak"
+    )]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
+    pub mastering_peak: u16,
+}
+
+const fn default_mastering_peak() -> u16 {
+    1000
+}
+
+fn is_default_mastering_peak(peak: &u16) -> bool {
+    *peak == default_mastering_peak()
 }
 
 impl ProjectColor {
@@ -288,6 +344,7 @@ impl ProjectColor {
         linear_blending: false,
         precision: Precision::Float16,
         blend_domain: BlendDomain::HdrSafe,
+        mastering_peak: default_mastering_peak(),
     };
 
     pub const fn working(&self) -> WorkingEncoding {
@@ -369,6 +426,10 @@ pub enum OutputColor {
     Rec709QuickTime { candidate: QuickTimeTag },
     /// The viewer: E-encoded working values for the display canvas.
     Viewer { space: ViewerColorSpace },
+    /// BT.2100 PQ delivery of an HDR project: CICP 9-16-9, limited range.
+    Rec2100Pq,
+    /// BT.2100 HLG delivery of an HDR project: CICP 9-18-9, limited range.
+    Rec2100Hlg,
 }
 
 /// The two tags S2 tests for "Rec.709 (QuickTime and Safari)" (section 9).
@@ -421,6 +482,8 @@ impl OutputColor {
             OutputColor::Rec709QuickTime {
                 candidate: QuickTimeTag::Cicp1_2_1Gamma22,
             } => (1, 2, 1, false),
+            OutputColor::Rec2100Pq => (9, 16, 9, false),
+            OutputColor::Rec2100Hlg => (9, 18, 9, false),
             OutputColor::Viewer { .. } => return None,
         };
         Some(Cicp {

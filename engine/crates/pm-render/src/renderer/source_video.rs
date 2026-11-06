@@ -449,18 +449,12 @@ fn chromium_tags(desc: &ColorDescription) -> Option<(&'static str, &'static str,
         Primaries::Bt709 => "bt709",
         Primaries::Bt601_525 => "smpte170m",
         Primaries::Bt601_625 => "bt470bg",
-        Primaries::Bt2020 | Primaries::DisplayP3 | Primaries::Unspecified => return None,
+        _ => return None,
     };
     let transfer = match desc.transfer {
         Transfer::DisplayE => "bt709",
         Transfer::Linear => "linear",
-        Transfer::Bt1886
-        | Transfer::SceneReferredBt709
-        | Transfer::Gamma22
-        | Transfer::Pq
-        | Transfer::Hlg
-        | Transfer::Log100
-        | Transfer::Log316 => return None,
+        _ => return None,
     };
     let matrix = match desc.matrix {
         MatrixCoefficients::Bt709 => "bt709",

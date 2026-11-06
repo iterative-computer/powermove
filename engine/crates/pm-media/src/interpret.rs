@@ -12,8 +12,10 @@
 //!
 //! ```json
 //! {
-//!   "primaries": "bt709" | "bt601_625" | "bt601_525" | "bt2020" | "displayP3",
-//!   "transfer": "displayE" | "bt1886" | "sceneReferredBt709" | "linear" | "gamma22" | "pq" | "hlg",
+//!   "primaries": "bt709" | "bt601_625" | "bt601_525" | "bt2020" | "displayP3" | "bt470M" |
+//!     "genericFilm" | "dciP3" | "ebu3213" | "sGamut3" | "sGamut3Cine" | "vGamut" | "awgGen3" | "awgGen4",
+//!   "transfer": "displayE" | "bt1886" | "sceneReferredBt709" | "linear" | "gamma22" | "pq" | "hlg" |
+//!     "appleLog" | "sLog3" | "vLog" | "logC3" | "logC4",
 //!   "matrix": "bt709" | "bt601" | "bt2020Ncl" | "identity",
 //!   "range": "limited" | "full",
 //!   "siting": "left" | "center" | "topLeft" | "top" | "bottomLeft" | "bottom",

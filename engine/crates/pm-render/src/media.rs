@@ -24,7 +24,7 @@ use pm_media::decode::service::{
 use pm_media::frame::DecodedFrame;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
-use pm_media::probe::color::HdrFormat;
+use pm_media::probe::color::{ContentLight, HdrFormat, MasteringDisplay};
 use pm_media::probe::{FieldOrder, VideoProbe};
 use pm_media::vt::DecodePurpose;
 use pm_protocol::color::{
@@ -372,6 +372,105 @@ pub(crate) fn deep_still(path: &Path) -> bool {
     })
 }
 
+/// What the HDR media in a document holds, for delivery and the viewer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HdrContent {
+    /// The brightest light the sources can hold, in cd/m².
+    pub peak_nits: f64,
+    /// The brightest source's mastering display.
+    pub mastering: Option<MasteringDisplay>,
+    /// The highest levels, when every HDR source states them.
+    pub content_light: Option<ContentLight>,
+}
+
+/// One source's reading of its light, per file stamp.
+#[derive(Clone)]
+struct SourceLight {
+    peak_nits: f64,
+    mastering: Option<MasteringDisplay>,
+    content_light: Option<ContentLight>,
+}
+
+/// Summarizes the HDR video the document's layers show: asset ids under
+/// layers' `d.asset`, read through their Interpret Footage overrides.
+pub fn hdr_content(
+    document: &pm_model::Document,
+    resolver: &dyn crate::assets::AssetResolver,
+) -> HdrContent {
+    use pm_eval::node;
+    fn walk(n: &pm_model::Node, out: &mut std::collections::BTreeSet<String>) {
+        match n.kind() {
+            pm_model::NodeKind::Object(map) => {
+                if let Some(asset) = node::string(node::member(node::member(Some(n), "d"), "asset"))
+                {
+                    out.insert(asset.to_string_lossy());
+                }
+                map.values().for_each(|child| walk(child, out));
+            }
+            pm_model::NodeKind::Array(array) => array.iter().for_each(|child| walk(child, out)),
+            _ => {}
+        }
+    }
+    let mut content = HdrContent::default();
+    let Some(root) = document.root() else {
+        return content;
+    };
+    let mut assets = std::collections::BTreeSet::new();
+    walk(root, &mut assets);
+    let mut all_stated = true;
+    let mut levels = (0, 0);
+    for id in assets {
+        let record = node::member(node::member(Some(root), "assets"), &id);
+        if !node::is_str(node::member(record, "kind"), "video") {
+            continue;
+        }
+        let Some(path) = resolver.path(&id, record) else {
+            continue;
+        };
+        let interpret = record.and_then(crate::footage::interpretation);
+        let Some(light) = source_light(&path, interpret.as_ref()) else {
+            continue;
+        };
+        if light.peak_nits > content.peak_nits {
+            content.peak_nits = light.peak_nits;
+            content.mastering = light.mastering;
+        }
+        match light.content_light {
+            Some(c) => levels = (levels.0.max(c.max_cll), levels.1.max(c.max_fall)),
+            None => all_stated = false,
+        }
+    }
+    content.content_light = (all_stated && levels.0 > 0).then_some(ContentLight {
+        max_cll: levels.0,
+        max_fall: levels.1,
+    });
+    content
+}
+
+/// `None` for SDR sources and unreadable files.
+fn source_light(path: &Path, interp: Option<&Interpretation>) -> Option<SourceLight> {
+    static CACHE: StampCache<Option<VideoProbe>> = OnceLock::new();
+    let video = per_stamp(&CACHE, path, || {
+        MediaSource::open(path).ok()?.probe.video.clone()
+    })??;
+    let none = Interpretation::default();
+    let reading = resolve_video(&video, interp.unwrap_or(&none));
+    match reading.transfer.value {
+        Transfer::Pq | Transfer::Hlg => Some(SourceLight {
+            peak_nits: reading.tone_map.map_or(1000.0, |t| t.peak_nits),
+            mastering: video.color.mastering.clone(),
+            content_light: video.color.content_light,
+        }),
+        camera if pm_color::camera_log::is_log(camera) => Some(SourceLight {
+            peak_nits: (pm_color::camera_log::decode(camera, 1.0)? * pm_color::tonemap::SDR_WHITE)
+                .min(10000.0),
+            mastering: None,
+            content_light: None,
+        }),
+        _ => None,
+    }
+}
+
 /// Y′CbCr planes to straight R′G′B′A in the stored encoding (no transfer or
 /// primaries conversion), on the CPU: chroma upsampled with section 9's
 /// filters at the given siting, then the matrix. For the consumers that
@@ -504,21 +603,10 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
     .unwrap_or_else(|| Err(offline(path)))
 }
 
-/// Whether a video file is drawn without routing: it opens and indexes,
-/// the renderer can draw it ([`video_drawable`]), and it shows nothing
-/// whose reading has not been checked against an f64 reference and today's
-/// viewer (section 25, `tests/video_reading.rs`). SDR footage in Rec.709,
-/// BT.601, BT.2020 and Display P3 primaries, and the HDR classes the gate
-/// covers ([`compared_hdr`]), are drawn by the one video path
-/// (docs/engine/video-parity.md). These are drawn only when the asset
-/// carries Interpret Footage overrides, which only this engine reads:
-///
-/// - other HDR (mastering or light-level metadata, Dolby Vision, other
-///   codecs and layouts);
-/// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
-///   woven frame);
-/// - non-square pixels and a cropping clean aperture
-///   (exact, but not compared with today's viewer).
+/// Whether a video file can be drawn: it opens and indexes and the renderer
+/// has a reading for it ([`video_drawable`]). Every SDR, HDR, wide-gamut,
+/// interlaced (bwdif, [`crate::footage::Timing`]), anamorphic and cropped
+/// source goes through the one video path; docs/engine/video-parity.md.
 ///
 /// Answers are kept per file stamp: capability routing asks at every
 /// document revision, and opening a source indexes it.
@@ -537,7 +625,8 @@ pub fn probe_video_issue(path: &Path) -> Result<(), ProbeIssue> {
     per_stamp(&CACHE, path, || {
         let src = MediaSource::open(path)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-        video_supported(&src).map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
+        video_drawable(&src, &Interpretation::default())
+            .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
@@ -568,79 +657,6 @@ pub fn probe_interpreted_video_issue(
     .map_err(ProbeIssue::Unreadable)?;
     video_probe_drawable(video.as_ref(), interp)
         .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
-}
-
-/// The HDR classes `tests/video_reading.rs` covers: 10-bit 4:2:0 AV1 and
-/// HEVC, limited range, no alpha, no HDR metadata, PQ in BT.2020 or
-/// Display P3, HLG in BT.2020.
-fn compared_hdr(video: &VideoProbe) -> bool {
-    matches!(video.codec.codec.as_str(), "av1" | "hevc")
-        && video.codec.bit_depth == 10
-        && (video.codec.log2_chroma_w, video.codec.log2_chroma_h) == (1, 1)
-        && !video.codec.full_range
-        && !video.codec.alpha_mode
-        && !video.codec.pix_fmt_alpha
-        && video.color.mastering.is_none()
-        && video.color.content_light.is_none()
-        && !matches!(video.color.hdr, Some(HdrFormat::DolbyVision { .. }))
-        && match video.color.interpreted.transfer {
-            Transfer::Pq => matches!(
-                video.color.interpreted.primaries,
-                Primaries::Bt2020 | Primaries::DisplayP3
-            ),
-            Transfer::Hlg => video.color.interpreted.primaries == Primaries::Bt2020,
-            _ => false,
-        }
-}
-
-fn video_supported(src: &MediaSource) -> Result<(), String> {
-    video_drawable(src, &Interpretation::default())?;
-    let Some(v) = src.probe.video.as_ref() else {
-        return Err("no video stream".into());
-    };
-    const WHEN: &str = "drawn when interpreted";
-    if matches!(
-        v.fields.order,
-        FieldOrder::TopFirst | FieldOrder::BottomFirst
-    ) {
-        return Err(format!(
-            "interlaced video (not compared with today's viewer; {WHEN})"
-        ));
-    }
-    if v.pixel_aspect.0 != v.pixel_aspect.1 {
-        return Err(format!(
-            "non-square pixels (not compared with today's viewer; {WHEN})"
-        ));
-    }
-    if let Some(clap) = v.clean_aperture
-        && (clap.width != f64::from(v.width)
-            || clap.height != f64::from(v.height)
-            || clap.horizontal_offset != 0.0
-            || clap.vertical_offset != 0.0)
-    {
-        return Err(format!(
-            "a cropping clean aperture (not compared with today's viewer; {WHEN})"
-        ));
-    }
-    let c = &src.color;
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && !compared_hdr(v) {
-        return Err(format!("HDR video outside the compared classes ({WHEN})"));
-    }
-    // Every other reading converts its primaries in linear light.
-    if !matches!(
-        c.primaries,
-        Primaries::Bt709
-            | Primaries::Bt601_525
-            | Primaries::Bt601_625
-            | Primaries::Bt2020
-            | Primaries::DisplayP3
-    ) {
-        return Err(format!(
-            "{:?} primaries (wide-gamut footage is {WHEN})",
-            c.primaries
-        ));
-    }
-    Ok(())
 }
 
 /// Whether the renderer can draw a video source as interpreted: every
@@ -675,11 +691,31 @@ fn video_probe_drawable(video: Option<&VideoProbe>, interp: &Interpretation) -> 
     Ok(())
 }
 
+/// What a source monitor can't show from the decoded planes alone: fields,
+/// pixel aspect, a cropped aperture, HDR light or wide-gamut primaries.
+fn needs_engine_conversion(src: &MediaSource) -> bool {
+    let Some(v) = src.probe.video.as_ref() else {
+        return true;
+    };
+    let cropped = v.clean_aperture.is_some_and(|c| {
+        c.width != f64::from(v.width)
+            || c.height != f64::from(v.height)
+            || c.horizontal_offset != 0.0
+            || c.vertical_offset != 0.0
+    });
+    matches!(
+        v.fields.order,
+        FieldOrder::TopFirst | FieldOrder::BottomFirst
+    ) || v.pixel_aspect.0 != v.pixel_aspect.1
+        || cropped
+        || is_hdr_signal(src.color.transfer)
+}
+
 /// How a video frame's code values become colour: the probe's reading
 /// ([`pm_media::probe::color::video_reading`], the table the source monitor
 /// shares), Interpret Footage's overrides, or the host's per-file override.
 /// Every surface (playback, pause, scrub, thumbnails, export) reads a frame
-/// this way.
+/// this way. `hdr_light` keeps PQ and HLG whole for an HDR project.
 fn video_color(
     v: &VideoProbe,
     reading: &pm_media::interpret::VideoReading,
@@ -687,6 +723,7 @@ fn video_color(
     override_color: Option<ColorDescription>,
     has_alpha: bool,
     sequence: bool,
+    hdr_light: bool,
 ) -> SourceColor {
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
@@ -710,7 +747,7 @@ fn video_color(
             (true, AlphaMode::Opaque) if interp.alpha.is_none() => AlphaMode::Straight,
             (true, other) => other,
         },
-        tone_map: matches!(desc.transfer, Transfer::Pq | Transfer::Hlg).then(|| {
+        tone_map: (is_hdr_signal(desc.transfer) && !hdr_light).then(|| {
             reading.tone_map.unwrap_or(ToneMap {
                 transfer: desc.transfer,
                 peak_nits: 1000.0,
@@ -721,9 +758,18 @@ fn video_color(
     }
 }
 
+const fn is_hdr_signal(transfer: Transfer) -> bool {
+    matches!(transfer, Transfer::Pq | Transfer::Hlg)
+}
+
+/// Sources whose light goes past SDR white: stored in float at every depth.
+const fn extended_light(transfer: Transfer) -> bool {
+    is_hdr_signal(transfer) || pm_color::camera_log::is_log(transfer)
+}
+
 /// The texture format a converted video frame is stored in: the project's
 /// working format, and never below half float for deeper-than-8-bit or HDR
-/// sources, so 10-bit codes and tone-mapped light are not cut to 8 bits.
+/// sources, so 10-bit codes and light above white are not cut to 8 bits.
 fn video_storage(precision: Precision, bits: u8, hdr: bool) -> wgpu::TextureFormat {
     match precision {
         Precision::Unorm8 if bits > 8 || hdr => working_format(Precision::Float16),
@@ -738,8 +784,8 @@ fn source_uniform(
     precision: Precision,
     chroma: Option<(Factors, u32, u32)>,
 ) -> SourceUniform {
-    // HDR signals are tone mapped (section 9); without a tone map (a still
-    // reaching here) they read as E, as refused stills never do.
+    // HDR signals are tone mapped for an SDR target (section 9); an HDR
+    // project's sources carry no tone map and keep their light.
     let tone = color
         .tone_map
         .filter(|t| matches!(t.transfer, Transfer::Pq | Transfer::Hlg));
@@ -754,7 +800,10 @@ fn source_uniform(
         (Transfer::Gamma22, _) => 4,
         (Transfer::Log100, _) => 8,
         (Transfer::Log316, _) => 9,
-        (Transfer::Pq | Transfer::Hlg, None) => 0,
+        // No tone map: an HDR project keeps BT.2100 light.
+        (Transfer::Pq, None) => 5,
+        (Transfer::Hlg, None) => 6,
+        (camera, _) => pm_color::camera_log::shader_curve(camera).expect("a camera log curve"),
     };
     // The source's primaries to Rec.709 in linear light: after the tone
     // map for HDR, after the transfer for SDR.
@@ -778,7 +827,8 @@ fn source_uniform(
         ),
     }
     .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-    let convert_primaries = tone.is_none()
+    let hdr_signal = matches!(transfer, 5 | 6);
+    let convert_primaries = !hdr_signal
         && (chromaticities.is_some()
             || color.primaries != Primaries::Bt709 && color.primaries != Primaries::Unspecified);
     let identity = transfer == 0 && working == WorkingEncoding::Standard && !convert_primaries;
@@ -811,7 +861,7 @@ fn source_uniform(
                 0.0
             },
             color.power.unwrap_or(1.0),
-            0.0,
+            if tone.is_none() { 1.0 } else { 0.0 },
         ],
         ..Default::default()
     };
@@ -963,6 +1013,8 @@ struct ImageKey {
     reading: String,
     /// Converted textures hold working values: linear light differs.
     linear: bool,
+    /// HDR light kept (an HDR project) rather than tone mapped.
+    hdr_light: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -976,6 +1028,7 @@ struct FrameKey {
     /// The interpretation the frame was converted with (a digest).
     reading: u64,
     linear: bool,
+    hdr_light: bool,
 }
 
 /// The frame cache of a renderer without a lease share: export jobs,
@@ -1021,6 +1074,9 @@ pub struct MediaCache {
     orient: Option<Orient>,
     /// Bytes of converted textures held (stills and frames).
     pub bytes: u64,
+    /// The render's project keeps BT.2100 light: PQ and HLG sources are not
+    /// tone mapped at input ([`pm_protocol::color::ColorMode::Hdr`]).
+    pub(crate) hdr_light: bool,
 }
 
 /// A media failure while preparing a frame.
@@ -1059,6 +1115,7 @@ impl MediaCache {
             deinterlacer: None,
             orient: None,
             bytes: 0,
+            hdr_light: false,
         }
     }
 
@@ -1095,6 +1152,7 @@ impl MediaCache {
             precision: precision as u8,
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
+            hdr_light: self.hdr_light,
         };
         if let Some(t) = self.images.get(&key) {
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
@@ -1111,8 +1169,11 @@ impl MediaCache {
         let interp = interpret.unwrap_or(&none);
         probe_interpreted_image(path, interp).map_err(issue)?;
         let mut still = pm_media::image::read(path, &self.pool).map_err(failed)?;
-        let read = interpreted_image_color(&still, interp).map_err(issue)?;
-        let deep = still.float || still.bit_depth > 8 || read.color.tone_map.is_some();
+        let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
+        if self.hdr_light {
+            read.color.tone_map = None;
+        }
+        let deep = still.float || still.bit_depth > 8 || extended_light(read.color.transfer);
         if let Some(alpha) = read.colorsync {
             if still.frame.format.layout != pm_media::frame::Layout::Rgba {
                 still = packed(&still, &read.color, &self.pool).map_err(MediaFailure::Failed)?;
@@ -1186,7 +1247,10 @@ impl MediaCache {
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images.retain(|k, _| {
-            k.path != key.path || k.precision != key.precision || k.linear != key.linear
+            k.path != key.path
+                || k.precision != key.precision
+                || k.linear != key.linear
+                || k.hdr_light != key.hdr_light
         });
         self.images.insert(key, target.clone());
         self.recount();
@@ -1355,7 +1419,7 @@ impl MediaCache {
         // What the engine cannot draw at all fails as composition would.
         video_drawable(&source, &Interpretation::default())
             .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
-        if video_supported(&source).is_err() || !presentable(&source) {
+        if needs_engine_conversion(&source) || !presentable(&source) {
             return Ok(None);
         }
         let frame = source
@@ -1393,12 +1457,8 @@ impl MediaCache {
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
-        match interpret {
-            Some(i) => video_drawable(&src, i),
-            None => video_supported(&src),
-        }
-        .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
         let interp = interpret.unwrap_or(&none);
+        video_drawable(&src, interp).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
         let v = src
             .probe
             .video
@@ -1428,6 +1488,7 @@ impl MediaCache {
             export,
             reading: reading_key,
             linear: working == WorkingEncoding::LinearLight,
+            hdr_light: self.hdr_light,
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some((t, _)) = self.frames.get(&key_of(n)) {
@@ -1492,11 +1553,12 @@ impl MediaCache {
             override_color,
             frame.format.has_alpha(),
             sequence,
+            self.hdr_light,
         );
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let format = video_storage(precision, frame.format.bits, color.tone_map.is_some());
+        let format = video_storage(precision, frame.format.bits, extended_light(color.transfer));
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
         // A converted frame retired by an earlier render (its reads are
         // submitted) is overwritten instead of allocating another.
@@ -1598,7 +1660,8 @@ impl MediaCache {
             let keep = k.path != key.path
                 || k.precision != key.precision
                 || k.export != key.export
-                || k.linear != key.linear;
+                || k.linear != key.linear
+                || k.hdr_light != key.hdr_light;
             if !keep {
                 retired.push(t.clone());
             }

@@ -6,4 +6,9 @@ import type { Precision } from "./Precision";
 /**
  * The project's `color` field as the engine sees it (Settings › Project › Color).
  */
-export type ProjectColor = { mode: ColorMode, linearBlending: boolean, precision: Precision, blendDomain: BlendDomain, };
+export type ProjectColor = { mode: ColorMode, linearBlending: boolean, precision: Precision, blendDomain: BlendDomain, 
+/**
+ * An HDR project's mastering display peak in cd/m²: the light its HDR
+ * delivery and viewer hold before BT.2390 rolls highlights off.
+ */
+masteringPeak?: number, };

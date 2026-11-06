@@ -1568,12 +1568,12 @@ unsafe fn convert(
     let at = |i: usize| unsafe { base.add(i * stride) };
     unsafe {
         match fmt {
-            ff::AV_SAMPLE_FMT_U8 | ff::AV_SAMPLE_FMT_U8P => out.extend(
-                (skip..n).map(|i| (*at(i) as f32 - 128.0) * U8_SCALE),
+            ff::AV_SAMPLE_FMT_U8 | ff::AV_SAMPLE_FMT_U8P => {
+                out.extend((skip..n).map(|i| (*at(i) as f32 - 128.0) * U8_SCALE))
+            }
+            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => out.extend(
+                (skip..n).map(|i| f32::from((at(i) as *const i16).read_unaligned()) * S16_SCALE),
             ),
-            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => out.extend((skip..n).map(|i| {
-                f32::from((at(i) as *const i16).read_unaligned()) * S16_SCALE
-            })),
             ff::AV_SAMPLE_FMT_S32 | ff::AV_SAMPLE_FMT_S32P => out
                 .extend((skip..n).map(|i| {
                     ((at(i) as *const i32).read_unaligned() as f64 / 2147483648.0) as f32

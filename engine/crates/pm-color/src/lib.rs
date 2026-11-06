@@ -12,7 +12,8 @@
 //! | [`chroma`] | Chroma siting, siting-aware upsampling (exact at co-sited samples), output decimation, pass-through eligibility |
 //! | [`alpha`] | Premultiplication rules for sources and outputs |
 //! | [`primaries`] | Linear-light conversion between primaries (P3 stills, the P3 viewer canvas), no clipping |
-//! | [`tonemap`] | HDR input tone mapping in Standard projects: BT.2446 Method A from PQ and HLG |
+//! | [`tonemap`] | BT.2100 light and the BT.2390 EETF, applied where the target cannot hold HDR |
+//! | [`camera_log`] | Apple Log, S-Log3, V-Log, LogC3 and LogC4 from the vendors' transforms |
 //! | [`linear`] | Linear-light helpers for linear blending (Phase 3a): input and output transforms and the HDR-safe blend formulas |
 //! | [`dither`] | The deterministic blue-noise RPDF dither of section 17 |
 //! | [`gamut`] | CSS Color 4 sRGB gamut mapping at an explicit SDR boundary |
@@ -24,6 +25,7 @@
 //! same inputs give the same bits on every target (section 2, determinism).
 
 pub mod alpha;
+pub mod camera_log;
 pub mod chroma;
 pub mod cicp;
 pub mod dither;

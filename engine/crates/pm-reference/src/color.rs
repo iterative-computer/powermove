@@ -371,12 +371,56 @@ impl Primaries {
         white: D65,
     };
 
+    /// 11: SMPTE RP 431-2, DCI white.
+    pub const DCI_P3: Primaries = Primaries {
+        r: [0.680, 0.320],
+        g: [0.265, 0.690],
+        b: [0.150, 0.060],
+        white: [0.314, 0.351],
+    };
+    /// Sony S-Gamut3 (Technical Summary for S-Gamut3.Cine/S-Log3).
+    pub const S_GAMUT3: Primaries = Primaries {
+        r: [0.730, 0.280],
+        g: [0.140, 0.855],
+        b: [0.100, -0.050],
+        white: D65,
+    };
+    /// Sony S-Gamut3.Cine (same document).
+    pub const S_GAMUT3_CINE: Primaries = Primaries {
+        r: [0.766, 0.275],
+        g: [0.225, 0.800],
+        b: [0.089, -0.087],
+        white: D65,
+    };
+    /// Panasonic V-Gamut (V-Log/V-Gamut Reference Manual).
+    pub const V_GAMUT: Primaries = Primaries {
+        r: [0.730, 0.280],
+        g: [0.165, 0.840],
+        b: [0.100, -0.030],
+        white: D65,
+    };
+    /// ARRI Wide Gamut 3.
+    pub const AWG3: Primaries = Primaries {
+        r: [0.6840, 0.3130],
+        g: [0.2210, 0.8480],
+        b: [0.0861, -0.1020],
+        white: D65,
+    };
+    /// ARRI Wide Gamut 4.
+    pub const AWG4: Primaries = Primaries {
+        r: [0.7347, 0.2653],
+        g: [0.1424, 0.8576],
+        b: [0.0991, -0.0308],
+        white: D65,
+    };
+
     pub fn from_h273(code: u8) -> Option<Primaries> {
         Some(match code {
             1 => Primaries::BT709,
             5 => Primaries::BT601_625,
             6 | 7 => Primaries::BT601_525,
             9 => Primaries::BT2020,
+            11 => Primaries::DCI_P3,
             12 => Primaries::P3_D65,
             _ => return None,
         })

@@ -84,11 +84,11 @@ fn log_encode(linear: f64, decades: f64) -> f64 {
     }
 }
 
-/// Why a transfer cannot be read into a Standard project yet.
+/// Why a transfer has no one-channel curve here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferError {
-    /// PQ and HLG sources need the BT.2446 Method A tone mapping (Phase 3b,
-    /// contract 4 open question 1); they are not read here.
+    /// PQ and HLG are read as BT.2100 light in [`crate::tonemap`]: HLG's
+    /// OOTF needs all three channels and PQ's light is absolute.
     NeedsToneMapping(Transfer),
 }
 
@@ -96,7 +96,7 @@ impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TransferError::NeedsToneMapping(t) => {
-                write!(f, "{t:?} sources need HDR tone mapping (Phase 3b)")
+                write!(f, "{t:?} is read as BT.2100 light")
             }
         }
     }
@@ -115,6 +115,7 @@ pub fn to_linear(transfer: Transfer, encoded: f64) -> Result<f64, TransferError>
         Transfer::Log100 => log_decode(encoded, 2.0),
         Transfer::Log316 => log_decode(encoded, 2.5),
         Transfer::Pq | Transfer::Hlg => return Err(TransferError::NeedsToneMapping(transfer)),
+        camera => crate::camera_log::decode(camera, encoded).expect("a camera log curve"),
     })
 }
 
@@ -129,6 +130,7 @@ pub fn from_linear(transfer: Transfer, linear: f64) -> Result<f64, TransferError
         Transfer::Log100 => log_encode(linear, 2.0),
         Transfer::Log316 => log_encode(linear, 2.5),
         Transfer::Pq | Transfer::Hlg => return Err(TransferError::NeedsToneMapping(transfer)),
+        camera => crate::camera_log::encode(camera, linear).expect("a camera log curve"),
     })
 }
 

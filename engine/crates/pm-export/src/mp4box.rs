@@ -109,6 +109,10 @@ pub struct Visual {
     pub layered_hevc: bool,
     /// The `almo` box's payload (HEVC with alpha: the alpha mode).
     pub alpha_mode: Option<Vec<u8>>,
+    /// `mdcv`: the mastering display colour volume.
+    pub mdcv: Option<[u8; 24]>,
+    /// `clli`: the content light level.
+    pub clli: Option<[u8; 4]>,
     /// The sample entry's child boxes, in order (diagnostics).
     pub boxes: Vec<[u8; 4]>,
 }
@@ -495,6 +499,8 @@ fn parse_visual(d: &[u8], e: BoxRef) -> Option<Visual> {
                 }
             }
             b"gama" => v.gamma = be32(d, k.start).map(|g| g as f64 / 65536.0),
+            b"mdcv" => v.mdcv = d.get(k.start..k.end)?.try_into().ok(),
+            b"clli" => v.clli = d.get(k.start..k.end)?.try_into().ok(),
             b"hvcC" => {
                 let b = |o: usize| d.get(k.start + o).copied();
                 v.hevc = Some(Hevc {

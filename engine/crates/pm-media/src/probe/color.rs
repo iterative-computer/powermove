@@ -245,6 +245,10 @@ pub fn interpret(
         Some(6) | Some(7) => Primaries::Bt601_525,
         Some(9) => Primaries::Bt2020,
         Some(12) => Primaries::DisplayP3,
+        Some(4) => Primaries::Bt470M,
+        Some(8) => Primaries::GenericFilm,
+        Some(11) => Primaries::DciP3,
+        Some(22) => Primaries::Ebu3213,
         Some(_) => Primaries::Unspecified,
         None => {
             let p = match table.primaries {

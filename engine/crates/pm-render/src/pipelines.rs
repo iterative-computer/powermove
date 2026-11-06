@@ -518,7 +518,11 @@ impl Pipelines {
             let code = format!(
                 "{}\n{}\n{}",
                 pm_color::wgsl::COLOR,
-                pm_color::tonemap::wgsl(),
+                format!(
+                    "{}{}",
+                    pm_color::tonemap::wgsl(),
+                    pm_color::camera_log::wgsl()
+                ),
                 include_str!("shaders/source.wgsl").replace("OUT_FORMAT", name)
             );
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
