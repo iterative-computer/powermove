@@ -130,14 +130,15 @@ headless kernel refuses it (`Text layout needs fonts that are not loaded`).
 | **Effects** `EffectCommand` | | |
 | `Add(AddEffect)` | `add_effect`, effect paste | done |
 | `Remove`, `Set { patch: EffectPatch }` | `remove_effect`, `set_effect` | done |
-| `Duplicate`, `Reset` | effect stack | done |
+| `Duplicate` | effect stack | done |
 | `SetTransition` | `set_transition` | done |
 | **Masks and pen** `MaskCommand` | | |
 | `Add`, `Remove`, `Set`, `Reorder` | mask rows, `PM.mkMask` | done |
 | `AddPath`, `AddVertex`, `DeleteVertex`, `ClosePath` | pen tool (vertex drags are `PropertyCommand::Set` on `g.<path>.v.<vertex>.x`) | done |
 | **Text** `TextCommand` | | |
 | `SetText`, `SetBox` | in-place editor commit, paragraph resize | done |
-| `Split`, `AddAnimator`, `RemoveAnimator`, `SetStyleRange` | Split Text, animators, style ranges | done |
+| `Split`, `AddAnimator`, `RemoveAnimator` | Split Text, Text Animators section | done |
+| `SetStyleRange` | none yet: no UI or MCP route reaches it | kernel only |
 | **Content** `ContentCommand::Set` | `set_content` (not extension/captions/shader code) | done |
 | **Markers** `MarkerCommand` | | |
 | `Add`, `Remove` (index), `RemoveById`, `Move`, `Rename` | `add_marker`, `remove_marker`, ruler menu | done |
@@ -152,7 +153,7 @@ headless kernel refuses it (`Text layout needs fonts that are not loaded`).
 | `CreateSection`, `UpdateSection` | `create_section`, `update_section` | done |
 | **Transform** `TransformCommand` | | |
 | `Nudge` | arrow keys (parent space) | done |
-| `Align`, `Distribute` | alignment strip (`pm_edit::align`; not text layers yet: no fonts in the core) | done |
+| `Align`, `Distribute` | alignment strip (`pm_edit::align`; text layers measure through the `KernelConfig.text` host) | done |
 | `CenterAnchor` | Cmd+Option+Home | done |
 
 Copy is not an edit (the clipboard lane serializes `snapshot()` layers);

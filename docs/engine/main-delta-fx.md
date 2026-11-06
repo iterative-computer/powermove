@@ -266,8 +266,8 @@ pixel oracles. Full workspace, strict and performance gates remain separate.
 
 ## E10 saved color conversion qualification
 
-Closed by `35ce14350`; the named `pm-render --test advanced_effects`
-set passes on offscreen Metal. These tests retain saved definitions, use
+Partial, as in [main-delta](../native/main-delta.md): first recorded at
+`35ce14350`; the named `pm-render --test advanced_effects` set passes on offscreen Metal. These tests retain saved definitions, use
 independent f64 conversion equations, and preserve signed working values.
 
 | Named test in `advanced/color_contract.rs` | Clause proved |
@@ -281,7 +281,8 @@ independent f64 conversion equations, and preserve signed working values.
 
 ## E05 saved color family qualification
 
-Closed by renderer `35ce14350` and application `b1bb0d036`. The inventory is
+Partial, as in [main-delta](../native/main-delta.md): first recorded at renderer
+`35ce14350` and application `b1bb0d036`. The inventory is
 fourteen saved programs: Tint, Channel Mixer, Invert v1/v2, Levels v1/v2,
 Levels Individual, Threshold, Shift Channels, Exposure, Tritone, Color Balance
 HLS, Brightness & Contrast and Black & White. No old program is replaced.
@@ -300,13 +301,16 @@ physical-display or whole-application capability flags.
 
 ## E06 saved spatial family qualification
 
-Closed by `a5c080839`. All six saved programs retain their own definitions:
+Partial, as in [main-delta](../native/main-delta.md): renderer and panel-model
+evidence only, first recorded at `a5c080839`. All six saved programs retain their own definitions:
 Gaussian Blur v1/v2, Mosaic v1/v2, Unsharp Mask and Find Edges. Cropped
 composition-space neighbor effects keep a logical canvas and a padded ROI;
 fixed support, padding factors and output/layer scale follow the saved metadata.
 Private multi-level sampling views never enter the single-level attachment pool.
-The existing bounded output dimensions still apply to logical canvases; local
-source chains and per-pixel effects keep their separate bounded viewport paths.
+A logical canvas is at most the largest output: beyond it, which covers every
+viewer crop, the canvas is a window of that size around the viewport, and
+padding that outreaches it stops at its edge. Local source chains and per-pixel
+effects keep their separate bounded viewport paths.
 
 | Named `spatial_contract` test | Clause proved |
 | --- | --- |
@@ -314,10 +318,12 @@ source chains and per-pixel effects keep their separate bounded viewport paths.
 | `e06_all_saved_spatial_revisions_depth_crop_zoom_and_source_contracts` | Exact cropped pixels and zoomed crops at every depth and source boundary; historical Blur/Mosaic without a source-processing declaration refuse that unsupported request instead of substituting a later revision. |
 | `e06_all_saved_spatial_revisions_viewer_final_and_decoded_exports` | Every saved program and depth through JSON reload, viewer/final-export equality and exact independently decoded PNG8/PNG16 output. |
 | `e06_wide_saved_gaussian_and_mosaic_kernels_keep_hdr_alpha_and_crop_zoom` | Both Gaussian revisions at wide radius, all current directional modes, both Mosaic revisions and non-square current grids/sharp mode retain HDR/alpha through exact crops and zoom. |
+| `e06_a_viewer_crop_beyond_the_largest_output_samples_outside_the_viewport` | Crops beyond the largest output match the same picture drawn whole in a smaller composition, beside the owner and at both composition corners. `pm-node --test compose` runs the Electron viewer path. |
 
 ## E07 saved shadow and ramp qualification
 
-Closed by renderer `a5c080839` and application `b1bb0d036`. No historical
+Partial, as in [main-delta](../native/main-delta.md): first recorded at renderer
+`a5c080839` and application `b1bb0d036`. No historical
 shader or source-processing contract is upgraded implicitly. Main Gradient v1
 uses explicit main-file provenance; tagged Gradient retains its separate program.
 
@@ -333,9 +339,10 @@ uses explicit main-file provenance; tagged Gradient retains its separate program
 | `pm-builtins::tests::effect_delta::e07_application_saved_ramp_v1_keeps_legacy_controls_and_reset_defaults` | Absent/null/explicit saved v1 keeps historical controls/defaults and version fields across Reset and Undo. |
 | `pm-builtins::tests::effect_delta::e07_application_ramp_swap_and_undo_render_the_published_project_offscreen` | The actual published project renders through the native export path after the panel action; Undo restores every rendered pixel exactly. |
 
-The first four closed rows are E10, E07, E06 and E05. All other rows retain
-their stated implementation or external-evidence boundaries; no capability,
-tolerance or performance baseline is promoted by these closures.
+E10, E07, E06 and E05 are Partial: these tests are renderer and panel-model
+evidence, not product closure. All other rows retain their stated implementation
+or external-evidence boundaries; no capability, tolerance or performance
+baseline is promoted by them.
 
 ## Production registry and consumers (fx3)
 
