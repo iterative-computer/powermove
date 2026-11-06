@@ -29,6 +29,7 @@ pub trait RealmEvents: Send + Sync + 'static {
     fn toast(&self, _text: &str, _options: &Value) {}
     /// A question for the main thread; the answer returns through the inbox.
     fn request(&self, _request: Value) {}
+    fn set_enabled(&self, _id: &str, _enabled: bool) {}
     fn contributions(&self, _value: Value) {}
     fn dom_ready(&self) {}
     fn presentation(&self) {}
@@ -868,6 +869,13 @@ impl EngineProxy for NativeHost {
             "storage.set" => {
                 let key = input["key"].as_str().ok_or(Error::Invalid("storage key"))?;
                 self.kernel.lock().unwrap().store(key, &input["value"])?;
+                return Ok(Value::Null);
+            }
+            "extension.enabled" => {
+                self.events.set_enabled(
+                    input["id"].as_str().unwrap_or_default(),
+                    input["enabled"] == true,
+                );
                 return Ok(Value::Null);
             }
             "extensions.ready" => {

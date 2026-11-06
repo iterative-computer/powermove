@@ -175,6 +175,9 @@ impl RealmEvents for Arc<Events> {
     fn request(&self, request: Value) {
         self.shared.update(|p| p.requests.push(request));
     }
+    fn set_enabled(&self, id: &str, enabled: bool) {
+        let _ = self.inbox.send(Input::Enabled(id.to_owned(), enabled));
+    }
     fn contributions(&self, mut value: Value) {
         drop(self.kernel.state_transaction(StateTransaction {
             expected_revision: None,
@@ -1324,6 +1327,8 @@ mod tests {
                    api.menus.contribute('panel:context',(ctx)=>[{label:'For '+ctx.panelId,run(){rename('tab')}}]);
                    api.commands.register({id:'synthetic-ui.round',label:'Round',run(){rename('round '+round)}});
                    api.commands.register({id:'synthetic-ui.open',label:'Open',run(){api.panels.open('synthetic-ui.panel')}});
+                   api.commands.register({id:'synthetic-ui.icon',label:'Icon',run(){rename(api.ui.icon('plus').slice(0,4)+api.extensions.list().length)}});
+                   api.commands.register({id:'synthetic-ui.off',label:'Off',run(){api.extensions.setEnabled('synthetic-ui',false)}});
                    api.commands.register({id:'synthetic-ui.confirm',label:'Confirm',run(){
                      api.ui.confirm('Sure?','Body').then((yes)=>rename(yes?'confirmed':'declined'))}});
                    api.commands.register({id:'synthetic-ui.menu',label:'Menu',run(){
@@ -1399,6 +1404,8 @@ mod tests {
         });
         fixture.host.run_command("synthetic-ui.round", json!([]));
         named("round 1");
+        fixture.host.run_command("synthetic-ui.icon", json!([]));
+        named("<svg1");
         let mut later = ExtensionHost::start(HostConfig {
             kernel: fixture.kernel.clone(),
             project: "window".into(),
@@ -1415,6 +1422,10 @@ mod tests {
         }
         later.run_command("synthetic-ui.round", json!([]));
         named("round 2");
+        later.run_command("synthetic-ui.off", json!([]));
+        fixture.until("disabled", |_| {
+            !fixture.kernel.state().extensions["synthetic-ui"].enabled
+        });
         later.close();
         let _ = later.worker.take().map(thread::JoinHandle::join);
     }

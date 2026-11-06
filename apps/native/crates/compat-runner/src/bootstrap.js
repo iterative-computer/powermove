@@ -52,6 +52,7 @@ globalThis.__compat = {
     // AppKit answers on the main thread, so the realm asks and carries on.
     const asks = new Map();
     let asked = 0;
+    let openMenu = 0;
     const ask = (request) =>
       new Promise((resolve) => {
         const token = ++asked;
@@ -81,7 +82,11 @@ globalThis.__compat = {
       const runs = [];
       const wire = wireMenu((await items) ?? [], runs);
       if (!wire.length && request.key === undefined) return;
-      const choice = await ask({ kind: "menu", items: wire, ...request });
+      // AppKit shows one menu; the last one's closures go when the next opens.
+      this.answer(openMenu, null);
+      const answer = ask({ kind: "menu", items: wire, ...request });
+      openMenu = asked;
+      const choice = await answer;
       if (choice !== null && choice !== undefined) await runs[choice]?.();
     };
     this.gatherMenu = (location, context, key) => {
@@ -104,6 +109,13 @@ globalThis.__compat = {
       call("ui.request", { kind: "panel", id, open });
     const capabilities = {
       ui: { controls: PowermoveCompat.controls },
+      extensions: {
+        list: () => this.loader.records(),
+        setEnabled: async (id, enabled) => {
+          call("extension.enabled", { id, enabled: !!enabled });
+        },
+        reload: (id) => this.loader.reload(id),
+      },
       assets: {
         get: (id) => this.realm.PM.proj.assets?.[id],
       },

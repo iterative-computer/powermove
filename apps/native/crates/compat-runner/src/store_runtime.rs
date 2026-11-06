@@ -915,8 +915,7 @@ mod tests {
         assert_eq!(runner.dispose().unwrap(), true);
         assert_eq!(runner.dispose().unwrap(), true);
         drop(runner);
-        let replacement =
-            StoreCompatRunner::new(&executable, host.clone(), bundle, &init).unwrap();
+        let replacement = StoreCompatRunner::new(&executable, host.clone(), bundle, &init).unwrap();
         assert_ne!(replacement.status().pid, pid);
         assert_eq!(
             replacement

@@ -164,13 +164,16 @@ impl Extensions {
 }
 impl Controller {
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
+        let mut shell = self.host.borrow_mut();
+        shell.native_present = None;
+        shell.native_accessibility = vec![];
+        drop(shell);
+        self.extensions = Extensions::default();
         let Some(session) = &self.session else {
-            self.extensions = Extensions::default();
             layout::set_contributed_panels([]);
             return;
         };
         let project = session.project.clone();
-        self.extensions = Extensions::default();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
         let host = ExtensionHost::start(HostConfig {
@@ -420,7 +423,7 @@ impl Controller {
         // it comes back if something registers the id again.
         let shell = self.host.borrow();
         for id in self.extensions.known_panels.difference(&known) {
-            if self.extensions.open_panels.contains(id) {
+            if self.extensions.open_panels.contains(id) || self.extensions.panels.contains_key(id) {
                 self.extensions.suspended.insert(id.clone());
                 shell.send_command(&format!("panel:close:{id}"), vec![]);
             }
