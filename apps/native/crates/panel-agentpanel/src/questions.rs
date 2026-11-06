@@ -46,6 +46,10 @@ impl QuestionDraft {
         self.typed.insert(id.into(), text);
         Ok(())
     }
+    /// Options picked so far. Typed text stays out, because it may be secret.
+    pub fn chosen(&self) -> &Answers {
+        &self.chosen
+    }
     pub fn answers(&self, step: &Value) -> Answers {
         step["questions"]
             .as_array()

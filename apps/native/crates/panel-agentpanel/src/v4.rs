@@ -79,7 +79,7 @@ impl Window {
             let chosen = session
                 .questions
                 .get(command_id)
-                .map_or_else(Default::default, |draft| draft.answers(value));
+                .map_or_else(Default::default, |draft| draft.chosen().clone());
             items.push(json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
                 "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))}));
         }
