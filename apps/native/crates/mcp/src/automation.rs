@@ -2,7 +2,7 @@ use crate::{Error, Result, json_value, model};
 use pm_kernel::session::{SessionHandle, SessionSource, ShellCall, ShellReply};
 use pm_kernel::{
     Ack, ActorHistoryMark, Call, Caller, Command, Kernel, KernelConfig, KernelEvent, KernelHandle,
-    Origin, Published, Reply, Request, WriteBody,
+    Origin, Published, Reply, Request, Selection, Snapshot, WriteBody, state::StateSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -87,10 +87,40 @@ pub trait SurfaceHook: Send + Sync {
     fn drive(&self, panel_id: &str, element_id: &str, action: &Value) -> Result<Value>;
     fn capture(&self, panel_id: &str) -> Result<Value>;
 }
-/// Single owner headless host. Call on a dedicated worker; do not put this
-/// behind a mutex that a UI thread waits for. It never discovers a profile.
+/// Either the headless binary's own kernel or the running app's actor.
+enum Backend {
+    Owned(Kernel),
+    App(Arc<crate::app_host::Host>),
+}
+/// One project's published state, read the same way from either backend.
+pub struct ProjectView {
+    pub document: u64,
+    pub revision: u64,
+    pub snapshot: Snapshot,
+    pub selection: Selection,
+    pub workspace: pm_model::Value,
+    pub path: Option<PathBuf>,
+}
+pub enum StateRead<'a> {
+    Owned(&'a StateSnapshot),
+    Shared(Arc<StateSnapshot>),
+}
+impl std::ops::Deref for StateRead<'_> {
+    type Target = StateSnapshot;
+    fn deref(&self) -> &StateSnapshot {
+        match self {
+            Self::Owned(state) => state,
+            Self::Shared(state) => state,
+        }
+    }
+}
+/// Single owner host. Call on a dedicated worker; do not put this behind a mutex
+/// that a UI thread waits for. It never discovers a profile.
 pub struct Automation {
-    kernel: Kernel,
+    backend: Backend,
+    /// Document bound to the caller's session, so a queued request cannot land
+    /// in a replacement document that reuses the project id.
+    pub document_fence: Option<u64>,
     pub profile: PathBuf,
     pub exports: PathBuf,
     pub active: Option<String>,
@@ -132,8 +162,17 @@ impl Automation {
             ShellReply::Library(pm_kernel::locks::OpenDecision::Writable) => {}
             other => return Err(Error::kernel(other)),
         }
-        Ok(Self {
-            kernel,
+        Ok(Self::with_backend(Backend::Owned(kernel), profile, exports))
+    }
+    /// Attach to the running app's kernel actor and session slot.
+    pub fn attached(host: Arc<crate::app_host::Host>, exports: PathBuf) -> Self {
+        let profile = host.profile.clone();
+        Self::with_backend(Backend::App(host), profile, exports)
+    }
+    fn with_backend(backend: Backend, profile: PathBuf, exports: PathBuf) -> Self {
+        Self {
+            backend,
+            document_fence: None,
             profile,
             exports,
             active: None,
@@ -148,10 +187,77 @@ impl Automation {
             store_reads: None,
             extension_sources: None,
             creative: Arc::new(crate::creative::CreativeReader::default()),
-        })
+        }
     }
+    /// The owned kernel. Attached hosts go through the app's actor instead.
     pub fn kernel(&self) -> &Kernel {
-        &self.kernel
+        match &self.backend {
+            Backend::Owned(kernel) => kernel,
+            Backend::App(_) => panic!("Attached automation has no owned kernel"),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn kernel_mut(&mut self) -> &mut Kernel {
+        match &mut self.backend {
+            Backend::Owned(kernel) => kernel,
+            Backend::App(_) => panic!("Attached automation has no owned kernel"),
+        }
+    }
+    fn app(&self) -> Option<&Arc<crate::app_host::Host>> {
+        match &self.backend {
+            Backend::Owned(_) => None,
+            Backend::App(host) => Some(host),
+        }
+    }
+    pub fn active_project(&self) -> Option<String> {
+        match &self.backend {
+            Backend::Owned(_) => self.active.clone(),
+            Backend::App(host) => host.current().map(|session| session.project),
+        }
+    }
+    pub fn state(&self) -> StateRead<'_> {
+        match &self.backend {
+            Backend::Owned(kernel) => StateRead::Owned(kernel.state()),
+            Backend::App(host) => StateRead::Shared(host.kernel.state()),
+        }
+    }
+    pub fn view(&self, id: &str) -> Result<ProjectView> {
+        match &self.backend {
+            Backend::Owned(kernel) => {
+                let project = kernel
+                    .project(id)
+                    .ok_or_else(|| Error::invalid("Project is not open"))?;
+                let store = project.store();
+                Ok(ProjectView {
+                    document: store.doc_id(),
+                    revision: store.revision(),
+                    snapshot: store.snapshot(),
+                    selection: store.selection().clone(),
+                    workspace: project.workspace().clone(),
+                    path: store.path().map(std::path::Path::to_path_buf),
+                })
+            }
+            Backend::App(host) => {
+                let p = host
+                    .kernel
+                    .published(id)
+                    .ok_or_else(|| Error::invalid("Project is not open"))?;
+                Ok(ProjectView {
+                    document: p.snapshot.doc_id,
+                    revision: p.revision(),
+                    snapshot: p.snapshot.clone(),
+                    selection: p.selection.clone(),
+                    workspace: p.workspace.clone(),
+                    path: p.path.clone(),
+                })
+            }
+        }
+    }
+    fn shell(&mut self, call: ShellCall) -> Result<ShellReply> {
+        match &mut self.backend {
+            Backend::Owned(kernel) => kernel.shell(call).map_err(Error::kernel),
+            Backend::App(host) => host.shell(call),
+        }
     }
     pub fn subscribe(&mut self) -> mpsc::Receiver<AutomationEvent> {
         let (tx, rx) = mpsc::channel();
@@ -159,11 +265,7 @@ impl Automation {
         rx
     }
     fn emit(&mut self, id: &str, kind: &str) {
-        let revision = self
-            .kernel
-            .project(id)
-            .map(|p| p.store().revision())
-            .unwrap_or(0);
+        let revision = self.revision(id).unwrap_or(0);
         let event = AutomationEvent {
             project_id: id.into(),
             revision,
@@ -172,10 +274,11 @@ impl Automation {
         self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
     }
     pub fn revision(&self, id: &str) -> Result<u64> {
-        Ok(self.store(id)?.revision())
+        Ok(self.view(id)?.revision)
     }
+    /// The owned store, for headless harnesses. Production paths read `view`.
     pub fn store(&self, id: &str) -> Result<&pm_kernel::DocumentStore> {
-        self.kernel
+        self.kernel()
             .project(id)
             .map(|p| p.store())
             .ok_or_else(|| Error::invalid("Project is not open"))
@@ -183,24 +286,24 @@ impl Automation {
     /// The authored model stays in JavaScript's UTF-16 domain. File ingress,
     /// portable export and snapshots must not round-trip it through serde JSON.
     pub fn read_document_model(&self, id: &str) -> Result<pm_model::Value> {
-        let store = self.store(id)?;
+        let view = self.view(id)?;
         let mut project = pm_model::canonical::realize_project(
-            store
-                .snapshot()
+            view.snapshot
                 .document
                 .to_value()
                 .ok_or_else(|| Error::invalid("Missing document"))?,
         );
         if let Some(object) = project.as_object_mut() {
-            object.insert("revision", pm_model::Value::Number(store.revision() as f64));
+            object.insert("revision", pm_model::Value::Number(view.revision as f64));
         }
         Ok(project)
     }
     fn project_identity(&self, id: &str) -> Result<Value> {
         // Only the response metadata needs a Unicode projection. An unrelated
         // opaque authored field may contain any JavaScript UTF-16 code units.
-        let name = self
-            .store(id)?
+        let view = self.view(id)?;
+        let name = view
+            .snapshot
             .root()
             .and_then(|root| root.get("name"))
             .and_then(|node| match node.kind() {
@@ -215,10 +318,10 @@ impl Automation {
         args: &Value,
         writer: u32,
     ) -> Result<pm_model::Value> {
-        let store = self.store(id)?;
-        let document = store.doc_id();
+        let view = self.view(id)?;
+        let document = view.document;
         let prepared = crate::memory_admission::prepare(
-            store
+            view.snapshot
                 .root()
                 .ok_or_else(|| Error::invalid("Missing document"))?,
             args,
@@ -237,24 +340,22 @@ impl Automation {
     }
 
     pub fn read_document(&self, id: &str) -> Result<Value> {
-        let store = self.store(id)?;
+        let view = self.view(id)?;
         let mut project = json_value(&pm_model::canonical::realize_project(
-            store
-                .snapshot()
+            view.snapshot
                 .document
                 .to_value()
                 .ok_or_else(|| Error::invalid("Missing document"))?,
         ));
-        project["revision"] = json!(store.revision());
+        project["revision"] = json!(view.revision);
         Ok(project)
     }
     pub fn selection(&self, id: &str) -> Result<Value> {
-        let s = self.store(id)?.selection();
+        let s = self.view(id)?.selection;
         Ok(json!({"layers":s.layers(),"keys":s.keys(),"chan":s.channel()}))
     }
     pub fn playhead(&self, id: &str) -> f64 {
-        self.kernel
-            .state()
+        self.state()
             .ui
             .get(id)
             .and_then(|ui| ui.transport.get("time"))
@@ -307,11 +408,28 @@ impl Automation {
             ),
         )
     }
-    fn call(&mut self, id: &str, request: Request) -> Result<Ack> {
-        let handled = self.kernel.handle(id, request).map_err(Error::kernel)?;
-        let ack = handled
-            .reply
-            .ok_or_else(|| Error::unavailable("external history continuation runtime"))?;
+    fn call(&mut self, id: &str, mut request: Request) -> Result<Ack> {
+        let ack = match &mut self.backend {
+            Backend::Owned(kernel) => kernel
+                .handle(id, request)
+                .map_err(Error::kernel)?
+                .reply
+                .ok_or_else(|| Error::unavailable("external history continuation runtime"))?,
+            Backend::App(host) => {
+                let document = self
+                    .document_fence
+                    .or_else(|| host.kernel.published(id).map(|p| p.snapshot.doc_id))
+                    .ok_or_else(|| {
+                        Error::conflict("Project closed before the request was admitted")
+                    })?;
+                request = request.with_document(document);
+                host.kernel
+                    .call(id, request)
+                    .wait()
+                    .ok_or_else(crate::app_host::stopped)?
+                    .map_err(Error::kernel)?
+            }
+        };
         if let Reply::Throw(e) = &ack.reply {
             return Err(Error::kernel(e));
         }
@@ -403,7 +521,7 @@ impl Automation {
                 }
             }
         }
-        let document = self.store(id)?.doc_id();
+        let document = self.view(id)?.document;
         let ack = self
             .call(
                 id,
@@ -440,15 +558,11 @@ impl Automation {
     }
     /// The frozen layout digest reads saved data, never live surface controls.
     pub fn panel_layout(&self, project: Option<&str>) -> Result<Value> {
-        let state = self.kernel.state();
+        let state = self.state();
         let saved = project
-            .map(|id| {
-                self.kernel
-                    .project(id)
-                    .ok_or_else(|| Error::invalid("Project is not open"))
-            })
+            .map(|id| self.view(id))
             .transpose()?
-            .map(|p| json_value(p.workspace()));
+            .map(|view| json_value(&view.workspace));
         let named = state
             .settings
             .get("workspaces")
@@ -521,17 +635,13 @@ impl Automation {
             .drive(panel, element, action)
     }
     pub fn list_projects(&mut self) -> Result<Value> {
-        let rows = match self
-            .kernel
-            .shell(ShellCall::Recent)
-            .map_err(Error::kernel)?
-        {
+        let rows = match self.shell(ShellCall::Recent)? {
             ShellReply::Recent(rows) => {
                 rows.into_iter().map(|v| json_value(&v)).collect::<Vec<_>>()
             }
             other => return Err(Error::kernel(other)),
         };
-        Ok(json!({"currentProjectId":self.active,"projects":rows}))
+        Ok(json!({"currentProjectId":self.active_project(),"projects":rows}))
     }
     pub fn create_project(&mut self, args: &Value) -> Result<Value> {
         let id = pm_kernel::new_id("P");
@@ -544,15 +654,16 @@ impl Automation {
         let fps = args["fps"].as_f64().unwrap_or(30.0);
         let dur = args["duration"].as_f64().unwrap_or(10.0);
         let value = json!({"id":id,"compId":pm_kernel::new_id("C"),"compName":"Main","comps":{},"name":name,"w":w,"h":h,"fps":fps,"dur":dur,"work":[0,dur],"bg":"#000000","layers":[],"assets":{},"params":{},"markers":[]});
-        let reply = self
-            .kernel
-            .shell(ShellCall::Open {
+        if let Some(host) = self.app() {
+            host.open(id.clone(), SessionSource::New(model(&value)))?;
+        } else {
+            let reply = self.shell(ShellCall::Open {
                 id: id.clone(),
                 source: SessionSource::New(model(&value)),
                 electron_profile: None,
-            })
-            .map_err(Error::kernel)?;
-        self.adopt(reply)?;
+            })?;
+            self.adopt(reply)?;
+        }
         self.save_library(&id)?;
         Ok(json!({"projectId":id,"name":name,"width":w,"height":h,"fps":fps,"duration":dur}))
     }
@@ -570,9 +681,7 @@ impl Automation {
                 if let Some(previous) = self.active.clone().filter(|previous| previous != &id)
                     && let Some(handle) = self.sessions.get(&previous).cloned()
                 {
-                    self.kernel
-                        .shell(ShellCall::Close(handle))
-                        .map_err(Error::kernel)?;
+                    self.shell(ShellCall::Close(handle))?;
                     self.sessions.remove(&previous);
                     self.emit(&previous, "closed");
                 }
@@ -592,18 +701,27 @@ impl Automation {
         {
             return Err(Error::invalid("Invalid projectId"));
         }
-        if !self.sessions.contains_key(id) {
-            let reply = self
-                .kernel
-                .shell(ShellCall::PrepareOpen {
-                    id: id.into(),
-                    source: SessionSource::Library {
+        if let Some(host) = self.app() {
+            if host.current().is_none_or(|session| session.project != id) {
+                return host.open(
+                    id.into(),
+                    SessionSource::Library {
                         profile: self.profile.clone(),
                         project: id.into(),
                     },
-                    electron_profile: None,
-                })
-                .map_err(Error::kernel)?;
+                );
+            }
+            return self.project_identity(id);
+        }
+        if !self.sessions.contains_key(id) {
+            let reply = self.shell(ShellCall::PrepareOpen {
+                id: id.into(),
+                source: SessionSource::Library {
+                    profile: self.profile.clone(),
+                    project: id.into(),
+                },
+                electron_profile: None,
+            })?;
             self.adopt(reply)?;
         }
         self.active = Some(id.into());
@@ -617,28 +735,27 @@ impl Automation {
         if !path.is_absolute() {
             return Err(Error::invalid("Use an absolute project working-file path"));
         }
-        let reply = self
-            .kernel
-            .shell(ShellCall::PrepareOpen {
-                id: id.into(),
-                source: SessionSource::File(path),
-                electron_profile: None,
-            })
-            .map_err(Error::kernel)?;
+        let reply = self.shell(ShellCall::PrepareOpen {
+            id: id.into(),
+            source: SessionSource::File(path),
+            electron_profile: None,
+        })?;
         let project = self.adopt(reply)?;
         self.project_identity(&project)
     }
+    fn session(&self, id: &str) -> Result<SessionHandle> {
+        match self.app() {
+            Some(host) => host.current().filter(|session| session.project == id),
+            None => self.sessions.get(id).cloned(),
+        }
+        .ok_or_else(|| Error::invalid("No shell session"))
+    }
     pub fn save_library(&mut self, id: &str) -> Result<()> {
-        let handle = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::invalid("No shell session"))?
-            .clone();
-        match self
-            .kernel
-            .shell(ShellCall::Save(handle))
-            .map_err(Error::kernel)?
-        {
+        let handle = self.session(id)?;
+        if let Some(host) = self.app() {
+            return host.save(handle, None).map(|_| ());
+        }
+        match self.shell(ShellCall::Save(handle))? {
             ShellReply::Saved {
                 recovery_copy: None,
                 ..
@@ -650,8 +767,12 @@ impl Automation {
         // Pinned main c7f46a056 mcp-project-tools.ts checks filePath before
         // exporting: an associated working file saves like Cmd-S, retaining
         // external links even when their originals are currently offline.
-        if let Some(path) = self.store(id)?.path().map(std::path::Path::to_path_buf) {
-            self.save_library(id)?;
+        let view = self.view(id)?;
+        if let Some(path) = view.path {
+            match self.app() {
+                Some(host) => host.save_document(self.session(id)?, view.document)?,
+                None => self.save_library(id)?,
+            }
             self.emit(id, "saved");
             return Ok(json!({"path":path,"projectId":id}));
         }
@@ -675,18 +796,19 @@ impl Automation {
         let path = self
             .exports
             .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
-        let session = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::invalid("No shell session"))?
-            .clone();
-        let document = self.store(id)?.doc_id();
-        let receipt = self
-            .kernel
-            .prepare_session_export(session, document, path.clone())
-            .map_err(Error::kernel)?
-            .run()
-            .map_err(Error::kernel)?;
+        let session = self.session(id)?;
+        let plan = match &self.backend {
+            Backend::Owned(kernel) => {
+                kernel.prepare_session_export(session, view.document, path.clone())
+            }
+            Backend::App(host) => host
+                .kernel
+                .prepare_export(session, view.document, path.clone())
+                .wait()
+                .ok_or_else(crate::app_host::stopped)?,
+        }
+        .map_err(Error::kernel)?;
+        let receipt = plan.run().map_err(Error::kernel)?;
         if !receipt.unavailable_links.is_empty() {
             return Err(Error::unavailable(
                 "original media unavailable for complete portable project export",
@@ -697,7 +819,7 @@ impl Automation {
         Ok(result)
     }
     pub fn library_action(&mut self, call: ShellCall) -> Result<ShellReply> {
-        self.kernel.shell(call).map_err(Error::kernel)
+        self.shell(call)
     }
 }
 
@@ -719,7 +841,10 @@ mod tests {
             let snapshot = host.read_document(&id).unwrap();
             let revision = host.revision(&id).unwrap();
             let mark = host.history_mark(&id, 23).unwrap();
-            host.kernel
+            let Backend::Owned(kernel) = &mut host.backend else {
+                unreachable!()
+            };
+            kernel
                 .handle(
                     &id,
                     Request::new(
@@ -738,7 +863,7 @@ mod tests {
             );
             assert_eq!(host.squash(&id, &mark, "Agent run").unwrap(), None);
             assert_eq!(host.read_document(&id).unwrap(), snapshot);
-            assert!(host.kernel.project(&id).unwrap().open_entry().is_some());
+            assert!(host.kernel().project(&id).unwrap().open_entry().is_some());
         }
         std::fs::remove_dir_all(root).unwrap();
     }

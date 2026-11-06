@@ -118,10 +118,9 @@ fn main() -> Result<()> {
         });
         mcp::attach(&actor.handle(), &worker_profile)?;
         let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
-        let host = mcp_host.clone();
-        let server = pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || {
-            mcp::Connection::new(host.clone())
-        })?;
+        let tools = mcp::Tools::new(mcp_host.clone());
+        let server =
+            pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || tools.connect())?;
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu, fonts,

@@ -102,6 +102,7 @@ impl McpSession {
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
         assert_project(session, &host, id)?;
+        host.document_fence = session.document;
         host.project_memory(id, args, self.writer)
     }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
@@ -128,6 +129,7 @@ impl McpSession {
         let mut host = shared
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
+        host.document_fence = self.active.as_ref().and_then(|session| session.document);
         if ["list_projects", "create_project", "open_project"].contains(&name) {
             if name != "list_projects" && self.active.is_some() {
                 return Err(Error::invalid(
@@ -266,9 +268,8 @@ impl McpSession {
         }
         let prepared_selection = if name == "select_layers" {
             let project = host
-                .active
-                .as_deref()
-                .map(|id| host.read_document(id))
+                .active_project()
+                .map(|id| host.read_document(&id))
                 .transpose()?;
             let ids = args["layerIds"].as_array().filter(|ids| ids.iter().all(|id| {
                 id.is_string() && project.as_ref().and_then(|p| p["layers"].as_array()).is_some_and(|layers| layers.iter().any(|layer| layer["id"] == *id))
@@ -357,8 +358,8 @@ impl McpSession {
                     tx.revision = ack.revision;
                 }
                 let selected = host
-                    .store(&id)?
-                    .selection()
+                    .view(&id)?
+                    .selection
                     .layers()
                     .iter()
                     .filter(|s| !plan.removed.contains(s))
@@ -427,7 +428,7 @@ impl McpSession {
                 };
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
-                        &host.store(&id)?.snapshot(),
+                        &host.view(&id)?.snapshot,
                         args,
                         &selection,
                         host.playhead(&id),
@@ -441,7 +442,7 @@ impl McpSession {
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
-                        Some(host.kernel().state()),
+                        Some(&host.state()),
                     )?)
                 } else {
                     None
@@ -527,8 +528,8 @@ impl McpSession {
                     .host
                     .lock()
                     .map_err(|_| Error::unavailable("headless host stopped"))?;
-                host.active.as_deref() != Some(id)
-                    || host.store(id).ok().map(|s| s.doc_id()) != session.document
+                host.active_project().as_deref() != Some(id)
+                    || host.view(id).ok().map(|view| view.document) != session.document
             } else {
                 false
             }
@@ -562,7 +563,7 @@ impl McpSession {
             .lock()
             .map_err(|_| Error::unavailable("headless host stopped"))?;
         let project = if context == "project" {
-            Some(host.active.clone().ok_or_else(|| {
+            Some(host.active_project().ok_or_else(|| {
                 Error::invalid("Create or open a project before starting a project session.")
             })?)
         } else {
@@ -575,7 +576,7 @@ impl McpSession {
             .unwrap_or(0);
         let document = project
             .as_ref()
-            .map(|id| host.store(id).map(|s| s.snapshot().doc_id))
+            .map(|id| host.view(id).map(|view| view.document))
             .transpose()?;
         let run_id = format!("mcp-{}", pm_kernel::new_id("run"));
         let mut result = json!({"runId":run_id,"projectId":project.as_deref().unwrap_or("powermove-global"),"access":access});
@@ -632,6 +633,7 @@ impl McpSession {
                 .host
                 .lock()
                 .map_err(|_| Error::unavailable("headless host stopped"))?;
+            host.document_fence = session.document;
             let Some(id) = session.project.clone() else {
                 return Ok(json!({"changed":session.committed}));
             };
@@ -669,7 +671,7 @@ impl McpSession {
         let id = a["projectId"]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| host.active.clone());
+            .or_else(|| host.active_project());
         let active = self.active.as_mut().unwrap();
         if ["create", "open"].contains(&operation) && active.context != "app" {
             return Err(Error::invalid(
@@ -695,7 +697,9 @@ impl McpSession {
                 .iter()
                 .map(|p| json!({"id":p["id"],"name":p["name"]}))
                 .collect::<Vec<_>>();
-            return Ok(json!({"activeProjectId":host.active,"projects":rows,"trash":trash}));
+            return Ok(
+                json!({"activeProjectId":host.active_project(),"projects":rows,"trash":trash}),
+            );
         }
         let name = || {
             a["name"]
@@ -729,7 +733,7 @@ impl McpSession {
             }
             "save" => host.save_library(&id)?,
             "rename" => {
-                if host.active.as_deref() != Some(&id) {
+                if host.active_project().as_deref() != Some(&id) {
                     return Err(Error::unavailable(
                         "rename unopened library slot through kernel shell",
                     ));
@@ -778,7 +782,7 @@ impl McpSession {
         if let Some(project) = &active.project {
             active.baseline = host.revision(project)?;
         }
-        Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active}))
+        Ok(json!({"projectId":id,"operation":operation,"activeProjectId":host.active_project()}))
     }
     pub fn close(&mut self) -> Result<()> {
         let result = self.finish(false).map(|_| ());
@@ -796,8 +800,8 @@ impl Drop for McpSession {
     }
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
-    if host.active.as_deref() != Some(id)
-        || host.store(id).ok().map(|s| s.snapshot().doc_id) != session.document
+    if host.active_project().as_deref() != Some(id)
+        || host.view(id).ok().map(|view| view.document) != session.document
     {
         return Err(Error::conflict(
             "The active project changed or reopened. All work was preserved. Start a new agent run in this project.",

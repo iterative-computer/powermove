@@ -5028,6 +5028,7 @@ dependencies = [
 name = "pm-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "icu_collator",
  "libc",
  "pm-kernel",
