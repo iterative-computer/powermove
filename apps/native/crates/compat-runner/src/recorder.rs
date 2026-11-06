@@ -13,7 +13,6 @@ use std::{
 
 #[derive(Default)]
 struct State {
-    storage: Value,
     next: u64,
     paints: BTreeMap<String, Paint>,
     surfaces: BTreeMap<String, Canvas>,
@@ -28,6 +27,8 @@ struct State {
 pub trait RealmEvents: Send + Sync + 'static {
     fn health(&self, _id: &str, _health: &Value) {}
     fn toast(&self, _text: &str, _options: &Value) {}
+    /// A question for the main thread; the answer returns through the inbox.
+    fn request(&self, _request: Value) {}
     fn contributions(&self, _value: Value) {}
     fn dom_ready(&self) {}
     fn presentation(&self) {}
@@ -857,6 +858,17 @@ impl EngineProxy for NativeHost {
                     .toast(input["text"].as_str().unwrap_or_default(), &input["options"]);
                 return Ok(Value::Null);
             }
+            "ui.request" => {
+                self.events.request(input.clone());
+                return Ok(Value::Null);
+            }
+            "storage.set" => {
+                let key = input["key"]
+                    .as_str()
+                    .ok_or(Error::Invalid("storage key"))?;
+                self.kernel.lock().unwrap().store(key, &input["value"])?;
+                return Ok(Value::Null);
+            }
             "extensions.ready" => {
                 self.events.ready();
                 return Ok(Value::Null);
@@ -930,24 +942,18 @@ impl EngineProxy for NativeHost {
 }
 impl KernelHooks for NativeHost {
     fn load_storage(&self, _: &str) -> Result<Value> {
-        let storage = self.state.lock().unwrap().storage.clone();
-        Ok(if storage.is_null() {
-            json!({})
-        } else {
-            storage
-        })
+        Ok(self.kernel.lock().unwrap().storage())
     }
     fn commit_activation(
         &self,
         _: Option<&Generation>,
         _: &Generation,
         ops: &[Value],
-        storage: &Value,
+        _: &Value,
     ) -> Result<()> {
         if !ops.is_empty() {
             return Err(Error::Host("kernel activation backend not attached".into()));
         }
-        self.state.lock().unwrap().storage = storage.clone();
         Ok(())
     }
     fn commit_retained(&self, _: &Generation, _: &[Value]) -> Result<()> {

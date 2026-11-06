@@ -16,8 +16,8 @@ use pm_compat_runner::{
 };
 use pm_node::fonts::render::BrokerResolver;
 use pm_protocol::{clock::TransportCommand, common::PlaybackRate};
-use pm_shell::{Command as ShellCommand, keyboard::Binding, layout, transient::Choice};
-use serde_json::Value;
+use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, transient::Choice};
+use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -28,6 +28,9 @@ use std::{
 
 const PAGE_PANEL: u64 = 1;
 const COMMAND: &str = "extension.command:";
+const MENU: &str = "extension.menu:";
+/// Longer than the realm's own deadline; a hung realm never holds a menu back.
+const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
 
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
@@ -66,6 +69,40 @@ impl TransportOwner for Clock {
     }
 }
 
+/// A tab menu waiting for the items extensions add to it.
+struct OpenMenu {
+    key: u64,
+    entries: Vec<MenuEntry>,
+    at: (f32, f32),
+}
+
+/// What an extension's menu items are in the native menu.
+fn menu_entries(items: &[Value], token: u64) -> Vec<MenuEntry> {
+    items
+        .iter()
+        .map(|item| {
+            if item["separator"] == true {
+                return MenuEntry::separator();
+            }
+            let label = item["label"].as_str().unwrap_or_default();
+            if let Some(children) = item["submenu"].as_array() {
+                return MenuEntry::submenu(label, menu_entries(children, token));
+            }
+            let command = item["run"]
+                .as_u64()
+                .map_or(String::new(), |run| format!("{MENU}{token}:{run}"));
+            let mut entry = MenuEntry::item(label, command).checked(item["on"] == true);
+            entry.enabled = item["disabled"] != true && item["run"].is_u64();
+            entry
+        })
+        .collect()
+}
+
+/// Only web links leave the app; nothing runs a local or custom scheme.
+fn external_link(url: &str) -> bool {
+    url.len() <= 2048 && (url.starts_with("https://") || url.starts_with("http://"))
+}
+
 #[derive(Default)]
 pub struct Extensions {
     pub host: Option<ExtensionHost>,
@@ -73,6 +110,11 @@ pub struct Extensions {
     /// Open contributed panels and where the shell placed their bodies.
     panels: BTreeMap<String, layout::Rect>,
     known_panels: BTreeSet<String>,
+    /// Panels whose definition went away while open. They return with it.
+    suspended: BTreeSet<String>,
+    open_panels: BTreeSet<String>,
+    menu: Option<OpenMenu>,
+    next_menu: u64,
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
@@ -168,6 +210,9 @@ impl Controller {
             self.message = toast;
             cx.notify();
         }
+        for request in host.take_requests() {
+            self.extension_request(request, cx);
+        }
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
@@ -176,6 +221,96 @@ impl Controller {
             }
         }
         self.present_page(cx);
+    }
+    /// The realm's questions for AppKit. Each answer returns through the inbox.
+    fn extension_request(&mut self, request: Value, cx: &mut Context<Self>) {
+        let token = request["token"].as_u64().unwrap_or_default();
+        match request["kind"].as_str() {
+            Some("panel") => {
+                let id = request["id"].as_str().unwrap_or_default();
+                let verb = if request["open"] == true { "show" } else { "close" };
+                self.host
+                    .borrow()
+                    .send_command(&format!("panel:{verb}:{id}"), vec![]);
+            }
+            Some("confirm") => {
+                let title = request["title"].as_str().unwrap_or_default();
+                let body = request["body"].as_str().unwrap_or_default();
+                let shell = self.host.borrow();
+                let answer =
+                    crate::platform::choice(&shell.window, title, body, &["OK", "Cancel"]);
+                drop(shell);
+                cx.spawn(async move |this, cx| {
+                    let confirmed = answer.recv().await == Ok(0);
+                    let _ = this.update(cx, |v, _| {
+                        if let Some(host) = &v.extensions.host {
+                            host.answer(token, confirmed.into());
+                        }
+                    });
+                })
+                .detach();
+            }
+            Some("openExternal") => {
+                let url = request["url"].as_str().unwrap_or_default();
+                let opened = external_link(url) && crate::platform::open_url(url);
+                if let Some(host) = &self.extensions.host {
+                    host.answer(token, opened.into());
+                }
+            }
+            Some("menu") => {
+                let items = menu_entries(request["items"].as_array().unwrap_or(&vec![]), token);
+                let open = self
+                    .extensions
+                    .menu
+                    .take_if(|menu| Some(menu.key) == request["key"].as_u64());
+                let shell = self.host.borrow();
+                match open {
+                    Some(OpenMenu { mut entries, at, .. }) => {
+                        if !items.is_empty() {
+                            entries.push(MenuEntry::separator());
+                            entries.extend(items);
+                        }
+                        shell.context_menu(&entries, at.0, at.1);
+                    }
+                    None if request["key"].is_null() => shell.context_menu(
+                        &items,
+                        request["x"].as_f64().unwrap_or_default() as f32,
+                        request["y"].as_f64().unwrap_or_default() as f32,
+                    ),
+                    None => (),
+                }
+            }
+            _ => (),
+        }
+    }
+    /// Extensions add to a tab's menu asynchronously, so it opens when they
+    /// answer or the deadline passes, whichever comes first.
+    pub fn extension_panel_menu(
+        &mut self,
+        id: &str,
+        entries: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        let Some(host) = &self.extensions.host else {
+            return Some(entries);
+        };
+        self.extensions.next_menu += 1;
+        let key = self.extensions.next_menu;
+        host.gather_menu("panel:context", json!({"panelId": id}), key);
+        self.extensions.menu = Some(OpenMenu { key, entries, at });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MENU_DEADLINE).await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(menu) = v.extensions.menu.take_if(|menu| menu.key == key) {
+                    v.host
+                        .borrow()
+                        .context_menu(&menu.entries, menu.at.0, menu.at.1);
+                }
+            });
+        })
+        .detach();
+        None
     }
     /// Each v4 extension gets its own realm and draws through the v4 panel path.
     fn mount_surfaces(&mut self, cx: &mut Context<Self>) {
@@ -221,7 +356,22 @@ impl Controller {
                 Some((id, title))
             })
             .collect();
-        self.extensions.known_panels = panels.iter().map(|(id, _)| id.clone()).collect();
+        let known: BTreeSet<String> = panels.iter().map(|(id, _)| id.clone()).collect();
+        // As in the shipped app: the workspace keeps a retired panel's place, and
+        // it comes back if something registers the id again.
+        let shell = self.host.borrow();
+        for id in self.extensions.known_panels.difference(&known) {
+            if self.extensions.open_panels.contains(id) {
+                self.extensions.suspended.insert(id.clone());
+                shell.send_command(&format!("panel:close:{id}"), vec![]);
+            }
+        }
+        for id in known.intersection(&self.extensions.suspended.clone()) {
+            self.extensions.suspended.remove(id);
+            shell.send_command(&format!("panel:show:{id}"), vec![]);
+        }
+        drop(shell);
+        self.extensions.known_panels = known;
         let surfaces = self.extensions.surfaces.clone().into_iter();
         layout::set_contributed_panels(panels.into_iter().chain(surfaces));
         let choices: Vec<Choice> = value["commands"]
@@ -292,6 +442,14 @@ impl Controller {
         }
     }
     pub fn extension_command(&mut self, cmd: &ShellCommand) -> bool {
+        if let Some(choice) = cmd.name.strip_prefix(MENU) {
+            if let (Some(host), Some((token, run))) = (&self.extensions.host, choice.split_once(':'))
+                && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
+            {
+                host.answer(token, run.into());
+            }
+            return true;
+        }
         let Some(id) = cmd.name.strip_prefix(COMMAND) else {
             return false;
         };
@@ -440,6 +598,7 @@ impl Controller {
     }
     /// The workspace closed a contributed panel: unmount it in the realm.
     pub fn sync_extension_panels(&mut self, open: &[&str]) {
+        self.extensions.open_panels = open.iter().map(|id| (*id).to_owned()).collect();
         let closed: Vec<String> = self
             .extensions
             .panels
@@ -487,5 +646,30 @@ impl Controller {
         for frame in host.take_canvases() {
             let _ = web.present_canvas(PAGE_PANEL, &frame);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_menus_keep_their_choice_tokens_and_only_web_links_open() {
+        let items = menu_entries(
+            &[
+                json!({"label":"Run","run":3,"on":true}),
+                json!({"separator":true}),
+                json!({"label":"Header","disabled":true}),
+                json!({"label":"More","submenu":[{"label":"Nested","run":4}]}),
+            ],
+            9,
+        );
+        assert_eq!(items[0].command, "extension.menu:9:3");
+        assert!(items[0].checked && items[0].enabled);
+        assert!(items[1].label.is_empty());
+        assert!(!items[2].enabled);
+        assert_eq!(items[3].children[0].command, "extension.menu:9:4");
+        assert!(external_link("https://example.com/a"));
+        assert!(!external_link("file:///etc/passwd") && !external_link("powermove://x"));
     }
 }

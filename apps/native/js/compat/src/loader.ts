@@ -83,7 +83,7 @@ export function planLoad(records: Data[]): {
     changed = false;
     for (const id of [...candidates])
       for (const dep of byId.get(id)?.manifest?.dependsOn ?? []) {
-        if (candidates.has(dep)) continue;
+        if (candidates.has(dep) || SHIPPED.has(dep)) continue;
         candidates.delete(id);
         skipped.push({
           id,
@@ -114,6 +114,20 @@ export function planLoad(records: Data[]): {
     });
   return { order, skipped };
 }
+
+/** Built-ins the app provides natively, so they are never discovered records. */
+const SHIPPED = new Set([
+  "effects-basic",
+  "inspector",
+  "keymap-default",
+  "layers-3d",
+  "mods",
+  "theme-default",
+  "timeline",
+  "toolbar",
+  "transitions-basic",
+  "viewer",
+]);
 
 export interface LoaderOptions {
   realm: CompatRealm;

@@ -98,6 +98,7 @@ def main():
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--summary", type=Path, default=run.WORK/"trace-summary.json")
+    parser.add_argument("--keep", action="store_true", help="Leave raw traces under the work directory")
     args = parser.parse_args()
     if args.repeat < 3:
         parser.error("at least three captures per role are required")
@@ -119,14 +120,18 @@ def main():
                "reference": args.reference_revision, "sources": {}, "families": {}, "reasons": {}}
     families, reasons = Counter(), Counter()
     for source, paths in populations.items():
-        counts = Counter(total=len(paths))
+        missing = 0 if args.only else max(0, run.EXPECTED_POPULATION[source]-len(paths))
+        counts = Counter(total=len(paths)+missing, cant_run=missing)
+        reasons["population-input-unavailable"] += missing
         for index, path in enumerate(paths, 1):
             case = f"{source}-{index:04d}"
             if args.only and getattr(path, "name", None) != args.only:
                 counts["total"] -= 1
                 continue
-            with tempfile.TemporaryDirectory(prefix="trace-", dir=run.WORK) as temporary:
+            with tempfile.TemporaryDirectory(prefix="trace-", dir=run.WORK, delete=not args.keep) as temporary:
                 root = Path(temporary)
+                if args.keep:
+                    print(f"{case}: {root}", flush=True)
                 try:
                     sha = public.source(path, root/"input") if source == "store" else run.copy_extension(path, root/"input")
                     store = {"repoId": path["repoId"], "releaseId": path["latest"]["id"]} if source == "store" else None

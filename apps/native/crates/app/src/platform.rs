@@ -45,6 +45,12 @@ pub fn paths_named(
     rx
 }
 
+/// Hands a web link to the default browser.
+pub fn open_url(url: &str) -> bool {
+    objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
+        .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
+}
+
 /// Button index, starting at zero. Closing a sheet always chooses cancellation.
 pub fn choice(
     window: &NSWindow,

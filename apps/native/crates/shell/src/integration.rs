@@ -32,6 +32,17 @@ pub trait Integration {
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {
         false
     }
+    /// A tab's context menu. Return the entries to show now, or `None` when the
+    /// app adds asynchronous items and shows the menu itself.
+    fn panel_menu(
+        &self,
+        _id: &str,
+        entries: Vec<crate::native::MenuEntry>,
+        _at: (f32, f32),
+        _cx: &mut App,
+    ) -> Option<Vec<crate::native::MenuEntry>> {
+        Some(entries)
+    }
     /// The workspace's open panels, after any layout change.
     fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     fn project_id(&self, cx: &App) -> Option<String>;

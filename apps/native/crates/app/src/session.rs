@@ -115,6 +115,16 @@ impl pm_shell::integration::Integration for Bridge {
     fn open_panels(&self, open: &[&str], cx: &mut App) {
         self.0.update(cx, |v, _| v.sync_extension_panels(open));
     }
+    fn panel_menu(
+        &self,
+        id: &str,
+        entries: Vec<pm_shell::MenuEntry>,
+        at: (f32, f32),
+        cx: &mut App,
+    ) -> Option<Vec<pm_shell::MenuEntry>> {
+        self.0
+            .update(cx, |v, cx| v.extension_panel_menu(id, entries, at, cx))
+    }
     fn header(
         &self,
         id: &str,

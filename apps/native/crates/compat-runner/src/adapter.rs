@@ -4,6 +4,7 @@
 use pm_kernel::{
     Ack, Call, Caller, Direction, EditCall, HistoryCall, KernelHandle, Origin, Published,
     QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, WriteBody,
+    state::{StateOp, StateTransaction},
 };
 use pm_model::{Op, PathPart, canonical};
 use pm_runtime_v8::{Error, Result};
@@ -130,6 +131,33 @@ impl KernelAdapter {
             "editLive":p.entry.as_ref().is_some_and(|e|e.source_edit_live),"label":p.history.undo_label})
     }
     /// The whole first publication. Later ones go through `publication`.
+    /// `ext.*` settings as the realm's storage object: durable, and already the
+    /// keys the shipped app wrote.
+    pub fn storage(&self) -> Value {
+        let state = self.kernel.state();
+        let values = state
+            .settings
+            .iter()
+            .filter(|(key, _)| key.starts_with("ext."))
+            .map(|(key, value)| (key.clone(), wire(value)));
+        Value::Object(values.collect())
+    }
+    pub fn store(&self, key: &str, value: &Value) -> Result<()> {
+        let value = pm_model::json::parse(&value.to_string())
+            .map_err(|_| Error::Invalid("storage value"))?;
+        self.kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Setting {
+                    key: key.to_owned(),
+                    value: Some(value),
+                }],
+            })
+            .wait()
+            .ok_or(Error::Closed)?
+            .map(|_| ())
+            .map_err(|error| Error::Host(error.to_string()))
+    }
     pub fn snapshot(&mut self) -> Result<Value> {
         let p = self.published()?;
         let document = realized(&p);

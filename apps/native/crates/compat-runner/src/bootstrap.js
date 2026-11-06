@@ -49,6 +49,58 @@ globalThis.__compat = {
           reportError: (error) => host.reportError(error),
         })
       : undefined;
+    // AppKit answers on the main thread, so the realm asks and carries on.
+    const asks = new Map();
+    let asked = 0;
+    const ask = (request) =>
+      new Promise((resolve) => {
+        const token = ++asked;
+        asks.set(token, resolve);
+        call("ui.request", { ...request, token });
+      });
+    this.answer = (token, value) => {
+      const resolve = asks.get(token);
+      asks.delete(token);
+      this.realm.task(() => resolve?.(value));
+    };
+    const wireMenu = (items, runs) =>
+      items.map((item) => {
+        if (item === "-") return { separator: true };
+        if (item?.header !== undefined)
+          return { label: String(item.header), disabled: true };
+        const wire = {
+          label: String(item?.label ?? ""),
+          disabled: !!item?.disabled,
+          on: !!item?.on,
+        };
+        if (item?.submenu) wire.submenu = wireMenu(item.submenu, runs);
+        else if (item?.run) wire.run = runs.push(item.run) - 1;
+        return wire;
+      });
+    const showMenu = async (items, request) => {
+      const runs = [];
+      const wire = wireMenu((await items) ?? [], runs);
+      if (!wire.length && request.key === undefined) return;
+      const choice = await ask({ kind: "menu", items: wire, ...request });
+      if (choice !== null && choice !== undefined) await runs[choice]?.();
+    };
+    this.gatherMenu = (location, context, key) => {
+      showMenu(this.realm.kernel.gatherMenu(location, context), { key }).catch(
+        (error) => this.reportFailure(error),
+      );
+    };
+    // One write per realm task, however often an extension saves.
+    const unsaved = new Map();
+    const save = (key, value) => {
+      if (!unsaved.size)
+        queueMicrotask(() => {
+          for (const [key, value] of unsaved)
+            call("storage.set", { key, value });
+          unsaved.clear();
+        });
+      unsaved.set(key, value);
+    };
+    const reveal = (id, open) => call("ui.request", { kind: "panel", id, open });
     const capabilities = {
       ui: { controls: PowermoveCompat.controls },
       assets: {
@@ -61,12 +113,36 @@ globalThis.__compat = {
             (...args) => {
               if (!this.panels)
                 throw Error("Remote DOM panels are not attached");
-              return this.panels[name](...args);
+              const result = this.panels[name](...args);
+              if (name === "open" || name === "close")
+                reveal(args[0], name === "open");
+              return result;
             },
           ],
         ),
       ),
       PM: {
+        toast: (text, options = {}) =>
+          call("ui.toast", {
+            text: String(text),
+            options: {
+              kind: options.kind,
+              error: options.error,
+              key: options.key,
+              sticky: options.sticky,
+            },
+          }),
+        confirm: (title, body = "") =>
+          ask({ kind: "confirm", title: String(title), body: String(body) }),
+        openExternal: (url) => ask({ kind: "openExternal", url: String(url) }),
+        menu: (anchor, items) => {
+          const rect = anchor?.getBoundingClientRect?.();
+          const at = rect
+            ? { x: rect.left, y: rect.bottom }
+            : { x: anchor?.x ?? 0, y: anchor?.y ?? 0 };
+          showMenu(items, at).catch((error) => this.reportFailure(error));
+        },
+        closeMenus: () => undefined,
         invalidate: (what = "all") => {
           if (what === "all" || what === "render")
             this.realm.PM.bus.emit("draw");
@@ -105,6 +181,7 @@ globalThis.__compat = {
           get: (key, fallback) => storage[key] ?? fallback,
           set: (key, value) => {
             storage[key] = value;
+            save(key, value);
           },
         },
       },

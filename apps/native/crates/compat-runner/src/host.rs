@@ -58,6 +58,8 @@ enum Input {
     Panel(String, bool),
     Place(String, [f32; 4]),
     Page(Value),
+    Answer(u64, Value),
+    Menu(String, Value, u64),
     Dom,
     Enabled(String, bool),
     Rescan,
@@ -84,6 +86,8 @@ struct Published {
     contributions: Option<Arc<Value>>,
     records: BTreeMap<String, Value>,
     toasts: Vec<String>,
+    /// Questions only the main thread can answer: menus, sheets, panel reveals.
+    requests: Vec<Value>,
     batches: VecDeque<AdmittedDomBatch>,
     canvases: Vec<CanvasFrame>,
     surfaces: Vec<Value>,
@@ -164,6 +168,9 @@ impl RealmEvents for Arc<Events> {
     fn toast(&self, text: &str, _: &Value) {
         let text = text.to_owned();
         self.shared.update(|p| p.toasts.push(text));
+    }
+    fn request(&self, request: Value) {
+        self.shared.update(|p| p.requests.push(request));
     }
     fn contributions(&self, mut value: Value) {
         let _ = self.kernel.state_transaction(StateTransaction {
@@ -273,6 +280,18 @@ impl ExtensionHost {
     }
     pub fn take_toasts(&self) -> Vec<String> {
         std::mem::take(&mut self.shared.published.lock().unwrap().toasts)
+    }
+    pub fn take_requests(&self) -> Vec<Value> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().requests)
+    }
+    pub fn answer(&self, token: u64, value: Value) {
+        let _ = self.inbox.send(Input::Answer(token, value));
+    }
+    /// Contributions for one open menu. A `key` keeps the reply tied to it.
+    pub fn gather_menu(&self, location: &str, context: Value, key: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Menu(location.to_owned(), context, key));
     }
     /// Admitted batches for `AdmittedDomBatch::present`, oldest first. Keep the
     /// front of a failed presentation and call `return_batches`.
@@ -470,6 +489,15 @@ impl Owner {
                     json!(id)
                 );
                 self.eval(&source);
+            }
+            Input::Answer(token, value) => {
+                self.eval(&format!("__compat.answer({token},{value})"));
+            }
+            Input::Menu(location, context, key) => {
+                self.eval(&format!(
+                    "__compat.gatherMenu({},{context},{key})",
+                    json!(location)
+                ));
             }
             Input::Place(id, rect) => {
                 self.eval(&format!("__compat.placePanel({},{})", json!(id), json!(rect)));
@@ -1050,6 +1078,97 @@ mod tests {
                 .iter()
                 .any(|command| command["id"] == id)
         })
+    }
+    #[test]
+    fn appkit_answers_reach_realm_closures_and_storage_outlives_the_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-ui",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const rename=(name)=>api.history.do('Rename',()=>{api.project.get().name=name});
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   api.panels.register({id:'synthetic-ui.panel',title:'Synthetic',build(){}});
+                   api.menus.contribute('panel:context',(ctx)=>[{label:'For '+ctx.panelId,run(){rename('tab')}}]);
+                   api.commands.register({id:'synthetic-ui.round',label:'Round',run(){rename('round '+round)}});
+                   api.commands.register({id:'synthetic-ui.open',label:'Open',run(){api.panels.open('synthetic-ui.panel')}});
+                   api.commands.register({id:'synthetic-ui.confirm',label:'Confirm',run(){
+                     api.ui.confirm('Sure?','Body').then((yes)=>rename(yes?'confirmed':'declined'))}});
+                   api.commands.register({id:'synthetic-ui.menu',label:'Menu',run(){
+                     api.ui.toast('Choose');
+                     api.ui.menu({x:4,y:5},[{header:'Pick'},'-',{label:'Rename',run(){rename('menu')}}])}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        let request = |what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(request) = fixture.host.take_requests().pop() {
+                    return request;
+                }
+                assert!(Instant::now() < deadline, "{what}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let named = |name: &str| {
+            fixture.until(name, |_| fixture.name() == name);
+        };
+        fixture.host.run_command("synthetic-ui.open", json!([]));
+        let reveal = request("panel reveal");
+        assert_eq!(
+            (&reveal["kind"], &reveal["id"], &reveal["open"]),
+            (&json!("panel"), &json!("synthetic-ui.panel"), &json!(true))
+        );
+        fixture.host.run_command("synthetic-ui.confirm", json!([]));
+        let sheet = request("confirm");
+        assert_eq!((&sheet["title"], &sheet["body"]), (&json!("Sure?"), &json!("Body")));
+        fixture.host.answer(sheet["token"].as_u64().unwrap(), json!(true));
+        named("confirmed");
+        fixture.host.run_command("synthetic-ui.menu", json!([]));
+        let menu = request("menu");
+        assert_eq!((menu["x"].as_f64(), menu["y"].as_f64()), (Some(4.), Some(5.)));
+        assert_eq!(menu["items"].as_array().unwrap().len(), 3);
+        assert_eq!(fixture.host.take_toasts(), ["Choose"]);
+        fixture.host.answer(menu["token"].as_u64().unwrap(), menu["items"][2]["run"].clone());
+        named("menu");
+        fixture.host.gather_menu("panel:context", json!({"panelId":"first"}), 7);
+        let gathered = request("gathered");
+        assert_eq!(gathered["key"], 7);
+        assert_eq!(gathered["items"][0]["label"], "For first");
+        fixture.host.answer(gathered["token"].as_u64().unwrap(), gathered["items"][0]["run"].clone());
+        named("tab");
+        // Storage lives in durable `ext.*` settings, so a later window reads it.
+        fixture.until("storage", |_| {
+            fixture.kernel.state().settings.contains_key("ext.synthetic-ui")
+        });
+        fixture.host.run_command("synthetic-ui.round", json!([]));
+        named("round 1");
+        let mut later = ExtensionHost::start(HostConfig {
+            kernel: fixture.kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: fixture._root.path().join("cache-later"),
+            owner: None,
+            text: None,
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !later.is_ready() || later.contributions().is_none() {
+            assert!(Instant::now() < deadline, "second host");
+            thread::sleep(Duration::from_millis(5));
+        }
+        later.run_command("synthetic-ui.round", json!([]));
+        named("round 2");
+        later.close();
+        let _ = later.worker.take().map(thread::JoinHandle::join);
     }
     #[test]
     fn discovered_typescript_and_svelte_extensions_contribute_and_edit_the_live_project() {

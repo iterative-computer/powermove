@@ -708,7 +708,7 @@ impl Editor {
                     self.layout = g.original();
                 }
             }
-            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2)))),
+            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2))), cx),
             "dismiss" => {
                 if let Some(h) = &self.host {
                     h.borrow().dismiss_transients();
@@ -781,13 +781,17 @@ impl Editor {
         items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
         items
     }
-    fn tab_menu(&self, id: &str, position: Point<Pixels>) {
+    fn tab_menu(&self, id: &str, position: Point<Pixels>, cx: &mut App) {
         let Some(h) = &self.host else { return };
-        h.borrow().context_menu(
-            &self.tab_menu_entries(id),
-            f32::from(position.x),
-            f32::from(position.y),
-        );
+        let at = (f32::from(position.x), f32::from(position.y));
+        let entries = self.tab_menu_entries(id);
+        let entries = match &self.integration {
+            Some(integration) => integration.panel_menu(id, entries, at, cx),
+            None => Some(entries),
+        };
+        if let Some(entries) = entries {
+            h.borrow().context_menu(&entries, at.0, at.1);
+        }
     }
     /// The status bar's workspace pop-up: presets (current checked) and saved ones.
     fn workspace_menu(&self, position: Point<Pixels>) {
@@ -1230,8 +1234,8 @@ impl Render for Editor {
                 )
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, _, _| {
-                        this.tab_menu(&menu_header, e.position);
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        this.tab_menu(&menu_header, e.position, cx);
                     }),
                 );
             let multi = tabs.len() > 1;
@@ -1344,7 +1348,7 @@ impl Render for Editor {
                             MouseButton::Right,
                             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                this.tab_menu(&menu_id, e.position);
+                                this.tab_menu(&menu_id, e.position, cx);
                             }),
                         ),
                     );
