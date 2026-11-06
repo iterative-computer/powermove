@@ -99,6 +99,27 @@ pub fn keys(project: &Value) -> Vec<String> {
     .collect()
 }
 
+/// Numbers `ids` after everything in `project`, in this order, for a batch
+/// written as one whole project.
+pub fn append(project: &mut Value, ids: &[String]) {
+    let top = project
+        .get(FIELD)
+        .and_then(Value::as_object)
+        .map_or(-1., |order| {
+            order.values().filter_map(Value::as_f64).fold(-1., f64::max)
+        });
+    let Some(root) = project.as_object_mut() else {
+        return;
+    };
+    if root.get(FIELD).and_then(Value::as_object).is_none() {
+        root.insert(FIELD, Value::Object(Map::new()));
+    }
+    let order = root.get_mut(FIELD).and_then(Value::as_object_mut).unwrap();
+    for (offset, id) in ids.iter().enumerate() {
+        order.insert(id.as_str(), Value::from(top + 1. + offset as f64));
+    }
+}
+
 fn member() -> Vec<PathPart> {
     vec![PathPart::Key(FIELD.into())]
 }

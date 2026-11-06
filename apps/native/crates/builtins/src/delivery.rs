@@ -544,7 +544,7 @@ impl MediaProbes {
         result
     }
 }
-fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
+pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
     match kind {
         "image" => pm_render::media::probe_image(path).map_err(|e| format!("{e:?}")),
         "video" => pm_render::media::probe_video(path).and_then(|_| {

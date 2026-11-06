@@ -46,6 +46,10 @@ fn extension(media_type: &str) -> &'static str {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
+        "image/tiff" => "tif",
+        "image/heic" => "heic",
+        "image/avif" => "avif",
+        "video/x-matroska" => "mkv",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
         "audio/wav" | "audio/x-wav" => "wav",
@@ -104,11 +108,26 @@ fn resolve(item: &MediaEntry, objects: &Path) -> Result<PathBuf> {
     let extension = extension(&item.media_type.to_string());
     let name = format!("{}.{extension}", object_key(item));
     let object = objects.join(&name);
-    if fs::metadata(&object).is_ok_and(|m| m.is_file() && m.len() == item.length()) {
-        // Recency for eviction; a failure only makes it evicted sooner.
-        if let Ok(file) = fs::File::options().append(true).open(&object) {
+    if let Ok(found) = fs::metadata(&object)
+        && found.is_file()
+        && found.len() == item.length()
+    {
+        // Recency for eviction; a failure only makes it evicted sooner. A link
+        // shares its inode with an immutable original, which stays untouched.
+        use std::os::unix::fs::MetadataExt;
+        if found.nlink() == 1
+            && let Ok(file) = fs::File::options().append(true).open(&object)
+        {
             let _ = file.set_modified(std::time::SystemTime::now());
         }
+        return Ok(object);
+    }
+    // Retained originals have no extension. A link names them for the decoder
+    // and costs no bytes; another volume falls through to a verified copy.
+    if let MediaSource::File { path, length, .. } = &item.source
+        && fs::metadata(path).is_ok_and(|m| m.len() == *length)
+        && fs::hard_link(path, &object).is_ok()
+    {
         return Ok(object);
     }
     let partial = objects.join(format!(".{name}.part"));
@@ -337,6 +356,33 @@ mod tests {
         let resolved = for_session(&snapshot(), &media, None, &cache).unwrap();
         assert_eq!(resolved.failed, ["b"]);
         assert!(resolved.catalog.originals.contains_key("a"));
+    }
+
+    #[test]
+    fn a_retained_original_is_linked_not_copied() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("media-cache");
+        let retained = directory.path().join("0".repeat(64));
+        fs::write(&retained, b"retained").unwrap();
+        let mut media = MediaTable::default();
+        media.insert(MediaEntry {
+            id: "a".into(),
+            media_type: "image/png".into(),
+            revision: "1".into(),
+            source: MediaSource::File {
+                path: retained.clone(),
+                length: 8,
+                sha256: Some("0".repeat(64)),
+            },
+        });
+        let resolved = for_session(&snapshot(), &media, None, &cache).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let object = &resolved.catalog.originals["a"];
+        assert_eq!(object.extension().unwrap(), "png");
+        assert_eq!(
+            fs::metadata(object).unwrap().ino(),
+            fs::metadata(&retained).unwrap().ino()
+        );
     }
 
     #[test]

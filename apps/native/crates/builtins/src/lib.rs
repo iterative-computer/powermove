@@ -3,6 +3,7 @@
 mod agent_host;
 mod data;
 pub mod delivery;
+pub mod media_import;
 mod models;
 mod properties;
 mod settings;
@@ -57,6 +58,7 @@ struct Entry {
     interaction: Interaction,
 }
 /// Completed byte receipts stay native; the JSX panel receives metadata only.
+#[derive(Clone)]
 pub struct RetainedAsset {
     pub id: String,
     pub metadata: pm_model::Value,

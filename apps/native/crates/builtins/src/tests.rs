@@ -1365,10 +1365,9 @@ fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_la
     finish(current.mount("timeline").unwrap());
     finish(current.timeline_action(intent).unwrap());
     let changed = handle.published("synthetic").unwrap();
+    let open = changed.snapshot.open_comp();
     assert_eq!(
-        changed
-            .snapshot
-            .root()
+        pm_kernel::model::comp_node(changed.snapshot.root().unwrap(), open.as_deref())
             .unwrap()
             .get("layers")
             .unwrap()

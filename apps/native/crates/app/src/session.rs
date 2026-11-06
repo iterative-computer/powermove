@@ -64,6 +64,10 @@ pub struct Controller {
     pub close_operation: Option<crate::mcp::Operation>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
+    pub(crate) new_project_open: bool,
+    /// Queued batches and the cancel flag of the running one.
+    pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
+    pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Why a project opened as a copy, in user language (never the enum name).
@@ -123,12 +127,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).status_text()
     }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
-        if let Some(path) = paths
-            .into_iter()
-            .find(|p| matches!(p.extension().and_then(|x| x.to_str()), Some("pmv" | "json")))
-        {
-            self.0.update(cx, |v, cx| v.open_file(path, cx));
-        }
+        self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
 }
 impl Controller {
@@ -260,6 +259,9 @@ impl Controller {
             close_operation: None,
             save_pending: false,
             close_after_save: None,
+            new_project_open: false,
+            imports: Default::default(),
+            importing: None,
         }
     }
     pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -533,6 +535,19 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        let id = match &source {
+            SessionSource::Library { project, .. } => project.clone(),
+            SessionSource::File(path) => stable_id(path),
+            SessionSource::New(_) => pm_kernel::new_id("app"),
+        };
+        self.open_as(id, source, cx);
+    }
+    pub(crate) fn open_as(
+        &mut self,
+        open_id: String,
+        source: SessionSource,
+        cx: &mut Context<Self>,
+    ) {
         if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -551,11 +566,6 @@ impl Controller {
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
             let _operation=operation;
-            let open_id = match &source {
-                SessionSource::Library {project,..}=>project.clone(),
-                SessionSource::File(p)=>stable_id(p),
-                SessionSource::New(_)=>pm_kernel::new_id("app"),
-            };
             let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
             if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
                 let ticket = ticket.clone();
@@ -872,6 +882,14 @@ impl Controller {
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
+            "cancel" | "deselect" if self.importing.is_some() => {
+                if let Some(cancel) = &self.importing {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            "newProject" => self.show_new_project(cx),
+            "import" => self.pick_media(None, true, cx),
+            "importFolder" => self.pick_media_folder(None, cx),
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {

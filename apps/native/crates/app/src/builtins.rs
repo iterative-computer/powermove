@@ -552,6 +552,23 @@ impl Controller {
                                 pm_panel_media::Effect::CompositionSettings(_) => {
                                     self.show_builtin("settings", window, cx)
                                 }
+                                pm_panel_media::Effect::PickFiles { replace } => {
+                                    let place = replace.is_none();
+                                    self.pick_media(replace, place, cx)
+                                }
+                                pm_panel_media::Effect::PickFolder { folder } => {
+                                    self.pick_media_folder(folder, cx)
+                                }
+                                // A drop on the panel: assets only, no layers.
+                                pm_panel_media::Effect::Import { files, folder, .. } => self
+                                    .import(
+                                        pm_builtins::media_import::ImportRequest {
+                                            paths: files.into_iter().map(Into::into).collect(),
+                                            folder,
+                                            ..Default::default()
+                                        },
+                                        cx,
+                                    ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {

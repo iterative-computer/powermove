@@ -272,6 +272,7 @@ impl Catalog {
         }
         let mut next = (*self.root).clone();
         let mut seen = HashSet::new();
+        let mut added = vec![];
         for item in items {
             let id = replace.clone().unwrap_or(item.id);
             if id.is_empty()
@@ -311,6 +312,10 @@ impl Catalog {
             // Replacing an asset keeps its id: layer timing/trim/transforms and
             // source-time interpretation remain authored exactly as before.
             ensure_map(&mut next, "assets").insert(id.as_str(), meta);
+            added.push(id);
+        }
+        if replace.is_none() {
+            pm_kernel::asset_order::append(&mut next, &added);
         }
         Ok(PreparedEdit {
             stamp: self.stamp.clone(),

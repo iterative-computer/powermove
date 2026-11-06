@@ -163,7 +163,7 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                         &kernel,
                         ShellCall::SaveAs {
                             session: session.clone(),
-                            path: save.clone()
+                            path: save.clone(),
                             replace: false,
                         }
                     )?,
