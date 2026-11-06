@@ -570,3 +570,75 @@ fn e06_mosaic_cells_follow_translated_rotated_scaled_owner_and_partial_alpha_hdr
         }
     }
 }
+
+/// Every viewer crop that has an origin lies beyond the largest output. Its
+/// effects still read the pixels outside the crop: the same picture in a
+/// smaller composition, drawn whole, is the reference.
+#[test]
+fn e06_a_viewer_crop_beyond_the_largest_output_samples_outside_the_viewport() {
+    const SCALE: f64 = 10.;
+    let scene = |size: (u32, u32), owner: (f64, f64), id, version, params: &Value| {
+        let mut value = fixture(id, version, params.clone(), json!({}), None);
+        value["w"] = json!(size.0);
+        value["h"] = json!(size.1);
+        value["layers"][0]["d"] = json!({"w":120,"h":80,"color":"#4080C0"});
+        set(&mut value["layers"][0], "position.x", json!(owner.0));
+        set(&mut value["layers"][0], "position.y", json!(owner.1));
+        let mut document = load(&value);
+        document.set_saving_app_version(Some("1.3.0".into()));
+        document
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    let (w, h) = (64usize, 48usize);
+    // Beside the owner, inside the composition, and at both of its corners.
+    let views = [
+        ((640., 310.), (40., 10.), (6330., 3150.), (330, 150)),
+        ((10., 10.), (10., 10.), (0., 0.), (0, 0)),
+        ((1870., 910.), (70., 10.), (19936., 9952.), (1936, 952)),
+    ];
+    for (id, version, params) in cases() {
+        for (owner, near, origin, corner) in views {
+            let large = scene((2000, 1000), owner, id, version, &params);
+            let small = scene((200, 100), near, id, version, &params);
+            renderer.set_main_effects_for_document(&small).unwrap();
+            let whole = renderer
+                .render(
+                    &small,
+                    "Ptest-root",
+                    Ticks::ZERO,
+                    &RenderRequest::sized(Size::new(2000, 1000), Precision::Float32),
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(whole.failures.is_empty(), "{:?}", whole.failures);
+            let whole = renderer.read_rgba(&whole).unwrap();
+            renderer.set_main_effects_for_document(&large).unwrap();
+            let mut request = RenderRequest::sized(Size::new(64, 48), Precision::Float32);
+            request.scale = Some((SCALE, SCALE));
+            request.origin = Some(origin);
+            let frame = renderer
+                .render(
+                    &large,
+                    "Ptest-root",
+                    Ticks::ZERO,
+                    &request,
+                    &MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            let actual = renderer.read_rgba(&frame).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    for c in 0..4 {
+                        let want = whole[((y + corner.1) * 2000 + x + corner.0) * 4 + c];
+                        let got = actual[(y * w + x) * 4 + c];
+                        assert!(
+                            (want - got).abs() < 2e-3,
+                            "{id} v{version} {params} at {origin:?}, {x},{y}.{c}: {got} for {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

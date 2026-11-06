@@ -329,17 +329,17 @@ fn preview_window(
 }
 
 /// A cropped effect needs the pixels outside the presentation rectangle.
-/// Keep a composition-sized logical canvas and express the viewport as its ROI;
-/// the compositor then grows that ROI by the declared chain padding. Without
-/// this, the viewport edge becomes an artificial blur/shadow sampling edge.
+/// Keep a logical canvas around the viewport and express the viewport as its
+/// ROI; the compositor then grows that ROI by the declared chain padding.
+/// Without this, the viewport edge becomes an artificial blur/shadow sampling
+/// edge. Only the grown ROI is allocated. Padding that outreaches the canvas
+/// stops at its edge, as any padding stops at the frame.
 fn effect_viewport_request(
     comp: &Comp<'_>,
     effects: &Effects,
     request: &RenderRequest,
-) -> Result<Option<RenderRequest>, RenderError> {
-    let Some((ox, oy)) = request.origin else {
-        return Ok(None);
-    };
+) -> Option<RenderRequest> {
+    let (ox, oy) = request.origin?;
     if !comp.layers().iter().any(|layer| {
         // Local source chains already retain their complete padded raster.
         if pm_eval::node::string(pm_eval::node::member(Some(layer), "effectSpace"))
@@ -377,7 +377,7 @@ fn effect_viewport_request(
             })
         })
     }) {
-        return Ok(None);
+        return None;
     }
     let scale = request.scale.unwrap_or_else(|| {
         plan::derived_scale(comp, request.output_size.width, request.output_size.height)
@@ -392,21 +392,27 @@ fn effect_viewport_request(
     };
     // Align the new ROI to integer pixels while retaining fractional pan in
     // the canvas origin. Negative pans keep their exact outside-comp extent.
-    let x = ox.ceil().max(0.);
-    let y = oy.ceil().max(0.);
-    let base = (ox - x, oy - y);
-    let width = (dim("w", request.output_size.width) * scale.0 - base.0)
-        .ceil()
-        .max(x + f64::from(request.output_size.width));
-    let height = (dim("h", request.output_size.height) * scale.1 - base.1)
-        .ceil()
-        .max(y + f64::from(request.output_size.height));
+    // A canvas beyond the largest output, which every viewer crop is, becomes
+    // a window of that size around the viewport, the limit of `Region::grow`.
     let limit = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
-    if width > limit || height > limit {
-        return Err(RenderError::Request(
-            "effect viewport canvas exceeds the bounded output dimensions".into(),
-        ));
-    }
+    let window = |origin: f64, visible: u32, extent: f64| {
+        let start = origin.ceil().max(0.);
+        let base = origin - start;
+        let visible = f64::from(visible);
+        let full = (extent - base).ceil().max(start + visible);
+        let shift = (start - ((limit - visible) / 2.).floor()).clamp(0., (full - limit).max(0.));
+        (base + shift, full.min(limit), start - shift, full > limit)
+    };
+    let (ox, width, x, cut_x) = window(
+        ox,
+        request.output_size.width,
+        dim("w", request.output_size.width) * scale.0,
+    );
+    let (oy, height, y, cut_y) = window(
+        oy,
+        request.output_size.height,
+        dim("h", request.output_size.height) * scale.1,
+    );
     let r = request.region.unwrap_or(pm_protocol::common::PixelRect {
         x: 0,
         y: 0,
@@ -422,9 +428,9 @@ fn effect_viewport_request(
         width: r.width,
         height: r.height,
     });
-    expanded.origin = (base != (0., 0.)).then_some(base);
+    expanded.origin = (cut_x || cut_y || (ox, oy) != (0., 0.)).then_some((ox, oy));
     expanded.preview_canvas = true;
-    Ok(Some(expanded))
+    Some(expanded)
 }
 
 /// The renderer.
@@ -1817,7 +1823,7 @@ impl Renderer {
         }
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
-        let expanded_request = effect_viewport_request(&comp, &self.effects, request)?;
+        let expanded_request = effect_viewport_request(&comp, &self.effects, request);
         let request = expanded_request.as_ref().unwrap_or(request);
         let open = capability::open_composition_id(root);
         let project = open

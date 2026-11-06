@@ -321,3 +321,28 @@ fn the_background_follows_todays_view_at_an_origin() {
         );
     }
 }
+
+/// A view beyond the largest output that starts at the composition's corner
+/// is still a window: a gradient spans the composition, not the output.
+#[test]
+fn a_window_at_the_corner_keeps_the_composition_resolution() {
+    let _compiler_fixture = COMPILER_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = renderer();
+    let doc = load(&project(
+        2000,
+        1000,
+        2.0,
+        gradient_at(0.0, "#000000", "#FFFFFF"),
+        vec![],
+    ));
+    let request = |origin| RenderRequest {
+        scale: Some((10.0, 10.0)),
+        origin: Some(origin),
+        ..RenderRequest::sized(Size::new(64, 48), Precision::Float32)
+    };
+    let corner = render(&mut r, &doc, &request((0.0, 0.0)));
+    let beside = render(&mut r, &doc, &request((1.0, 1.0)));
+    for (a, b) in corner.iter().zip(&beside) {
+        assert!((a - b).abs() < 1.0 / 255.0, "{a} against {b}");
+    }
+}
