@@ -131,6 +131,13 @@ pub fn settings() -> Accessibility {
         reduce_motion: w.accessibilityDisplayShouldReduceMotion(),
     }
 }
+/// Drawable pixels for a layer of `size` points at the preview resolution.
+pub fn preview_drawable(size: (f64, f64), backing: f64, preview: f64) -> (f64, f64) {
+    (
+        (size.0 * backing * preview).round().max(2.),
+        (size.1 * backing * preview).round().max(2.),
+    )
+}
 pub fn native_color(rgb: u32) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(
         ((rgb >> 16) & 255) as f64 / 255.,
@@ -827,6 +834,7 @@ pub struct Host {
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>)>,
+    preview_scale: f64,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
@@ -1000,6 +1008,7 @@ impl Host {
             flowchart: None,
             layer,
             viewer_transform: None,
+            preview_scale: 1.,
             last_geometry: None,
             _toolbar: toolbar,
             _delegate: delegate,
@@ -1464,6 +1473,15 @@ impl Host {
             .bindings
             .sort_by_key(|b| std::cmp::Reverse(b.priority));
     }
+    /// Viewer render resolution as a fraction of the layer's pixels. The layer
+    /// keeps its size; AppKit scales the smaller drawable up. The engine follows
+    /// the drawable through its OutputBinding, so a change costs one reconfigure.
+    pub fn set_preview_scale(&mut self, scale: f64) {
+        if self.preview_scale != scale {
+            self.preview_scale = scale;
+            self.last_geometry = None;
+        }
+    }
     pub fn viewer_layer(&self) -> metal::MetalLayer {
         self.layer.clone()
     }
@@ -1509,11 +1527,13 @@ impl Host {
                     let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
                 }
                 self.layer.set_contents_scale(g.scale);
+                let (width, height) = preview_drawable(
+                    (g.layer.size.width, g.layer.size.height),
+                    g.scale,
+                    self.preview_scale,
+                );
                 self.layer
-                    .set_drawable_size(core_graphics::geometry::CGSize::new(
-                        g.layer.size.width * g.scale,
-                        g.layer.size.height * g.scale,
-                    ));
+                    .set_drawable_size(core_graphics::geometry::CGSize::new(width, height));
             } else {
                 self.viewer.setHidden(true);
             }

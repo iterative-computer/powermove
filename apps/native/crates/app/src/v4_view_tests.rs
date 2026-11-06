@@ -468,12 +468,22 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     assert!(!history(&rig));
     vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
     for step in 1..=5 {
-        vcx.simulate_mouse_move(at + point(px(step as f32 * 8.), px(0.)), MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(
+            at + point(px(step as f32 * 8.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
         settle(cx, |_| false_after(10));
     }
-    vcx.simulate_mouse_up(at + point(px(40.), px(0.)), MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(
+        at + point(px(40.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
     let check = rig.kernel.clone();
-    settle(cx, move |_| check.published(PROJECT).unwrap().history.can_undo);
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
     assert!(view.read_with(&vcx, |v, _| v.error.clone()).is_none());
     assert!(opacity(&rig) > start);
     let root = rig.kernel.published(PROJECT).unwrap();

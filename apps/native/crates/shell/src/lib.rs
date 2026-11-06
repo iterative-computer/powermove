@@ -23,5 +23,6 @@ pub(crate) use macos::{open_editor, open_editor_tab, open_settings};
 pub use macos::{run, run_integrated, run_with_device, smoke};
 #[cfg(target_os = "macos")]
 pub use native::{
-    Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, system_accent,
+    Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, preview_drawable,
+    system_accent,
 };

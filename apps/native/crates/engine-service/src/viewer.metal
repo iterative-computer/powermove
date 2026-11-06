@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Line { float4 ends; float4 color; };
-struct Params { uint count; uint pad0; uint pad1; uint pad2; float4 output; Line lines[64]; };
+struct Params { uint count; uint pad0; uint pad1; uint pad2; float4 output; Line lines[120]; };
 vertex float4 vs(uint i [[vertex_id]]) {
     float2 q=float2(float((i<<1)&2),float(i&2));
     return float4(q*2-1,0,1);

@@ -988,8 +988,7 @@ impl TimelineSurface {
             ("delete", "Delete"),
         ];
         if !self.model.selection.contains(&id) {
-            self.queue
-                .push_back(Job::SelectLayer(id, Mods::default()));
+            self.queue.push_back(Job::SelectLayer(id, Mods::default()));
             self.pump(cx);
         }
         let rows = ROWS

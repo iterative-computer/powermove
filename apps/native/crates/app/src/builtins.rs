@@ -18,6 +18,7 @@ pub struct Host {
     pub views: BTreeMap<String, Entity<SurfaceView>>,
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
+    pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -79,6 +80,16 @@ impl Controller {
                 .borrow_mut()
                 .insert("timeline".into(), surface.clone().into());
             self.builtins.timeline = Some(surface);
+            let host = Rc::new(ControllerDelegate(cx.entity().downgrade()));
+            let (kernel, tokens) = (self.kernel.clone(), self.host.borrow().tokens.clone());
+            let gizmos =
+                cx.new(|_| crate::gizmo::GizmoSurface::new(kernel, project.clone(), tokens, host));
+            self.builtins
+                .natives
+                .views
+                .borrow_mut()
+                .insert("viewer.gizmos".into(), gizmos.clone().into());
+            self.builtins.gizmos = Some(gizmos);
         }
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
@@ -230,7 +241,21 @@ impl Controller {
         self.builtins.last_time = time;
         self.builtins.last_playing = playing;
         self.builtins.last_tick = Some(std::time::Instant::now());
+        if let Some(gizmos) = &self.builtins.gizmos {
+            gizmos.update(cx, |g, cx| g.refresh(cx));
+        }
         self.update_builtins(cx);
+    }
+    /// Escape during a drag restores through the kernel gesture that drag owns.
+    pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        let timeline = self.builtins.timeline.clone();
+        let gizmos = self.builtins.gizmos.clone();
+        let views: Vec<_> = self.builtins.views.values().cloned().collect();
+        timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
+            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || views
+                .into_iter()
+                .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
         self.start_builtins(cx);
@@ -351,9 +376,11 @@ impl Controller {
         if id == "viewer" {
             let body_h = (bounds.h - t.metrics.header).max(1.);
             let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
+            let scale = self.zoom.unwrap_or(fit);
+            self.viewer_scale.set(scale);
             self.host
                 .borrow_mut()
-                .viewer_transform(self.dimensions, Some(self.zoom.unwrap_or(fit)));
+                .viewer_transform(self.dimensions, Some(scale));
             crate::playback::frame_outline(
                 &self.host.borrow(),
                 crate::panels::needs_frame_outline(self.background, t.colors.viewer),
@@ -780,6 +807,47 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
     ) {
         crate::v4_native::menu(window, &items, cx, choose);
+    }
+}
+impl crate::gizmo::Host for ControllerDelegate {
+    fn time(&self, cx: &App) -> f64 {
+        self.0.upgrade().map_or(0., |c| c.read(cx).time())
+    }
+    fn playing(&self, cx: &App) -> bool {
+        self.0.upgrade().is_some_and(|c| c.read(cx).playing())
+    }
+    fn frame(&self, _: Bounds<Pixels>, cx: &App) -> Option<crate::gizmo::ViewFrame> {
+        let controller = self.0.upgrade()?;
+        let v = controller.read(cx);
+        let slot = v.host.borrow().viewer_rect.get()?;
+        let scale = v.viewer_scale.get();
+        let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
+        Some(crate::gizmo::ViewFrame {
+            origin: point(
+                px(slot.x + (slot.w - w as f32) / 2.),
+                px(slot.y + (slot.h - h as f32) / 2.),
+            ),
+            scale,
+            size: v.dimensions,
+        })
+    }
+    fn tool(&self, cx: &App) -> crate::gizmo::Tool {
+        use crate::gizmo::Tool;
+        let Some(controller) = self.0.upgrade() else {
+            return Tool::Other;
+        };
+        match controller.read(cx).tool.as_str() {
+            "toolSelect" => Tool::Select,
+            "toolRotate" => Tool::Rotate,
+            "toolAnchor" => Tool::Anchor,
+            _ => Tool::Other,
+        }
+    }
+    fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
+    }
+    fn report(&self, message: String, cx: &mut App) {
+        crate::timeline_surface::Delegate::report(self, message, cx);
     }
 }
 struct SurfaceWindow {

@@ -314,19 +314,40 @@ fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
     let value = |s: &Stage| {
         s.surface.read_with(&s.vcx, |t, _| {
-            t.model().index.channel("l0", "opacity").unwrap().value.as_f64().unwrap()
+            t.model()
+                .index
+                .channel("l0", "opacity")
+                .unwrap()
+                .value
+                .as_f64()
+                .unwrap()
         })
     };
     let before = value(&s);
     let at = s.at(0, 0.5);
-    s.surface.update(&mut s.vcx, |t, _| t.press_property("l0".into(), "opacity".into(), at));
-    s.vcx.simulate_mouse_move(at + point(px(-20.), px(0.)), MouseButton::Left, Modifiers::none());
+    s.surface.update(&mut s.vcx, |t, _| {
+        t.press_property("l0".into(), "opacity".into(), at)
+    });
+    s.vcx.simulate_mouse_move(
+        at + point(px(-20.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
     s.idle(cx);
-    s.vcx.simulate_mouse_move(at + point(px(-40.), px(0.)), MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        at + point(px(-40.), px(0.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
     s.idle(cx);
-    s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
     s.idle(cx);
-    assert!(s.recorder.reports.borrow().is_empty(), "{:?}", s.recorder.reports.borrow());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
     assert_eq!(value(&s), before - 20.);
     s.undo(cx);
     assert_eq!(value(&s), before);
@@ -346,7 +367,13 @@ fn layer_rows_offer_a_native_menu_that_runs_commands(cx: &mut TestAppContext) {
     s.idle(cx);
     assert_eq!(*s.recorder.commands.borrow(), ["duplicate"]);
     assert_eq!(
-        s.rig.kernel.published(PROJECT).unwrap().selection.layers().len(),
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .len(),
         1,
         "the row under the pointer becomes the selection"
     );

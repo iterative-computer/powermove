@@ -120,6 +120,11 @@ pub fn overlay_lines(safe: bool, guides: bool) -> Vec<OverlayLine> {
     }
     lines
 }
+/// The Resolution pop-up, read from the same view state the panel writes.
+/// `Auto` keeps full size; the chosen scale sets the engine's drawable.
+pub fn preview_scale(ui: &pm_kernel::state::UiState) -> f64 {
+    pm_panel_viewerchrome::Chrome::read(ui).map_or(1., |c| c.quality.scale())
+}
 pub fn overlay_geometry(safe: bool, guides: bool) -> OverlayGeometry {
     OverlayGeometry::new(overlay_lines(safe, guides)).expect("fixed overlay geometry is valid")
 }
@@ -588,11 +593,27 @@ impl Controller {
         self.apply_viewer_options();
         cx.notify();
     }
+    /// Selection gizmos draw in the engine's own pass, with the safe areas.
+    pub fn set_gizmos(&mut self, lines: Vec<OverlayLine>) {
+        self.gizmo_lines = lines;
+        if let Some(viewer) = &self.viewer
+            && let Err(error) = viewer.safe_areas(self.overlay())
+        {
+            self.message = error.to_string();
+        }
+    }
+    /// Guides first; a huge selection loses its last boxes, never the guides.
+    fn overlay(&self) -> OverlayGeometry {
+        let mut lines = overlay_lines(self.safe_areas, self.guides);
+        let room = OverlayGeometry::MAX_LINES.saturating_sub(lines.len());
+        lines.extend(self.gizmo_lines.iter().take(room).copied());
+        OverlayGeometry::new(lines).expect("bounded overlay geometry")
+    }
     /// Re-applies output mode and overlays to every viewer of this editor
     /// (after any viewer is created or an option changes).
     pub fn apply_viewer_options(&mut self) {
         let mtm = MainThreadMarker::new().unwrap();
-        let geometry = overlay_geometry(self.safe_areas, self.guides);
+        let geometry = self.overlay();
         let popout = self.popout.as_ref().and_then(|p| p.viewer.borrow().clone());
         for viewer in self.viewer.iter().chain(popout.as_ref()) {
             if let Err(e) = viewer

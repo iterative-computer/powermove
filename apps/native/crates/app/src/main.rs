@@ -5,9 +5,12 @@ mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
 mod export_coordinator;
+mod gizmo;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
+#[cfg(test)]
+mod gizmo_tests;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
 mod lifecycle;

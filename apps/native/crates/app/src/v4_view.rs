@@ -485,6 +485,11 @@ impl SurfaceView {
         }
     }
     #[cfg(test)]
+    pub fn change_semantic(&mut self, semantic: &str, value: Value, cx: &mut Context<Self>) {
+        let id = self.prepared.semantics[semantic];
+        self.change(id, value, cx);
+    }
+    #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {
         let mut numbers: Vec<_> = self
             .prepared
@@ -1466,14 +1471,16 @@ impl SurfaceView {
             wrapper = wrapper.track_focus(focus).tab_index(0);
         }
         if node.number.is_some() {
-            wrapper = wrapper.cursor_col_resize().capture_any_mouse_down(cx.listener(
-                move |v, event: &MouseDownEvent, window, cx| {
-                    if event.button == MouseButton::Left {
-                        v.scrub_press(id, event, window);
-                        cx.stop_propagation();
-                    }
-                },
-            ));
+            wrapper = wrapper
+                .cursor_col_resize()
+                .capture_any_mouse_down(cx.listener(
+                    move |v, event: &MouseDownEvent, window, cx| {
+                        if event.button == MouseButton::Left {
+                            v.scrub_press(id, event, window);
+                            cx.stop_propagation();
+                        }
+                    },
+                ));
         }
         let weak = cx.entity().downgrade();
         wrapper = wrapper.on_a11y_action(AccessibleAction::SetValue, move |data, _, cx| {

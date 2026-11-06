@@ -61,6 +61,11 @@ pub struct Controller {
     pub close_pending: bool,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
+    pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
+    /// The toolbar tool, mirrored from shell commands for native surfaces.
+    pub tool: String,
+    /// The composition's scale in the viewer, as last placed.
+    pub viewer_scale: std::cell::Cell<f64>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
 }
@@ -256,6 +261,9 @@ impl Controller {
             close_pending: false,
             close_window: None,
             close_operation: None,
+            gizmo_lines: vec![],
+            tool: "toolSelect".into(),
+            viewer_scale: std::cell::Cell::new(1.),
             save_pending: false,
             close_after_save: None,
         }
@@ -346,6 +354,9 @@ impl Controller {
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
         }
+        self.host
+            .borrow_mut()
+            .set_preview_scale(crate::viewer2::preview_scale(&p.ui_state));
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
             _ => None,
@@ -378,6 +389,9 @@ impl Controller {
         self.update_builtins(cx);
         if let Some(timeline) = &self.builtins.timeline {
             timeline.update(cx, |t, cx| t.published(cx));
+        }
+        if let Some(gizmos) = &self.builtins.gizmos {
+            gizmos.update(cx, |g, cx| g.refresh(cx));
         }
         cx.notify();
     }
@@ -855,8 +869,13 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            self.tool = cmd.name.clone();
+            return false;
+        }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
+            "deselect" | "cancel" if self.cancel_gesture(cx) => {}
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),

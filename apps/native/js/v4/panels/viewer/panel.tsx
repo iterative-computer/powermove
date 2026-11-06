@@ -214,7 +214,12 @@ export function ViewerPanel({
         label="Viewer"
         value={value}
         tabIndex={0}
-        style={{ ...target, background: token("colors.viewer") }}
+        style={{
+          ...target,
+          position: "relative",
+          flexGrow: 1,
+          background: token("colors.viewer"),
+        }}
         state={{ interaction: state.host.interaction }}
         metadata={{
           // DESIGN-TODO(opus): map spec geometry/keylines/opacity to named
@@ -228,7 +233,14 @@ export function ViewerPanel({
           canvasLost: !source && m.canvasLost,
           pendingRecipe: "viewer-chrome.md §§2–3,6–7",
         }}
-      />
+      >
+        <canvas
+          id="viewer.gizmos"
+          surface="viewer.gizmos"
+          label="Transform gizmos"
+          style={{ position: "absolute", inset: "fill" }}
+        />
+      </div>
       {!source && m.canvasLost && (
         <ToolbarItem
           id="viewer.canvas.return"
