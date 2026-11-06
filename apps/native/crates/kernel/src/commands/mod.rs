@@ -77,7 +77,9 @@ use pm_model::{Node, Op};
 
 use crate::error::CommandError;
 
+pub mod capabilities;
 pub mod pro_edit;
+pub mod precompose;
 pub mod pro_links;
 pub mod pro_source;
 mod pro_support;
@@ -275,7 +277,7 @@ impl Command {
     /// Validates against `root` (the scratch project tree) and returns the
     /// operations; empty when the document already says so.
     pub fn plan(&self, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
-        self.plan_with_state(root, origin, None)
+        self.plan_with_state(root, origin, None, None)
     }
 
     pub(crate) fn plan_with_state(
@@ -283,9 +285,11 @@ impl Command {
         root: &Node,
         origin: Origin,
         state: Option<&crate::state::StateSnapshot>,
+        text: Option<&crate::text_host::SharedTextHost>,
     ) -> Result<Vec<Op>, CommandError> {
         let mut cx = Cx::new(root, origin);
         cx.state = state;
+        cx.text = text;
         match self {
             Command::SetStaticOpacity { .. }
             | Command::SetLayerName { .. }

@@ -124,14 +124,17 @@ pub enum CompCommand {
     ReleasePrecomp { layer_id: String },
     /// Pre-compose (Cmd+Shift+C): moves the layers into a new composition
     /// `new_comp_id` and replaces them with one pre-comp layer
-    /// `precomp_layer_id`, keeping every rendered pixel. Not ported (needs
-    /// `PM.Comps.precompose` and the `comp_bounds` kernel).
+    /// `precomp_layer_id`, keeping every rendered pixel (`PM.Comps.precompose`).
+    /// Leave attributes takes one source layer; it keeps its id and turns
+    /// into the pre-comp layer. `adjust_duration` fits the new composition to
+    /// the moved layers. A host opens the composition afterwards.
     Precompose {
         layer_ids: Vec<String>,
         new_comp_id: String,
         precomp_layer_id: String,
         name: Option<String>,
         mode: PrecomposeMode,
+        adjust_duration: bool,
         time: f64,
     },
 }
@@ -183,7 +186,26 @@ impl CompCommand {
             CompCommand::Duplicate { comp_id, new_id } => duplicate(cx, comp_id, new_id),
             CompCommand::Delete { comp_id, fallback } => delete(cx, comp_id, fallback.as_deref()),
             CompCommand::ReleasePrecomp { layer_id } => release_precomp(cx, layer_id),
-            CompCommand::Precompose { .. } => Err(CommandError::NotImplemented("precompose")),
+            CompCommand::Precompose {
+                layer_ids,
+                new_comp_id,
+                precomp_layer_id,
+                name,
+                mode,
+                adjust_duration,
+                time,
+            } => super::precompose::precompose(
+                cx,
+                &super::precompose::Request {
+                    ids: layer_ids,
+                    comp_id: new_comp_id,
+                    layer_id: precomp_layer_id,
+                    name: name.as_deref(),
+                    mode: *mode,
+                    adjust_duration: *adjust_duration,
+                    time: *time,
+                },
+            ),
         }
     }
 }
@@ -378,7 +400,7 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
 }
 
 /// Every composition id.
-fn comp_ids(cx: &Cx<'_>) -> Vec<String> {
+pub(super) fn comp_ids(cx: &Cx<'_>) -> Vec<String> {
     match cx.root().get("comps").map(pm_model::Node::kind) {
         Some(pm_model::NodeKind::Object(map)) => map
             .keys()
@@ -388,7 +410,7 @@ fn comp_ids(cx: &Cx<'_>) -> Vec<String> {
     }
 }
 
-fn comp_name(cx: &Cx<'_>, id: &str) -> String {
+pub(super) fn comp_name(cx: &Cx<'_>, id: &str) -> String {
     cx.comp_node(Some(id))
         .ok()
         .and_then(|c| c.get("name"))
@@ -398,7 +420,7 @@ fn comp_name(cx: &Cx<'_>, id: &str) -> String {
 }
 
 /// `uniqueName(base, except)`.
-fn unique_name(cx: &Cx<'_>, base: &str, except: Option<&str>) -> String {
+pub(super) fn unique_name(cx: &Cx<'_>, base: &str, except: Option<&str>) -> String {
     let taken: HashSet<String> = comp_ids(cx)
         .into_iter()
         .filter(|id| Some(id.as_str()) != except)
@@ -651,7 +673,7 @@ fn set_scene_parameter(
 }
 
 /// `blankComp(settings)` + `create`.
-fn create(cx: &mut Cx<'_>, comp_id: &str, s: &NewComp) -> Result<(), CommandError> {
+pub(super) fn create(cx: &mut Cx<'_>, comp_id: &str, s: &NewComp) -> Result<(), CommandError> {
     if comp_ids(cx).iter().any(|c| c == comp_id) {
         return Err(CommandError::Invalid(format!(
             "Composition id already exists: {comp_id}"
@@ -947,7 +969,7 @@ fn release_precomp(cx: &mut Cx<'_>, layer_id: &str) -> Result<(), CommandError> 
     )
 }
 
-fn new_id_for(prefix: &str) -> String {
+pub(super) fn new_id_for(prefix: &str) -> String {
     super::new_id(prefix)
 }
 

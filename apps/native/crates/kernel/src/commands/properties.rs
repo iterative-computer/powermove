@@ -8,7 +8,7 @@
 use pm_model::{Map, Value};
 
 use super::channels::{self, Step};
-use super::keyframes::EaseSpec;
+use super::keyframes::{self, EaseSpec};
 use super::{Cx, new_id, track, values};
 use crate::error::CommandError;
 use crate::model::LayerLoc;
@@ -101,12 +101,14 @@ pub enum PropertyCommand {
         channel: String,
         time: f64,
     },
-    /// Reset (channel-row menu): back to the channel's default value (keys
-    /// and expression removed). Needs the channel schema defaults
-    /// (`PM.CH`, effect definitions); not ported.
+    /// Reset (channel-row menu): keys and expression removed, then the
+    /// channel's default. Transform channels default from the shipped reset
+    /// table; content and effect channels from `default`, which the caller
+    /// resolves like every definition. With neither the static value stays.
     Reset {
         layer_id: String,
         channel: String,
+        default: Option<Value>,
         time: f64,
     },
 }
@@ -121,7 +123,7 @@ impl PropertyCommand {
             } if !e.is_empty() => "Set Expression".into(),
             PropertyCommand::SetExpression { .. } => "Remove Expression".into(),
             PropertyCommand::ToggleStopwatch { .. } => "Toggle Animation".into(),
-            PropertyCommand::Reset { .. } => "Reset Property".into(),
+            PropertyCommand::Reset { .. } => "Reset".into(),
         }
     }
 
@@ -138,9 +140,55 @@ impl PropertyCommand {
                 channel,
                 time,
             } => toggle_stopwatch(cx, layer_id, channel, *time),
-            PropertyCommand::Reset { .. } => Err(CommandError::NotImplemented("reset_property")),
+            PropertyCommand::Reset {
+                layer_id,
+                channel,
+                default,
+                time,
+            } => reset(cx, layer_id, channel, default.as_ref(), *time),
         }
     }
+}
+
+/// `resetChannel` (`ChannelRow.svelte`).
+fn reset(
+    cx: &mut Cx<'_>,
+    layer_id: &str,
+    channel: &str,
+    default: Option<&Value>,
+    time: f64,
+) -> Result<(), CommandError> {
+    let (loc, layer, key, _) = resolve(cx, layer_id, channel)?;
+    let value = default.cloned().or_else(|| {
+        let comp = cx.comp_node(loc.comp_id.as_deref()).ok()?.to_value();
+        let context = pm_fx_defs::DefaultContext {
+            width: values::num(&comp, "w")?,
+            height: values::num(&comp, "h")?,
+        };
+        let value = pm_fx_defs::builtins().reset_default(
+            values::text(&layer, "type")?,
+            &key,
+            context,
+        )?;
+        pm_model::json::parse(&value.to_string()).ok()
+    });
+    keyframes::KeyframeCommand::Replace(Box::new(keyframes::ReplaceKeyframes {
+        layer_id: layer_id.into(),
+        channel: key.clone(),
+        keyframes: Vec::new(),
+        replace: true,
+        expression: Some(None),
+        preserve_hand_edits: false,
+        time,
+    }))
+    .plan(cx)?;
+    if let Some(value) = value {
+        let mut c = SetProperty::new(layer_id, key, value, time);
+        c.mode = KeyMode::Static;
+        c.preserve_hand_edits = false;
+        set_property(cx, &c)?;
+    }
+    Ok(())
 }
 
 /// The layer and its channel path, after the lock check and the
