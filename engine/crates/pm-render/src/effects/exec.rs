@@ -644,6 +644,11 @@ impl<'c> Gpu<'c> {
                     calls.push(("u_lutSize".into(), f(&[lut.size as f64])));
                     calls.push(("u_lutDomainMin".into(), f(&lut.domain_min.map(f64::from))));
                     calls.push(("u_lutDomainMax".into(), f(&lut.domain_max.map(f64::from))));
+                    calls.push(("u_lutCubeSize".into(), f(&[f64::from(lut.cube_size)])));
+                    calls.push(("u_lutColumns".into(), f(&[f64::from(lut.cube_columns)])));
+                    calls.push(("u_lutShaperSize".into(), f(&[f64::from(lut.shaper_size)])));
+                    calls.push(("u_lutShaperRow".into(), f(&[f64::from(lut.shaper_row)])));
+                    calls.push(("u_lutCubeRange".into(), f(&lut.cube_range.map(f64::from))));
                 } else {
                     let mapping = if asset.brush {
                         let sx = w as f32 / asset.width as f32;

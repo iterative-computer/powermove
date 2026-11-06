@@ -14,6 +14,8 @@
 //! | [`primaries`] | Linear-light conversion between primaries (P3 stills, the P3 viewer canvas), no clipping |
 //! | [`tonemap`] | BT.2100 light and the BT.2390 EETF, applied where the target cannot hold HDR |
 //! | [`camera_log`] | Apple Log, S-Log3, V-Log, LogC3 and LogC4 from the vendors' transforms |
+//! | [`lut`] | Strict `.cube` reading, tetrahedral evaluation in f64 and the GPU table layout |
+//! | [`scopes`] | Waveform, parade, vectorscope and histogram in f64: the reference for the GPU scopes |
 //! | [`linear`] | Linear-light helpers for linear blending (Phase 3a): input and output transforms and the HDR-safe blend formulas |
 //! | [`dither`] | The deterministic blue-noise RPDF dither of section 17 |
 //! | [`gamut`] | CSS Color 4 sRGB gamut mapping at an explicit SDR boundary |
@@ -33,7 +35,9 @@ pub mod effect_transforms;
 pub mod gamut;
 pub mod key;
 pub mod linear;
+pub mod lut;
 pub mod primaries;
+pub mod scopes;
 pub mod standard;
 pub mod tonemap;
 pub mod transfer;

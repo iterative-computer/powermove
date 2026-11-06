@@ -5,10 +5,12 @@ use serde_json::{Value, json};
 fn pinned_main_has_every_family_and_full_historical_revisions() {
     assert_eq!(main_effects().commit, MAIN_COMMIT);
     assert_eq!(main_effects().effects.len(), 43);
-    assert_eq!(main_catalog().definitions().count(), 53);
+    // 53 pinned from main plus Apply Color LUT's native revision 2.
+    assert_eq!(main_catalog().definitions().count(), 54);
     assert_eq!(main_catalog().current_definitions().count(), 43);
     assert_eq!(main_effects().blobs.len(), 22);
     let raw: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
+    assert_eq!(raw["effects"].as_array().unwrap().len(), 43);
     for original in raw["effects"].as_array().unwrap() {
         let parsed: Definition = serde_json::from_value(original.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), *original);
@@ -229,7 +231,7 @@ fn changed_historical_gradient_requires_provenance_instead_of_silent_reinterpret
 fn assembled_programs_are_keyed_by_implementation_revision_and_preserve_raw_sources() {
     use std::collections::BTreeSet;
     let shaders = &main_effects().shaders;
-    assert_eq!(shaders.len(), 53);
+    assert_eq!(shaders.len(), 54);
     let mut keys = BTreeSet::new();
     for shader in shaders {
         assert!(keys.insert((&shader.id, shader.version)));

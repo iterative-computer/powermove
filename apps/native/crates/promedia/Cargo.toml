@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pm-color = { path = "../../../../engine/crates/pm-color" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
 pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
 blake3 = "1"

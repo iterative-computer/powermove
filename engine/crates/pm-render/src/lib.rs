@@ -47,6 +47,7 @@ mod request;
 pub mod retime;
 pub mod reuse;
 pub mod sampling;
+pub mod scopes;
 pub mod scene3d;
 pub mod shader_layers;
 pub mod space25d;

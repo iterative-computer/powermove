@@ -12,7 +12,7 @@ pub struct Asset {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<f32>,
-    pub lut: Option<pm_fx_defs::lut::Cube>,
+    pub lut: Option<pm_color::lut::GpuLut>,
     pub vector: Option<crate::vector::VectorSource>,
     pub brush: bool,
 }
@@ -81,14 +81,16 @@ impl Assets {
                     .path(&id, record)
                     .ok_or_else(|| format!("Effect asset is offline: {id}"))?;
                 use std::io::Read;
+                // A 129-point cube is about 80 MiB of text.
+                let limit: u64 = if lut { 128 } else { 16 } * 1024 * 1024;
                 let mut bytes = vec![];
                 std::fs::File::open(path)
                     .map_err(|e| e.to_string())?
-                    .take(16 * 1024 * 1024 + 1)
+                    .take(limit + 1)
                     .read_to_end(&mut bytes)
                     .map_err(|e| e.to_string())?;
-                if bytes.len() > 16 * 1024 * 1024 {
-                    return Err("Effect asset exceeds 16 MiB".into());
+                if bytes.len() as u64 > limit {
+                    return Err(format!("Effect asset exceeds {} MiB", limit / 1024 / 1024));
                 }
                 let key = Sha256::digest(&bytes).into();
                 if let Some(Ok(asset)) = old.get(&(id.clone(), lut))
@@ -97,10 +99,11 @@ impl Assets {
                     return Ok(asset.clone());
                 }
                 let asset = if lut {
-                    let cube = pm_fx_defs::lut::parse(
+                    let cube = pm_color::lut::CubeLut::parse(
                         std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                    .gpu();
                     Asset {
                         key,
                         width: cube.width,

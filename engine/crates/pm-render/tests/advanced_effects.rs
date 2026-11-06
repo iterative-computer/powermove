@@ -1216,3 +1216,223 @@ fn metal_source_shared_plan_replays_each_count_toward_admission() {
         .to_string();
     assert!(error.contains("memory budget"), "{error}");
 }
+
+/// A cube whose colour axes are not separable, so tetrahedral and trilinear
+/// interpolation disagree.
+fn twisted_cube(size: usize) -> String {
+    let mut text = format!("LUT_3D_SIZE {size}\n");
+    let at = |i: usize| i as f64 / (size - 1) as f64;
+    for b in 0..size {
+        for g in 0..size {
+            for r in 0..size {
+                let (r, g, b) = (at(r), at(g), at(b));
+                text += &format!(
+                    "{} {} {}\n",
+                    (r * g).sqrt(),
+                    0.5 * g + 0.5 * b * b,
+                    (b + 0.3 * r * (1.0 - g)).min(1.0)
+                );
+            }
+        }
+    }
+    text
+}
+
+fn lut_layer(input: f64, output: f64) -> Value {
+    json!([{
+        "id":"effect","type":"applyColorLut","version":2,"on":true,
+        "p":{"amount":ch(json!(100)),"inputSpace":ch(json!(input)),"outputSpace":ch(json!(output))},
+        "inputs":{"lut":{"kind":"asset","assetId":"grade"}}
+    }])
+}
+
+fn lut_project(code: &str, fx: Value, adjustment: bool) -> Value {
+    let source = layer(
+        "owner",
+        "shader",
+        json!({"w":32,"h":32,"code":code,"uniforms":{}}),
+        0.,
+        0.,
+        1.,
+    );
+    let mut layers = vec![source];
+    if adjustment {
+        let mut adj = layer("adj", "adjustment", json!({}), 0., 0., 1.);
+        adj["fx"] = fx;
+        layers.insert(0, adj);
+    } else {
+        layers[0]["fx"] = fx;
+    }
+    let mut value = project(32, 32, 1., no_fill(), layers);
+    asset(&mut value, "grade", "lut", "cube", 0, 0, 0.);
+    value
+}
+
+fn lut_resolver(dir: &tempfile::TempDir, text: &str) -> MapResolver {
+    let path = dir.path().join("grade.cube");
+    std::fs::write(&path, text).unwrap();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("grade".into(), path);
+    resolver
+}
+
+/// E-encoded Rec.709 working values for the reference.
+fn e_decode(v: f64) -> f64 {
+    pm_reference::color::Transfer::Srgb.to_linear(v)
+}
+fn e_encode(v: f64) -> f64 {
+    pm_reference::color::Transfer::Srgb.from_linear(v)
+}
+
+#[test]
+fn metal_lut_revision_two_is_tetrahedral_and_matches_f64_per_clip_and_adjustment() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = twisted_cube(5);
+    let resolver = lut_resolver(&dir, &text);
+    let lut = pm_color::lut::CubeLut::parse(&text).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    for input in [
+        [0.125, 0.25, 0.375],
+        [0.61, 0.33, 0.87],
+        [0.93, 0.07, 0.41],
+        [0.2, 0.9, 0.55],
+    ] {
+        let code = format!(
+            "void main(){{fragColor=vec4({:?},{:?},{:?},1.0);}}",
+            input[0], input[1], input[2]
+        );
+        let expected = lut.apply(input).unwrap();
+        for adjustment in [false, true] {
+            let value = lut_project(&code, lut_layer(0., 0.), adjustment);
+            let pixels = draw(&mut renderer, &value, &resolver, 32);
+            for c in 0..3 {
+                assert!(
+                    (f64::from(pixels[c]) - expected[c]).abs() < 1e-5,
+                    "adjustment {adjustment}, {input:?}: {:?} {expected:?}",
+                    &pixels[..3]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn metal_lut_revision_two_reads_large_cubes_shapers_and_keeps_revision_one_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let code = "void main(){fragColor=vec4(0.31,0.62,0.77,1.0);}";
+    let input = [0.31f32, 0.62, 0.77].map(f64::from);
+    let rows = "0 0 0\n0.1 0.2 0.3\n0.5 0.5 0.5\n0.7 0.8 0.6\n1 1 1\n";
+    let cube = twisted_cube(9);
+    let (cube_size, cube_rows) = cube.split_once('\n').unwrap();
+    for text in [
+        twisted_cube(65),
+        format!("LUT_1D_SIZE 5\n{rows}"),
+        format!("LUT_1D_SIZE 5\n{cube_size}\n{rows}{cube_rows}"),
+    ] {
+        let resolver = lut_resolver(&dir, &text);
+        let lut = pm_color::lut::CubeLut::parse(&text).unwrap();
+        let expected = lut.apply(input).unwrap();
+        let value = lut_project(code, lut_layer(0., 0.), false);
+        let pixels = draw(&mut renderer, &value, &resolver, 32);
+        for c in 0..3 {
+            assert!(
+                (f64::from(pixels[c]) - expected[c]).abs() < 1e-5,
+                "{:?} {expected:?}",
+                &pixels[..3]
+            );
+        }
+    }
+    // Saved revision 1 keeps main's trilinear result, which differs here.
+    let text = twisted_cube(3);
+    let resolver = lut_resolver(&dir, &text);
+    let mut one = lut_project(code, lut_layer(0., 0.), false);
+    one["layers"][0]["fx"][0]["version"] = json!(1);
+    one["layers"][0]["fx"][0]["p"] = json!({"amount":ch(json!(100))});
+    let trilinear = draw(&mut renderer, &one, &resolver, 32);
+    let lut = pm_color::lut::CubeLut::parse(&text).unwrap();
+    let tetrahedral = lut.apply(input).unwrap();
+    assert!(
+        (0..3).any(|c| (f64::from(trilinear[c]) - tetrahedral[c]).abs() > 1e-3),
+        "{:?} {tetrahedral:?}",
+        &trilinear[..3]
+    );
+}
+
+#[test]
+fn metal_lut_spaces_convert_through_the_stated_camera_encoding() {
+    use pm_reference::camera_log::Curve;
+    use pm_reference::color::{Primaries as P, Transfer as T, apply, invert, mul};
+    let dir = tempfile::tempdir().unwrap();
+    // Identity table over 0..2 in every encoding: what leaves the table is the
+    // encoded value, so the path out through the same space restores the pixel.
+    let identity =
+        "DOMAIN_MIN -0.5 -0.5 -0.5\nDOMAIN_MAX 2 2 2\nLUT_1D_SIZE 2\n-0.5 -0.5 -0.5\n2 2 2\n";
+    // Half the encoded value: output must decode through the space.
+    let half =
+        "DOMAIN_MIN -0.5 -0.5 -0.5\nDOMAIN_MAX 2 2 2\nLUT_1D_SIZE 2\n-0.25 -0.25 -0.25\n1 1 1\n";
+    let mut renderer = Renderer::headless().unwrap();
+    let code = "void main(){fragColor=vec4(0.40,0.55,0.70,1.0);}";
+    let input = [0.40f64, 0.55, 0.70];
+    let rec709 = input.map(e_decode);
+    let log = |curve: Curve,
+               gamut: P|
+     -> (
+        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+    ) {
+        let to = mul(&invert(&gamut.to_xyz()), &P::BT709.to_xyz());
+        let from = invert(&to);
+        (
+            Box::new(move |l| apply(&to, l).map(|v| curve.from_linear(v))),
+            Box::new(move |e| apply(&from, e.map(|v| curve.to_linear(v)))),
+        )
+    };
+    type Pair = (
+        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+        Box<dyn Fn([f64; 3]) -> [f64; 3]>,
+    );
+    let pq = || -> Pair {
+        let to = mul(&invert(&P::BT2020.to_xyz()), &P::BT709.to_xyz());
+        let from = invert(&to);
+        (
+            Box::new(move |l| {
+                apply(&to, l).map(|v| T::Pq.from_linear((v * 203.0 / 10000.0).max(0.0)))
+            }),
+            Box::new(move |e| apply(&from, e.map(|v| T::Pq.to_linear(v) * 10000.0 / 203.0))),
+        )
+    };
+    let spaces: Vec<(f64, Pair)> = vec![
+        (2., log(Curve::AppleLog, P::BT2020)),
+        (3., log(Curve::SLog3, P::S_GAMUT3_CINE)),
+        (4., log(Curve::SLog3, P::S_GAMUT3)),
+        (5., log(Curve::VLog, P::V_GAMUT)),
+        (6., log(Curve::LogC3, P::AWG3)),
+        (7., log(Curve::LogC4, P::AWG4)),
+        (8., pq()),
+    ];
+    for (space, (encode, decode)) in &spaces {
+        let value = lut_project(code, lut_layer(*space, *space), false);
+        let resolver = lut_resolver(&dir, identity);
+        let pixels = draw(&mut renderer, &value, &resolver, 32);
+        for c in 0..3 {
+            assert!(
+                (f64::from(pixels[c]) - input[c]).abs() < 2e-3,
+                "space {space} round trip: {:?}",
+                &pixels[..3]
+            );
+        }
+        let resolver = lut_resolver(&dir, half);
+        let pixels = draw(&mut renderer, &value, &resolver, 32);
+        let encoded = encode(rec709);
+        let halved = decode(encoded.map(|v| v / 2.0));
+        for c in 0..3 {
+            let expected = e_encode(halved[c]);
+            assert!(
+                (f64::from(pixels[c]) - expected).abs() < 2e-3,
+                "space {space}: {:?} {expected}",
+                &pixels[..3]
+            );
+        }
+    }
+}

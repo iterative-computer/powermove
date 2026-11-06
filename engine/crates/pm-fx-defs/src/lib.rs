@@ -8,7 +8,6 @@
 pub mod catalog;
 pub mod graph;
 pub mod inputs;
-pub mod lut;
 pub mod spatial;
 
 use serde::{Deserialize, Serialize};
