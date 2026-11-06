@@ -332,7 +332,9 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
         .expect("the selected key shows its out handle")
         .bounds;
     assert!(
-        !graph.iter().any(|o| o.id.starts_with(&format!("graph-handle:{}:", ids[1]))),
+        !graph
+            .iter()
+            .any(|o| o.id.starts_with(&format!("graph-handle:{}:", ids[1]))),
         "an unselected key shows no handles"
     );
     let at = s.origin()
@@ -342,7 +344,14 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
         );
     let ease = |s: &Stage| {
         s.surface.read_with(&s.vcx, |t, _| {
-            t.model().index.key(&ids[0]).unwrap().2.stored.get("outEase").cloned()
+            t.model()
+                .index
+                .key(&ids[0])
+                .unwrap()
+                .2
+                .stored
+                .get("outEase")
+                .cloned()
         })
     };
     let before = ease(&s);
@@ -353,7 +362,10 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
         s.recorder.reports.borrow()
     );
     let after = ease(&s);
-    assert!(after.is_some() && after != before, "{before:?} -> {after:?}");
+    assert!(
+        after.is_some() && after != before,
+        "{before:?} -> {after:?}"
+    );
     s.undo(cx);
     assert_eq!(ease(&s), before);
 }
@@ -365,13 +377,21 @@ fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
         let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
         let curve = &graph.curves()[0];
         let handles = curve.points.iter().map(|p| p.handles.len()).sum::<usize>();
-        (curve.points.iter().map(|p| p.point.value).collect::<Vec<_>>(), handles)
+        (
+            curve
+                .points
+                .iter()
+                .map(|p| p.point.value)
+                .collect::<Vec<_>>(),
+            handles,
+        )
     };
     let (values, handles) = keys(&s);
     assert_eq!(values, vec![50., 51.]);
     assert!(handles > 0);
-    s.surface
-        .update(&mut s.vcx, |t, cx| t.command("graph.speed", 0., None, false, cx));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.speed", 0., None, false, cx)
+    });
     s.idle(cx);
     // 50 to 51 over one second, linear: one unit per second at both keys.
     let (speeds, handles) = keys(&s);

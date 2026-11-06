@@ -49,7 +49,10 @@ enum Spec {
         key: String,
         side: pm_kernel::commands::keyframes::EaseSide,
     },
-    Property { layer: String, path: String },
+    Property {
+        layer: String,
+        path: String,
+    },
     WorkIn,
     WorkOut,
     WorkMove,

@@ -1512,9 +1512,7 @@ impl Host {
             let (width, height, pan) = if let Some((dimensions, zoom, pan)) = self.viewer_transform
             {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
-                let zoom = zoom
-                    .unwrap_or(fit)
-                    .min(zoom_limit(dimensions, scale));
+                let zoom = zoom.unwrap_or(fit).min(zoom_limit(dimensions, scale));
                 (dimensions[0] * zoom, dimensions[1] * zoom, pan)
             } else {
                 (r.w as f64, r.h as f64, [0., 0.])

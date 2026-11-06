@@ -359,9 +359,7 @@ pub fn transform_roots<'a>(layers: &'a [LayerInfo], selected: &[String]) -> Hash
     layers
         .iter()
         .filter(|l| chosen.contains(l.id.as_str()))
-        .filter(|l| {
-            !carried(l, |l| l.group.as_ref()) && !carried(l, |l| l.parent.as_ref())
-        })
+        .filter(|l| !carried(l, |l| l.group.as_ref()) && !carried(l, |l| l.parent.as_ref()))
         .map(|l| l.id.as_str())
         .collect()
 }

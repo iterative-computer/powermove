@@ -155,15 +155,16 @@ pub fn sample(
                 .get(i)
                 .filter(|_| selected)
                 .into_iter()
-                .flat_map(|[before, after]| {
-                    [(EaseSide::In, *before), (EaseSide::Out, *after)]
-                })
+                .flat_map(|[before, after]| [(EaseSide::In, *before), (EaseSide::Out, *after)])
                 .filter_map(|(side, p)| {
                     let (t, v) = p?;
-                    Some((side, Point {
-                        seconds: layer.from + t,
-                        value: v,
-                    }))
+                    Some((
+                        side,
+                        Point {
+                            seconds: layer.from + t,
+                            value: v,
+                        },
+                    ))
                 })
                 .collect();
             for (_, p) in &handles {

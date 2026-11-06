@@ -447,7 +447,9 @@ struct Owner {
 struct OwnerHost(gpui::WeakEntity<Owner>);
 impl Host for OwnerHost {
     fn time(&self, cx: &App) -> f64 {
-        self.0.upgrade().map_or(0., |o| o.read(cx).overlays as f64 * 0.)
+        self.0
+            .upgrade()
+            .map_or(0., |o| o.read(cx).overlays as f64 * 0.)
     }
     fn playing(&self, cx: &App) -> bool {
         self.0.upgrade().is_some_and(|o| o.read(cx).overlays > 99)
@@ -479,14 +481,8 @@ fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut Test
         overlays: 0,
     });
     let weak = owner.downgrade();
-    let surface = cx.new(|_| {
-        GizmoSurface::new(
-            kernel,
-            PROJECT.into(),
-            tokens(),
-            Rc::new(OwnerHost(weak)),
-        )
-    });
+    let surface =
+        cx.new(|_| GizmoSurface::new(kernel, PROJECT.into(), tokens(), Rc::new(OwnerHost(weak))));
     owner.update(cx, |o, _| o.surface = Some(surface));
     // Controller::refresh, tick_builtins and toggleLayerControls, each under lease.
     owner.update(cx, |o, cx| {
