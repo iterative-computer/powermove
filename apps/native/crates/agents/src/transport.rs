@@ -181,6 +181,13 @@ impl Handle {
                 TrySendError::Disconnected(queued) => TrySendError::Disconnected(queued.action),
             })
     }
+    /// Consume the same mailbox as `try_event`, preserving inspection events as
+    /// typed observations instead of provider callbacks. Choose one drain API.
+    pub fn try_delivery(&self) -> Result<Delivery, mpsc::TryRecvError> {
+        self.events
+            .try_recv()
+            .map(|e| delivery::event(self.surface, e))
+    }
     pub fn try_event(&self) -> Result<Event, mpsc::TryRecvError> {
         self.events.try_recv()
     }
@@ -227,7 +234,6 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
             }
         });
-        let surface = machine.surface();
         let start = Instant::now();
         let now = || start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut lines = Lines::new(1024 * 1024);

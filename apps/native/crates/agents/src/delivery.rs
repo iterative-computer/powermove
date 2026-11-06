@@ -72,20 +72,23 @@ pub(crate) fn ordered(surface: Surface, effects: Effects) -> impl Iterator<Item 
         .outgoing
         .into_iter()
         .map(Delivery::Wire)
-        .chain(effects.events.into_iter().map(move |e| {
-            let callback = match &e {
-                Event::Trace { .. }
-                | Event::Progress { .. }
-                | Event::Completed { .. }
-                | Event::Warning(_) => true,
-                Event::Session { .. } => surface == Surface::Claude,
-                Event::Ready | Event::Notification(_) | Event::Stopped(_) => false,
-            };
-            if callback {
-                Delivery::Callback(e)
-            } else {
-                Delivery::Inspection(e)
-            }
-        }))
+        .chain(effects.events.into_iter().map(move |e| event(surface, e)))
         .chain(effects.close_stdin.then_some(Delivery::CloseStdin))
+}
+
+/// Classify the public callback contract while retaining every native event.
+pub(crate) fn event(surface: Surface, e: Event) -> Delivery {
+    let callback = match &e {
+        Event::Trace { .. }
+        | Event::Progress { .. }
+        | Event::Completed { .. }
+        | Event::Warning(_) => true,
+        Event::Session { .. } => surface == Surface::Claude,
+        Event::Ready | Event::Notification(_) | Event::Stopped(_) => false,
+    };
+    if callback {
+        Delivery::Callback(e)
+    } else {
+        Delivery::Inspection(e)
+    }
 }

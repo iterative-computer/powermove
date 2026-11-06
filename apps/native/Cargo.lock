@@ -4623,9 +4623,11 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
+ "url",
 ]
 
 [[package]]
