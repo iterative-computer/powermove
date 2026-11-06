@@ -84,11 +84,7 @@ pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Res
     settled(realm, COMPAT_BUNDLE, 60)?;
     settled(realm, include_str!("canvas-dom.js"), 15)?;
     settled(realm, include_str!("bootstrap.js"), 15)?;
-    settled(
-        realm,
-        &format!("__compat.create({})", host.snapshot()?),
-        60,
-    )?;
+    settled(realm, &format!("__compat.create({})", host.snapshot()?), 60)?;
     Ok(())
 }
 
@@ -158,9 +154,7 @@ impl CompatRunner {
     pub fn install(&self, manifest: &Value, graph: &Value) -> Result<Value> {
         let record = json!({"id":manifest["id"],"scope":"user","manifest":manifest,"enabled":true,
             "trust":"local","health":{"state":"ok"},"graph":graph});
-        self.json(&format!(
-            "__compat.install({record})"
-        ))
+        self.json(&format!("__compat.install({record})"))
     }
     pub fn json(&self, expression: &str) -> Result<Value> {
         let result = self.eval(&format!(
@@ -242,8 +236,12 @@ mod tests {
     #[test]
     fn actual_bundle_executes_without_node_or_chromium() {
         let runner = runner();
-        assert_eq!(runner.json("[typeof process,typeof require,typeof PowermoveCompat.CompatRealm]").unwrap(),
-            json!(["undefined","undefined","function"]));
+        assert_eq!(
+            runner
+                .json("[typeof process,typeof require,typeof PowermoveCompat.CompatRealm]")
+                .unwrap(),
+            json!(["undefined", "undefined", "function"])
+        );
     }
     #[test]
     fn every_legacy_version_activates_and_disposes_real_contributions() {
@@ -257,7 +255,9 @@ mod tests {
                     .unwrap(),
                 42
             );
-            runner.json("__compat.loader.dispose().then(()=>true)").unwrap();
+            runner
+                .json("__compat.loader.dispose().then(()=>true)")
+                .unwrap();
             assert_eq!(
                 runner
                     .json("__compat.realm.kernel.commands.list().length")

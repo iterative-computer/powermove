@@ -326,9 +326,7 @@ mod mac {
                 if let Some((selector, value)) = selector {
                     ticket = web.inspect_capture(1, selector, value).ok();
                 } else {
-                    ticket = web
-                        .inspect_capture(1, "#art-pixel", false)
-                        .ok();
+                    ticket = web.inspect_capture(1, "#art-pixel", false).ok();
                     script(
                         &web,
                         "{const c=document.querySelector('#art');let o=document.querySelector('#art-pixel');if(!o){o=document.createElement('output');o.id='art-pixel';document.documentElement.append(o)}o.textContent=JSON.stringify([...c.getContext('2d').getImageData(0,0,1,1).data]);0}",

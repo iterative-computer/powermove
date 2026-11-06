@@ -73,10 +73,7 @@ enum Input {
 /// A contribution list is the realm's plus every confined helper's.
 fn merge_store(value: &mut Value, store: &Value) {
     for (kind, items) in store.as_object().into_iter().flatten() {
-        if let (Some(list), Some(items)) = (
-            value[kind.as_str()].as_array_mut(),
-            items.as_array(),
-        ) {
+        if let (Some(list), Some(items)) = (value[kind.as_str()].as_array_mut(), items.as_array()) {
             list.extend(items.iter().cloned());
         } else if value[kind.as_str()].is_null() {
             value[kind.as_str()] = items.clone();
@@ -230,9 +227,15 @@ impl StoreViews for ViewEvents {
 struct PageQueue<'a>(&'a Shared);
 struct StorePageQueue<'a>(&'a Shared, &'a str);
 impl TrySink<AdmittedDomBatch> for StorePageQueue<'_> {
-    fn try_send(&mut self, batch: AdmittedDomBatch) -> std::result::Result<(), pm_remote_dom::Error> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
         let mut published = self.0.published.lock().unwrap();
-        let queue = published.store_batches.entry(self.1.to_owned()).or_default();
+        let queue = published
+            .store_batches
+            .entry(self.1.to_owned())
+            .or_default();
         if queue.len() >= 256 {
             return Err(pm_remote_dom::Error::Backpressure);
         }
@@ -243,7 +246,10 @@ impl TrySink<AdmittedDomBatch> for StorePageQueue<'_> {
     }
 }
 impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
-    fn try_send(&mut self, batch: AdmittedDomBatch) -> std::result::Result<(), pm_remote_dom::Error> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
         let mut published = self.0.published.lock().unwrap();
         if published.batches.len() >= 256 {
             return Err(pm_remote_dom::Error::Backpressure);
@@ -621,7 +627,11 @@ impl Owner {
                 ));
             }
             Input::Place(id, rect) => {
-                self.eval(&format!("__compat.placePanel({},{})", json!(id), json!(rect)));
+                self.eval(&format!(
+                    "__compat.placePanel({},{})",
+                    json!(id),
+                    json!(rect)
+                ));
             }
             Input::Moved(time, playing) => {
                 self.moved.store(false, Ordering::Release);
@@ -768,7 +778,9 @@ impl Owner {
         }
     }
     fn page(&mut self, message: Value) {
-        let Some(router) = &mut self.router else { return };
+        let Some(router) = &mut self.router else {
+            return;
+        };
         struct Realmward(Vec<Value>);
         impl TrySink<pm_remote_dom::protocol::PageMessage> for Realmward {
             fn try_send(
@@ -932,7 +944,11 @@ impl Owner {
             ),
             Err(error) => Err(error.clone()),
         };
-        let mut record = discovery::record(found, enabled, graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone));
+        let mut record = discovery::record(
+            found,
+            enabled,
+            graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone),
+        );
         // Surface extensions get their own realm from the panel host.
         if record["manifest"]["apiVersion"].as_u64() >= Some(4) {
             record["surface"] = json!(true);
@@ -1006,7 +1022,9 @@ impl Owner {
         let surfaces: Vec<Value> = self
             .records
             .iter()
-            .filter(|r| r["surface"] == true && r["health"]["state"] == "ok" && r["enabled"] == true)
+            .filter(|r| {
+                r["surface"] == true && r["health"]["state"] == "ok" && r["enabled"] == true
+            })
             .cloned()
             .collect();
         self.shared.update(|p| {
@@ -1031,7 +1049,11 @@ impl Owner {
             self.writer.realm,
         );
         let transport = Transport::new(self.config.owner.take());
-        let host = Arc::new(NativeHost::new(adapter, transport, Box::new(events.clone())));
+        let host = Arc::new(NativeHost::new(
+            adapter,
+            transport,
+            Box::new(events.clone()),
+        ));
         if let Some(text) = &self.config.text {
             host.set_text(text());
         }
@@ -1065,16 +1087,20 @@ impl Owner {
             return;
         }
         if let Err(error) = self.start_realm() {
-            self.shared
-                .update(|p| p.toasts.push(format!("Extensions could not start: {error}")));
+            self.shared.update(|p| {
+                p.toasts
+                    .push(format!("Extensions could not start: {error}"))
+            });
             return;
         }
         let live = self.realm.as_ref().unwrap();
         let compiler = match SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024) {
             Ok(compiler) => compiler,
             Err(error) => {
-                self.shared
-                    .update(|p| p.toasts.push(format!("Extensions could not compile: {error}")));
+                self.shared.update(|p| {
+                    p.toasts
+                        .push(format!("Extensions could not compile: {error}"))
+                });
                 return;
             }
         };
@@ -1112,10 +1138,9 @@ impl Owner {
         let changed: Vec<_> = records
             .iter()
             .filter(|next| {
-                !self
-                    .records
-                    .iter()
-                    .any(|old| old["id"] == next["id"] && old["graph"]["hash"] == next["graph"]["hash"])
+                !self.records.iter().any(|old| {
+                    old["id"] == next["id"] && old["graph"]["hash"] == next["graph"]["hash"]
+                })
             })
             .map(|record| record["id"].clone())
             .collect();
@@ -1131,7 +1156,9 @@ impl Owner {
     /// A hung or failed realm is rebuilt without the extension that broke it.
     /// The kernel already sealed its edits; other windows and the UI never noticed.
     fn restart(&mut self) {
-        let Some(live) = self.realm.take() else { return };
+        let Some(live) = self.realm.take() else {
+            return;
+        };
         let culprit = live.events.activating.lock().unwrap().take();
         live.realm.close();
         drop(live);
@@ -1140,7 +1167,8 @@ impl Owner {
             for record in &mut self.records {
                 if record["id"] == id.as_str() {
                     record["enabled"] = json!(false);
-                    record["health"] = json!({"state":"runtime-error","error":"Stopped responding"});
+                    record["health"] =
+                        json!({"state":"runtime-error","error":"Stopped responding"});
                 }
             }
             let id = id.clone();
@@ -1149,8 +1177,10 @@ impl Owner {
         }
         if self.restarts > MAX_RESTARTS {
             self.shared.update(|p| {
-                p.toasts
-                    .push("Extensions stopped after repeated failures. Reopen the project to retry.".into());
+                p.toasts.push(
+                    "Extensions stopped after repeated failures. Reopen the project to retry."
+                        .into(),
+                );
             });
             return;
         }
@@ -1189,7 +1219,8 @@ mod tests {
         fn start(root: tempfile::TempDir) -> Self {
             let actor = KernelActor::spawn(KernelConfig::default());
             let kernel = actor.handle();
-            let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+            let document =
+                pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
             kernel
                 .open("window", OpenSource::Untitled(document))
                 .wait()
@@ -1310,25 +1341,45 @@ mod tests {
         );
         fixture.host.run_command("synthetic-ui.confirm", json!([]));
         let sheet = request("confirm");
-        assert_eq!((&sheet["title"], &sheet["body"]), (&json!("Sure?"), &json!("Body")));
-        fixture.host.answer(sheet["token"].as_u64().unwrap(), json!(true));
+        assert_eq!(
+            (&sheet["title"], &sheet["body"]),
+            (&json!("Sure?"), &json!("Body"))
+        );
+        fixture
+            .host
+            .answer(sheet["token"].as_u64().unwrap(), json!(true));
         named("confirmed");
         fixture.host.run_command("synthetic-ui.menu", json!([]));
         let menu = request("menu");
-        assert_eq!((menu["x"].as_f64(), menu["y"].as_f64()), (Some(4.), Some(5.)));
+        assert_eq!(
+            (menu["x"].as_f64(), menu["y"].as_f64()),
+            (Some(4.), Some(5.))
+        );
         assert_eq!(menu["items"].as_array().unwrap().len(), 3);
         assert_eq!(fixture.host.take_toasts(), ["Choose"]);
-        fixture.host.answer(menu["token"].as_u64().unwrap(), menu["items"][2]["run"].clone());
+        fixture.host.answer(
+            menu["token"].as_u64().unwrap(),
+            menu["items"][2]["run"].clone(),
+        );
         named("menu");
-        fixture.host.gather_menu("panel:context", json!({"panelId":"first"}), 7);
+        fixture
+            .host
+            .gather_menu("panel:context", json!({"panelId":"first"}), 7);
         let gathered = request("gathered");
         assert_eq!(gathered["key"], 7);
         assert_eq!(gathered["items"][0]["label"], "For first");
-        fixture.host.answer(gathered["token"].as_u64().unwrap(), gathered["items"][0]["run"].clone());
+        fixture.host.answer(
+            gathered["token"].as_u64().unwrap(),
+            gathered["items"][0]["run"].clone(),
+        );
         named("tab");
         // Storage lives in durable `ext.*` settings, so a later window reads it.
         fixture.until("storage", |_| {
-            fixture.kernel.state().settings.contains_key("ext.synthetic-ui")
+            fixture
+                .kernel
+                .state()
+                .settings
+                .contains_key("ext.synthetic-ui")
         });
         fixture.host.run_command("synthetic-ui.round", json!([]));
         named("round 1");
@@ -1419,7 +1470,10 @@ mod tests {
         fixture.until("activation", |host| host.is_ready());
         let state = fixture.kernel.state();
         let provider = state.provider("effects", "synthetic.tint").unwrap();
-        assert_eq!(provider.definition.get("label").unwrap().as_str(), Some("Tint"));
+        assert_eq!(
+            provider.definition.get("label").unwrap().as_str(),
+            Some("Tint")
+        );
         let contributions = fixture.host.contributions().unwrap();
         let definition: pm_protocol::definitions::DefinitionSnapshot =
             serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
@@ -1454,7 +1508,12 @@ mod tests {
         fixture.until("activation", |host| {
             host.is_ready() && host.contributions().is_some()
         });
-        assert_eq!(fixture.health("synthetic-store"), "ok", "{:?}", fixture.host.records());
+        assert_eq!(
+            fixture.health("synthetic-store"),
+            "ok",
+            "{:?}",
+            fixture.host.records()
+        );
         let state = fixture.kernel.state();
         assert!(state.provider("effects", "synthetic-store.tint").is_some());
         assert!(state.provider("commands", "synthetic-store.mark").is_some());
@@ -1562,17 +1621,26 @@ mod tests {
         extension(
             &extensions,
             "synthetic-throws",
-            &[("index.ts", "export default function(){throw new Error('synthetic')}")],
+            &[(
+                "index.ts",
+                "export default function(){throw new Error('synthetic')}",
+            )],
         );
         extension(
             &extensions,
             "synthetic-broken",
-            &[("index.ts", "export default function(api){ this is not javascript")],
+            &[(
+                "index.ts",
+                "export default function(api){ this is not javascript",
+            )],
         );
         extension(
             &extensions,
             "synthetic-missing",
-            &[("index.ts", "import './nowhere'; export default function(){}")],
+            &[(
+                "index.ts",
+                "import './nowhere'; export default function(){}",
+            )],
         );
         extension(
             &extensions,
@@ -1625,7 +1693,11 @@ mod tests {
             stopped
                 && host.is_ready()
                 && host.contributions().is_some_and(|c| {
-                    c["commands"].as_array().unwrap().iter().any(|c| c["id"] == "synthetic-good.run")
+                    c["commands"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["id"] == "synthetic-good.run")
                 })
         });
         assert_eq!(fixture.health("synthetic-good"), "ok");

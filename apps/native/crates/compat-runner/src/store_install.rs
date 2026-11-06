@@ -189,7 +189,8 @@ mod tests {
     fn a_verified_release_is_committed_and_found_like_any_install_but_unpinned_keys_fail() {
         let manifest = json!({"id":"synthetic-store","name":"Synthetic","version":"1.0.0","apiVersion":3,"permissions":[]}).to_string();
         let source = b"export default function(){}";
-        let files: [(&str, &[u8]); 2] = [("manifest.json", manifest.as_bytes()), ("index.ts", source)];
+        let files: [(&str, &[u8]); 2] =
+            [("manifest.json", manifest.as_bytes()), ("index.ts", source)];
         let bytes = archive(&files);
         let key = SigningKey::from_bytes(&[7; 32]);
         let statement = ReleaseStatement {
@@ -252,6 +253,9 @@ mod tests {
         assert_eq!(id, "synthetic-store");
         let found = crate::discovery::scan(&[profile.join("extensions")]);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].store.as_ref().unwrap()["releaseId"], "synthetic-release");
+        assert_eq!(
+            found[0].store.as_ref().unwrap()["releaseId"],
+            "synthetic-release"
+        );
     }
 }

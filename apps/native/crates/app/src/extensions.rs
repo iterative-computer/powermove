@@ -4,7 +4,6 @@
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2::MainThreadMarker;
-use pm_engine_service::resources::ResourceSnapshot;
 use pm_compat_host::{
     DomPanelHost, Error as PageError, HostEvent, MacDomHost, PanelSlot, PanelSpec, Rect,
     RequestContext, Result as PageResult, StoreDataStores, SyncHandler, Trust,
@@ -14,6 +13,7 @@ use pm_compat_runner::{
     host::{ExtensionHost, HostConfig},
     transport::{TransportOwner, TransportRequest},
 };
+use pm_engine_service::resources::ResourceSnapshot;
 use pm_node::fonts::render::BrokerResolver;
 use pm_protocol::{clock::TransportCommand, common::PlaybackRate};
 use pm_shell::{Command as ShellCommand, MenuEntry, keyboard::Binding, layout, transient::Choice};
@@ -155,7 +155,8 @@ impl Extensions {
     fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         let mut roots = vec![];
         if let Some(home) = std::env::var_os("HOME") {
-            roots.push(PathBuf::from(home).join("Library/Application Support/Powermove/extensions"));
+            roots
+                .push(PathBuf::from(home).join("Library/Application Support/Powermove/extensions"));
         }
         roots.push(profile.join("extensions"));
         roots
@@ -239,7 +240,12 @@ impl Controller {
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
-            if let Some(contributions) = self.extensions.host.as_ref().and_then(|h| h.contributions()) {
+            if let Some(contributions) = self
+                .extensions
+                .host
+                .as_ref()
+                .and_then(|h| h.contributions())
+            {
                 self.apply_contributions(&contributions, cx);
             }
         }
@@ -251,7 +257,11 @@ impl Controller {
         match request["kind"].as_str() {
             Some("panel") => {
                 let id = request["id"].as_str().unwrap_or_default();
-                let verb = if request["open"] == true { "show" } else { "close" };
+                let verb = if request["open"] == true {
+                    "show"
+                } else {
+                    "close"
+                };
                 self.host
                     .borrow()
                     .send_command(&format!("panel:{verb}:{id}"), vec![]);
@@ -260,8 +270,7 @@ impl Controller {
                 let title = request["title"].as_str().unwrap_or_default();
                 let body = request["body"].as_str().unwrap_or_default();
                 let shell = self.host.borrow();
-                let answer =
-                    crate::platform::choice(&shell.window, title, body, &["OK", "Cancel"]);
+                let answer = crate::platform::choice(&shell.window, title, body, &["OK", "Cancel"]);
                 drop(shell);
                 cx.spawn(async move |this, cx| {
                     let confirmed = answer.recv().await == Ok(0);
@@ -294,7 +303,9 @@ impl Controller {
                     .take_if(|menu| Some(menu.key) == request["key"].as_u64());
                 let shell = self.host.borrow();
                 match open {
-                    Some(OpenMenu { mut entries, at, .. }) => {
+                    Some(OpenMenu {
+                        mut entries, at, ..
+                    }) => {
                         if !items.is_empty() {
                             entries.push(MenuEntry::separator());
                             entries.extend(items);
@@ -354,7 +365,10 @@ impl Controller {
             if self.extensions.surfaces.contains_key(&id) {
                 continue;
             }
-            let title = surface["manifest"]["name"].as_str().unwrap_or(&id).to_owned();
+            let title = surface["manifest"]["name"]
+                .as_str()
+                .unwrap_or(&id)
+                .to_owned();
             self.extensions.surfaces.insert(id.clone(), title);
             let ticket = runtime.mount_extension(&id, &surface["graph"]);
             cx.spawn(async move |this, cx| {
@@ -507,7 +521,8 @@ impl Controller {
             return true;
         }
         if let Some(choice) = cmd.name.strip_prefix(MENU) {
-            if let (Some(host), Some((token, run))) = (&self.extensions.host, choice.split_once(':'))
+            if let (Some(host), Some((token, run))) =
+                (&self.extensions.host, choice.split_once(':'))
                 && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
             {
                 host.answer(token, run.into());
@@ -562,7 +577,12 @@ impl Controller {
             .get(id)
             .map_or(String::new(), |(store, _)| store.clone());
         let view = self.extensions.stores.get(id).map_or(0, |(_, view)| *view);
-        if self.extensions.pages.get(&key).is_some_and(|page| page.view == view) {
+        if self
+            .extensions
+            .pages
+            .get(&key)
+            .is_some_and(|page| page.view == view)
+        {
             return;
         }
         self.extensions.pages.remove(&key);
@@ -578,7 +598,11 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
         });
-        let session = self.extensions.host.as_ref().and_then(|h| h.store_session(&key));
+        let session = self
+            .extensions
+            .host
+            .as_ref()
+            .and_then(|h| h.store_session(&key));
         let created = match &session {
             Some(session) => MacDomHost::new_store_remote_dom(
                 mtm,

@@ -100,7 +100,8 @@ globalThis.__compat = {
         });
       unsaved.set(key, value);
     };
-    const reveal = (id, open) => call("ui.request", { kind: "panel", id, open });
+    const reveal = (id, open) =>
+      call("ui.request", { kind: "panel", id, open });
     const capabilities = {
       ui: { controls: PowermoveCompat.controls },
       assets: {
@@ -454,14 +455,12 @@ globalThis.__compat = {
       layers: entries(kernel.layerTypes),
       themes: entries(kernel.themes),
       keybindings: kernel.listBindings().map((binding) => data(binding)),
-      status: kernel.status
-        .entries()
-        .map(({ id, ownerId, item }) => ({
-          id,
-          owner: ownerId,
-          text: label(item.text),
-          side: item.side,
-        })),
+      status: kernel.status.entries().map(({ id, ownerId, item }) => ({
+        id,
+        owner: ownerId,
+        text: label(item.text),
+        side: item.side,
+      })),
       theme: kernel.theme.activeId,
       definitions: this.definitions(),
     };

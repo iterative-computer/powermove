@@ -37,7 +37,8 @@ const controls: Bun.BunPlugin = {
       namespace: styles,
     }));
     build.onLoad({ filter: /.*/, namespace: styles }, () => ({
-      contents: "export const styles=[];export const add=css=>styles.push(css);",
+      contents:
+        "export const styles=[];export const add=css=>styles.push(css);",
       loader: "js",
     }));
     build.onLoad({ filter: /\.svelte(?:\.[tj]s)?$/ }, async ({ path }) => {
@@ -64,11 +65,14 @@ const controls: Bun.BunPlugin = {
         resolveDir: dirname(path),
       };
     });
-    build.onLoad({ filter: /frozen\/reference\/.*\.css$/ }, async ({ path }) => ({
-      contents: `import {add} from '${styles}';add(${JSON.stringify(await readFile(path, "utf8"))});`,
-      loader: "js",
-      resolveDir: dirname(path),
-    }));
+    build.onLoad(
+      { filter: /frozen\/reference\/.*\.css$/ },
+      async ({ path }) => ({
+        contents: `import {add} from '${styles}';add(${JSON.stringify(await readFile(path, "utf8"))});`,
+        loader: "js",
+        resolveDir: dirname(path),
+      }),
+    );
   },
 };
 const virtual = (name: string, code: string, resolveDir: string) => ({
@@ -93,7 +97,7 @@ const write = async (name: string, result: any) => {
 const options = {
   target: "browser",
   format: "iife",
-  conditions: ["browser", "production"],
+  conditions: ["browser", "production"] as string[],
   define: { "process.env.NODE_ENV": '"production"' },
 } as const;
 const modules = [

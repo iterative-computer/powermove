@@ -107,9 +107,9 @@ impl Sources<'_> {
             return Err(format!("Unsupported bare import: {specifier}"));
         }
         let unresolved = normalize(&directory.join(specifier));
-        let relative = unresolved.strip_prefix(&self.root).map_err(|_| {
-            format!("Import escapes extension directory: {specifier}")
-        })?;
+        let relative = unresolved
+            .strip_prefix(&self.root)
+            .map_err(|_| format!("Import escapes extension directory: {specifier}"))?;
         if hidden(relative) {
             return Err(format!(
                 "Imports from hidden extension paths are not allowed: {specifier}"
@@ -212,8 +212,8 @@ impl Sources<'_> {
                 manifest::SOURCE_BYTES
             ));
         }
-        let source = String::from_utf8_lossy(&fs::read(&file).map_err(|e| e.to_string())?)
-            .into_owned();
+        let source =
+            String::from_utf8_lossy(&fs::read(&file).map_err(|e| e.to_string())?).into_owned();
         let code = self.transform(&source, &file)?;
         let directory = file.parent().unwrap_or(&self.root).to_path_buf();
         self.link(&id, code, &directory)?;
@@ -269,7 +269,11 @@ pub fn fingerprint(root: &Path) -> Result<Vec<(PathBuf, u64, std::time::SystemTi
         .into_iter()
         .map(|file| {
             let meta = fs::metadata(&file).map_err(|e| e.to_string())?;
-            Ok((file, meta.len(), meta.modified().map_err(|e| e.to_string())?))
+            Ok((
+                file,
+                meta.len(),
+                meta.modified().map_err(|e| e.to_string())?,
+            ))
         })
         .collect()
 }
@@ -334,9 +338,9 @@ pub fn compile(
             "export {{ default }} from {entry_path}; export * from {entry_path}; export {{ styles as __powermoveStyles, acquire as __powermoveAcquireStyles }} from '{STYLES}';"
         )
     };
-    sources.link(BUNDLE, bundle, &root).map_err(|e| {
-        if id.is_empty() { e } else { truncate(e) }
-    })?;
+    sources
+        .link(BUNDLE, bundle, &root)
+        .map_err(|e| if id.is_empty() { e } else { truncate(e) })?;
     let total: usize = sources.graph.sources.values().map(String::len).sum();
     if total > manifest::BUNDLE_BYTES {
         return Err(format!(

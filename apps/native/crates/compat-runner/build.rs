@@ -3,7 +3,12 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../js");
-    for input in ["compat/src", "compat/scripts", "compat/bun.lock", "remote-dom/src"] {
+    for input in [
+        "compat/src",
+        "compat/scripts",
+        "compat/bun.lock",
+        "remote-dom/src",
+    ] {
         println!("cargo:rerun-if-changed={}", root.join(input).display());
     }
     let output = env::var_os("OUT_DIR").unwrap();

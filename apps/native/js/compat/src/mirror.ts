@@ -251,7 +251,11 @@ export class DocumentMirror {
       const key = op.path.at(-1)!;
       if (op.op === "order") {
         const items = new Map(parent.map((item: Data) => [item.id, item]));
-        parent.splice(0, parent.length, ...op.ids.map((id: string) => items.get(id)));
+        parent.splice(
+          0,
+          parent.length,
+          ...op.ids.map((id: string) => items.get(id)),
+        );
       } else if (op.op === "insert") parent.splice(op.index, 0, copy(op.value));
       else if (op.op === "delete")
         parent.splice(

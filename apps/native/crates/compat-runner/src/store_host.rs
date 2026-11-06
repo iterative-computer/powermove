@@ -68,9 +68,7 @@ fn adopt(
 ) -> Result<()> {
     let id = ExtensionId::new(found.id.clone()).map_err(|_| Error::Invalid("Store id"))?;
     let mut store = KernelStoreAdapter::new(kernel);
-    let current = store
-        .load(&id)
-        .map_err(|e| Error::Host(format!("{e:?}")))?;
+    let current = store.load(&id).map_err(|e| Error::Host(format!("{e:?}")))?;
     if current.as_ref().is_some_and(|state| state.active.is_some()) {
         return Ok(());
     }
@@ -191,7 +189,9 @@ impl StoreExtension {
             json!(graph.to_json().to_string())
         ))?;
         if reply["ok"] != true {
-            let error = reply["error"]["message"].as_str().unwrap_or("Activation failed");
+            let error = reply["error"]["message"]
+                .as_str()
+                .unwrap_or("Activation failed");
             return Err(Error::JavaScript(error.to_owned()));
         }
         Ok(Self {

@@ -59,7 +59,9 @@ fn realize_op(op: &Op, open: Option<&str>) -> Option<Value> {
                         } else if field == "id" {
                             return None;
                         } else {
-                            field.as_str().filter(|f| canonical::COMP_FIELDS.contains(f))?
+                            field
+                                .as_str()
+                                .filter(|f| canonical::COMP_FIELDS.contains(f))?
                         };
                         let mut out = vec![PathPart::from(key)];
                         out.extend_from_slice(tail);
@@ -312,7 +314,12 @@ impl KernelAdapter {
         self.replies.insert(txid, (request.clone(), reply.clone()));
         Ok(reply)
     }
-    fn plan(&mut self, args: &Value, p: &Published, time: f64) -> Result<Option<Vec<pm_kernel::Command>>> {
+    fn plan(
+        &mut self,
+        args: &Value,
+        p: &Published,
+        time: f64,
+    ) -> Result<Option<Vec<pm_kernel::Command>>> {
         let values = if let Some(a) = args["commands"].as_array() {
             a.clone()
         } else {
@@ -503,7 +510,8 @@ impl KernelAdapter {
                 // A lease is the open entry: nested synchronous writes fold into it.
                 self.mutations += 1;
                 let lease = self.mutations;
-                let mut reply = self.execute(txid, HistoryCall::Begin { label: label(args) }.into())?;
+                let mut reply =
+                    self.execute(txid, HistoryCall::Begin { label: label(args) }.into())?;
                 if reply.get("error").is_none() {
                     reply["value"] = json!({"ok":true,"message":"","data":{"lease":lease}});
                 }
@@ -515,7 +523,9 @@ impl KernelAdapter {
                 if written.get("error").is_some() {
                     let _ = self.execute(txid, HistoryCall::Rollback.into());
                     let message = written["error"]["message"].clone();
-                    return Ok(json!({"value":{"ok":false,"message":message},"publication":self.publication()?}));
+                    return Ok(
+                        json!({"value":{"ok":false,"message":message},"publication":self.publication()?}),
+                    );
                 }
                 let mut reply = self.execute(
                     txid,
@@ -583,9 +593,7 @@ impl KernelAdapter {
         let open = p.snapshot.open_comp();
         match input["method"].as_str() {
             Some("engine.bounds") => {
-                let layer = args["layer"]
-                    .as_str()
-                    .ok_or(Error::Invalid("layer id"))?;
+                let layer = args["layer"].as_str().ok_or(Error::Invalid("layer id"))?;
                 let bounds = mirror.queries().bounds(open.as_deref(), layer, time);
                 Ok(bounds.ok().flatten().map_or(Value::Null, |b| {
                     json!({"x0":b.x0,"y0":b.y0,"x1":b.x1,"y1":b.y1,"w":b.w,"h":b.h,"ax":b.ax,"ay":b.ay})
@@ -621,10 +629,7 @@ mod tests {
         let initial = crate::initial();
         let handle = actor.handle();
         handle
-            .open(
-                "compat",
-                OpenSource::Untitled(model(&initial["document"])),
-            )
+            .open("compat", OpenSource::Untitled(model(&initial["document"])))
             .wait()
             .unwrap()
             .unwrap();
@@ -642,7 +647,10 @@ mod tests {
         assert!(read["publication"].get("document").is_none());
         assert!(read["publication"].get("ops").is_none());
         adapter
-            .call(&request(2, "history.begin", json!({"label":"Synthetic"})), 0.)
+            .call(
+                &request(2, "history.begin", json!({"label":"Synthetic"})),
+                0.,
+            )
             .unwrap();
         let write = request(
             3,

@@ -59,15 +59,12 @@ mod system {
                         if body.len() > limit {
                             Err(Error::Quota("response bytes"))
                         } else {
-                            let http = response
-                                .as_ref()
-                                .and_then(|r| {
-                                    let object: &AnyObject = r.as_ref();
-                                    object.downcast_ref::<NSHTTPURLResponse>()
-                                });
-                            let (status, url, headers) = http.map_or(
-                                (200, fallback.clone(), vec![]),
-                                |http| {
+                            let http = response.as_ref().and_then(|r| {
+                                let object: &AnyObject = r.as_ref();
+                                object.downcast_ref::<NSHTTPURLResponse>()
+                            });
+                            let (status, url, headers) =
+                                http.map_or((200, fallback.clone(), vec![]), |http| {
                                     let headers = http.allHeaderFields();
                                     let mut list = vec![];
                                     for key in headers.allKeys() {
@@ -90,8 +87,7 @@ mod system {
                                             .map_or(fallback.clone(), |u| u.to_string()),
                                         list,
                                     )
-                                },
-                            );
+                                });
                             Ok(FetchResponse {
                                 status,
                                 url,
@@ -178,8 +174,16 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/synthetic");
         let reply = get(&url, 1024, 10).unwrap();
         assert_eq!((reply.status, &reply.body[..]), (201, &b"hello"[..]));
-        assert!(reply.headers.iter().any(|(k, v)| k == "X-Synthetic" && v == "yes"));
-        assert!(matches!(get(&url, 2, 10), Err(Error::Quota("response bytes"))));
+        assert!(
+            reply
+                .headers
+                .iter()
+                .any(|(k, v)| k == "X-Synthetic" && v == "yes")
+        );
+        assert!(matches!(
+            get(&url, 2, 10),
+            Err(Error::Quota("response bytes"))
+        ));
         server.join().unwrap();
     }
 }

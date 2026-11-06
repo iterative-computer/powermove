@@ -285,9 +285,9 @@ impl Builtins {
     }
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("export")?.eval(format!(
-                "runtime.engine('export.observe',{});__pmBuiltin.publish()",
-                run
-            ))
+            "runtime.engine('export.observe',{});__pmBuiltin.publish()",
+            run
+        ))
     }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
@@ -334,11 +334,8 @@ impl Builtins {
             .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
-        self.realm_of(panel)?.eval(format!(
-            "__pmBuiltin.write({},{})",
-            json!(handle),
-            value
-        ))
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.write({},{})", json!(handle), value))
     }
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
         std::mem::take(&mut *self.broker.platform.lock().unwrap())

@@ -1174,7 +1174,10 @@ impl Render for Editor {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
             let is_viewer = id == "viewer";
-            let body_native = self.integration.as_ref().is_some_and(|i| i.native_panel(&id, cx));
+            let body_native = self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
             let tab_track = group.tab_track(p.rect.w - 2. * m.inset - m.hit, &t);

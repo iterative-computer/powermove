@@ -295,9 +295,10 @@ impl EngineProxy for StoreRuntimeHost {
             Some(reply) => reply,
             None => match self.core_call(kernel, method, &input["args"])? {
                 Some(reply) => reply,
-                None => self
-                    .dispatch
-                    .call(kernel, &self.session, method, &input["args"], &budget)?,
+                None => {
+                    self.dispatch
+                        .call(kernel, &self.session, method, &input["args"], &budget)?
+                }
             },
         };
         budget.check()?;
@@ -362,7 +363,8 @@ impl KernelHooks for StoreRuntimeHost {
         ))
     }
     fn revoke_generation(&self, generation: &Generation) {
-        self.dispatch.revoke(&*self.kernel, &self.session, generation);
+        self.dispatch
+            .revoke(&*self.kernel, &self.session, generation);
     }
     fn seal_open_gestures(&self, generation: &Generation) {
         self.dispatch.seal(&*self.kernel, &self.session, generation);

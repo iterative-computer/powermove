@@ -205,7 +205,8 @@ pub fn module_imports(source: &str) -> Result<Vec<String>> {
         .collect();
     imports.sort();
     for dynamic in &parsed.module_record.dynamic_imports {
-        let request = &source[dynamic.module_request.start as usize..dynamic.module_request.end as usize];
+        let request =
+            &source[dynamic.module_request.start as usize..dynamic.module_request.end as usize];
         // A computed specifier stays a runtime refusal, as the frozen compiler leaves it.
         let literal = request
             .strip_prefix(['"', '\''])

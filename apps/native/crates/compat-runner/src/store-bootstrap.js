@@ -59,7 +59,8 @@ globalThis.__storeCheck = {
       session: { panel: "store", generation: 1 },
       realmGlobal: globalThis,
       send: (batch) => runtime.engine("store.dom", { batch }),
-      requestAnimationFrame: (fn) => setTimeout(() => fn(performance.now()), 16),
+      requestAnimationFrame: (fn) =>
+        setTimeout(() => fn(performance.now()), 16),
       cancelAnimationFrame: (id) => clearTimeout(id),
       reportError: (error) =>
         this.errors.push({ name: error?.name, message: error?.message }),
@@ -146,7 +147,9 @@ globalThis.__storeCheck = {
   async activateGraph(text) {
     const graph = JSON.parse(text);
     const url = (id) =>
-      id.startsWith("runtime:") ? `pmruntime://${id.slice(8)}` : `pmext://${id}`;
+      id.startsWith("runtime:")
+        ? `pmruntime://${id.slice(8)}`
+        : `pmext://${id}`;
     const sources = {},
       edges = {};
     for (const [id, source] of Object.entries(graph.sources))

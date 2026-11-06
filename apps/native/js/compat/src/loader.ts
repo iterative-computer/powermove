@@ -79,7 +79,7 @@ export function planLoad(records: Data[]): {
     candidates.delete(target);
     skipped.push({ id: target, health: { state: "replaced", by } });
   }
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const id of [...candidates])
       for (const dep of byId.get(id)?.manifest?.dependsOn ?? []) {
@@ -307,7 +307,10 @@ export function createLoader(options: LoaderOptions) {
     );
     return pending;
   };
-  async function reconcile(list: Data[], changed: string[] = []): Promise<void> {
+  async function reconcile(
+    list: Data[],
+    changed: string[] = [],
+  ): Promise<void> {
     for (const record of list) records.set(record.id, record);
     for (const id of changed) failed.delete(id);
     const plan = planLoad(list.filter((record) => !failed.has(record.id)));

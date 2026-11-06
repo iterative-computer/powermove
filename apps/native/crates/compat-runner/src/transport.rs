@@ -20,14 +20,19 @@ impl TimeBase {
             Some(id) => c.get(id),
             None => None,
         });
-        let field = |key: &str| comp.and_then(|c| c.get(key)).or(root.and_then(|r| r.get(key)));
+        let field = |key: &str| {
+            comp.and_then(|c| c.get(key))
+                .or(root.and_then(|r| r.get(key)))
+        };
         let number = |key: &str| field(key).and_then(|n| n.to_value().as_f64());
         let work = field("work").map(|w| w.to_value()).and_then(|w| {
             let w = w.as_array()?;
             Some((w.first()?.as_f64()?, w.get(1)?.as_f64()?))
         });
         Self {
-            fps: number("fps").filter(|v| v.is_finite() && *v > 0.).unwrap_or(30.),
+            fps: number("fps")
+                .filter(|v| v.is_finite() && *v > 0.)
+                .unwrap_or(30.),
             duration: number("dur")
                 .filter(|v| v.is_finite() && *v >= 0.)
                 .unwrap_or(0.),
@@ -233,7 +238,10 @@ mod tests {
                 .command(&json!({"method":"seek","time":1,"now":null}), BASE)
                 .is_err()
         );
-        assert_eq!(clock.command(&json!({"method":"state"}), BASE).unwrap(), before);
+        assert_eq!(
+            clock.command(&json!({"method":"state"}), BASE).unwrap(),
+            before
+        );
         assert_eq!(
             clock
                 .command(&json!({"method":"tick","now":1250}), BASE)

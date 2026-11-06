@@ -75,7 +75,8 @@ fn resolve<'s>(
     let hash = referrer.get_identity_hash().get();
     let urls = s.get_slot::<Registry>()?.urls.get(&hash)?.clone();
     // Identity hashes can collide. Each candidate's edge table must name the import.
-    urls.into_iter().find_map(|url| resolved(s, &url, &specifier))
+    urls.into_iter()
+        .find_map(|url| resolved(s, &url, &specifier))
 }
 
 fn dynamic<'s, 'i>(
@@ -152,11 +153,7 @@ pub(crate) fn link(
                 .into_iter()
                 .flatten()
                 .filter_map(|(spec, target)| Some((spec.clone(), target.as_str()?.to_owned())));
-            registry
-                .edges
-                .entry(url.clone())
-                .or_default()
-                .extend(edges);
+            registry.edges.entry(url.clone()).or_default().extend(edges);
         }
     }
     // A failed compile or link has already left its exception pending in `s`.

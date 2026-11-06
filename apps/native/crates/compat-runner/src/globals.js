@@ -2,7 +2,10 @@
 // DOM exists. Answers come from the host's appearance facts once it is attached.
 globalThis.window ??= globalThis;
 globalThis.devicePixelRatio ??= 2;
-globalThis.__mediaFacts = { "prefers-reduced-motion": false, "prefers-color-scheme": "light" };
+globalThis.__mediaFacts = {
+  "prefers-reduced-motion": false,
+  "prefers-color-scheme": "light",
+};
 globalThis.matchMedia ??= (query) => {
   const list = new EventTarget();
   const [, name, value] = /\(\s*([\w-]+)\s*:\s*([\w-]+)\s*\)/.exec(query) ?? [];

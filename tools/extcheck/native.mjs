@@ -45,12 +45,26 @@ try {
   const manifest = JSON.parse(
     await readFile(path.join(request.extension, "manifest.json"), "utf8"),
   );
-  // Store source is compiled but never executed through a trusted facade. Its permissioned
-  // signed native installation and resource dispatcher must be connected before
-  // public archive bytes may enter the confined helper.
+  // Store source runs in its confined helper only, never through a trusted facade,
+  // so its facade calls are not recorded yet. Activation there is still measured.
   if (request.case.startsWith("store-")) {
-    status.reason = "native-store-release-admission-unavailable";
-    if (request.trace_only) status.reason = "native-store-trace-driver-unavailable";
+    status.reason = "native-store-activation-failed";
+    const reply = JSON.parse(
+      execFileSync(process.argv[3], [], {
+        input: JSON.stringify({
+          store: true,
+          work: path.join(out, "store"),
+          extension: request.extension,
+          release: request.store?.releaseId,
+        }),
+        encoding: "utf8",
+        timeout: 60000,
+        maxBuffer: 16 * 1024 * 1024,
+      }),
+    );
+    await writeFile(path.join(out, "probe.json"), JSON.stringify(reply));
+    status.activated = reply.activation.ok === true;
+    if (status.activated) status.reason = "native-store-trace-driver-unavailable";
   } else {
     status.reason = "native-runner-failed";
     const reply = JSON.parse(

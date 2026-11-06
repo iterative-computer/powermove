@@ -28,6 +28,7 @@ import type {
   HistoryAPI,
   KernelHost,
   Publication,
+  PublicationDelta,
   Reply,
 } from "./types";
 
@@ -59,7 +60,7 @@ export class CompatRealm {
   readonly channel: HostChannel;
   readonly mirror: DocumentMirror;
   readonly globals: Data;
-  private publication: Publication;
+  private publication: PublicationDelta;
   private workspaceValue: Data;
   private selection: Data;
   private busListeners = new Map<string, Set<(a: any, b: any) => void>>();
@@ -71,7 +72,7 @@ export class CompatRealm {
   private extensions = new Map<string, { api: Data; dispose(): void }>();
   private disposed = false;
   private abandonedMutationStart = false;
-  private deferredPublications: Publication[] = [];
+  private deferredPublications: PublicationDelta[] = [];
   private unacknowledgedDocument?: Data;
   private unacknowledgedSelection?: Data;
   private unacknowledgedWorkspace?: Data;
@@ -85,7 +86,7 @@ export class CompatRealm {
       this.kernel,
     );
     this.publication = { ...copy(options.initial), document: undefined };
-    this.mirror = new DocumentMirror(options.initial.document!);
+    this.mirror = new DocumentMirror(options.initial.document);
     this.workspaceValue = copy(options.initial.workspace);
     this.selection = copy(options.initial.selection);
     this.channel = new HostChannel(
@@ -359,7 +360,7 @@ export class CompatRealm {
   private callback<T>(fn: () => T): T {
     return fn();
   }
-  private accept(publication: Publication, reply: Reply): void {
+  private accept(publication: PublicationDelta, reply: Reply): void {
     if (publication.revision < this.publication.revision)
       throw new HostError(
         "StalePublication",
@@ -371,7 +372,8 @@ export class CompatRealm {
       !!publication.ops?.length ||
       !!reply.error ||
       !!this.unacknowledgedDocument;
-    const documentBase = this.unacknowledgedDocument ?? this.mirror.acknowledged;
+    const documentBase =
+      this.unacknowledgedDocument ?? this.mirror.acknowledged;
     const later =
       moved && (this.unacknowledgedDocument || !reply.error)
         ? diff(documentBase, this.mirror.document)
@@ -425,7 +427,7 @@ export class CompatRealm {
   }
   /** A publication carries a whole document, ops against the last one, or
    * neither; selection and workspace are likewise only sent when they moved. */
-  private adopt(publication: Publication): void {
+  private adopt(publication: PublicationDelta): void {
     if (publication.document) this.mirror.setAcknowledged(publication.document);
     else if (publication.ops?.length) this.mirror.applyOps(publication.ops);
     const { document: _, ops: __, ...rest } = publication;
@@ -437,7 +439,7 @@ export class CompatRealm {
     };
   }
   /** Host mailbox publication while local raw writes are still pending. */
-  receive(publication: Publication): void {
+  receive(publication: PublicationDelta): void {
     this.live();
     // A mailbox may overtake an acknowledgement lost in transport. Resolve that
     // immutable request before treating its acknowledged writes as new local intent.
@@ -560,7 +562,8 @@ export class CompatRealm {
   /** The reference's one subscription per legacy topic (kernel/install.ts). */
   private bridgeEvents(): void {
     const events = this.kernel.events;
-    const on = (name: string, fn: (...args: any[]) => void) => this.on(name, fn);
+    const on = (name: string, fn: (...args: any[]) => void) =>
+      this.on(name, fn);
     const kinds: Data = {
       layers: "structure",
       project: "project",

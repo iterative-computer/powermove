@@ -28,7 +28,13 @@ const KINDS: [&str; 13] = [
     "status",
     "hooks",
 ];
-const PERMISSIONS: [&str; 5] = ["network", "clipboard", "assets", "project:write", "full-access"];
+const PERMISSIONS: [&str; 5] = [
+    "network",
+    "clipboard",
+    "assets",
+    "project:write",
+    "full-access",
+];
 
 pub fn extension_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -79,7 +85,8 @@ fn link_origin(value: &Value) -> bool {
         (1..=63).contains(&b.len())
             && b[0].is_ascii_alphanumeric()
             && b[b.len() - 1].is_ascii_alphanumeric()
-            && b.iter().all(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+            && b.iter()
+                .all(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'-'))
     };
     let last = labels[labels.len() - 1];
     labels.len() > 1
@@ -201,7 +208,8 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
         }
         let items = permissions.as_array();
         let valid = items.is_some_and(|v| {
-            let unique: std::collections::BTreeSet<_> = v.iter().filter_map(Value::as_str).collect();
+            let unique: std::collections::BTreeSet<_> =
+                v.iter().filter_map(Value::as_str).collect();
             v.len() <= 8
                 && unique.len() == v.len()
                 && unique.iter().all(|p| PERMISSIONS.contains(p))
@@ -215,7 +223,8 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
             return Err("\"links\" requires apiVersion 3".into());
         }
         let valid = links.as_array().is_some_and(|v| {
-            let unique: std::collections::BTreeSet<_> = v.iter().filter_map(Value::as_str).collect();
+            let unique: std::collections::BTreeSet<_> =
+                v.iter().filter_map(Value::as_str).collect();
             v.len() <= LINKS && unique.len() == v.len() && v.iter().all(link_origin)
         });
         if !valid {
@@ -276,14 +285,30 @@ mod tests {
     fn defaults_and_refusals_match_the_frozen_parser() {
         assert_eq!(parse(&base()).unwrap(), base());
         for (key, value, error) in [
-            ("id", json!("Bad"), "invalid \"id\" (a-z, 0-9, -; 2–64 chars)"),
+            (
+                "id",
+                json!("Bad"),
+                "invalid \"id\" (a-z, 0-9, -; 2–64 chars)",
+            ),
             ("version", json!("1.0"), "invalid \"version\" (x.y.z)"),
-            ("apiVersion", json!(9), "apiVersion 9 is newer than this app (4)"),
+            (
+                "apiVersion",
+                json!(9),
+                "apiVersion 9 is newer than this app (4)",
+            ),
             ("entry", json!("../x.ts"), "invalid \"entry\" path"),
             ("contributes", json!(["nope"]), "invalid \"contributes\""),
-            ("replaces", json!(["synthetic"]), "extension cannot reference itself"),
+            (
+                "replaces",
+                json!(["synthetic"]),
+                "extension cannot reference itself",
+            ),
             ("vars", json!([]), "\"vars\" requires apiVersion 2"),
-            ("permissions", json!([]), "\"permissions\" requires apiVersion 3"),
+            (
+                "permissions",
+                json!([]),
+                "\"permissions\" requires apiVersion 3",
+            ),
         ] {
             let mut raw = base();
             raw[key] = value;

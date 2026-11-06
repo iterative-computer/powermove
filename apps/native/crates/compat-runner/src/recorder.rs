@@ -706,11 +706,17 @@ impl NativeHost {
                     Some("no-repeat") => Repetition::NoRepeat,
                     _ => Repetition::Repeat,
                 };
-                handle(paints, next, Paint::Pattern(Pattern::new(source, repetition)))
+                handle(
+                    paints,
+                    next,
+                    Paint::Pattern(Pattern::new(source, repetition)),
+                )
             }
             ("recorder.command", "paint.addColorStop") => {
-                let Some(Paint::Gradient(gradient)) =
-                    values.first().and_then(Value::as_str).and_then(|h| paints.get(h))
+                let Some(Paint::Gradient(gradient)) = values
+                    .first()
+                    .and_then(Value::as_str)
+                    .and_then(|h| paints.get(h))
                 else {
                     return Err(Error::Invalid("gradient handle"));
                 };
@@ -727,7 +733,10 @@ impl NativeHost {
             }
             ("recorder.command", "putImageData") => {
                 let data = &values[0];
-                let (width, height) = (dimension(data.get("width"))?, dimension(data.get("height"))?);
+                let (width, height) = (
+                    dimension(data.get("width"))?,
+                    dimension(data.get("height"))?,
+                );
                 let bytes: Vec<u8> = data["data"]
                     .as_array()
                     .ok_or(Error::Invalid("image data"))?
@@ -735,16 +744,10 @@ impl NativeHost {
                     .map(|v| v.as_u64().unwrap_or(0).min(255) as u8)
                     .collect();
                 let image = ImageData::from_rgba(width, height, bytes).map_err(host_error)?;
-                let dirty = (values.len() == 7).then(|| {
-                    [3, 4, 5, 6].map(|i| values[i].as_i64().unwrap_or(0) as i32)
-                });
+                let dirty = (values.len() == 7)
+                    .then(|| [3, 4, 5, 6].map(|i| values[i].as_i64().unwrap_or(0) as i32));
                 canvas
-                    .put_image_data(
-                        image,
-                        num(values, 1)? as i32,
-                        num(values, 2)? as i32,
-                        dirty,
-                    )
+                    .put_image_data(image, num(values, 1)? as i32, num(values, 2)? as i32, dirty)
                     .map_err(host_error)?;
                 Value::Null
             }
@@ -847,15 +850,15 @@ impl EngineProxy for NativeHost {
             "kernel.publication" => return self.kernel.lock().unwrap().publication(),
             "kernel.query" => return self.kernel.lock().unwrap().query(input),
             "extension.health" => {
-                self.events.health(
-                    input["id"].as_str().unwrap_or_default(),
-                    &input["health"],
-                );
+                self.events
+                    .health(input["id"].as_str().unwrap_or_default(), &input["health"]);
                 return Ok(Value::Null);
             }
             "ui.toast" => {
-                self.events
-                    .toast(input["text"].as_str().unwrap_or_default(), &input["options"]);
+                self.events.toast(
+                    input["text"].as_str().unwrap_or_default(),
+                    &input["options"],
+                );
                 return Ok(Value::Null);
             }
             "ui.request" => {
@@ -863,9 +866,7 @@ impl EngineProxy for NativeHost {
                 return Ok(Value::Null);
             }
             "storage.set" => {
-                let key = input["key"]
-                    .as_str()
-                    .ok_or(Error::Invalid("storage key"))?;
+                let key = input["key"].as_str().ok_or(Error::Invalid("storage key"))?;
                 self.kernel.lock().unwrap().store(key, &input["value"])?;
                 return Ok(Value::Null);
             }

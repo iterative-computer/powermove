@@ -279,10 +279,16 @@ mod tests {
             ..Panels::default()
         };
         panel(&mut p, 1, 0);
-        p.regions = vec![Rect::new(0., 0., 50., 50.), Rect::new(300., 300., 200., 200.)];
+        p.regions = vec![
+            Rect::new(0., 0., 50., 50.),
+            Rect::new(300., 300., 200., 200.),
+        ];
         assert_eq!(
             p.snapshot().visible_union,
-            vec![Rect::new(0., 0., 50., 50.), Rect::new(300., 300., 100., 100.)]
+            vec![
+                Rect::new(0., 0., 50., 50.),
+                Rect::new(300., 300., 100., 100.)
+            ]
         );
     }
     #[test]
