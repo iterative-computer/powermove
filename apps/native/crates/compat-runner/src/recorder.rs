@@ -948,6 +948,9 @@ impl EngineProxy for NativeHost {
                 }
             }
             state.bindings = bindings;
+            drop(state);
+            // Bound pixels are read after this flush, by the owner, not in here.
+            self.events.canvases_ready();
             return Ok(Value::Null);
         }
         if operation == "recorder.command" {

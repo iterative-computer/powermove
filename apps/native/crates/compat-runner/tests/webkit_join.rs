@@ -94,7 +94,24 @@ mod mac {
             },
         )?;
         web.present(viewport)?;
-        let sink = host.store_page_sink(ID);
+        // The helper run this page draws, as the app reads it from contributions.
+        let view = loop {
+            let view = host.contributions().and_then(|c| {
+                c["panels"]
+                    .as_array()?
+                    .iter()
+                    .find(|p| p["id"] == PANEL_ID)?["view"]
+                    .as_u64()
+            });
+            if let Some(view) = view {
+                break view;
+            }
+            if Instant::now() > deadline {
+                return Err("no Store panel contribution".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let sink = host.store_page_sink(ID, view);
         let (mut ready, mut opened, mut stage, mut ticket) = (false, false, 0, None);
         while Instant::now() < deadline {
             if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
@@ -118,11 +135,11 @@ mod mac {
             }
             if ready && !opened {
                 host.set_panel(PANEL_ID, true);
-                host.place_panel(PANEL_ID, [10., 20., 300., 200.]);
+                host.place_panel(PANEL_ID, Some([10., 20., 300., 200.]));
                 opened = true;
             }
             if ready {
-                let mut batches = host.take_store_batches(ID);
+                let mut batches = host.take_store_batches(ID, view);
                 while let Some(batch) = batches.front() {
                     match batch.present(&mut web) {
                         Ok(()) => {
@@ -132,7 +149,7 @@ mod mac {
                         Err(error) => return Err(error.into()),
                     }
                 }
-                host.return_store_batches(ID, batches);
+                host.return_store_batches(ID, view, batches);
             }
             if let Some(reply) = ticket.as_ref().and_then(CaptureTicket::try_take) {
                 ticket = None;
@@ -241,6 +258,15 @@ mod mac {
         )?;
         web.present(viewport)?;
         let deadline = Instant::now() + Duration::from_secs(30);
+        // The page belongs to one realm generation, as in the app.
+        while host.view() == 0 {
+            if Instant::now() > deadline {
+                return Err("no realm".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let view = host.view();
+        let sink = host.page_sink(view);
         let mut ready = false;
         let mut opened = false;
         let mut stage = 0;
@@ -267,15 +293,15 @@ mod mac {
                 }
             }
             while let Ok(message) = messages.try_recv() {
-                host.page_message(message);
+                sink(message);
             }
             if host.is_ready() && !opened {
                 host.set_panel("synthetic.panel", true);
-                host.place_panel("synthetic.panel", [10., 20., 300., 200.]);
+                host.place_panel("synthetic.panel", Some([10., 20., 300., 200.]));
                 opened = true;
             }
             if ready {
-                let mut batches = host.take_batches();
+                let mut batches = host.take_batches(view);
                 while let Some(batch) = batches.front() {
                     match batch.present(&mut web) {
                         Ok(()) => {
@@ -285,7 +311,7 @@ mod mac {
                         Err(error) => return Err(error.into()),
                     }
                 }
-                host.return_batches(batches);
+                host.return_batches(view, batches);
                 for frame in host.take_canvases() {
                     web.present_canvas(1, &frame)?;
                 }

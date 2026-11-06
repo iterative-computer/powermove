@@ -47,8 +47,10 @@ because the v4 Inspector has no DOM slot.
 
 A failed compile, throw or export leaves one record with its reason. A task that
 runs for eight seconds is terminated and the realm is rebuilt without the extension
-that was activating; two restarts in one session stop the realm until the project
-reopens. Kernel edits were sealed by then. A fatal V8 process abort is not contained:
+that was activating, which stays disabled in state; two restarts in one session stop
+the realm until the project reopens. The rebuild is a new writer generation: the old
+one is sealed (`RealmFailed`), and its page is replaced and its open panels reopened.
+A fatal V8 process abort is not contained:
 the trusted realm is in-process, by decision 5.
 
 ## Native answers
@@ -70,10 +72,12 @@ touched: native layout lives in the shell.
 ## Store
 
 Each Store extension gets a confined helper and its own WebKit document. Panels are
-built in the helper against a remote DOM; only batches reach the page. The palette's
-Install Extension from Store lists the first catalog page, and choosing a release
-runs `store_install` off the main thread. No release verifies until the Store signs
-them: see [store-host.md](store-host.md).
+built in the helper against a remote DOM; only batches reach the page. Settings
+toggles start and stop the helper; a rescan restarts only helpers whose source moved.
+A Store fetch reaches public HTTPS hosts only, across redirects, and drops credentials
+on a cross-origin redirect. The palette's Install Extension from Store appears only
+once a Store key is pinned; until the Store signs releases there is none (see
+[store-host.md](store-host.md)).
 
 ## Known limits
 
