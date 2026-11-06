@@ -1058,9 +1058,9 @@ Outside-owned-path integration still required:
    apply input/AX plans, route focus/IME/clipboard events and register the v4
    section. The existing temporary app panels are untouched beyond module
    registration. `EditingServices` is a queue contract, not an installed service.
-2. Kernel text commands `AddAnimator`, `RemoveAnimator`, `SetStyleRange` remain
-   `NotImplemented`; rename/duplicate/reorder/enable/property structural commands
-   are also needed. The current property resolver lacks `ta.*`, `ts.*`, `g.*`
+2. Kernel text commands `AddAnimator`, `RemoveAnimator`, `SetStyleRange` exist;
+   rename/duplicate/reorder/enable/property structural commands are still
+   needed. The current property resolver lacks `ta.*`, `ts.*`, `g.*`
    and `mp.*` channels. Path create/add/close/delete and text/box edits are backed;
    the drag reducer alone is not an admitted vertex/tangent mutation.
 3. The actor needs an atomic document-session guard for `Transact` and gestures.

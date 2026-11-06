@@ -783,7 +783,7 @@ fn effect_controls_native_binding_and_diamond_use_published_playhead() {
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .add_effect_at(Caller::native(), "a", "synthetic.glow", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
@@ -1110,7 +1110,7 @@ fn effect_controls_edits_every_supported_scalar_type_through_registered_native_f
         .model
         .as_mut()
         .unwrap()
-        .add_effect(Caller::native(), "a", "synthetic.glow")
+        .add_effect_at(Caller::native(), "a", "synthetic.glow", 0.)
         .unwrap();
     kernel.call("synthetic", request).wait().unwrap().unwrap();
     let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
@@ -1321,3 +1321,9 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     assert!(panels.take_errors().is_empty());
     actor.shutdown();
 }
+
+mod effect_delta;
+mod effect_registry;
+mod text_animators;
+
+mod precomp_delta;

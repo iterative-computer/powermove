@@ -81,6 +81,7 @@ pub mod pro_mcp;
 pub mod project_io;
 pub mod queries;
 pub mod selection;
+pub mod text_host;
 pub mod tx;
 
 pub use commands::{

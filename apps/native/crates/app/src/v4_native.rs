@@ -25,6 +25,63 @@ define_class!(
         fn choose(&self,sender:&NSMenuItem){self.ivars().selected.set(Some(sender.tag() as usize));}
     }
 );
+/// Options depth first: a choice's index counts every row before it, so a flat
+/// list answers its own positions and a nested one indexes this list.
+pub fn flatten(options: &[Value]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(options.len());
+    for option in options {
+        out.push(option.clone());
+        if let Some(children) = option.get("children").and_then(Value::as_array) {
+            out.extend(flatten(children));
+        }
+    }
+    out
+}
+fn build(
+    options: &[Value],
+    next: &mut isize,
+    target: &MenuTarget,
+    mtm: MainThreadMarker,
+) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    for option in options {
+        let tag = *next;
+        *next += 1;
+        if option.is_null() || option.get("separator") == Some(&Value::Bool(true)) {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            continue;
+        }
+        let label = option
+            .get("label")
+            .and_then(Value::as_str)
+            .or_else(|| option.as_str())
+            .unwrap_or("");
+        let children = option.get("children").and_then(Value::as_array);
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(label),
+                children.is_none().then_some(sel!(choose:)),
+                &NSString::new(),
+            )
+        };
+        item.setTag(tag);
+        item.setEnabled(
+            option.get("disabled") != Some(&Value::Bool(true))
+                && option.get("enabled") != Some(&Value::Bool(false)),
+        );
+        match children {
+            Some(children) => {
+                let submenu = build(children, next, target, mtm);
+                item.setSubmenu(Some(&submenu));
+            }
+            None => unsafe { item.setTarget(Some(target)) },
+        }
+        menu.addItem(&item);
+    }
+    menu
+}
 pub fn menu(
     window: &mut Window,
     options: &[Value],
@@ -45,36 +102,8 @@ pub fn menu(
             init
         ]
     };
-    let menu = NSMenu::new(mtm);
-    menu.setAutoenablesItems(false);
-    for (index, option) in options.iter().enumerate() {
-        if option.is_null() || option.get("separator") == Some(&Value::Bool(true)) {
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
-            continue;
-        }
-        let label = option
-            .get("label")
-            .and_then(Value::as_str)
-            .or_else(|| option.as_str())
-            .unwrap_or("");
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(label),
-                Some(sel!(choose:)),
-                &NSString::new(),
-            )
-        };
-        item.setTag(index as isize);
-        item.setEnabled(
-            option.get("disabled") != Some(&Value::Bool(true))
-                && option.get("enabled") != Some(&Value::Bool(false)),
-        );
-        unsafe {
-            item.setTarget(Some(&target));
-        }
-        menu.addItem(&item);
-    }
+    let mut next = 0;
+    let menu = build(options, &mut next, &target, mtm);
     let point = view.convertPoint_fromView(
         view.window()
             .map(|w| w.mouseLocationOutsideOfEventStream())

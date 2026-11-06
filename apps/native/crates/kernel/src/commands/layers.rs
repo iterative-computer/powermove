@@ -208,8 +208,14 @@ pub enum LayerCommand {
     /// forward", "Send backward", "Bring to front", "Send to back".
     Restack { layer_ids: Vec<String>, to: Restack },
     /// `transform_layers`: a generated tool's higher-order edit, compiled to
-    /// primitive commands (`PM.Capabilities.compile`). Not ported.
-    TransformLayers { transform: Value, state: Value },
+    /// primitive commands (`PM.Capabilities.compile`) over the open
+    /// composition. `selection` is the selected layer ids in pick order.
+    TransformLayers {
+        transform: Value,
+        state: Value,
+        selection: Vec<String>,
+        time: f64,
+    },
 }
 
 impl LayerCommand {
@@ -251,9 +257,12 @@ impl LayerCommand {
                 time,
             } => reorder(cx, layer_id, *index, *time),
             LayerCommand::Restack { layer_ids, to } => restack(cx, layer_ids, *to),
-            LayerCommand::TransformLayers { .. } => {
-                Err(CommandError::NotImplemented("transform_layers"))
-            }
+            LayerCommand::TransformLayers {
+                transform,
+                state,
+                selection,
+                time,
+            } => super::capabilities::run(cx, transform, state, selection, *time),
         }
     }
 }

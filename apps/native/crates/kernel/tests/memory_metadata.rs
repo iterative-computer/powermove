@@ -507,6 +507,7 @@ fn metadata_storage_failure_remains_visible_on_retry_and_lost_ack_query() {
             max_segment_bytes: 1,
             ..Default::default()
         },
+        ..Default::default()
     });
     kernel
         .open("P", OpenSource::Untitled(parse(SOURCE).unwrap()))

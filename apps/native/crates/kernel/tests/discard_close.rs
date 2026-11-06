@@ -15,6 +15,7 @@ fn config(root: &Path) -> KernelConfig {
             checkpoint_revisions: 1,
             ..Default::default()
         },
+        ..Default::default()
     }
 }
 fn attach(k: &mut Kernel, root: &Path) {

@@ -9,9 +9,7 @@
 use std::collections::HashSet;
 
 use pm_eval::bounds::NoHost;
-use pm_eval::text_geom::TextMeasure;
 use pm_model::{Map, Value};
-use pm_text::compat::{GlyphLayout, TextContent};
 
 use super::{Cx, layers, values};
 use crate::error::CommandError;
@@ -91,27 +89,8 @@ fn index_of(layers: &[Value], id: &str) -> Option<usize> {
         .position(|l| values::text(l, "id") == Some(id))
 }
 
-/// A text measure for kernels that must not measure text (the core has no
-/// fonts yet): text layers are kept out of its way by the callers.
-struct NoFonts;
-
-impl TextMeasure for NoFonts {
-    fn measure_lines(&mut self, _: &TextContent) -> Vec<pm_eval::text_geom::MeasuredLine> {
-        Vec::new()
-    }
-    fn plain_width(&mut self, _: &TextContent, _: &str) -> f64 {
-        0.0
-    }
-    fn glyph_layout(&mut self, _: &TextContent) -> GlyphLayout {
-        GlyphLayout::default()
-    }
-    fn spaced_width(&mut self, _: &TextContent, _: &str) -> f64 {
-        0.0
-    }
-}
-
 /// `PM.groupLayers(ids, name)`.
-fn group(
+pub(super) fn group(
     cx: &mut Cx<'_>,
     ids: &[String],
     group_id: &str,
@@ -207,12 +186,17 @@ fn group(
             .find(|l| values::text(l, "id") == Some(id.as_str()))
             .is_some_and(|l| values::text(l, "type") == Some("text"))
     });
-    if !has_text && let Some(index) = index_of(&now, group_id) {
+    // Without fonts a text group keeps its default placement; nothing moves.
+    if (!has_text || cx.text.is_some())
+        && let Some(index) = index_of(&now, group_id)
+    {
         let time = values::finite(time, "time")?;
+        let mut measure = cx.measure(false)?;
         cx.kernel(comp.as_deref(), |edit| {
-            pm_edit::groups::group_placement(edit, index, time, &mut NoFonts, &mut NoHost)
+            pm_edit::groups::group_placement(edit, index, time, &mut *measure, &mut NoHost)
                 .map(|_| ())
         })?;
+        cx.check_fonts()?;
     }
     Ok(())
 }

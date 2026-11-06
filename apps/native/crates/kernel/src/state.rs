@@ -64,9 +64,48 @@ pub struct StateSnapshot {
     pub registries: Arc<BTreeMap<String, Vec<Registration>>>,
     pub extensions: Arc<BTreeMap<String, ExtensionEntry>>,
 }
+/// The kernel's own effect providers. They sit first in the stack, so an
+/// extension registering the same id wins and disposal reveals the built-in.
+fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
+    static SEED: std::sync::OnceLock<Arc<BTreeMap<String, Vec<Registration>>>> =
+        std::sync::OnceLock::new();
+    SEED.get_or_init(|| {
+        let ops = pm_fx_defs::catalog::main_effects()
+            .effects
+            .iter()
+            .map(|definition| StateOp::Register {
+                registry: "effects".into(),
+                entry: Registration {
+                    token: format!("builtin.effect.{}", definition.id),
+                    owner: crate::tx::Caller::native().writer,
+                    id: definition.id.clone(),
+                    definition: parse(
+                        &serde_json::to_string(definition).expect("JSON effect definition"),
+                    )
+                    .expect("JSON effect definition"),
+                },
+            })
+            .collect();
+        let (seeded, _) = StateSnapshot::default()
+            .stage(StateTransaction {
+                expected_revision: None,
+                ops,
+            })
+            .expect("built-in effect registrations");
+        seeded.registries
+    })
+    .clone()
+}
 impl StateSnapshot {
+    /// The state every kernel starts from, before any profile is attached.
+    pub fn seeded() -> Self {
+        Self {
+            registries: builtin_registries(),
+            ..Self::default()
+        }
+    }
     pub fn load(store: &LibraryStore) -> Result<Self, LibraryError> {
-        let mut s = Self::default();
+        let mut s = Self::seeded();
         for key in STATIC_KEYS {
             if is_setting(key)
                 && let Some(v) = store.read(key)?

@@ -921,3 +921,49 @@ fn diagnostic(session: &mut McpSession, name: &str, args: Value) -> Value {
     )
     .unwrap()
 }
+
+#[test]
+fn transform_layers_runs_over_the_batch_selection() {
+    let solid = |id: &str| {
+        json!({"id":id,"type":"solid","name":id,"from":0,"dur":5,"on":true,"lock":false,
+            "parent":null,"group":null,"fx":[],"masks":[],"d":{"w":10,"h":10,"color":"#FF0000"},
+            "p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]}}})
+    };
+    let project = json!({"id":"p","name":"p","compId":"root","w":100,"h":100,"fps":30,"dur":5,
+        "assets":{},"comps":{},"layers":[solid("a"),solid("b")]});
+    let edit = json!({"type":"transform_layers","transform":{"edits":[
+        {"path":"properties.opacity","value":{"op":"multiply","args":[{"ref":"current"},0.5]}}
+    ]}});
+    let batch =
+        pm_mcp::commands::plan(&project, &["b".to_owned()], std::slice::from_ref(&edit), 0.)
+            .unwrap();
+    assert_eq!(batch.commands.len(), 1);
+    let mut store = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    );
+    store
+        .transact("Transform", pm_kernel::Origin::Agent, &batch.commands)
+        .unwrap();
+    let after = store.root().unwrap().to_value();
+    let layers = after
+        .get("comps")
+        .and_then(|c| c.get("root"))
+        .unwrap_or(&after)
+        .get("layers")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let opacity = |l: &pm_model::Value| {
+        let v = l
+            .get("p")
+            .unwrap()
+            .get("opacity")
+            .unwrap()
+            .get("v")
+            .unwrap();
+        v.as_f64().unwrap()
+    };
+    assert_eq!(opacity(&layers[0]), 100., "not selected");
+    assert_eq!(opacity(&layers[1]), 50.);
+    assert!(pm_mcp::commands::plan(&project, &[], &[edit], 0.).is_err());
+}

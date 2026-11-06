@@ -41,7 +41,15 @@ export interface ParameterRow {
   effectLabel: string;
   enabled: boolean;
 }
-export type Row = EffectHeader | ParameterRow;
+export interface ActionRow {
+  kind: "action";
+  id: string;
+  effect: string;
+  index: number;
+  label: string;
+  readonly: boolean;
+}
+export type Row = EffectHeader | ParameterRow | ActionRow;
 /** Read-only worker projection of pm-panel-inspector, never an editable JS document. */
 export interface Projection {
   version: 1;
@@ -62,6 +70,7 @@ export interface Projection {
   clipboardCount: number;
 }
 export type Intent =
+  | { type: "action"; id: string; index: number }
   | { type: "select"; id: string; meta: boolean; ctrl: boolean; shift: boolean }
   | { type: "navigate"; direction: -1 | 1; shift: boolean }
   | { type: "disclose"; id: string; open: boolean }
@@ -184,6 +193,16 @@ export function projection(value: Json): Projection {
         (r.control === "toggle" && typeof r.value !== "boolean")
       )
         throw new TypeError("Invalid parameter row");
+    } else if (row.kind === "action") {
+      if (
+        typeof row.effect !== "string" ||
+        typeof row.label !== "string" ||
+        typeof row.readonly !== "boolean" ||
+        !Number.isSafeInteger(row.index) ||
+        row.index < 0 ||
+        row.index >= 16
+      )
+        throw new TypeError("Invalid action row");
     } else throw new TypeError("Invalid row kind");
   }
   return structuredClone(p);

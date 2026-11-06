@@ -52,6 +52,8 @@ pub(crate) struct Backend {
     pub(crate) native: super::models::Models,
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
+    last_effects: BTreeMap<String, Value>,
+    last_registries: Option<Arc<BTreeMap<String, Vec<state::Registration>>>>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
 impl Backend {
@@ -106,6 +108,8 @@ impl Backend {
             native,
             panel_id: panel.into(),
             service_revision: 0,
+            last_effects: BTreeMap::new(),
+            last_registries: None,
             timeline_waiter: None,
             bindings: BTreeMap::new(),
             binding_owners: BTreeMap::new(),
@@ -156,10 +160,46 @@ impl Backend {
             .ok_or("No open project")?
             .sync(published);
         let state = self.kernel.state();
+        // Definitions carry whole shaders; only a new registry pays to convert them.
+        if self
+            .last_registries
+            .as_ref()
+            .is_some_and(|last| Arc::ptr_eq(last, &state.registries))
+        {
+            return Ok(());
+        }
+        let registries = state.registries.clone();
         let mut latest = BTreeMap::new();
         for registration in state.registries.get("effects").into_iter().flatten() {
             latest.insert(registration.id.clone(), wire(&registration.definition));
         }
+        if self.last_effects == latest {
+            self.last_registries = Some(registries);
+            return Ok(());
+        }
+        let next_effects = latest.clone();
+        // Rendering owns its own provider snapshots. This catalog carries
+        // complete program definitions only; display-only descriptors retain
+        // the existing Inspector registration path below.
+        let definitions = latest
+            .iter()
+            .filter(|(_, d)| d["frag"].is_string())
+            .map(|(id, d)| {
+                let mut d = d.clone();
+                if d.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value != id)
+                {
+                    return Err("Effect definition id does not match its registry entry".into());
+                }
+                if d.get("id").is_none() {
+                    d["id"] = json!(id);
+                }
+                serde_json::from_value::<pm_fx_defs::Definition>(d).map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let catalog =
+            pm_fx_defs::catalog::EffectCatalog::new(definitions).map_err(|e| e.to_string())?;
         for id in self
             .model
             .as_mut()
@@ -229,6 +269,14 @@ impl Backend {
                     backdrop: d["backdrop"].as_bool().unwrap_or(false),
                 });
         }
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .install_effect_catalog(catalog)
+            .map_err(|e| e.to_string())?;
+        self.last_effects = next_effects;
+        // Only now: a failed conversion must fail every sync, not just the first.
+        self.last_registries = Some(registries);
         Ok(())
     }
     pub(crate) fn projection(&mut self) -> Result<Value, String> {
@@ -243,17 +291,26 @@ impl Backend {
     }
     pub fn registry(&self) -> Value {
         let state = self.kernel.state();
+        // Registration order, the winning provider's presentation in its first slot.
+        let mut order = Vec::new();
         let mut items = BTreeMap::new();
-        let mut groups = std::collections::BTreeSet::new();
-        if let Some(registry) = state.registries.get("effects") {
-            for entry in registry {
-                let d = wire(&entry.definition);
-                let group = d["group"].as_str().unwrap_or("");
-                groups.insert(group.to_owned());
-                items.insert(entry.id.clone(), json!({"id":entry.id,"label":d["label"].as_str().unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
+        let mut groups: Vec<String> = Vec::new();
+        for entry in state.registries.get("effects").into_iter().flatten() {
+            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+            let group = text("group").unwrap_or("").to_owned();
+            if !groups.contains(&group) {
+                groups.push(group.clone());
             }
+            if !items.contains_key(&entry.id) {
+                order.push(entry.id.clone());
+            }
+            items.insert(entry.id.clone(), json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
         }
-        json!({"items":items.into_values().collect::<Vec<_>>(),"groups":groups})
+        let items = order
+            .iter()
+            .filter_map(|id| items.remove(id))
+            .collect::<Vec<_>>();
+        json!({"items":items,"groups":groups})
     }
     pub fn target(&mut self) -> Result<Value, String> {
         self.sync()?;
@@ -577,11 +634,12 @@ impl KernelData for Data {
                             .as_str()
                             .ok_or("effect definition")?;
                         let caller = b.caller;
+                        let time = b.native.facts["time"].as_f64().unwrap_or(0.);
                         let request = b
                             .model
                             .as_mut()
                             .ok_or("No open project")?
-                            .add_effect(caller, target, definition)
+                            .add_effect_at(caller, target, definition, time)
                             .map_err(|e| e.to_string())?;
                         if let pm_kernel::Call::Transact {
                             body: pm_kernel::WriteBody::Commands(commands),

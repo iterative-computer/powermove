@@ -242,6 +242,16 @@ impl Inspector {
                 });
             }
         }
+        if kind == "precomp" {
+            out.push(FieldDescriptor {
+                binding: Binding::Layer {
+                    layer: id.into(),
+                    field: "continuousRaster".into(),
+                },
+                kind: FieldType::Boolean,
+                animatable: false,
+            });
+        }
         for (field, kind) in [
             ("solo", FieldType::Boolean),
             ("visible", FieldType::Boolean),
