@@ -526,7 +526,8 @@ fn control_during_probe_settles_without_failure_or_output() {
 
 #[test]
 fn real_source_frames_flow_through_lut_cache_and_scope_pipeline_at_exact_pts() {
-    use pm_promedia::{cache::RenderCache, cache_frame::*, render::*, scopes::*, source_frames::*};
+    use pm_color::scopes::*;
+    use pm_promedia::{cache::RenderCache, cache_frame::*, render::*, source_frames::*};
     let dir = TempDir::new().unwrap();
     let path = fixture(dir.path(), false, true);
     let backend = SoftwareEncoder::default();
