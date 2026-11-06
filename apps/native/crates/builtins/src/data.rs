@@ -52,6 +52,7 @@ pub(crate) struct Backend {
     pub(crate) native: super::models::Models,
     pub(crate) panel_id: String,
     pub(crate) service_revision: u64,
+    last_effects: BTreeMap<String, Value>,
     timeline_waiter: Option<(HostRequest, SyncSender<HostAck>)>,
 }
 impl Backend {
@@ -106,6 +107,7 @@ impl Backend {
             native,
             panel_id: panel.into(),
             service_revision: 0,
+            last_effects: BTreeMap::new(),
             timeline_waiter: None,
             bindings: BTreeMap::new(),
             binding_owners: BTreeMap::new(),
@@ -160,6 +162,32 @@ impl Backend {
         for registration in state.registries.get("effects").into_iter().flatten() {
             latest.insert(registration.id.clone(), wire(&registration.definition));
         }
+        if self.last_effects == latest {
+            return Ok(());
+        }
+        let next_effects = latest.clone();
+        // Rendering owns its own provider snapshots. This catalog carries
+        // complete program definitions only; display-only descriptors retain
+        // the existing Inspector registration path below.
+        let definitions = latest
+            .iter()
+            .filter(|(_, d)| d["frag"].is_string())
+            .map(|(id, d)| {
+                let mut d = d.clone();
+                if d.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value != id)
+                {
+                    return Err("Effect definition id does not match its registry entry".into());
+                }
+                if d.get("id").is_none() {
+                    d["id"] = json!(id);
+                }
+                serde_json::from_value::<pm_fx_defs::Definition>(d).map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let catalog =
+            pm_fx_defs::catalog::EffectCatalog::new(definitions).map_err(|e| e.to_string())?;
         for id in self
             .model
             .as_mut()
@@ -229,6 +257,12 @@ impl Backend {
                     backdrop: d["backdrop"].as_bool().unwrap_or(false),
                 });
         }
+        self.model
+            .as_mut()
+            .ok_or("No open project")?
+            .install_effect_catalog(catalog)
+            .map_err(|e| e.to_string())?;
+        self.last_effects = next_effects;
         Ok(())
     }
     pub(crate) fn projection(&mut self) -> Result<Value, String> {
@@ -577,11 +611,12 @@ impl KernelData for Data {
                             .as_str()
                             .ok_or("effect definition")?;
                         let caller = b.caller;
+                        let time = b.native.facts["time"].as_f64().unwrap_or(0.);
                         let request = b
                             .model
                             .as_mut()
                             .ok_or("No open project")?
-                            .add_effect(caller, target, definition)
+                            .add_effect_at(caller, target, definition, time)
                             .map_err(|e| e.to_string())?;
                         if let pm_kernel::Call::Transact {
                             body: pm_kernel::WriteBody::Commands(commands),

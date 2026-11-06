@@ -2680,10 +2680,9 @@ fn effect_inputs<'d>(
         };
         if matches!(js::layer_type(source).as_str(), "group" | "adjustment")
             || js::flag(source, "threeD")
-            || js::flag(source, "matteSource")
         {
             return Ok(Err(Feature::Definition(
-                "Effect input group/3D/matte adapter unavailable".into(),
+                "Effect input group/3D adapter unavailable".into(),
             )));
         }
         let at = request.time().unwrap_or(time);
@@ -2802,6 +2801,14 @@ fn effect_inputs<'d>(
             } else {
                 None
             };
+            // Source and mask stages precede the track matte. A complete
+            // composition-space effects producer includes it; an exclusive
+            // effect prefix (including Echo history) deliberately omits it.
+            let matte = if active && request.stage == Stage::Effects && request.prefix.is_none() {
+                layer_matte(scope, b, source, at, width, height, scale)?
+            } else {
+                None
+            };
             let draws = vec![Draw {
                 layer: js::layer_id(owner),
                 matrix: [width as f64, 0., 0., height as f64, 0., 0.],
@@ -2811,7 +2818,7 @@ fn effect_inputs<'d>(
                         content,
                         masks,
                         effects: nested,
-                        matte: None,
+                        matte,
                         blend: pm_protocol::color::BlendMode::Normal,
                         alpha: 1.,
                         transition: None,

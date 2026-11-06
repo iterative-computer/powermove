@@ -380,7 +380,7 @@ impl Properties {
             }
             let definition = intent["effect"].as_str().ok_or("Effect definition")?;
             return model
-                .add_effect(caller, target, definition)
+                .add_effect_at(caller, target, definition, time)
                 .map(Some)
                 .map_err(|e| e.to_string());
         }
