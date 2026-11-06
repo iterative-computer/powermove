@@ -55,6 +55,26 @@ pub fn present_alert(window: &NSWindow, spec: &Alert) -> async_channel::Receiver
     rx
 }
 
+/// The aspect Link's symbol, label, tip and state for the form's current lock.
+pub fn show_link(link: &objc2_app_kit::NSButton, form: &super::form::NewProjectForm) {
+    use objc2_app_kit::{NSAccessibility, NSControlStateValueOff, NSControlStateValueOn, NSImage};
+    let (symbol, ax, tip) = form.link_presentation();
+    link.setAccessibilityLabel(Some(&NSString::from_str(ax)));
+    link.setToolTip(Some(&NSString::from_str(tip)));
+    link.setState(if form.linked == Some(true) {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    link.setImage(
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(symbol),
+            None,
+        )
+        .as_deref(),
+    );
+}
+
 /// S018 native fields; publication/validation remain NewProjectForm-owned.
 /// The caller binds the control IDs to its main-thread input queue, and uses the
 /// kit ColourPopover for the minimal native colour well's action.
@@ -112,28 +132,21 @@ pub fn new_project_sheet(
         let field = NSTextField::textFieldWithString(&NSString::from_str(value), mtm);
         field.setAccessibilityLabel(Some(&NSString::from_str(label)));
         field.setEnabled(!form.submitting);
+        // A size reports when its editing ends, which applies the aspect link
+        // to a whole number rather than to every keystroke.
+        field.setIdentifier(Some(&NSString::from_str(id)));
+        field.setContinuous(false);
+        unsafe {
+            let _: () = objc2::msg_send![&*field, setSendsActionOnEndEditing: true];
+        }
         group.addArrangedSubview(&field);
         sheet.fields.insert(id.into(), field);
     }
-    let (symbol, ax, tip) = form.link_presentation();
     sheet.button("link", "", !form.submitting, false, false);
     let link = &sheet.buttons["link"];
     link.setBordered(false);
     link.setButtonType(NSButtonType::PushOnPushOff);
-    link.setAccessibilityLabel(Some(&NSString::from_str(ax)));
-    link.setToolTip(Some(&NSString::from_str(tip)));
-    link.setState(if form.linked == Some(true) {
-        NSControlStateValueOn
-    } else {
-        NSControlStateValueOff
-    });
-    link.setImage(
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str(symbol),
-            None,
-        )
-        .as_deref(),
-    );
+    show_link(link, form);
     group.addArrangedSubview(link);
     sheet.row("Size", &group);
     if let Some(error) = errors.size {

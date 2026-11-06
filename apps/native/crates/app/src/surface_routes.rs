@@ -6,7 +6,7 @@ use crate::{
         CompositionDraft, DialogId, RESOLUTIONS, WindowId,
         kernel::{Context as Dialog, DialogError},
     },
-    project_library::{Outbound, ProjectLibrary, Sink, current_format},
+    project_library::{Outbound, ProjectLibrary, Sink, current_format, default_format},
     session::Controller,
     sheets::{OpenSheet, from_surface},
 };
@@ -75,14 +75,9 @@ impl Controller {
         if let Some(library) = self.library(cx) {
             library.update(cx, |v, cx| {
                 let _ = v.controller.refresh();
-                let fallback = crate::library_surface::form::Format {
-                    width: 1920,
-                    height: 1080,
-                    fps: 30.,
-                    duration: 10.,
-                    background: "#000000".into(),
-                };
-                let _ = v.controller.begin_new(owner, current.as_ref(), &fallback);
+                let _ = v
+                    .controller
+                    .begin_new(owner, current.as_ref(), &default_format());
                 v.pump(cx);
             });
         }

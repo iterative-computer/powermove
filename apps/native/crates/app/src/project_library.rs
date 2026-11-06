@@ -191,15 +191,40 @@ impl ProjectLibrary {
             if let Some(colour) = open.changed_colour("background") {
                 form.background = colour;
             }
-            let _ = form.edit_size(open.text("width"), open.text("height"));
-            if action == "resolution" {
-                let _ = form.choose_preset(open.popup("resolution").filter(|i| *i < PRESET_COUNT));
-                if let Some(field) = open.sheet.fields.get("width") {
-                    field.setStringValue(&objc2_foundation::NSString::from_str(&form.width));
+            let (width, height) = (open.text("width"), open.text("height"));
+            match action {
+                // The end of a size edit: a locked aspect moves the other side.
+                "width" | "height" => {
+                    let is_width = action == "width";
+                    let draft = if is_width { width } else { height };
+                    let current = if is_width { &form.width } else { &form.height };
+                    if draft != *current {
+                        let _ = form.edit_dimension(is_width, draft);
+                    }
+                    open.set_text("width", &form.width);
+                    open.set_text("height", &form.height);
                 }
-                if let Some(field) = open.sheet.fields.get("height") {
-                    field.setStringValue(&objc2_foundation::NSString::from_str(&form.height));
+                "link" => {
+                    form.linked = form.linked.map(|linked| !linked);
+                    if let Some(link) = open.sheet.buttons.get("link") {
+                        crate::library_surface::appkit::show_link(link, form);
+                    }
                 }
+                "resolution" => {
+                    let _ =
+                        form.choose_preset(open.popup("resolution").filter(|i| *i < PRESET_COUNT));
+                    open.set_text("width", &form.width);
+                    open.set_text("height", &form.height);
+                }
+                // Mid-edit, a locked size waits for the edit to end; an unlocked
+                // one is taken as typed so Create tracks it. Create takes what
+                // the fields show, even if Return beat the end of an edit.
+                _ if (form.linked != Some(true) || action == "create")
+                    && (width != form.width || height != form.height) =>
+                {
+                    let _ = form.edit_size(width, height);
+                }
+                _ => {}
             }
             open.enable("create", form.can_create());
         }
@@ -481,16 +506,34 @@ impl Render for ProjectLibrary {
             .child(list)
     }
 }
-/// S018's `Current` seed: the open composition's format, else the shipped default.
+/// The defaults of `createNewProjectForm`, for a window with no project.
+pub fn default_format() -> Format {
+    Format {
+        width: 1920,
+        height: 1080,
+        fps: 30.,
+        duration: 10.,
+        background: "#09090A".into(),
+    }
+}
+/// S018's `Current` seed: the open composition's format. A key the composition
+/// doesn't author comes from the project, and a missing background from the
+/// shipped default.
 pub fn current_format(published: Option<&pm_kernel::Published>) -> Option<Format> {
-    let root = published?.snapshot.root()?;
-    let number = |key: &str| root.get(key).and_then(crate::node_number);
+    let snapshot = &published?.snapshot;
+    let root = snapshot.root()?;
+    let open = snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+    let get = |key: &str| comp.get(key).or_else(|| root.get(key));
+    let number = |key: &str| get(key).and_then(crate::node_number);
     Some(Format {
         width: number("w")? as u32,
         height: number("h")? as u32,
         fps: number("fps")?,
         duration: number("dur")?,
-        background: root.get("bg").and_then(crate::node_string)?.to_owned(),
+        background: get("bg")
+            .and_then(crate::node_string)
+            .map_or_else(|| default_format().background, str::to_owned),
     })
 }
 

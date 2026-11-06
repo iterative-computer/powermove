@@ -170,3 +170,101 @@ fn sections_switch_and_an_empty_trash_says_so() {
         Some(Content::Empty(_))
     )));
 }
+
+#[::core::prelude::v1::test]
+fn a_window_without_a_project_uses_the_shipped_defaults() {
+    use crate::library_surface::NewProjectForm;
+    let form = NewProjectForm::new(
+        String::new(),
+        current_format(None).as_ref(),
+        &default_format(),
+        &[],
+    );
+    assert_eq!(
+        (form.width.as_str(), form.height.as_str(), form.fps.as_str()),
+        ("1920", "1080", "30")
+    );
+    assert_eq!(form.background, "#09090A");
+    assert_eq!(form.preset, Some(1));
+}
+
+#[::core::prelude::v1::test]
+fn create_opens_a_library_project_with_the_forms_format_and_saves_it() {
+    use crate::library_surface::{Command, NewProjectForm, Outcome, kernel::KernelLibrary};
+    use pm_kernel::session::ShellReply;
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().canonicalize().unwrap();
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        ..Default::default()
+    });
+    actor
+        .handle()
+        .shell(ShellCall::AttachLibrary {
+            profile: profile.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let current = Format {
+        width: 1080,
+        height: 1920,
+        fps: 24.,
+        duration: 5.,
+        background: "#112233".into(),
+    };
+    let mut form = NewProjectForm::new(
+        String::new(),
+        Some(&current),
+        &default_format(),
+        &["Untitled".into()],
+    );
+    assert_eq!(form.name, "Untitled 2", "names stay unique");
+    form.choose_preset(Some(1)).unwrap();
+    let mut service = KernelLibrary {
+        kernel: actor.handle(),
+        profile: profile.clone(),
+    };
+    let Outcome::Opened {
+        reply: ShellReply::Opened { session, .. },
+        ..
+    } = service
+        .execute(Command::Create(form.values().unwrap()))
+        .unwrap()
+    else {
+        panic!("a new project opens without recovery");
+    };
+    let published = actor.handle().published(&session.project).unwrap();
+    assert_eq!(
+        current_format(Some(&published)),
+        Some(Format {
+            width: 1920,
+            height: 1080,
+            fps: 24.,
+            duration: 5.,
+            background: "#112233".into(),
+        }),
+        "the next New Project starts from this one"
+    );
+    let root = published.snapshot.root().unwrap();
+    assert_eq!(
+        root.get("name").and_then(crate::node_string),
+        Some("Untitled 2")
+    );
+    actor
+        .handle()
+        .shell(ShellCall::Save(session.clone()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    actor.shutdown();
+    assert!(
+        pm_kernel::LibraryStore::open(&profile)
+            .load(&session.project)
+            .unwrap()
+            .is_some(),
+        "the new project is in the library"
+    );
+}
