@@ -246,7 +246,7 @@ fn converted(c: [f64; 3], mode: u32) -> [f64; 3] {
     } else {
         c
     };
-    let mut out = mult(if mode % 2 == 0 { inverse(m) } else { m }, input);
+    let mut out = mult(if mode.is_multiple_of(2) { inverse(m) } else { m }, input);
     if mode == 21 {
         out[1] += 0.5;
         out[2] += 0.5;

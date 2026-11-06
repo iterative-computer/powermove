@@ -155,7 +155,7 @@ fn precompose_move_keeps_the_picture_and_releases_back() {
     let precomp = plan_.select.clone().unwrap().remove(0);
     run(&kernel, plan_);
     let after = kernel.published("synthetic").unwrap();
-    assert_eq!(after.selection.layers(), [precomp.clone()]);
+    assert_eq!(after.selection.layers(), std::slice::from_ref(&precomp));
     same(
         &original,
         &frame(&kernel, &mut renderer, 0.),
@@ -196,12 +196,11 @@ fn precompose_leave_keeps_an_effect_on_the_outer_layer() {
 
 #[test]
 fn toggle_continuous_raster_turns_every_selected_precomp_on_then_off() {
-    let d = r##""d":{"w":24,"h":12,"color":"#FF0000"}"##;
     let sub = r##""d":{"comp":"sub","w":24,"h":12}"##;
     let (_actor, kernel) = open(&[
         layer("a", "precomp", 40., 20., 0., "", "")
             .replace(r##""d":{"w":24,"h":12,"color":""}"##, sub),
-        layer("b", "solid", 40., 20., 0., "#FF0000", "").replace(d, d),
+        layer("b", "solid", 40., 20., 0., "#FF0000", ""),
     ]);
     let flag = |kernel: &KernelHandle| {
         let p = kernel.published("synthetic").unwrap();

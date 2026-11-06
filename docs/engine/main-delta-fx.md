@@ -336,3 +336,11 @@ uses explicit main-file provenance; tagged Gradient retains its separate program
 The first four closed rows are E10, E07, E06 and E05. All other rows retain
 their stated implementation or external-evidence boundaries; no capability,
 tolerance or performance baseline is promoted by these closures.
+
+## Production registry and consumers (fx3)
+
+`Kernel::new` seeds `registries["effects"]` from `main_effects()` through
+`StateOp::Register`, first in the stack so an extension of the same id wins and
+disposal reveals the built-in. `pm-builtins` reads that registry; a saved effect
+the v1.2.0 tag never had resolves in main's catalog without file provenance.
+Byte projects use 128/255 as a layer map's neutral, other depths exactly 0.5.

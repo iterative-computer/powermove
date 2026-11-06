@@ -34,6 +34,7 @@ fn config(root: &Path, checkpoint_revisions: u64) -> KernelConfig {
             checkpoint_revisions,
             max_segment_bytes: 4 * 1024 * 1024,
         },
+        ..Default::default()
     }
 }
 

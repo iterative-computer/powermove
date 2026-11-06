@@ -378,9 +378,9 @@ impl Inspector {
         let mut commands = Vec::new();
         let mut ids = Vec::new();
         for fx in saved {
-            let definition = self
-                .saved_effect_definition(&fx)
-                .ok_or_else(|| InspectorError::MissingDefinition(text(&fx, "type").into()))?;
+            let Some(definition) = self.saved_effect_definition(&fx) else {
+                continue;
+            };
             let id = pm_kernel::new_id("f");
             ids.push(id.clone());
             let on = fx.get("on");

@@ -144,10 +144,10 @@ impl Inspector {
         let mut definition = definition;
         for (key, is_width, factor) in contexts {
             let v = if is_width { width } else { height } * factor;
-            if v.is_finite() {
-                if let Some(p) = definition.params.iter_mut().find(|p| p.key == key) {
-                    p.default = Value::Number(v);
-                }
+            if v.is_finite()
+                && let Some(p) = definition.params.iter_mut().find(|p| p.key == key)
+            {
+                p.default = Value::Number(v);
             }
         }
         Ok(definition)
