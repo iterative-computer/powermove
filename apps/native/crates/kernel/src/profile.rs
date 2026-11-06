@@ -124,6 +124,38 @@ impl<'a> ProfileStorage<'a> {
         }
         self.write("local-storage.json", values)
     }
+    pub fn local_storage(&self) -> Result<Vec<LocalStorageEntry>, KernelFailure> {
+        Ok(self
+            .read("local-storage.json")?
+            .iter()
+            .filter_map(|v| {
+                Some(LocalStorageEntry {
+                    origin: v.get("origin")?.as_str()?.to_owned(),
+                    key: v.get("key")?.as_str()?.to_owned(),
+                    value: v.get("value")?.as_str()?.to_owned(),
+                })
+            })
+            .collect())
+    }
+    /// Publishes a merged set. Migration deltas own the merge.
+    pub fn replace_local_storage(
+        &self,
+        entries: &[LocalStorageEntry],
+    ) -> Result<(), KernelFailure> {
+        self.write(
+            "local-storage.json",
+            entries
+                .iter()
+                .map(|e| {
+                    object(&[
+                        ("origin", &e.origin),
+                        ("key", &e.key),
+                        ("value", &e.value),
+                    ])
+                })
+                .collect(),
+        )
+    }
     pub fn register_secret(&self, locator: &SecretLocator) -> Result<(), KernelFailure> {
         if [
             &locator.id,

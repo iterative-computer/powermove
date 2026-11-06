@@ -9,11 +9,27 @@ use std::{
 };
 
 pub const RESERVE: u64 = 6 * 1024 * 1024 * 1024;
+/// Typed so the gate can show `Not Enough Space` with real byte counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LowDisk {
+    pub needed: u64,
+    pub available: u64,
+}
+impl std::fmt::Display for LowDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("migration paused: 6 GiB free space reserve required")
+    }
+}
+impl std::error::Error for LowDisk {}
 pub fn space(root: &Path, needed: u64) -> Result<()> {
-    ensure!(
-        fs2::available_space(root)?.saturating_sub(needed) >= RESERVE,
-        "migration paused: 6 GiB free space reserve required"
-    );
+    let available = fs2::available_space(root)?;
+    if available.saturating_sub(needed) < RESERVE {
+        return Err(LowDisk {
+            needed: needed.saturating_add(RESERVE),
+            available,
+        }
+        .into());
+    }
     Ok(())
 }
 pub fn private_dir(path: &Path) -> Result<()> {

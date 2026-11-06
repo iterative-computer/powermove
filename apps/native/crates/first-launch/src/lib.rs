@@ -3,18 +3,22 @@
 //! Checkpoints contain private user state; keep them out of Git/telemetry.
 mod checkpoint;
 mod closure;
+mod delta;
 mod disk;
 pub mod integration;
+pub mod report;
 pub mod secrets;
 pub mod sparkle;
 pub mod store_preparation;
 pub mod surfaces;
 pub use checkpoint::Checkpoint;
+pub use delta::{Conflict, ConflictKind, DeltaPrepared, delta, delta_if_changed, delta_media, delta_store};
+pub use disk::LowDisk;
 
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use pm_kernel::{
-    History, Kernel, KernelConfig, LibraryStore,
+    Kernel, KernelConfig, LibraryStore,
     locks::{OpenDecision, older_electron_running},
     persistence::{DiskFormat, LibraryWriter},
     session::{ShellCall, ShellReply},
@@ -86,6 +90,40 @@ pub const BETA_BUNDLE_ID: &str = "com.zellzoi.powermove.native-beta";
 pub fn beta_profile(application_support: &Path) -> PathBuf {
     application_support.join(BETA_BUNDLE_ID)
 }
+/// The shipped Electron profile folder inside Application Support.
+pub const ELECTRON_FOLDER: &str = "Powermove";
+/// The one profile layout shared by the app and this coordinator.
+pub fn default_paths(application_support: &Path) -> Config {
+    Config {
+        electron_profile: application_support.join(ELECTRON_FOLDER),
+        native_profile: beta_profile(application_support),
+    }
+}
+/// What this launch has to do, from local file metadata only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// No original app on this Mac: onboarding, then the editor.
+    Fresh,
+    /// A source exists and bootstrap isn't finished: the gate runs.
+    Migrate,
+    /// Bootstrap finished earlier: no gate, later changes come in behind it.
+    Later,
+}
+pub fn detect(config: &Config) -> Launch {
+    let finished = disk::json::<State>(&config.native_profile.join("migration.json"))
+        .is_ok_and(|state| state.completed.contains(&Step::Secrets));
+    if finished {
+        Launch::Later
+    } else if config.electron_profile.is_dir() {
+        Launch::Migrate
+    } else {
+        Launch::Fresh
+    }
+}
+/// Copied from the source, or written when onboarding finishes.
+pub fn onboarding_completed(native: &Path) -> bool {
+    native.join("onboarding-v1.json").is_file()
+}
 #[derive(Clone, Debug)]
 pub struct Config {
     pub electron_profile: PathBuf,
@@ -117,6 +155,19 @@ pub struct State {
     pub missing_projects: BTreeSet<String>,
     pub secrets: SecretStep,
     pub imported_secrets: BTreeSet<String>,
+    /// Per source project: what was imported, so a later delta can tell a
+    /// native edit from an edit in the original app.
+    #[serde(default)]
+    pub receipts: std::collections::BTreeMap<String, delta::ProjectReceipt>,
+    /// Newest merged delta checkpoint, the three-way base of the next one.
+    #[serde(default)]
+    pub delta_base: Option<String>,
+    /// Both versions kept. The original's bytes stay in its delta checkpoint.
+    #[serde(default)]
+    pub conflicts: BTreeSet<delta::Conflict>,
+    /// Source metadata stamp of the newest merged capture.
+    #[serde(default)]
+    pub source_stamp: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -155,7 +206,7 @@ pub fn run(config: &Config, hook: impl FnMut(Event) -> Result<()>) -> Result<Out
     if native.join("migration.json").is_file() {
         let state: State = disk::json(&native.join("migration.json"))?;
         if state.completed.contains(&Step::Secrets) {
-            return delta(config, hook);
+            return delta::delta(config, hook);
         }
     }
     run_inner(config, None, false, false, hook)
@@ -305,6 +356,10 @@ fn run_inner(
             missing_projects: BTreeSet::new(),
             secrets: SecretStep::NotStarted,
             imported_secrets: BTreeSet::new(),
+            receipts: Default::default(),
+            delta_base: None,
+            conflicts: BTreeSet::new(),
+            source_stamp: None,
         };
         publish(&native, &state)?;
         state
@@ -316,6 +371,9 @@ fn run_inner(
     let root = native.join("first-launch-checkpoint");
     if !root.exists() {
         hook(Event::Started(Step::Checkpoint))?;
+        // Stamped before capture; capture itself proves nothing moved after.
+        state.source_stamp = Some(checkpoint::source_stamp(&source)?);
+        publish(&native, &state)?;
         Checkpoint::capture(&source, &root)?;
     }
     let cp = Checkpoint::load(&root)?;
@@ -394,7 +452,7 @@ fn run_inner(
     drop(writer);
     if !state.completed.contains(&Step::Extensions) {
         hook(Event::Started(Step::Extensions))?;
-        extensions(&native)?;
+        extensions(&native, Vec::new())?;
         finish(&native, &mut state, Step::Extensions, &mut hook)?;
     }
     if state.secrets != SecretStep::Complete || retry_current_secrets {
@@ -511,6 +569,9 @@ fn media(
     let mut count = 0;
     let disk_records =
         pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
+    // One record publication per source record, however many objects it has.
+    let total =
+        batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
     migration::migrate_many_with_disk(
         &batches
             .iter()
@@ -519,13 +580,16 @@ fn media(
         &disk_records,
         closure,
         &native.join("Media Store"),
-        |_| {
+        |checkpoint| {
             disk::space(native, 0)?;
+            if checkpoint != migration::Checkpoint::RecordPublished {
+                return Ok(());
+            }
             count += 1;
             hook(Event::Progress {
                 step: Step::Media,
                 done: count,
-                total: 0,
+                total,
             })
         },
     )
@@ -558,68 +622,11 @@ fn bootstrap(
 ) -> Result<()> {
     let store = LibraryStore::open(&root.join("profile"));
     for key in cp.logical_keys.keys() {
-        let prefix = key.split('.').next().unwrap();
-        if [
-            "projects",
-            "projectTrash",
-            "autosave",
-            "project",
-            "projectJournal",
-            "projectState",
-            "projectMeta",
-            "projectHistory",
-            "projectWorkspace",
-        ]
-        .contains(&prefix)
-        {
+        if project_key(key) || state.imported_keys.contains(key) {
             continue;
         }
-        if state.imported_keys.contains(key) {
-            continue;
-        }
-        let mut value = store.read(key)?.context("checkpoint key disappeared")?;
-        if ["workspaces", "workspaceTrash"].contains(&key.as_str()) {
-            let raw = as_json(&value)?;
-            if let Some(items) = raw.as_array() {
-                value = to_kernel(&serde_json::Value::Array(
-                    items
-                        .iter()
-                        .map(pm_native_migrate::workspace::migrate)
-                        .collect(),
-                ))?;
-            }
-        }
-        if [
-            "openWindows",
-            "windowTabs",
-            "lastActiveProject",
-            "openTabs",
-            "restoreWindows",
-        ]
-        .contains(&key.as_str())
-        {
-            let mut logical = as_json(&value)?;
-            remap_project_refs(&mut logical, &cp.projects, true);
-            value = to_kernel(&logical)?;
-        } else if key.starts_with("agentThreads.") {
-            let mut logical = as_json(&value)?;
-            remap_project_refs(&mut logical, &cp.projects, false);
-            value = to_kernel(&logical)?;
-        }
-        // Settings and storage values stay exact. Only agent-family OWNER keys
-        // change to follow their copied project; attachment IDs stay stable.
-        let target = if let Some((family, id)) = key.split_once('.') {
-            if ["agentThreads", "agentModel"].contains(&family) {
-                format!(
-                    "{family}.{}",
-                    cp.projects.get(id).map(String::as_str).unwrap_or(id)
-                )
-            } else {
-                key.clone()
-            }
-        } else {
-            key.clone()
-        };
+        let value = store.read(key)?.context("checkpoint key disappeared")?;
+        let (target, value) = imported_key(key, value, &cp.projects)?;
         if writer.store().read(&target)?.is_none() {
             disk::space(native, to_canonical_string(&value).len() as u64)?;
             writer.set(&target, value)?;
@@ -638,48 +645,119 @@ fn bootstrap(
             continue;
         }
         let target = native.join(checkpoint::file_target(relative)?);
-        disk::private_dir(target.parent().unwrap())?;
-        ensure!(
-            target.parent().unwrap().canonicalize()?.starts_with(native),
-            "native file destination escaped profile"
-        );
         if !target.exists() {
-            let temp = target.with_extension("first-launch-copy");
-            if temp.exists() {
-                disk::archive(&temp)?;
-            }
-            let copied = disk::copy(&root.join("profile").join(relative), &temp)?;
-            ensure!(copied.hash == entry.hash, "checkpoint copy differs");
-            fs::rename(temp, &target)?;
-            File::open(target.parent().unwrap())?.sync_all()?;
+            place_file(&root.join("profile").join(relative), &target, entry, native)?;
         }
         state.imported_files.insert(relative.clone());
         publish(native, state)?;
     }
     disk::private_dir(&native.join("extensions-overlay"))?;
-    let shared = native.join("extensions-shared");
-    if shared.is_dir() {
-        fn seal(p: &Path) -> Result<()> {
-            for e in fs::read_dir(p)? {
-                let p = e?.path();
-                let m = fs::symlink_metadata(&p)?;
-                ensure!(
-                    !m.file_type().is_symlink(),
-                    "symlink in extension checkpoint"
-                );
-                if m.is_dir() {
-                    seal(&p)?;
-                } else {
-                    let exec = m.permissions().mode() & 0o100;
-                    fs::set_permissions(&p, fs::Permissions::from_mode(0o400 | exec))?;
-                }
+    seal_shared(&native.join("extensions-shared"))
+}
+fn seal_shared(shared: &Path) -> Result<()> {
+    fn seal(p: &Path) -> Result<()> {
+        for e in fs::read_dir(p)? {
+            let p = e?.path();
+            let m = fs::symlink_metadata(&p)?;
+            ensure!(
+                !m.file_type().is_symlink(),
+                "symlink in extension checkpoint"
+            );
+            if m.is_dir() {
+                seal(&p)?;
+            } else {
+                let exec = m.permissions().mode() & 0o100;
+                fs::set_permissions(&p, fs::Permissions::from_mode(0o400 | exec))?;
             }
-            fs::set_permissions(p, fs::Permissions::from_mode(0o500))?;
-            Ok(())
         }
-        seal(&shared)?;
+        fs::set_permissions(p, fs::Permissions::from_mode(0o500))?;
+        Ok(())
+    }
+    if shared.is_dir() {
+        seal(shared)?;
     }
     Ok(())
+}
+/// Verified copy into a native path, published by rename. Never leaves the profile.
+fn place_file(
+    from: &Path,
+    target: &Path,
+    entry: &disk::FileEntry,
+    native: &Path,
+) -> Result<()> {
+    disk::private_dir(target.parent().unwrap())?;
+    ensure!(
+        target.parent().unwrap().canonicalize()?.starts_with(native),
+        "native file destination escaped profile"
+    );
+    let temp = target.with_extension("first-launch-copy");
+    if temp.exists() {
+        disk::archive(&temp)?;
+    }
+    let copied = disk::copy(from, &temp)?;
+    ensure!(copied.hash == entry.hash, "checkpoint copy differs");
+    fs::rename(temp, target)?;
+    File::open(target.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+const PROJECT_FAMILIES: [&str; 9] = [
+    "projects",
+    "projectTrash",
+    "autosave",
+    "project",
+    "projectJournal",
+    "projectState",
+    "projectMeta",
+    "projectHistory",
+    "projectWorkspace",
+];
+fn project_key(key: &str) -> bool {
+    PROJECT_FAMILIES.contains(&key.split('.').next().unwrap_or(key))
+}
+/// A nonproject key as the native library stores it. Settings and storage
+/// values stay exact. Only agent-family OWNER keys follow their copied project;
+/// attachment IDs stay stable.
+fn imported_key(
+    key: &str,
+    mut value: KernelValue,
+    projects: &std::collections::BTreeMap<String, String>,
+) -> Result<(String, KernelValue)> {
+    if ["workspaces", "workspaceTrash"].contains(&key) {
+        let raw = as_json(&value)?;
+        if let Some(items) = raw.as_array() {
+            value = to_kernel(&serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(pm_native_migrate::workspace::migrate)
+                    .collect(),
+            ))?;
+        }
+    }
+    if [
+        "openWindows",
+        "windowTabs",
+        "lastActiveProject",
+        "openTabs",
+        "restoreWindows",
+    ]
+    .contains(&key)
+    {
+        let mut logical = as_json(&value)?;
+        remap_project_refs(&mut logical, projects, true);
+        value = to_kernel(&logical)?;
+    } else if key.starts_with("agentThreads.") {
+        let mut logical = as_json(&value)?;
+        remap_project_refs(&mut logical, projects, false);
+        value = to_kernel(&logical)?;
+    }
+    let target = match key.split_once('.') {
+        Some((family, id)) if ["agentThreads", "agentModel"].contains(&family) => format!(
+            "{family}.{}",
+            projects.get(id).map(String::as_str).unwrap_or(id)
+        ),
+        _ => key.to_owned(),
+    };
+    Ok((target, value))
 }
 
 fn remap_project_refs(
@@ -732,60 +810,15 @@ fn library(
             publish(native, state)?;
             continue;
         };
-        let mut project = as_json(&p.project)?;
-        let name = format!(
-            "{} — Native",
-            project
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Project")
-        );
-        project["id"] = id.clone().into();
-        project["name"] = name.into();
-        let history = p.history.clone().unwrap_or_else(|| {
-            parse(r#"{"version":1,"paths":"composition","index":-1,"entries":[]}"#).unwrap()
-        });
-        if History::import(
-            &history,
-            p.project.get("compId").and_then(KernelValue::as_str),
-        )
-        .is_err()
-        {
+        let copy = delta::project_copy(&p, id)?;
+        if copy.refused {
             state.history_refusals.insert(source.clone());
         }
-        let mut meta = p
-            .session
-            .as_ref()
-            .map(as_json)
-            .transpose()?
-            .unwrap_or(serde_json::json!({}));
-        // A read-only media association is not an in-place save destination.
-        // The kernel can resolve it when this named copy is explicitly opened.
-        if let Some(m) = meta.as_object_mut()
-            && let Some(file) = m.remove("file")
-        {
-            m.insert("embeddedMedia".into(), file);
-        }
         if writer.store().load(id)?.is_none() {
-            let needed = serde_json::to_vec(&project)?.len() as u64
-                + to_canonical_string(&history).len() as u64
-                + serde_json::to_vec(&meta)?.len() as u64
-                + p.workspace
-                    .as_ref()
-                    .map_or(0, |v| to_canonical_string(v).len() as u64);
-            disk::space(native, needed.saturating_mul(3))?;
-            writer.save_project(
-                id,
-                to_kernel(&project)?,
-                history,
-                p.workspace
-                    .as_ref()
-                    .map(|v| to_kernel(&pm_native_migrate::workspace::migrate(&as_json(v)?)))
-                    .transpose()?
-                    .unwrap_or_else(|| parse("{}").unwrap()),
-                to_kernel(&meta)?,
-            )?;
+            disk::space(native, copy.bytes().saturating_mul(3))?;
+            copy.save(writer, id)?;
         }
+        state.receipts.insert(source.clone(), copy.receipt(id));
         if trash.contains(source) {
             writer.trash(id)?;
         }
@@ -805,7 +838,9 @@ fn as_json(v: &KernelValue) -> Result<serde_json::Value> {
 fn to_kernel(v: &serde_json::Value) -> Result<KernelValue> {
     parse(&serde_json::to_string(v)?).map_err(|_| anyhow::anyhow!("invalid migration JSON"))
 }
-fn extensions(native: &Path) -> Result<()> {
+/// Registers shared extension copies and applies `ops`, through the kernel so
+/// its durable state record stays the one authority on settings.
+fn extensions(native: &Path, mut ops: Vec<StateOp>) -> Result<()> {
     let mut kernel = Kernel::new(KernelConfig::default());
     let result = kernel.shell(ShellCall::AttachLibrary {
         profile: native.into(),
@@ -817,7 +852,19 @@ fn extensions(native: &Path) -> Result<()> {
         "native library not writable"
     );
     let shared = native.join("extensions-shared");
-    let mut ops = Vec::new();
+    // Removed from the original app: unregistered. The overlay and its checkpoint stay.
+    let gone = kernel
+        .state()
+        .extensions
+        .values()
+        .filter(|e| e.installed && !shared.join(&e.id).join("manifest.json").is_file())
+        .map(|e| {
+            let mut entry = e.clone();
+            entry.installed = false;
+            StateOp::Extension(entry)
+        })
+        .collect::<Vec<_>>();
+    ops.extend(gone);
     if shared.is_dir() {
         for e in fs::read_dir(&shared)? {
             let e = e?;
@@ -860,82 +907,6 @@ fn extensions(native: &Path) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-/// Fresh media-only first-launch delta, after bootstrap is complete. Settings,
-/// libraries and beta edits keep their checkpoint identities. Every invocation
-/// snapshots Electron again; identical captures are no-ops in pm-native-migrate.
-/// The original checkpoint remains the future 3-way base.
-pub fn delta(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -> Result<Outcome> {
-    let (source, native) = validate(config)?;
-    if older_electron_running(&source) {
-        hook(Event::WaitingForElectron)?;
-        return Ok(Outcome::WaitingForElectron);
-    }
-    let state: State = disk::json(&native.join("migration.json"))?;
-    ensure!(
-        state.source == source && state.bundle_id == BETA_BUNDLE_ID && state.version == 1,
-        "profile migration identity mismatch"
-    );
-    ensure!(
-        state.completed.contains(&Step::Media),
-        "bootstrap must finish before a delta"
-    );
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(native.join("first-launch.lock"))?;
-    lock.try_lock_exclusive()?;
-    validate_native_paths(&native)?;
-    let _writer = LibraryWriter::open(&native, DiskFormat::V1_2, None)
-        .map_err(|e| anyhow::anyhow!("native library unavailable: {e:?}"))?;
-    let base = native.join("first-launch-checkpoint");
-    ensure!(
-        state.checkpoint_hash.as_ref() == Some(&disk::hash(&base.join("checkpoint.json"))?.0),
-        "checkpoint manifest changed"
-    );
-    Checkpoint::load(&base)?;
-    ensure!(
-        state.availability_hash.as_ref() == Some(&disk::hash(&base.join("availability.json"))?.0),
-        "availability checkpoint changed"
-    );
-    let deltas = native.join("first-launch-deltas");
-    disk::private_dir(&deltas)?;
-    // Retain all availability checkpoints, including interrupted passes. Reuse
-    // the unfinished capture on resume; callers finish it before starting fresh.
-    let pending = deltas.join("pending");
-    let cp = if pending.exists() {
-        Checkpoint::load(&pending)?
-    } else {
-        Checkpoint::capture(&source, &pending)?
-    };
-    require_supported_media(&cp, &pending)?;
-    let batches = read_batches(&cp, &pending)?;
-    let availability = pending.join("availability.json");
-    let closure = if availability.exists() {
-        disk::json(&availability)?
-    } else {
-        let c = closure::inventory(&cp, &pending, &batches)?;
-        disk::atomic(&availability, &c)?;
-        c
-    };
-    let pass = media(&native, &pending, &batches, &closure, &mut hook)?;
-    let identity = disk::hash(&pending.join("checkpoint.json"))?.0;
-    let destination = deltas.join(format!(
-        "{}-{}-{}",
-        &identity[..16],
-        &pass.snapshot[..16],
-        &pass.base_hash[..16]
-    ));
-    if destination.exists() {
-        disk::archive(&pending)?;
-    } else {
-        fs::rename(&pending, destination)?;
-        File::open(&deltas)?.sync_all()?;
-    }
-    hook(Event::Complete)?;
-    Ok(summary(&state, &pass))
 }
 
 /// Result of an explicit Settings retry. No secret count or decrypted value is
