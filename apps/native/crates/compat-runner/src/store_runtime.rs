@@ -792,13 +792,8 @@ mod tests {
                     .unwrap()
                     .join("pm-store-helper")
             });
-        let runner = StoreCompatRunner::new(
-            &executable,
-            host.clone(),
-            crate::STORE_BUNDLE,
-            &init,
-        )
-        .unwrap();
+        let runner =
+            StoreCompatRunner::new(&executable, host.clone(), crate::STORE_BUNDLE, &init).unwrap();
         let result=runner.activate("var ExtCheckModule={async default(api){api.commands.register({id:'calculate',label:'Synthetic calculate',when:()=>false,run:(n)=>n+7});api.commands.register({id:'throws',label:'Synthetic throw',run:()=>{throw Error('synthetic callback error')}});globalThis.result=await api.commands.run('calculate',35);globalThis.fallback=(await api.commands.run('throws'))===undefined;}}").unwrap();
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(runner.json("result").unwrap(), 42);
@@ -868,7 +863,7 @@ mod tests {
         );
         let fixture = format!("(()=>{{{fixture}\ninstallClockFixture(globalThis,0x504d5032);}})()");
         let runner =
-            StoreCompatRunner::with_prelude(&executable, host.clone(), &bundle, &init, &fixture)
+            StoreCompatRunner::with_prelude(&executable, host.clone(), bundle, &init, &fixture)
                 .unwrap();
         assert_eq!(
             runner.json("[Date.now(),performance.now()]").unwrap(),
@@ -921,7 +916,7 @@ mod tests {
         assert_eq!(runner.dispose().unwrap(), true);
         drop(runner);
         let replacement =
-            StoreCompatRunner::new(&executable, host.clone(), &bundle, &init).unwrap();
+            StoreCompatRunner::new(&executable, host.clone(), bundle, &init).unwrap();
         assert_ne!(replacement.status().pid, pid);
         assert_eq!(
             replacement

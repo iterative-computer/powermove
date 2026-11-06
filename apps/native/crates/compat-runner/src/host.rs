@@ -176,10 +176,10 @@ impl RealmEvents for Arc<Events> {
         self.shared.update(|p| p.requests.push(request));
     }
     fn contributions(&self, mut value: Value) {
-        let _ = self.kernel.state_transaction(StateTransaction {
+        drop(self.kernel.state_transaction(StateTransaction {
             expected_revision: None,
             ops: registrations(&value, self.writer),
-        });
+        }));
         merge_store(&mut value, &self.shared.store.lock().unwrap());
         self.shared
             .update(|p| p.contributions = Some(Arc::new(value)));
@@ -561,10 +561,10 @@ impl Owner {
             live.realm.close();
         }
         *self.transport.lock().unwrap() = None;
-        let _ = self.config.kernel.state_transaction(StateTransaction {
+        drop(self.config.kernel.state_transaction(StateTransaction {
             expected_revision: None,
             ops: vec![StateOp::DisposeOwner { owner: self.writer }],
-        });
+        }));
     }
     fn eval(&mut self, source: &str) {
         let Some(live) = &self.realm else { return };
@@ -863,13 +863,13 @@ impl Owner {
         if let Some(entry) = state.extensions.get(id)
             && entry.enabled != enabled
         {
-            let _ = self.config.kernel.state_transaction(StateTransaction {
+            drop(self.config.kernel.state_transaction(StateTransaction {
                 expected_revision: None,
                 ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
                     enabled,
                     ..entry.clone()
                 })],
-            });
+            }));
         }
         for record in &mut self.records {
             if record["id"] == id {
@@ -916,10 +916,10 @@ impl Owner {
             })
             .collect();
         if !ops.is_empty() {
-            let _ = self.config.kernel.state_transaction(StateTransaction {
+            drop(self.config.kernel.state_transaction(StateTransaction {
                 expected_revision: None,
                 ops,
-            });
+            }));
         }
     }
     /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
@@ -1000,7 +1000,6 @@ impl Owner {
                 "native",
                 found,
                 &graph,
-                found.store.as_ref().unwrap_or(&Value::Null),
                 owner,
                 views.clone(),
             )
@@ -1559,7 +1558,9 @@ mod tests {
         assert!(command(&fixture, "synthetic-store.mark"));
         // A listener in the helper hears a project change and writes through its
         // own storage, proving the delivery end to end.
-        fixture.host.run_command("synthetic-editor.rename", json!([]));
+        fixture
+            .host
+            .run_command("synthetic-editor.rename", json!([]));
         fixture.until("listener", |_| {
             fixture
                 .kernel

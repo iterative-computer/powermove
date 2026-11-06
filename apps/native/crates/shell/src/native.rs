@@ -521,7 +521,7 @@ fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
                     crate::layout::panel_title(&id),
                     &format!("panel:toggle:{id}"),
                 );
-                item.setState(if state.open.iter().any(|o| *o == id) {
+                item.setState(if state.open.contains(&id) {
                     NSControlStateValueOn
                 } else {
                     NSControlStateValueOff
@@ -1680,7 +1680,7 @@ impl Host {
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
         for id in crate::layout::all_panels() {
-            let open = state.open.iter().any(|o| *o == id);
+            let open = state.open.contains(&id);
             if open && id == "viewer" {
                 continue;
             }

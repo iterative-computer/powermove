@@ -148,10 +148,10 @@ impl StoreExtension {
         namespace: &str,
         found: &Discovered,
         graph: &ModuleGraph,
-        marker: &Value,
         owner: Writer,
         views: Arc<dyn StoreViews>,
     ) -> Result<Self> {
+        let marker = found.store.as_ref().unwrap_or(&Value::Null);
         adopt(&*kernel, namespace, found, graph, marker)?;
         let id = ExtensionId::new(found.id.clone()).map_err(|_| Error::Invalid("Store id"))?;
         let session = StoreSession::admit(&KernelStoreAdapter::new(&*kernel), &id)
