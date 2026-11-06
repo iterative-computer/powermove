@@ -114,6 +114,32 @@ pub struct VideoExportRequest {
 }
 /// Runs on the MCP worker, never the UI thread. Video adapters own child
 /// cancellation/draining. Caption export is pure text and needs no subprocess.
+/// A worker copies an original into durable media and admits it through the kernel.
+#[derive(Clone, Debug)]
+pub struct MediaImport {
+    pub frozen: FrozenProject,
+    pub path: PathBuf,
+    pub folder: Option<String>,
+    pub replace: Option<String>,
+    pub expected_fingerprint: Option<String>,
+    pub writer: u32,
+}
+#[derive(Clone, Debug)]
+pub struct ImportedMedia {
+    pub status: &'static str,
+    pub asset: String,
+    pub name: String,
+    pub kind: String,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub duration: Option<f64>,
+    pub has_audio: bool,
+    pub fingerprint: String,
+    pub revision: u64,
+}
+pub trait MediaImporter: Send + Sync {
+    fn import(&self, request: &MediaImport) -> Result<ImportedMedia>;
+}
 pub trait ExportChild: Send + Sync {
     fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
     fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {

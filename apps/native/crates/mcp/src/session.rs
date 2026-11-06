@@ -337,6 +337,74 @@ impl McpSession {
             }
 
             "export_captions" => host.export_captions(&id, args),
+            "import_media" | "replace_media" | "import_media_to_timeline" => {
+                let importer = host
+                    .media_importer
+                    .clone()
+                    .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+                let expected = session
+                    .transaction
+                    .as_ref()
+                    .map_or(session.baseline, |t| t.revision);
+                if host.revision(&id)? != expected {
+                    return Err(Error::conflict(
+                        "The project changed. Read get_project_state before retrying.",
+                    ));
+                }
+                let frozen = host.freeze(&id)?;
+                let replace = (name == "replace_media")
+                    .then(|| args["assetId"].as_str().unwrap_or_default().to_owned());
+                if let Some(asset) = replace.as_deref() {
+                    if crate::media::has_locked_reference(&frozen.project, asset) {
+                        return Err(Error::invalid(
+                            "Unlock layers using this media before replacing it.",
+                        ));
+                    }
+                    if args["missingOnly"] == true
+                        && host.media_registry.as_ref().is_some_and(|registry| {
+                            registry.state(&id, asset).available
+                        })
+                    {
+                        return Ok(json!({"status":"already_available","assetId":asset,
+                            "persisted":frozen.project["assets"][asset]["persisted"] == true}));
+                    }
+                }
+                let project = frozen.project.clone();
+                let imported = importer.import(&crate::services::MediaImport {
+                    frozen,
+                    path: args["path"].as_str().unwrap_or_default().into(),
+                    folder: args["folderId"].as_str().map(str::to_owned),
+                    replace,
+                    expected_fingerprint: args["expectedFingerprint"].as_str().map(str::to_owned),
+                    writer: self.writer,
+                })?;
+                // Media Undo is separate from run grouping, like manage_media.
+                session.external_actions = true;
+                session.committed |= imported.revision != expected;
+                session.baseline = imported.revision;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.revision = imported.revision;
+                }
+                let mut result = json!({"status":imported.status,"assetId":imported.asset,
+                    "name":imported.name,"persisted":true,"fingerprint":imported.fingerprint,
+                    "storage":"copied","revision":imported.revision});
+                if name == "import_media_to_timeline" {
+                    let at = args["at"].as_f64().unwrap_or(0.);
+                    match crate::media::layer_for(&project, &imported, at) {
+                        Some((layer, command)) => {
+                            drop(host);
+                            let commands = json!({"commands":[command],"label":"Import Media"});
+                            self.dispatch("apply_commands", &commands)?;
+                            result["layerId"] = json!(layer);
+                        }
+                        None => {
+                            result["note"] =
+                                json!("Imported. Place 3D models with edit_3d.");
+                        }
+                    }
+                }
+                Ok(result)
+            }
             "manage_media" => {
                 let expected = session
                     .transaction

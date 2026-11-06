@@ -222,14 +222,11 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
     assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
 }
 
-/// A real audio file through the app's media tools: measured, not modelled.
-#[test]
-fn media_tools_measure_a_linked_original() {
-    let root = tempfile::tempdir().unwrap();
+/// One second of tone, then one of silence.
+fn tone_wav() -> Vec<u8> {
     let rate = 8000u32;
     let mut samples = vec![];
     for i in 0..rate {
-        // One second of tone, then one of silence.
         let tone = (i as f64 * 0.2).sin() * 0.5 * 32767.;
         samples.extend_from_slice(&(tone as i16).to_le_bytes());
     }
@@ -243,8 +240,81 @@ fn media_tools_measure_a_linked_original() {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
     wav.extend_from_slice(&samples);
+    wav
+}
+/// Real files over real pipes into the kernel's durable media.
+#[test]
+fn import_media_retains_bytes_places_layers_and_replaces_in_place() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
     let audio = root.path().join("tone.wav");
-    std::fs::write(&audio, wav).unwrap();
+    std::fs::write(&audio, tone_wav()).unwrap();
+    let mut client = Client::new(&profile, None);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool(
+        "create_project",
+        json!({"name":"Synthetic import","width":320,"height":180,"fps":30,"duration":4}),
+    );
+    client.tool("start_session", json!({"prompt":"Synthetic import"}));
+    let refused = client.rpc(
+        "tools/call",
+        json!({"name":"import_media","arguments":{"path":audio,"expectedFingerprint":"v2:0:none"}}),
+    );
+    assert_eq!(refused["isError"], true, "{refused}");
+    let imported = client.tool("import_media", json!({"path":audio}));
+    assert_eq!(imported["status"], "imported", "{imported}");
+    assert_eq!(imported["persisted"], true);
+    let asset = imported["assetId"].as_str().unwrap().to_owned();
+    let fingerprint = imported["fingerprint"].as_str().unwrap().to_owned();
+    assert!(fingerprint.starts_with("v2:"), "{fingerprint}");
+    std::fs::remove_file(&audio).unwrap();
+    let listed = client.tool("list_media", json!({"assetId":asset}));
+    let row = &listed["assets"][0];
+    assert_eq!(row["status"], "available", "{listed}");
+    assert_eq!(row["fingerprint"], fingerprint);
+    assert_eq!(row["kind"], "audio");
+    assert_eq!(row["duration"], 2.0);
+    let probe = client.rpc(
+        "tools/call",
+        json!({"name":"probe_media","arguments":{"assetId":asset}}),
+    );
+    assert_eq!(probe["isError"], false, "{probe}");
+    std::fs::write(&audio, tone_wav()).unwrap();
+    let again = client.tool("import_media", json!({"path":audio}));
+    assert_eq!(again["status"], "already_imported", "{again}");
+    assert_eq!(again["assetId"], asset);
+    let placed = client.tool("import_media_to_timeline", json!({"path":audio,"at":1}));
+    let layer = placed["layerId"].as_str().expect("placed layer").to_owned();
+    assert_eq!(placed["assetId"], asset);
+    let state = client.tool("get_timeline", json!({}));
+    assert!(state.to_string().contains(&layer), "{state}");
+    let mut longer = tone_wav();
+    longer.push(0);
+    longer.push(0);
+    std::fs::write(&audio, longer).unwrap();
+    let replaced = client.tool("replace_media", json!({"assetId":asset,"path":audio}));
+    assert_eq!(replaced["status"], "replaced", "{replaced}");
+    assert_eq!(replaced["assetId"], asset);
+    assert_ne!(replaced["fingerprint"], fingerprint);
+    let mismatched = root.path().join("still.png");
+    std::fs::write(&mismatched, b"not really a png").unwrap();
+    let wrong = client.rpc(
+        "tools/call",
+        json!({"name":"replace_media","arguments":{"assetId":asset,"path":mismatched}}),
+    );
+    assert_eq!(wrong["isError"], true, "{wrong}");
+    client.tool("finish_session", json!({"commit":true}));
+}
+/// A real audio file through the app's media tools: measured, not modelled.
+#[test]
+fn media_tools_measure_a_linked_original() {
+    let root = tempfile::tempdir().unwrap();
+    let audio = root.path().join("tone.wav");
+    std::fs::write(&audio, tone_wav()).unwrap();
     let project = json!({"id":"synthetic","name":"Synthetic media","compId":"c","w":320,"h":180,
         "fps":30,"dur":2,"bg":"#000000","comps":{},"layers":[],"params":{},"markers":[],
         "assets":{"tone":{"id":"tone","kind":"audio","name":"Tone","sourcePath":audio}}});

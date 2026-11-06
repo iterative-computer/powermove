@@ -20,7 +20,13 @@ no production caller.
   evaluated clip timing exists; pass `assetId`. The `informative` frame scan
   refuses. Loudness is peak level only.
 
-Of the 68 tools, 31 have bodies in the app. These refuse with
+- `import_media`, `replace_media` and `import_media_to_timeline` retain originals
+  through `Archive::retain_path` and admit them with `Call::AdmitMedia`, so they
+  use normal media Undo. Images aren't converted and videos get no playback proxy.
+  3D models import but aren't placed; use `edit_3d`. `list_media` reports
+  availability from the kernel's media table.
+
+Of the 68 tools, 34 have bodies in the app. These refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
@@ -29,7 +35,6 @@ the running binary in both directions.
 |---|---|
 | `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A bridge from MCP workers to the main-thread shell and v4 surfaces. |
 | `generate_captions`, `transcribe_media` | A local transcription runtime. |
-| `import_media`, `import_media_to_timeline`, `replace_media` | An MCP route into `Archive::retain_path` and `Builtins::admit_media`. |
 | `publish_extensions`, `stage_fork_rebase`, `fork_builtin_extension` | Extension activation; the app has no compat realm. Also a shipped source root for forks. |
 | `publish_visual_reply` | A safe viewer. `pm_agents::visual` validates input. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |

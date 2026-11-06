@@ -36,6 +36,7 @@ pm-builtins = { path = "../builtins" }
 pm-agents = { path = "../agents" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
 png = "0.18"
+sha2 = "0.10"
 pm-surface = { path = "../surface" }
 pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"

@@ -2,6 +2,7 @@
 //! export workers. Exports and frames use the same child job as the Export panel.
 use crate::mcp::Tools;
 use anyhow::{Context, Result as AnyResult};
+use pm_kernel::media_archive::Archive;
 use pm_engine_service::jobs::{ExportHandle, ExportRequest};
 use pm_kernel::{KernelHandle, Published};
 use pm_mcp::{
@@ -11,7 +12,11 @@ use pm_mcp::{
         FrameRequest, MediaSource, Probe, SheetOutput, SheetPlan, SheetRequest, Waveform,
         WaveformRequest,
     },
-    services::{ExportChild, FrozenProject, Image, MediaRequest, VideoExportRequest},
+    media::{MediaRegistry, MediaState},
+    services::{
+        ExportChild, FrozenProject, Image, ImportedMedia, MediaImport, MediaImporter,
+        MediaRequest, VideoExportRequest,
+    },
 };
 use pm_media::preview::PreviewReader;
 use pm_protocol::{
@@ -33,10 +38,12 @@ pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()>
         tools.host.kernel.clone(),
         std::env::current_exe()?,
         activity,
-        tools.host.profile.join("cache/mcp"),
+        tools.host.profile.clone(),
     );
     let mut automation = tools.automation.lock().unwrap();
     automation.export_child = jobs.clone();
+    automation.media_importer = Some(jobs.clone());
+    automation.media_registry = Some(jobs.clone());
     automation.engine = Some(jobs);
     Ok(())
 }
@@ -77,6 +84,7 @@ pub struct EngineJobs {
     kernel: KernelHandle,
     executable: PathBuf,
     activity: Arc<AtomicBool>,
+    profile: PathBuf,
     cache: PathBuf,
     progress: Mutex<HashMap<u64, Progress>>,
 }
@@ -85,13 +93,14 @@ impl EngineJobs {
         kernel: KernelHandle,
         executable: PathBuf,
         activity: Arc<AtomicBool>,
-        cache: PathBuf,
+        profile: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
             kernel,
             executable,
             activity,
-            cache,
+            cache: profile.join("cache/mcp"),
+            profile,
             progress: Mutex::default(),
         })
     }
@@ -295,6 +304,237 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     text
+}
+const IMPORT_LIMIT: u64 = 512 << 20;
+/// The kind main gives a file, and the type its bytes are served as.
+fn media_type(path: &Path) -> Option<(&'static str, &'static str)> {
+    let extension = path.extension()?.to_str()?.to_lowercase();
+    Some(match extension.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "webp" => ("image", "image/webp"),
+        "gif" => ("image", "image/gif"),
+        "bmp" => ("image", "image/bmp"),
+        "tif" | "tiff" => ("image", "image/tiff"),
+        "heic" | "heif" => ("image", "image/heic"),
+        "avif" => ("image", "image/avif"),
+        "mp4" | "m4v" => ("video", "video/mp4"),
+        "mov" => ("video", "video/quicktime"),
+        "webm" => ("video", "video/webm"),
+        "mkv" => ("video", "video/x-matroska"),
+        "avi" => ("video", "video/x-msvideo"),
+        "mxf" => ("video", "application/mxf"),
+        "wav" => ("audio", "audio/wav"),
+        "mp3" => ("audio", "audio/mpeg"),
+        "m4a" | "aac" => ("audio", "audio/mp4"),
+        "flac" => ("audio", "audio/flac"),
+        "ogg" | "opus" => ("audio", "audio/ogg"),
+        "aif" | "aiff" => ("audio", "audio/aiff"),
+        "glb" => ("model", "model/gltf-binary"),
+        "gltf" => ("model", "model/gltf+json"),
+        "obj" => ("model", "model/obj"),
+        _ => return None,
+    })
+}
+/// Main's identity: stable across renames, sampled so it never reads a whole file.
+fn fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+    const SAMPLE: u64 = 64 << 10;
+    let sample = SAMPLE.min(size);
+    let mut digest = Sha256::new();
+    digest.update(format!("powermove-media-v2\n{size}\n"));
+    let mut file = std::fs::File::open(path)?;
+    let mut offsets = vec![0, (size - sample) / 2, size - sample];
+    offsets.dedup();
+    let mut buffer = vec![0; sample as usize];
+    for offset in offsets {
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut buffer)?;
+        digest.update(&buffer);
+    }
+    let hex = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("v2:{size}:{hex}"))
+}
+impl MediaImporter for EngineJobs {
+    fn import(&self, request: &MediaImport) -> Result<ImportedMedia> {
+        let path = &request.path;
+        if !path.is_absolute() {
+            return Err(Error::invalid("Provide an absolute local media file path."));
+        }
+        let size = std::fs::metadata(path)
+            .map_err(|_| {
+                Error::invalid(
+                    "The source is unavailable locally. Download cloud files first; no media was changed.",
+                )
+            })?
+            .len();
+        if size > IMPORT_LIMIT {
+            return Err(Error::invalid("Import local files up to 512 MiB."));
+        }
+        let (kind, mime) =
+            media_type(path).ok_or_else(|| Error::invalid("Unsupported media file."))?;
+        let fingerprint = fingerprint(path, size).map_err(failed)?;
+        if request
+            .expected_fingerprint
+            .as_ref()
+            .is_some_and(|expected| *expected != fingerprint)
+        {
+            return Err(Error::invalid(
+                "The chosen file does not match expectedFingerprint; no media was changed.",
+            ));
+        }
+        let project = &request.frozen.project;
+        if let Some(asset) = &request.replace
+            && project["assets"][asset]["kind"] != kind
+        {
+            return Err(Error::invalid(
+                "Replace media with a file of the same kind.",
+            ));
+        }
+        let probe = (kind != "model")
+            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
+            .transpose()
+            .map_err(|_| Error::invalid("This file could not be read as media."))?;
+        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
+        let width = video.map(|video| f64::from(video.width));
+        let height = video.map(|video| f64::from(video.height));
+        let duration = probe
+            .as_ref()
+            .and_then(|probe| seconds(probe.duration_us))
+            .filter(|_| kind != "image");
+        let has_audio = probe
+            .as_ref()
+            .is_some_and(|probe| probe.streams.iter().any(|stream| stream.audio.is_some()));
+        let archive = Archive::open(&self.profile).map_err(failed)?;
+        let original = archive
+            .retain_path(path, mime, &AtomicBool::new(false))
+            .map_err(failed)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let imported = |status, asset: String, revision| ImportedMedia {
+            status,
+            asset,
+            name: name.clone(),
+            kind: kind.into(),
+            width,
+            height,
+            duration,
+            has_audio,
+            fingerprint: fingerprint.clone(),
+            revision,
+        };
+        let published = self.published(&request.frozen)?;
+        let same_bytes = |entry: &pm_kernel::project_io::MediaEntry| {
+            use pm_kernel::project_io::MediaSource::{Embedded, File, Memory};
+            match &entry.source {
+                File { sha256, .. } | Embedded { sha256, .. } => {
+                    sha256.as_deref() == Some(original.hash())
+                }
+                Memory(_) => false,
+            }
+        };
+        if request.replace.is_none()
+            && let Some(entry) = published.media.iter().find(|entry| {
+                same_bytes(entry) && project["assets"][entry.id.to_string()].is_object()
+            })
+        {
+            return Ok(imported(
+                "already_imported",
+                entry.id.to_string(),
+                request.frozen.revision,
+            ));
+        }
+        let id = request
+            .replace
+            .clone()
+            .unwrap_or_else(|| pm_kernel::new_id("asset"));
+        let previous = request
+            .replace
+            .as_ref()
+            .and_then(|asset| published.media.get(asset))
+            .map(|entry| archive.retain_entry(entry))
+            .transpose()
+            .map_err(failed)?;
+        let metadata = json!({"name":name,"kind":kind,"mimeType":mime,"fingerprint":fingerprint,
+            "sourcePath":path,"size":size,"w":width.unwrap_or(0.),"h":height.unwrap_or(0.),
+            "dur":duration.unwrap_or(0.),"hasAudio":has_audio,"persisted":true});
+        let catalog = pm_panel_media::Catalog::published(&published)
+            .map_err(|e| failed(format!("{e:?}")))?;
+        let edit = catalog
+            .prepare_import(
+                &catalog.stamp,
+                vec![pm_panel_media::StoredAsset {
+                    id: id.clone(),
+                    metadata: pm_model::json::parse(&metadata.to_string()).map_err(failed)?,
+                    original_version: original.version().into(),
+                }],
+                request.folder.clone(),
+                request.replace.clone(),
+            )
+            .map_err(|e| match e {
+                pm_panel_media::Error::MissingItem => {
+                    Error::invalid("Choose an existing media folder.")
+                }
+                other => failed(format!("{other:?}")),
+            })?;
+        let expected = published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(&id))
+            .map(pm_model::Node::to_value);
+        let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
+        let ack = self
+            .kernel
+            .call(
+                &request.frozen.project_id,
+                edit.request_with_media(
+                    writer,
+                    vec![pm_kernel::MediaBinding {
+                        asset: id.clone(),
+                        expected,
+                        original,
+                        previous,
+                    }],
+                ),
+            )
+            .wait()
+            .ok_or_else(|| Error::unavailable("The app is closing."))?
+            .map_err(Error::kernel)?;
+        if let pm_kernel::Reply::Throw(error) = &ack.reply {
+            return Err(Error::kernel(error));
+        }
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, ack.revision))
+    }
+}
+impl MediaRegistry for EngineJobs {
+    fn state(&self, project: &str, asset: &str) -> MediaState {
+        let Some(published) = self.kernel.published(project) else {
+            return MediaState::default();
+        };
+        let linked = || {
+            let root = published.snapshot.root()?;
+            let record = root.get("assets")?.get(asset)?.to_value();
+            let path = record.get("sourcePath").or_else(|| record.get("path"))?;
+            Some(Path::new(&*path.as_js_string()?.to_string_lossy()).is_file())
+        };
+        MediaState {
+            available: published.media.get(asset).is_some() || linked() == Some(true),
+            ..Default::default()
+        }
+    }
 }
 impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {

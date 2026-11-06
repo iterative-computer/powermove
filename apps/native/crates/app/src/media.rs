@@ -23,8 +23,17 @@ pub fn for_session(
             "model/gltf-binary" => "glb",
             _ => "bin",
         };
-        let destination = cache.join(format!("asset-{index}.{extension}"));
-        item.copy_to(&destination)?;
+        // Keyed by the entry's revision, so a shared cache reuses unchanged bytes.
+        let revision = item
+            .revision
+            .to_string()
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let destination = cache.join(format!("asset-{index}-{revision}.{extension}"));
+        if !destination.is_file() {
+            let partial = destination.with_extension(pm_kernel::new_id("partial"));
+            item.copy_to(&partial)?;
+            fs::rename(&partial, &destination)?;
+        }
         let resolved = destination;
         if pm_builtins::delivery::embedded_proxy(snapshot, &item.id.to_string()) {
             catalog.proxies.insert(item.id.to_string(), resolved);
