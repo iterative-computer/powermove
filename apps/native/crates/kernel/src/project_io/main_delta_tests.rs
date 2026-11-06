@@ -99,7 +99,7 @@ fn a_full_disk_reclaims_archived_generations_oldest_first_and_the_save_lands() {
 
     let path = dir.path("project.pmv");
     let saved = |fault| {
-        let mut store = DocumentStore::new_untitled(fixture());
+        let mut store = DocumentStore::new_untitled(fixture().get("proj").unwrap().clone());
         store.prepare_save(
             SaveTarget::SaveAs {
                 path: path.clone(),
@@ -113,11 +113,11 @@ fn a_full_disk_reclaims_archived_generations_oldest_first_and_the_save_lands() {
         )
     };
     // Nothing left to reclaim would not retry: the space error comes back.
+    let failed = saved(WriteFault::DiskFullAfter(1)).unwrap().run();
     assert!(
-        saved(WriteFault::DiskFullAfter(1))
-            .unwrap()
-            .run()
-            .is_err_and(|e| e.is_disk_full())
+        failed.as_ref().is_err_and(|e| e.is_disk_full()),
+        "{:?}",
+        failed.err()
     );
     assert!(!newest.exists(), "the failed save reclaimed the rest");
     std::fs::write(&newest, b"0123456789").unwrap();
