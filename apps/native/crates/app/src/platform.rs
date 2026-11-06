@@ -76,6 +76,15 @@ pub fn choice(
     rx
 }
 
+/// Selects `path` in Finder.
+pub fn reveal(path: &std::path::Path) {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSURL};
+    if let Some(url) = NSURL::from_file_path(path) {
+        NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+    }
+}
 /// A one-button alert as a sheet on the key window.
 pub fn note(title: &str, detail: &str) {
     let mtm = MainThreadMarker::new().unwrap();

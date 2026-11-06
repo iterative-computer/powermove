@@ -11,7 +11,7 @@ pub struct ReportWindow {
 impl ReportWindow {
     fn action(&self, id: &str) {
         match id {
-            "show_library" => reveal(&self.profile),
+            "show_library" => crate::platform::reveal(&self.profile),
             "copy_report" => copy_text(&report_text(&self.report)),
             "about_native_files" => {
                 let view = about_native_files();
@@ -34,16 +34,6 @@ pub fn report_text(report: &Report) -> String {
         }
     }
     text
-}
-fn reveal(path: &std::path::Path) {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::NSURL;
-    let url = NSURL::from_file_path(path);
-    if let Some(url) = url {
-        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(
-            &objc2_foundation::NSArray::from_retained_slice(&[url]),
-        );
-    }
 }
 fn copy_text(text: &str) {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};

@@ -163,6 +163,22 @@ impl Context {
             })],
         )
     }
+    pub fn precompose_draft(&self, selected: &[String]) -> Result<PrecomposeDraft, DialogError> {
+        let names = composition_names(&self.root()?);
+        let comp = self.comp()?;
+        let layers = array(&comp, "layers");
+        let single = (selected.len() == 1)
+            .then(|| layers.iter().find(|l| text(l, "id") == selected[0]))
+            .flatten();
+        Ok(PrecomposeDraft {
+            name: unique_name("Pre-comp", &names),
+            layer_name: single.map(|l| text(l, "name").to_owned()),
+            can_leave: single.is_some_and(|l| l.get("d").is_some_and(|d| d.get("asset").is_some())),
+            leave: false,
+            adjust_duration: false,
+            open_after: false,
+        })
+    }
     pub fn precompose(&self, _draft: &PrecomposeDraft) -> Result<PreparedEdit, DialogError> {
         Err(DialogError::MissingBacking(
             "pm-kernel::CompCommand::Precompose is NotImplemented; adjustDuration/openAfter also need kernel/session support",
@@ -544,6 +560,9 @@ pub struct PreparedEdit {
     after: Value,
 }
 impl PreparedEdit {
+    pub fn document(&self) -> u64 {
+        self.document
+    }
     pub fn submit(
         self,
         handle: &KernelHandle,

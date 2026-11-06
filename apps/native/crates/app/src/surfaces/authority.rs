@@ -5,10 +5,7 @@
 //! N6 values retain their extension/env identity; N7 every action has an id and
 //! generation; N8 publication is nonblocking, with no JS or service IO here.
 //! The app's shell must dispatch this module; registration alone is not wiring.
-// Each surface also builds as an independent portable verification target.
-#[allow(clippy::duplicate_mod)]
-#[path = "sheet_layout.rs"]
-pub mod sheet_layout;
+pub use crate::surfaces::sheet_layout;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;

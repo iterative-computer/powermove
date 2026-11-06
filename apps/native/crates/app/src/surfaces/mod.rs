@@ -1,6 +1,7 @@
 //! App-owned secondary surfaces. Platform adapters never execute JavaScript.
 #[allow(dead_code)] // Entry-point dispatch belongs to the shell integration lane.
 pub mod authority;
+pub mod sheet_layout;
 
 // Secondary media surfaces. Publication and effect execution are host-owned.
 // These public entry points are awaiting the app integration lane (see surfaces.md).

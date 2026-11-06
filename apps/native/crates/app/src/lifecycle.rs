@@ -219,20 +219,33 @@ impl Controller {
             self.complete_close(intent, cx);
             return;
         }
+        use crate::surfaces::documents::{Action, unsaved};
+        let name = p
+            .as_ref()
+            .and_then(|p| {
+                p.snapshot
+                    .root()?
+                    .get("name")
+                    .and_then(crate::node_string)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "Untitled".into());
+        let alert = unsaved(&name);
+        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
         let rx = crate::platform::choice(
             &self.host.borrow().window,
-            "Do you want to save your changes?",
-            "If you don’t save, your changes won’t be kept in this project.",
-            &["Save", "Don’t Save", "Cancel"],
+            &alert.message,
+            &alert.informative,
+            &labels,
         );
         cx.spawn(async move |this, cx| {
             let choice = rx.recv().await.ok();
-            let _ = this.update(cx, |v, cx| match choice {
-                Some(0) => {
+            let _ = this.update(cx, |v, cx| match alert.action_at(choice) {
+                Some(Action::Save) => {
                     v.close_after_save = Some(intent);
                     v.save(None, cx);
                 }
-                Some(1) => v.discard_and_close(intent, cx),
+                Some(Action::DontSave) => v.discard_and_close(intent, cx),
                 _ => v.cancel_close(cx),
             });
         })

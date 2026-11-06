@@ -9,7 +9,7 @@ pub fn library(
     bounds: Rect,
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
-    if id != "assets" || (v.session.is_some() && !v.show_library) {
+    if id != "assets" || v.session.is_some() {
         return None;
     }
     let t = v.host.borrow().tokens.clone();

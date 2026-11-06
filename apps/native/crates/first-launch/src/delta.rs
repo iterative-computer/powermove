@@ -287,6 +287,7 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
     }
     if moved {
         state.delta_base = Some(name);
+        state.latest_pass = Some(pass.snapshot.clone());
     }
     if moved || state.source_stamp.is_none() {
         state.source_stamp = stamp.or(state.source_stamp.take());

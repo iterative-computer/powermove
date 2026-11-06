@@ -190,6 +190,9 @@ pub struct State {
     /// Source metadata stamp of the newest merged capture.
     #[serde(default)]
     pub source_stamp: Option<String>,
+    /// Snapshot id of the media pass that describes the library now.
+    #[serde(default)]
+    pub latest_pass: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -389,6 +392,7 @@ fn run_inner(
             delta_base: None,
             conflicts: BTreeSet::new(),
             source_stamp: None,
+            latest_pass: None,
         };
         publish(&native, &state)?;
         state
@@ -454,6 +458,7 @@ fn run_inner(
     hook(Event::Started(Step::Media))?;
     let pass = media(&native, &root, &batches, &closure, &mut hook)?;
     if !state.completed.contains(&Step::Media) {
+        state.latest_pass = Some(pass.snapshot.clone());
         finish(&native, &mut state, Step::Media, &mut hook)?;
     }
     if !state.completed.contains(&Step::LocalStorage) {

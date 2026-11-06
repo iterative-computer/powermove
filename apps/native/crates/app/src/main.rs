@@ -4,6 +4,7 @@ mod builtins_tests;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
+mod error_log;
 mod export_coordinator;
 mod first_run;
 
@@ -19,9 +20,12 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod project_library;
 mod rows;
 mod session;
+mod sheets;
 mod smoke;
+mod surface_routes;
 mod surfaces;
 mod v4_control;
 mod v4_native;

@@ -7,10 +7,7 @@
 //! Sheet geometry resolves the approved host tokens without guessed dimensions.
 //! All native output remains provisional until Opus review.
 
-// Each surface also builds as an independent portable verification target.
-#[allow(clippy::duplicate_mod)]
-#[path = "sheet_layout.rs"]
-pub mod sheet_layout;
+pub use crate::surfaces::sheet_layout;
 
 #[cfg(target_os = "macos")]
 #[path = "dialogs_appkit.rs"]

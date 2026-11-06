@@ -71,7 +71,11 @@ pub fn load(native: &Path) -> Result<Report> {
     if let Some(pass) = passes
         .get("passes")
         .and_then(serde_json::Value::as_object)
-        .and_then(|p| p.values().last())
+        .and_then(|passes| {
+            passes
+                .values()
+                .find(|p| p["snapshot"].as_str() == state.latest_pass.as_deref())
+        })
     {
         if let Some(owners) = pass.get("blockedOwners").and_then(|v| v.as_array()) {
             for owner in owners.iter().filter_map(serde_json::Value::as_str) {
