@@ -51,7 +51,9 @@ fn native_profile(profile: Option<PathBuf>, home: Option<std::ffi::OsString>) ->
 /// keeps its exports to itself.
 fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) -> PathBuf {
     match home.map(PathBuf::from) {
-        Some(home) if native_profile(None, Some(home.clone().into())).as_deref() == Some(profile) => {
+        Some(home)
+            if native_profile(None, Some(home.clone().into())).as_deref() == Some(profile) =>
+        {
             home.join("Powermove")
         }
         _ => profile.join("exports"),
@@ -137,8 +139,9 @@ fn main() -> Result<()> {
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
         tools.connect_engine(engine.export_activity())?;
-        let server =
-            pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || tools.connect())?;
+        let server = pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || {
+            tools.connect()
+        })?;
         Ok((actor, engine, mcp_host, server))
     })
     .join()

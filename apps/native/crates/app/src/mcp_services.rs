@@ -3,7 +3,6 @@
 use anyhow::{Context, Result as AnyResult};
 use pm_engine_service::jobs::{ExportHandle, ExportRequest};
 use pm_kernel::{KernelHandle, Published};
-use pm_media::preview::PreviewReader;
 use pm_mcp::{
     CaptureRequest, EngineHook, Error, Result,
     export_jobs::Progress,
@@ -13,6 +12,7 @@ use pm_mcp::{
     },
     services::{ExportChild, FrozenProject, Image, MediaRequest, VideoExportRequest},
 };
+use pm_media::preview::PreviewReader;
 use pm_protocol::{
     color::{OutputColor, Precision},
     common::{FrameRate, SessionId, Size, TickRange, Ticks},
@@ -388,7 +388,8 @@ impl EngineHook for EngineJobs {
             .find_map(|stream| stream.audio.as_ref().map(|audio| audio.sample_rate))
             .ok_or_else(|| Error::invalid("This media has no audio."))?;
         let per_peak = (rate as f64 / BUCKETS_PER_SECOND).round() as usize;
-        let peaks = pm_media::probe::peaks::peaks(&path, None, per_peak.max(1), 0).map_err(failed)?;
+        let peaks =
+            pm_media::probe::peaks::peaks(&path, None, per_peak.max(1), 0).map_err(failed)?;
         let channels = peaks.channels.max(1);
         let envelope = peaks
             .data
@@ -492,9 +493,8 @@ fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
         let (column, row) = (index % plan.columns, index / plan.columns);
         let fitted = fit(cell, cell_w, cell_h);
         for line in 0..cell_h as usize {
-            let start = ((row * cell_h as usize + line) * width as usize
-                + column * cell_w as usize)
-                * 4;
+            let start =
+                ((row * cell_h as usize + line) * width as usize + column * cell_w as usize) * 4;
             let source = line * cell_w as usize * 4;
             canvas[start..start + cell_w as usize * 4]
                 .copy_from_slice(&fitted[source..source + cell_w as usize * 4]);

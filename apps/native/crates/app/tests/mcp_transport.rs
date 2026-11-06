@@ -165,7 +165,14 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
 fn glsl_compiler() -> std::path::PathBuf {
     let output = Command::new(env!("CARGO"))
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .args(["build", "--locked", "-p", "pm-glsl", "--bin", "pm-glsl-compiler"])
+        .args([
+            "build",
+            "--locked",
+            "-p",
+            "pm-glsl",
+            "--bin",
+            "pm-glsl-compiler",
+        ])
         .args(["--message-format=json"])
         .stderr(Stdio::inherit())
         .output()
@@ -264,5 +271,62 @@ fn media_tools_measure_a_linked_original() {
     let measured: Value =
         serde_json::from_str(wave["content"][0]["text"].as_str().unwrap()).unwrap();
     let silence = &measured["silences"][0];
-    assert!((silence[0].as_f64().unwrap() - 1.).abs() < 0.05, "{measured}");
+    assert!(
+        (silence[0].as_f64().unwrap() - 1.).abs() < 0.05,
+        "{measured}"
+    );
+}
+
+/// Each tool either reaches a body or refuses with the documented reason. The
+/// table in docs/native/mcp.md is the list of refusals, in both directions.
+#[test]
+fn every_catalog_tool_has_a_body_or_a_documented_refusal() {
+    let docs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/native/mcp.md"),
+    )
+    .unwrap();
+    let section = docs
+        .split("<!-- refused-tools -->")
+        .nth(1)
+        .expect("refusal table markers");
+    let documented = section
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .flat_map(|line| line.split('|').next())
+        .flat_map(|tools| tools.split(", "))
+        .map(|tool| tool.trim().trim_matches('`').to_owned())
+        .filter(|tool| !tool.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let mut client = Client::new(&profile, None);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool("create_project", json!({"name":"Synthetic catalog"}));
+    client.tool("start_session", json!({"prompt":"Synthetic catalog"}));
+    let mut refused = std::collections::BTreeSet::new();
+    for tool in pm_mcp::catalog::names() {
+        if matches!(
+            tool.as_str(),
+            "start_session" | "finish_session" | "export_video" | "render_frames"
+        ) {
+            continue;
+        }
+        // These two validate their arguments ahead of the capability check.
+        let arguments = match tool.as_str() {
+            "fork_builtin_extension" => json!({"id":"timeline"}),
+            "publish_extensions" => json!({"extensions":[]}),
+            _ => json!({}),
+        };
+        let reply = client.rpc("tools/call", json!({"name":tool,"arguments":arguments}));
+        let text = reply["content"][0]["text"].as_str().unwrap_or_default();
+        if text.starts_with("Not available in this build") {
+            assert!(text.len() > 40, "{tool} refuses without a reason: {text}");
+            refused.insert(tool);
+        }
+    }
+    assert_eq!(refused, documented);
 }

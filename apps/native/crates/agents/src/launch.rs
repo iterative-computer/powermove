@@ -60,11 +60,8 @@ impl Environment {
     pub fn binary(&self, provider: Runtime) -> Option<PathBuf> {
         let name = provider.name();
         let bundled = || Some(self.resources.as_ref()?.join(name).join("bin").join(name));
-        let managed = runtime::candidate(
-            &self.profile.join("runtimes"),
-            provider,
-            &self.app_version,
-        );
+        let managed =
+            runtime::candidate(&self.profile.join("runtimes"), provider, &self.app_version);
         [
             self.vars
                 .get(&format!("{}_BINARY", name.to_uppercase()))

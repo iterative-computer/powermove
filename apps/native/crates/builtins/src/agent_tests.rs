@@ -172,13 +172,20 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
         assert_eq!(session.draft.text(), "");
     }
     let text = panel.text();
-    assert!(text.contains("Saw: Hi"), "{text}\n{}", agent.lock().unwrap().panel.raw_archive());
+    assert!(
+        text.contains("Saw: Hi"),
+        "{text}\n{}",
+        agent.lock().unwrap().panel.raw_archive()
+    );
     let archive = actor.handle().state().settings["agentThreads.synthetic"].clone();
     drop(agent);
     panel.panels.close();
     let stored = pm_model::json::to_canonical_string(&archive);
     assert!(stored.contains("Saw: Hi"), "{stored}");
-    assert!(stored.contains("\"lastRunStatus\":\"completed\""), "{stored}");
+    assert!(
+        stored.contains("\"lastRunStatus\":\"completed\""),
+        "{stored}"
+    );
     let mut reopened = Agent::mount(&actor, environment(root.path(), "reply"));
     assert!(reopened.text().contains("Saw: Hi"));
     reopened.panels.close();
@@ -218,7 +225,14 @@ fn claude_question_answer_reaches_the_process_and_its_structured_reply_shows() {
         .unwrap();
     panel.type_text("Style");
     panel.key("Enter", false);
-    panel.wait(|state| state.panel.session(&thread).unwrap().question("question").is_some());
+    panel.wait(|state| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .question("question")
+            .is_some()
+    });
     assert!(panel.text().contains("Choose a style?"));
     {
         let mut state = agent.lock().unwrap();

@@ -607,7 +607,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             result["instructions"] = json!(
-                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. Engine, panels, agents, Store and extension sources require their native host capabilities. User MCP servers and scripting sandbox are not available in this build. api/mcp-tools.json lists the frozen public contract; unsupported tools return a structured error. Extension staging is inert until the runtime lane is connected."
+                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. Extension staging is inert: nothing here activates."
             );
             Some(root)
         };

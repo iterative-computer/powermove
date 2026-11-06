@@ -90,11 +90,7 @@ impl ToolConnection for Connection {
     }
 }
 
-pub fn headless(
-    profile: PathBuf,
-    exports: PathBuf,
-    launch: Option<PathBuf>,
-) -> anyhow::Result<()> {
+pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
     std::thread::spawn(move || -> anyhow::Result<()> {
         let actor = KernelActor::spawn(KernelConfig {
             journal_root: Some(profile.join("journals")),

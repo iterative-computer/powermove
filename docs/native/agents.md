@@ -1,4 +1,45 @@
-# Rust agents (P4 package 16)
+# Rust agents
+
+## Current state (2026-11-05)
+
+A panel run is real, from keystroke to durable reply:
+
+1. `panels/agent/view.tsx` sends composer keys as `{type:"key"}`. The Rust panel
+   edits the draft. The v4 host reports keys, not composed text, so IME and
+   shifted punctuation need a real text input there.
+2. `panel.agent.dispatch` in `builtins/src/models.rs` admits the action
+   (`agent_host::admit`) before touching the panel. No runtime means no consumed
+   draft.
+3. `agent_host::run_effect` builds the prompt with bounded thread context and
+   calls `ProviderRuns::start`, which saves intent before launch.
+4. `pm_agents::launch` finds the binary: `CODEX_BINARY`/`CLAUDE_BINARY`, then a
+   managed update under `<profile>/runtimes`, then `Resources/<name>/bin/<name>`.
+   Isolated homes are `codex-runtime` and `claude-runtime` in the profile.
+   Editor ChatGPT runs use App Server; Project runs use `codex exec`; Claude uses
+   stream-json. Providers reach tools through `--powermove-mcp`.
+5. The `pm-agent-runs` worker polls events into the panel and publishes. A Backend
+   lock is not held while it does. A failed save keeps the event for retry.
+6. Window close sets `AgentLink::close`; the worker cancels runs and exits.
+
+Proof is `builtins/src/agent_tests.rs`: real V8 panel, real kernel actor and a fake
+provider over real pipes, for reply and reopen, Stop, and a question answered back
+into the process. No real provider has run. `live-provider-check` is still
+unexecuted.
+
+Open:
+
+- Sign-in. Accounts in Settings has no provider login, so a real run reports the
+  runtime's own auth error in its conversation.
+- Provider, model and Access pickers are still disabled in the panel view.
+  ChatGPT is the effective default.
+- `Compatible` refuses at launch: `compatible` and `completion` have no HTTP or
+  Keychain host. Computer access stays refused because no consent alert exists.
+- Attachments refuse with an explanation.
+- `INSTRUCTIONS` in `launch.rs` is a short stand-in for main's generated workspace
+  instructions.
+- Project access has no OS confinement host for Compatible-only workspace tools.
+
+The sections below are older dated notes.
 
 `apps/native/crates/agents` is `pm-agents`, a Linux-testable Rust service library.
 Reference: tag `v1.2.0`, commit `07ed5fa17ee640659cb075f9cad1af2095011d60`.

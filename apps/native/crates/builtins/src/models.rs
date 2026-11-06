@@ -497,8 +497,8 @@ impl Backend {
         let state = agent.lock().unwrap();
         let panel = &state.panel;
         let active = panel.active_id();
-        let window = pm_panel_agentpanel::v4::Window::new(panel, active)
-            .map_err(|e| format!("{e:?}"))?;
+        let window =
+            pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
         let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
         let snapshot = window
             .snapshot(
