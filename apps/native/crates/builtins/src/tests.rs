@@ -1343,6 +1343,37 @@ fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_th
         .find(|p| p.panel == "synthetic-surface")
         .expect("a surface publication");
     assert_eq!(publication.panel, "synthetic-surface");
+    // A view is a component: its hooks have somewhere to live.
+    let hooks = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';import { useState } from 'powermove/hooks';export const view = () => jsx('text', {children:'Hooked '+useState(7)[0]});"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {
+                "powermove/jsx-runtime":"runtime:powermove/jsx-runtime",
+                "powermove/hooks":"runtime:powermove/hooks"
+            }
+        }
+    });
+    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
+    let hooked = panels
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "synthetic-hooks")
+        .expect("a hooked publication");
+    assert!(
+        hooked
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Hooked 7")
+    );
+    // Unmounting frees the id for a rebuilt graph.
+    assert!(panels.mount_extension("synthetic-hooks", &hooks).is_err());
+    panels.unmount_extension("synthetic-hooks");
+    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
     assert!(panels.mount_extension("timeline", &graph).is_err());
     let errors = panels.take_errors();
     assert!(errors.is_empty(), "{errors:?}");

@@ -447,7 +447,9 @@ async function mountExtension(id: string, text: string) {
     { generation: identity.generation },
   );
   await namespace.activate?.({ host, id });
-  await root.render(namespace.view());
+  // A component, so the view's hooks have one to belong to.
+  const View = namespace.view;
+  await root.render(<View />);
   await root.flush();
   mounted = { root, dispose: () => root.dispose() };
   return true;

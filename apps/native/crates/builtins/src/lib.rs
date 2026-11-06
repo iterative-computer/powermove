@@ -175,6 +175,14 @@ impl Builtins {
         extensions.insert(id.into(), realm);
         Ok(ticket)
     }
+    /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
+    /// its writer on the isolate owner; the same id can mount again.
+    pub fn unmount_extension(&self, id: &str) {
+        if let Some(realm) = self.extension_realms.lock().unwrap().remove(id) {
+            realm.close();
+        }
+        self.broker.extensions.lock().unwrap().remove(id);
+    }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
         if let Some(realm) = self.realms.get(panel) {
             return Ok(realm.clone());
