@@ -376,6 +376,7 @@ impl CloseFlow {
             call: ShellCall::SaveAs {
                 session: self.current().session.clone(),
                 path,
+                replace: true,
             },
         }]
     }

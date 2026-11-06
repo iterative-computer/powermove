@@ -210,6 +210,73 @@ fn properties_native_binding_writes_kernel_and_retired_selection_rejects_lease()
 }
 
 #[test]
+fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("assets").unwrap());
+    let mut publication = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while publication.is_none() {
+        assert!(Instant::now() < deadline, "the panel publishes a tree");
+        publication = panels
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "assets");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let publication = publication.unwrap();
+    let target = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|node| node.listeners.contains_key("drop"))
+        .expect("the panel declares a drop target")
+        .id;
+    let files = json!(["/synthetic/clip.mov"]);
+    let ticket = panels
+        .event(
+            "assets",
+            publication.generation,
+            publication.surface.revision(),
+            target,
+            "drop",
+            EventDetail {
+                alt_key: Some(false),
+                drag: Some(pm_surface::events::DragData {
+                    types: vec!["public.file-url".into()],
+                    data: std::collections::BTreeMap::from([("public.file-url".to_owned(), files)]),
+                    effect: pm_surface::events::DragEffect::Copy,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    finish(ticket);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let request = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "project.effect")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "{:?}", panels.take_errors());
+        thread::sleep(Duration::from_millis(1));
+    };
+    let effect: pm_panel_media::HostRequest = serde_json::from_value(request.input).unwrap();
+    assert_eq!(
+        effect.effect,
+        pm_panel_media::Effect::Import {
+            files: vec!["/synthetic/clip.mov".into()],
+            folder: None,
+            as_folder: false,
+        }
+    );
+    panels.close();
+}
+
+#[test]
 fn application_agent_and_settings_mount_without_creating_a_project() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let mut panels = Builtins::application(actor.handle(), || {}).unwrap();
@@ -973,7 +1040,14 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
     let stored_version = first.version().to_owned();
     let stored=RetainedAsset{id:"imported-image".into(),metadata:data::model(&json!({"name":"Synthetic.bin","kind":"image","mimeType":"application/octet-stream","w":80,"h":40,"future":{"keep":true}})).unwrap(),original:first,previous:None};
     let ack = panels
-        .admit_media(&catalog.stamp, vec![stored], None, None, Caller::native())
+        .admit_media(
+            &catalog.stamp,
+            vec![stored],
+            None,
+            None,
+            vec![],
+            Caller::native(),
+        )
         .unwrap()
         .wait()
         .unwrap()
@@ -993,7 +1067,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
         .unwrap();
     let replacement = original("replacement.bin", b"replacement complete original");
     let replacement_version = replacement.version().to_owned();
-    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),Caller::native()).unwrap().wait().unwrap().unwrap();
+    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
     assert!(ack.notice.is_none(), "{ack:?}");
     let relinked = kernel.published("synthetic").unwrap();
@@ -1040,6 +1114,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
                 }],
                 None,
                 None,
+                vec![],
                 Caller::native()
             )
             .is_err()
@@ -1319,6 +1394,67 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
             .any(|n| n.text.contains("Resolved"))
     );
     assert!(panels.take_errors().is_empty());
+    actor.shutdown();
+}
+#[test]
+fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_layer_ids() {
+    let actor = actor();
+    let handle = actor.handle();
+    let mut old = Builtins::new(handle.clone(), "synthetic", || {}).unwrap();
+    finish(old.mount("timeline").unwrap());
+    let before = handle.published("synthetic").unwrap();
+    let source = before.snapshot.document.to_value().unwrap();
+    assert!(handle.close("synthetic").wait().unwrap());
+    handle
+        .open("synthetic", OpenSource::Untitled(source))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let reopened = handle.published("synthetic").unwrap();
+    assert_ne!(before.snapshot.doc_id, reopened.snapshot.doc_id);
+    let intent = serde_json::json!({"type":"switch", "id":pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer("a".into())), "name":"visibility"});
+    let ticket = old.timeline_action(intent.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let rejected = loop {
+        if let Some(result) = ticket.try_take() {
+            break result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retired native worker must finish"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert!(
+        rejected.is_err(),
+        "Old rendered actions must not be rebound: {rejected:?}"
+    );
+    let after = handle.published("synthetic").unwrap();
+    assert_eq!(
+        after.snapshot.document.to_value(),
+        reopened.snapshot.document.to_value()
+    );
+    assert_eq!(after.history.entries, reopened.history.entries);
+    assert_eq!(after.dirty, reopened.dirty);
+    let mut current = Builtins::new(handle.clone(), "synthetic", || {}).unwrap();
+    finish(current.mount("timeline").unwrap());
+    finish(current.timeline_action(intent).unwrap());
+    let changed = handle.published("synthetic").unwrap();
+    let open = changed.snapshot.open_comp();
+    assert_eq!(
+        pm_kernel::model::comp_node(changed.snapshot.root().unwrap(), open.as_deref())
+            .unwrap()
+            .get("layers")
+            .unwrap()
+            .at(0)
+            .unwrap()
+            .get("on")
+            .map(pm_model::Node::to_value),
+        Some(pm_model::Value::Bool(false))
+    );
+    assert_eq!(changed.history.entries, reopened.history.entries + 1);
+    old.close();
+    current.close();
     actor.shutdown();
 }
 

@@ -271,5 +271,30 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(helper, {})
 
 
+class AdhocProofSafetyTests(unittest.TestCase):
+    def test_adhoc_cannot_sign_production_or_owner_bundle(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp).resolve() / "Production.app"
+            (app / "Contents/Resources").mkdir(parents=True)
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.zellzoi.powermove"}))
+            (app / "Contents/Resources/Assets.car").write_bytes(b"synthetic")
+            with patch.object(package, "macos"), patch.object(package, "run") as calls:
+                with self.assertRaises(ValueError):
+                    package.sign(app, adhoc_proof=True)
+                calls.assert_not_called()
+
+    def test_adhoc_proof_never_uses_identity_or_timestamp_service(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp).resolve() / "Synthetic.app"
+            (app / "Contents/Resources").mkdir(parents=True)
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.powermove.signature-proof"}))
+            (app / "Contents/Resources/Assets.car").write_bytes(b"synthetic")
+            with patch.object(package, "macos"), patch.object(package, "run") as calls:
+                package.sign(app, identity="must-never-use", adhoc_proof=True)
+                sign = calls.call_args_list[0].args[0]
+                self.assertIn("--timestamp=none", sign)
+                self.assertEqual(sign[sign.index("--sign") + 1], "-")
+
+
 if __name__ == "__main__":
     unittest.main()

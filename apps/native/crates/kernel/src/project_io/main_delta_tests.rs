@@ -72,6 +72,60 @@ fn backup_budgets_archive_every_old_generation_without_replacing_archived_bytes(
     assert_eq!(std::fs::read_dir(archive).unwrap().count(), 2);
 }
 
+#[test]
+fn a_full_disk_reclaims_archived_generations_oldest_first_and_the_save_lands() {
+    let dir = Scratch::new();
+    let root = dir.path("backups");
+    let policy = BackupPolicy::new(root.join("this"));
+    let archive = policy.directory.join("archived");
+    let other = root.join("other/archived");
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let active = policy.directory.join("2026-01-01T00-00-00-000Z.pmv");
+    let oldest = other.join("2026-02-01T00-00-00-000Z.pmv");
+    let older = archive.join("2026-03-01T00-00-00-000Z.pmv");
+    let newest = archive.join("2026-04-01T00-00-00-000Z.pmv-1.collision");
+    let unnamed = archive.join("notes.pmv");
+    for file in [&active, &oldest, &older, &newest, &unnamed] {
+        std::fs::write(file, b"0123456789").unwrap();
+    }
+    assert_eq!(durable::reclaim_archived(&policy, 11), 20);
+    assert!(!oldest.exists() && !older.exists());
+    assert!(newest.exists(), "only what was needed");
+    assert!(
+        active.exists() && unnamed.exists(),
+        "active and unknown stay"
+    );
+
+    let path = dir.path("project.pmv");
+    let saved = |fault| {
+        let mut store = DocumentStore::new_untitled(fixture().get("proj").unwrap().clone());
+        store.prepare_save(
+            SaveTarget::SaveAs {
+                path: path.clone(),
+                replace: true,
+            },
+            SaveOptions {
+                backups: Some(policy.clone()),
+                fault: Some(fault),
+                ..Default::default()
+            },
+        )
+    };
+    // Nothing left to reclaim would not retry: the space error comes back.
+    let failed = saved(WriteFault::DiskFullAfter(1)).unwrap().run();
+    assert!(
+        failed.as_ref().is_err_and(|e| e.is_disk_full()),
+        "{:?}",
+        failed.err()
+    );
+    assert!(!newest.exists(), "the failed save reclaimed the rest");
+    std::fs::write(&newest, b"0123456789").unwrap();
+    saved(WriteFault::DiskFullOnce(1)).unwrap().run().unwrap();
+    assert!(path.exists(), "the retry published the file");
+    assert!(!newest.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn backup_retention_refuses_linked_archive_and_keeps_the_original_generation() {

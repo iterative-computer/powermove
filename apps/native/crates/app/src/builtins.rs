@@ -8,9 +8,15 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
+type MediaProbeInputs = (
+    crate::media_refresh::Inputs,
+    BTreeMap<String, std::path::PathBuf>,
+    BTreeMap<String, std::path::PathBuf>,
+);
 #[derive(Default)]
 pub struct Host {
     project: Option<String>,
+    document: Option<u64>,
     application: bool,
     pub runtime: Option<Arc<Builtins>>,
     pending: BTreeMap<String, Publication>,
@@ -28,9 +34,19 @@ pub struct Host {
     pub last_time: f64,
     pub last_playing: bool,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
-    media_probe_key: String,
+    media_probes: Arc<pm_builtins::delivery::MediaProbes>,
+    /// The media inputs behind `media_runtime`, and the worker observing them.
+    media_probed: Option<MediaProbeInputs>,
+    media_probe_serial: u64,
     updating: bool,
     again: bool,
+}
+fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
+    pm_panel_media::Stamp {
+        project: published.project.clone(),
+        document: published.snapshot.doc_id,
+        revision: published.revision(),
+    }
 }
 impl Controller {
     pub fn start_builtins(&mut self, cx: &mut Context<Self>) {
@@ -40,7 +56,9 @@ impl Controller {
             .as_ref()
             .map(|s| s.project.clone())
             .unwrap_or_else(|| "builtin-application".into());
+        let document = self.published.as_ref().map(|p| p.snapshot.doc_id);
         if self.builtins.project.as_ref() == Some(&project)
+            && self.builtins.document == document
             && self.builtins.application == application
         {
             return;
@@ -55,6 +73,7 @@ impl Controller {
         self.builtins = Host::default();
         self.builtins.windows = windows;
         self.builtins.project = Some(project.clone());
+        self.builtins.document = document;
         self.builtins.application = application;
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
@@ -133,23 +152,29 @@ impl Controller {
         })
         .detach();
     }
+    /// Readiness depends only on the media inputs, so an edit that left them
+    /// alone moves the observation to its revision without any worker.
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
         let Some(published) = self.published.clone() else {
             return;
         };
+        let inputs = crate::media_refresh::Inputs::published(&published);
         let originals = self.media.originals.clone();
         let proxies = self.media.proxies.clone();
-        let key = format!(
-            "{}:{}:{:?}:{:?}",
-            published.snapshot.doc_id,
-            published.revision(),
-            originals,
-            proxies
-        );
-        if self.builtins.media_probe_key == key {
+        let stamp = media_stamp(&published);
+        if self
+            .builtins
+            .media_probed
+            .as_ref()
+            .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
+        {
+            self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
             return;
         }
-        self.builtins.media_probe_key = key.clone();
+        self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
+        self.builtins.media_probe_serial += 1;
+        let serial = self.builtins.media_probe_serial;
+        let probes = self.builtins.media_probes.clone();
         cx.spawn(async move |this, cx| {
             let observed = cx
                 .background_executor()
@@ -159,16 +184,20 @@ impl Controller {
                         &published.snapshot,
                         &originals,
                         &proxies,
+                        &probes,
                     )
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if v.builtins.media_probe_key != key {
+                if v.builtins.media_probe_serial != serial {
                     return;
                 }
                 match observed {
                     Ok(observed) => {
-                        v.builtins.media_runtime = observed;
+                        v.builtins.media_runtime = match &v.published {
+                            Some(p) => observed.rebound(media_stamp(p)),
+                            None => observed,
+                        };
                         v.update_builtins(cx);
                     }
                     Err(error) => {
@@ -523,6 +552,22 @@ impl Controller {
                                 pm_panel_media::Effect::CompositionSettings(_) => {
                                     self.show_builtin("settings", window, cx)
                                 }
+                                pm_panel_media::Effect::PickFiles { replace } => {
+                                    let place = replace.is_none();
+                                    self.pick_media(replace, place, cx)
+                                }
+                                pm_panel_media::Effect::PickFolder { folder } => {
+                                    self.pick_media_folder(folder, cx)
+                                }
+                                // A drop on the panel: assets only, no layers. Option
+                                // separates a folder from a sequence, and no sequence
+                                // imports yet, so it changes nothing here.
+                                pm_panel_media::Effect::Import { files, folder, .. } => self
+                                    .import_to_panel(
+                                        files.into_iter().map(Into::into).collect(),
+                                        folder,
+                                        cx,
+                                    ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -619,6 +664,7 @@ impl Controller {
                         let title = match request.input.as_str() {
                             Some("project") => "Project",
                             Some("general") => "General",
+                            Some("memory") => "Memory",
                             Some("accounts") => "Accounts",
                             Some("transcription") => "Transcription",
                             Some("extensions") => "Extensions",
@@ -644,7 +690,7 @@ impl Controller {
                     let runtime = runtime.clone();
                     crate::v4_native::menu(window, &options, cx, move |index, _| {
                         let value = index
-                            .and_then(|index| selected.get(index))
+                            .and_then(|index| crate::v4_native::menu_item(&selected, index))
                             .and_then(|item| item.get("id"))
                             .cloned()
                             .unwrap_or(Value::Null);
@@ -653,14 +699,14 @@ impl Controller {
                     continue;
                 }
                 "effectMenu" => {
-                    let options = effect_menu(&self.kernel.state());
-                    let selected = crate::v4_native::flatten(&options);
+                    let options = crate::v4_native::effect_options(&self.kernel.state());
+                    let selected = options.clone();
                     let runtime = runtime.clone();
                     crate::v4_native::menu(window, &options, cx, move |index, _| {
                         runtime.platform_reply(
                             request.id,
                             Ok(index
-                                .and_then(|index| selected.get(index))
+                                .and_then(|index| crate::v4_native::menu_item(&selected, index))
                                 .and_then(|item| item.get("id"))
                                 .cloned()
                                 .unwrap_or(Value::Null)),
@@ -684,30 +730,6 @@ impl Controller {
             runtime.platform_reply(request.id, result);
         }
     }
-}
-/// One submenu per category, in registration order, as Effect in After Effects.
-fn effect_menu(state: &pm_kernel::state::StateSnapshot) -> Vec<Value> {
-    let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
-    for entry in state.registries.get("effects").into_iter().flatten() {
-        // The last provider of an id wins; earlier registrations stay hidden.
-        if state
-            .provider("effects", &entry.id)
-            .is_none_or(|winner| winner.token != entry.token)
-        {
-            continue;
-        }
-        let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
-        let group = text("group").unwrap_or("Effects");
-        let item = json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id)});
-        match groups.iter_mut().find(|(name, _)| name == group) {
-            Some((_, items)) => items.push(item),
-            None => groups.push((group.to_owned(), vec![item])),
-        }
-    }
-    groups
-        .into_iter()
-        .map(|(label, children)| json!({"label":label,"children":children}))
-        .collect()
 }
 struct SurfaceWindow {
     owner: Entity<Controller>,

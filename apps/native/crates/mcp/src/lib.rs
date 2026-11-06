@@ -100,6 +100,21 @@ pub fn failure(error: Error) -> Value {
     // stay on dispatch/Result; wrapping them in text changes agent-visible errors.
     json!({"content":[{"type":"text","text":error.message}],"isError":true})
 }
+/// `Object.values(assets)`: authored order, as the Project panel lists them.
+pub(crate) fn assets_in_order(project: &Value) -> Vec<&Value> {
+    use pm_kernel::asset_order::{FIELD, arrange};
+    let Some(assets) = project["assets"].as_object() else {
+        return Vec::new();
+    };
+    let keys = assets.keys().map(|id| id.as_str().into()).collect();
+    arrange(keys, &|id| {
+        project[FIELD].get(id.as_str()?).and_then(Value::as_f64)
+    })
+    .iter()
+    .filter_map(|id| assets.get(id.as_str()?))
+    .collect()
+}
+
 pub(crate) fn model(value: &Value) -> pm_model::Value {
     pm_model::json::parse(&value.to_string()).expect("valid JSON")
 }

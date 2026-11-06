@@ -240,6 +240,10 @@ pub struct DocumentStore {
     gesture: Option<Gesture>,
     state_token: u64,
     saved_token: u64,
+    /// Changes history cannot return from: direct writes, Undo that skipped a
+    /// stale operation. History position alone proves nothing past one.
+    outside_writes: u64,
+    saved_outside_writes: u64,
     metadata_token: u64,
     saved_metadata_token: u64,
     save_metadata_token: u64,
@@ -327,6 +331,8 @@ impl DocumentStore {
             gesture: None,
             state_token: token,
             saved_token: token,
+            outside_writes: 0,
+            saved_outside_writes: 0,
             metadata_token: 0,
             saved_metadata_token: 0,
             save_metadata_token: 0,
@@ -449,9 +455,10 @@ impl DocumentStore {
     ///
     /// Difference: the old app compared content fingerprints, so retyping a
     /// value back by hand also became clean; here only reaching the same
-    /// history state does (see `docs/gpui/core-api.md`).
+    /// history state does (see `docs/gpui/core-api.md`), and only with no
+    /// write outside history since that state was saved.
     pub fn is_dirty(&self) -> bool {
-        self.state_token != self.saved_token
+        self.state_token != self.saved_token || self.outside_writes != self.saved_outside_writes
     }
 
     /// Whether a save of this document is running.
@@ -686,13 +693,15 @@ impl DocumentStore {
             .iter()
             .chain(staged.inverse.iter())
             .any(|op| !matches!(op, Op::Leaf(_)));
-        let saved = structural.then(|| {
-            scoped_patches(
-                self.current.root(),
-                staged.document.root(),
-                staged.scopes.clone(),
-            )
-        });
+        let saved = structural
+            .then(|| {
+                saved_form(
+                    self.current.root(),
+                    staged.document.root(),
+                    staged.scopes.clone(),
+                )
+            })
+            .flatten();
         let revision = staged.document.revision();
         let forward: Arc<[Op]> = staged.forward.clone().into();
         let record = self.history.push(
@@ -725,30 +734,12 @@ impl DocumentStore {
         let record = self
             .history
             .peek_undo()
-            .ok_or(TransactionError::NothingToUndo)?
-            .clone();
-        if record.selection.is_some() {
-            self.kernel_undo()?;
-            return Ok(self.revision());
-        }
-        if !record.is_document() {
+            .ok_or(TransactionError::NothingToUndo)?;
+        if record.selection.is_none() && !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_ops(&record.inverse, false)?;
-        let revision = staged.document.revision();
-        self.publish(
-            staged.document,
-            record.inverse.clone(),
-            ChangeCause::Undo {
-                label: record.label.clone(),
-            },
-        );
-        self.history.mark_undone();
-        self.history_owned = true;
-        self.tap(|_| Tap::Undo { external: false });
-        self.set_state_token(self.history.state_token());
-        self.emit(StoreEvent::HistoryChanged);
-        Ok(revision)
+        self.kernel_undo()?;
+        Ok(self.revision())
     }
 
     /// `PM.hist.redo()`.
@@ -759,30 +750,12 @@ impl DocumentStore {
         let record = self
             .history
             .peek_redo()
-            .ok_or(TransactionError::NothingToRedo)?
-            .clone();
-        if record.selection.is_some() {
-            self.kernel_redo()?;
-            return Ok(self.revision());
-        }
-        if !record.is_document() {
+            .ok_or(TransactionError::NothingToRedo)?;
+        if record.selection.is_none() && !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_ops(&record.forward, false)?;
-        let revision = staged.document.revision();
-        self.publish(
-            staged.document,
-            record.forward.clone(),
-            ChangeCause::Redo {
-                label: record.label.clone(),
-            },
-        );
-        self.history.mark_redone();
-        self.history_owned = true;
-        self.tap(|_| Tap::Redo { external: false });
-        self.set_state_token(self.history.state_token());
-        self.emit(StoreEvent::HistoryChanged);
-        Ok(revision)
+        self.kernel_redo()?;
+        Ok(self.revision())
     }
 
     /// A position to squash back to ([`DocumentStore::squash_since`]).
@@ -920,14 +893,21 @@ impl DocumentStore {
     pub fn commit_gesture(&mut self, id: GestureId) -> Result<Option<u64>, TransactionError> {
         self.gesture_mut(id)?;
         let gesture = self.gesture.take().expect("checked");
-        let (forward, backward) =
-            scoped_patches(gesture.base.root(), self.current.root(), gesture.scopes);
-        if forward == backward {
+        let (forward, inverse) =
+            match saved_form(gesture.base.root(), self.current.root(), gesture.scopes) {
+                Some((forward, backward)) => (
+                    forward.into_iter().map(Op::Leaf).collect::<Vec<_>>(),
+                    backward.into_iter().map(Op::Leaf).collect::<Vec<_>>(),
+                ),
+                None => (
+                    diff_node_ops(gesture.base.root(), self.current.root()),
+                    diff_node_ops(self.current.root(), gesture.base.root()),
+                ),
+            };
+        if forward == inverse || forward.is_empty() {
             self.set_state_token(gesture.base_token);
             return Ok(None);
         }
-        let forward: Vec<Op> = forward.into_iter().map(Op::Leaf).collect();
-        let inverse: Vec<Op> = backward.into_iter().map(Op::Leaf).collect();
         let record = self.history.push(
             gesture.label,
             gesture.origin,
@@ -951,14 +931,9 @@ impl DocumentStore {
             Some(g) if g.id == id => g,
             _ => return Err(TransactionError::NoSuchGesture),
         };
-        let (forward, backward) = scoped_patches(
-            gesture.base.root(),
-            self.current.root(),
-            gesture.scopes.clone(),
-        );
+        let ops = diff_node_ops(self.current.root(), gesture.base.root());
         let base_token = gesture.base_token;
-        if forward != backward {
-            let ops: Vec<Op> = backward.into_iter().map(Op::Leaf).collect();
+        if !ops.is_empty() {
             let staged = self.stage_ops(&ops, false)?;
             self.publish(
                 staged.document,
@@ -1050,6 +1025,15 @@ impl DocumentStore {
                 forward.push(op);
             }
         }
+        for op in crate::asset_order::reconcile(start, root.as_ref(), &forward) {
+            let (inv, scope) = capture_inverse(root.as_ref(), &op);
+            let (next, did) = apply_one(root, &op, revision)?;
+            root = next;
+            changed |= did;
+            inverse.push(inv);
+            scopes.push(scope);
+            forward.push(op);
+        }
         inverse.reverse();
         let document = Document::from_root(root, revision);
         validate(&document, &forward)?;
@@ -1065,7 +1049,7 @@ impl DocumentStore {
                 .is_some_and(|old| old.revision != item.revision || old.length() != item.length())
             {
                 return Err(TransactionError::Invalid(
-                    "A retained 3D import already owns this asset ID".into(),
+                    "Retained media already owns this asset ID".into(),
                 ));
             }
         }
@@ -1077,6 +1061,64 @@ impl DocumentStore {
             scopes,
             changed,
         })
+    }
+
+    /// Undo and Redo: applies what still matches. A write outside history can
+    /// remove what an id-keyed operation names; that operation is skipped, as
+    /// a leaf patch without its parent is, and the entry stays usable. The
+    /// result's `forward` is what applied, the only thing that may be
+    /// published: journal replay refuses an operation that does not apply.
+    /// `inverse` is filled only when something was skipped.
+    fn stage_history_ops(&self, ops: &[Op]) -> Result<Staged, TransactionError> {
+        match self.stage_ops(ops, false) {
+            Err(TransactionError::Patch(_)) => {}
+            staged => return staged,
+        }
+        let revision = self.revision() + 1;
+        let mut root = self.current.root().cloned();
+        let mut applied = Vec::with_capacity(ops.len());
+        let mut inverse = Vec::with_capacity(ops.len());
+        let mut changed = false;
+        for op in ops {
+            let (undo, _) = capture_inverse(root.as_ref(), op);
+            if let Ok((next, did)) = apply_one(root.clone(), op, revision) {
+                root = next;
+                changed |= did;
+                applied.push(op.clone());
+                inverse.push(undo);
+            }
+        }
+        inverse.reverse();
+        let document = Document::from_root(root, revision);
+        validate(&document, &applied)?;
+        Ok(Staged {
+            media: vec![],
+            document,
+            forward: applied,
+            inverse,
+            scopes: vec![],
+            changed,
+        })
+    }
+
+    /// One Undo or Redo of a document entry: publishes what applied and
+    /// returns it with the operations reversing it (`reverse` when all did).
+    fn history_step(
+        &mut self,
+        ops: &Arc<[Op]>,
+        reverse: &Arc<[Op]>,
+        cause: ChangeCause,
+    ) -> Result<HistoryStep, TransactionError> {
+        let staged = self.stage_history_ops(ops)?;
+        let skipped = staged.forward.len() != ops.len();
+        let applied: Arc<[Op]> = staged.forward.into();
+        self.publish(staged.document, applied.clone(), cause);
+        if !skipped {
+            return Ok((applied, reverse.clone()));
+        }
+        // This position no longer names the document it recorded.
+        self.note_outside_write();
+        Ok((applied, staged.inverse.into()))
     }
 
     /// Stages raw operations (undo, redo, cancel, restore). `capture`
@@ -1121,14 +1163,15 @@ impl DocumentStore {
         } else {
             None
         };
-        let ops = admitted.as_deref().unwrap_or(ops);
+        let mut forward = admitted.unwrap_or_else(|| ops.to_vec());
         let revision = self.revision() + 1;
+        let start = root.clone();
         let mut root = root;
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
         if capture {
-            for op in ops {
+            for op in &forward {
                 let (inv, scope) = capture_inverse(root.as_ref(), op);
                 let (next, did) = apply_one(root, op, revision)?;
                 root = next;
@@ -1136,21 +1179,42 @@ impl DocumentStore {
                 inverse.push(inv);
                 scopes.push(scope);
             }
+            let order = crate::asset_order::reconcile(start.as_ref(), root.as_ref(), &forward);
+            for op in order {
+                let (inv, scope) = capture_inverse(root.as_ref(), &op);
+                let (next, did) = apply_one(root, &op, revision)?;
+                root = next;
+                changed |= did;
+                inverse.push(inv);
+                scopes.push(scope);
+                forward.push(op);
+            }
             inverse.reverse();
+            // An entry holds what the edit changed, not the values it replaced:
+            // a member written whole for one new layer costs that layer.
+            if forward.iter().any(writes_large_value) {
+                forward = diff_node_ops(start.as_ref(), root.as_ref());
+                inverse = diff_node_ops(root.as_ref(), start.as_ref());
+                scopes = forward
+                    .iter()
+                    .chain(&inverse)
+                    .map(|op| op.path().to_vec())
+                    .collect();
+            }
         } else {
             let mut scratch = Document::from_root(root, revision - 1);
             changed = scratch
-                .apply_ops_at(ops, revision)
+                .apply_ops_at(&forward, revision)
                 .map_err(|e| TransactionError::Patch(e.to_string()))?
                 .changed;
             root = scratch.root().cloned();
         }
         let document = Document::from_root(root, revision);
-        validate(&document, ops)?;
+        validate(&document, &forward)?;
         Ok(Staged {
             media: vec![],
             document,
-            forward: ops.to_vec(),
+            forward,
             inverse,
             scopes,
             changed,
@@ -1214,6 +1278,14 @@ impl DocumentStore {
         let now = self.is_dirty();
         if was != now {
             self.emit(StoreEvent::DirtyChanged(now));
+        }
+    }
+
+    fn note_outside_write(&mut self) {
+        let was = self.is_dirty();
+        self.outside_writes += 1;
+        if !was {
+            self.emit(StoreEvent::DirtyChanged(true));
         }
     }
 
@@ -1366,6 +1438,7 @@ impl DocumentStore {
             revision: self.revision(),
             doc_id: self.doc_id,
             state_token: self.state_token,
+            outside_writes: self.outside_writes,
             document: self.current.clone(),
             had_comps: self.file.envelope.had_comps,
             history,
@@ -1414,6 +1487,7 @@ impl DocumentStore {
         }
         let was = self.is_dirty();
         self.saved_token = receipt.state_token;
+        self.saved_outside_writes = receipt.outside_writes;
         self.saved_metadata_token = self.save_metadata_token;
         let revision = receipt.revision;
         drop(receipt);
@@ -1434,8 +1508,7 @@ impl DocumentStore {
             }
         };
         for record in self.history.records() {
-            if record.saved.is_some() {
-                let (f, b) = record.saved_patches();
+            if let Some((f, b)) = record.saved_form().filter(|_| record.saved.is_some()) {
                 for p in f.iter().chain(b.iter()) {
                     project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
                 }
@@ -1457,9 +1530,13 @@ impl DocumentStore {
         }
         for record in self.history.records() {
             for op in record.forward.iter().chain(record.inverse.iter()) {
-                if let Op::Leaf(p) = op
-                    && let Some(value) = p.value.as_ref()
-                {
+                // A deleted layer's value is what Undo would reinsert.
+                let value = match op {
+                    Op::Leaf(p) => p.value.as_ref(),
+                    Op::Insert { value, .. } => Some(value),
+                    _ => None,
+                };
+                if let Some(value) = value {
                     crate::commands::scene3d::collect_original_assets(value, &mut ids);
                 }
             }
@@ -1477,6 +1554,9 @@ pub(crate) struct Applied {
     /// Where each operation's inverse was captured (forward order).
     pub scopes: Vec<Vec<PathPart>>,
 }
+
+/// The operations a history step applied, and those reversing them.
+type HistoryStep = (Arc<[Op]>, Arc<[Op]>);
 
 /// What a kernel undo/redo step did ([`DocumentStore::kernel_undo`]).
 #[derive(Clone, Debug)]
@@ -1595,6 +1675,15 @@ impl DocumentStore {
             .map_err(TransactionError::Invalid)?;
         let ops = diff_node_ops(self.current.root(), Some(&after));
         let mut staged = self.stage_ops(&ops, true)?;
+        if !admission.place.is_empty() {
+            let placed =
+                self.stage_commands_on(staged.document.root(), &admission.place, origin)?;
+            staged.forward.extend(placed.forward);
+            staged.inverse.splice(0..0, placed.inverse);
+            staged.scopes.extend(placed.scopes);
+            staged.changed |= placed.changed;
+            staged.document = placed.document;
+        }
         if !staged.changed {
             return Ok(None);
         }
@@ -1668,6 +1757,11 @@ impl DocumentStore {
     /// External entries with a cleanup that retired.
     pub(crate) fn take_retired(&mut self) -> Vec<crate::history::ExternalRef> {
         self.history.take_retired()
+    }
+
+    /// A write no history entry covers.
+    pub(crate) fn kernel_outside_write(&mut self) {
+        self.note_outside_write();
     }
 
     pub(crate) fn kernel_state_token(&self) -> u64 {
@@ -1783,7 +1877,9 @@ impl DocumentStore {
             .iter()
             .chain(inverse.iter())
             .any(|op| !matches!(op, Op::Leaf(_)));
-        let saved = structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
+        let saved = structural
+            .then(|| saved_form(before.root(), self.current.root(), scopes))
+            .flatten();
         let record = self
             .history
             .push(label, origin, forward, inverse, saved, self.revision());
@@ -1854,22 +1950,21 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_ops(&record.inverse, false)?;
-        self.publish(
-            staged.document,
-            record.inverse.clone(),
+        let (ops, reverse) = self.history_step(
+            &record.inverse,
+            &record.forward,
             ChangeCause::Undo {
                 label: record.label.clone(),
             },
-        );
+        )?;
         self.history.mark_undone();
         self.history_owned = true;
         self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            ops: record.inverse.clone(),
-            reverse: record.forward.clone(),
+            ops,
+            reverse,
             label: record.label,
         })
     }
@@ -1899,22 +1994,21 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_ops(&record.forward, false)?;
-        self.publish(
-            staged.document,
-            record.forward.clone(),
+        let (ops, reverse) = self.history_step(
+            &record.forward,
+            &record.inverse,
             ChangeCause::Redo {
                 label: record.label.clone(),
             },
-        );
+        )?;
         self.history.mark_redone();
         self.history_owned = true;
         self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            ops: record.forward.clone(),
-            reverse: record.inverse.clone(),
+            ops,
+            reverse,
             label: record.label,
         })
     }
@@ -1939,6 +2033,7 @@ impl DocumentStore {
     }
     pub(crate) fn mark_library_saved(&mut self) {
         self.saved_token = self.state_token;
+        self.saved_outside_writes = self.outside_writes;
         self.saved_metadata_token = self.metadata_token;
         self.emit(StoreEvent::Saved {
             revision: self.revision(),
@@ -2083,13 +2178,96 @@ fn same_part(a: &PathPart, b: &PathPart) -> bool {
     a.property_key() == b.property_key()
 }
 
-/// The old app's scoped history entries (`scopedPatches`): for each touched
-/// path not already covered by a shorter one, its value before and after.
-pub(crate) fn scoped_patches(
+/// The most an entry's whole-value form may hold. Past it the entry keeps its
+/// operations only: on a 180 MB project, adding a layer must cost that layer.
+pub(crate) const SAVED_FORM_BYTES: usize = 1 << 20;
+
+/// Whether `node`'s serialized size passes `budget`, which it spends. Stops as
+/// soon as it does, so the check is bounded however large the value is.
+fn spends(node: &Node, budget: &mut usize) -> bool {
+    let cost = match node.kind() {
+        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) => 8,
+        NodeKind::String(s) => s.as_bytes().len() + 2,
+        NodeKind::Array(items) => {
+            *budget = budget.saturating_sub(items.len());
+            return *budget == 0 || items.iter().any(|item| spends(item, budget));
+        }
+        NodeKind::Object(map) => {
+            for (key, value) in map.iter() {
+                *budget = budget.saturating_sub(key.as_bytes().len() + 3);
+                if *budget == 0 || spends(value, budget) {
+                    return true;
+                }
+            }
+            return *budget == 0;
+        }
+    };
+    *budget = budget.saturating_sub(cost);
+    *budget == 0
+}
+
+/// A raw write that replaces a member with a value past the same limit.
+fn writes_large_value(op: &Op) -> bool {
+    let Op::Leaf(patch) = op else { return false };
+    if patch.path.is_empty() {
+        return false;
+    }
+    fn size(value: &Value, budget: &mut usize) -> bool {
+        match value {
+            Value::Array(items) => {
+                *budget = budget.saturating_sub(items.len());
+                *budget == 0 || items.iter().any(|item| size(item, budget))
+            }
+            Value::Object(map) => map.iter().any(|(key, value)| {
+                *budget = budget.saturating_sub(key.as_bytes().len() + 3);
+                *budget == 0 || size(value, budget)
+            }),
+            Value::String(s) => {
+                *budget = budget.saturating_sub(s.as_bytes().len() + 2);
+                *budget == 0
+            }
+            _ => {
+                *budget = budget.saturating_sub(8);
+                *budget == 0
+            }
+        }
+    }
+    let mut budget = SAVED_FORM_BYTES;
+    patch.value.as_ref().is_some_and(|v| size(v, &mut budget))
+}
+
+/// [`scoped_patches`] for what a file stores, or `None` when the values are
+/// too large to keep whole; the entry then saves as operations.
+pub(crate) fn saved_form(
     before: Option<&Node>,
     after: Option<&Node>,
-    mut scopes: Vec<Vec<PathPart>>,
-) -> (Vec<Patch>, Vec<Patch>) {
+    scopes: Vec<Vec<PathPart>>,
+) -> Option<(Vec<Patch>, Vec<Patch>)> {
+    let kept = kept_scopes(scopes);
+    let mut budget = SAVED_FORM_BYTES;
+    for root in [before, after].into_iter().flatten() {
+        for path in &kept {
+            if root.lookup(path).is_some_and(|n| spends(n, &mut budget)) {
+                return None;
+            }
+        }
+    }
+    Some(scoped_patches(before, after, kept))
+}
+
+/// Whether anything changed under `scopes`, without copying what they cover.
+pub(crate) fn scopes_changed(
+    before: Option<&Node>,
+    after: Option<&Node>,
+    scopes: Vec<Vec<PathPart>>,
+) -> bool {
+    kept_scopes(scopes).iter().any(|path| {
+        let at = |root: Option<&Node>| root.and_then(|r| r.lookup(path)).cloned();
+        !diff_node_ops(at(before).as_ref(), at(after).as_ref()).is_empty()
+    })
+}
+
+fn kept_scopes(mut scopes: Vec<Vec<PathPart>>) -> Vec<Vec<PathPart>> {
     scopes.sort_by_key(Vec::len);
     let mut kept: Vec<Vec<PathPart>> = Vec::new();
     for path in scopes {
@@ -2100,6 +2278,17 @@ pub(crate) fn scoped_patches(
             kept.push(path);
         }
     }
+    kept
+}
+
+/// The old app's scoped history entries (`scopedPatches`): for each touched
+/// path not already covered by a shorter one, its value before and after.
+pub(crate) fn scoped_patches(
+    before: Option<&Node>,
+    after: Option<&Node>,
+    scopes: Vec<Vec<PathPart>>,
+) -> (Vec<Patch>, Vec<Patch>) {
+    let kept = kept_scopes(scopes);
     let mut forward = Vec::new();
     let mut backward = Vec::new();
     for path in kept {

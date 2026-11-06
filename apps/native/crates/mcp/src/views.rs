@@ -172,10 +172,7 @@ pub fn project_state_data(
         }
         page.push(item);
     }
-    let assets = p["assets"]
-        .as_object()
-        .map(|o| o.values().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let assets = crate::assets_in_order(&p);
     let media = if index_only {
         vec![]
     } else {

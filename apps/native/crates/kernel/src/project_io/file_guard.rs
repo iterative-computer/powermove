@@ -208,13 +208,28 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
         return true;
     };
     let source = saved.get("history").unwrap_or(saved);
-    if source
-        .get("entries")
-        .and_then(Value::as_array)
-        .is_some_and(|entries| entries.len() != history.records().len())
-    {
+    let entries = source.get("entries").and_then(Value::as_array);
+    if entries.is_some_and(|entries| entries.len() != history.records().len()) {
         // Import can trim history to its budget. A partial inventory is not a
         // proof of legacy readability, including for raw preserved dictionaries.
+        return true;
+    }
+    // Large edits save as id-keyed operations. The shipped reader's
+    // `validPatches` refuses them, dropping the file's whole history.
+    let holds_operations = |entry: &Value| {
+        ["forward", "backward"].iter().any(|side| {
+            entry
+                .get(side)
+                .and_then(Value::as_array)
+                .is_some_and(|ops| {
+                    ops.iter().any(|op| {
+                        let op = op.get("patch").unwrap_or(op);
+                        op.get("op").and_then(Value::as_str).is_some()
+                    })
+                })
+        })
+    };
+    if entries.is_some_and(|entries| entries.iter().any(holds_operations)) {
         return true;
     }
     // Reconstruct each reachable state, not isolated patch values: a leaf
@@ -228,12 +243,17 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
             Box::new(records[history.applied()..].iter())
         };
         for record in steps {
-            let (forward, backward) = record.saved_patches();
-            if state
-                .apply_patches(if undo { &backward } else { &forward }, root.rev())
-                .is_err()
-                || project_needs_native(&state)
-            {
+            let ops = if undo {
+                &record.inverse
+            } else {
+                &record.forward
+            };
+            let mut replay = pm_model::Document::from_root(Some(state), root.rev());
+            if replay.apply_ops_at(ops, root.rev() + 1).is_err() {
+                return true;
+            }
+            state = replay.root().expect("replayed project").clone();
+            if project_needs_native(&state) {
                 return true;
             }
         }

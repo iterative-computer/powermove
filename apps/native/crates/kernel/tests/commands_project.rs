@@ -941,3 +941,48 @@ fn composition_set_fractional_rate_keeps_limits_and_rejects_nonfinite_atomically
         assert_eq!(root(&s), before);
     }
 }
+
+#[test]
+fn asset_folder_move_matches_main_and_undo_keeps_unknown_fields() {
+    let mut value = parse(PROJECT).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "assetFolders",
+        parse(r#"{"f":{"id":"f","name":"Folder","future":true}}"#).unwrap(),
+    );
+    let mut s = DocumentStore::new_untitled(value);
+    let before = root(&s);
+    run(
+        &mut s,
+        MediaCommand::SetAssetFolder {
+            asset_ids: vec!["a1".into(), "missing".into()],
+            folder: Some("f".into()),
+        },
+    );
+    assert_eq!(
+        get(&root(&s), &["assets", "a1", "folder"]).as_str(),
+        Some("f")
+    );
+    s.undo().unwrap();
+    assert_eq!(root(&s), before);
+    s.redo().unwrap();
+    run(
+        &mut s,
+        MediaCommand::SetAssetFolder {
+            asset_ids: vec!["a1".into()],
+            folder: Some("missing".into()),
+        },
+    );
+    assert!(
+        root(&s)
+            .get("assets")
+            .unwrap()
+            .get("a1")
+            .unwrap()
+            .get("folder")
+            .is_none()
+    );
+    assert_eq!(
+        get(&root(&s), &["assetFolders", "f", "future"]),
+        &Value::Bool(true)
+    );
+}
