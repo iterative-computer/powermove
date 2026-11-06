@@ -78,6 +78,7 @@ impl PreparedEdit {
         &self,
         caller: Caller,
         bindings: Vec<pm_kernel::MediaBinding>,
+        place: Vec<pm_kernel::Command>,
     ) -> Request {
         Request::new(
             caller,
@@ -86,6 +87,7 @@ impl PreparedEdit {
                 project: self.next.clone(),
                 label: self.label.clone(),
                 bindings,
+                place,
             }),
         )
         .with_document(self.stamp.document)

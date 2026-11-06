@@ -1,9 +1,10 @@
-//! Import Media. Probing and byte retention run on the caller's worker; admission
-//! goes through the kernel actor with `RetainedAsset` receipts, one Undo step.
+//! Import Media. Probing and byte retention run on the caller's worker. The
+//! kernel admits `RetainedAsset` receipts and any placed layers as one
+//! transaction: one Undo step, and no asset without its layer.
 use crate::{Builtins, RetainedAsset};
 use pm_kernel::{
-    Call, Caller, Command, LayerCommand, Reply, Request, SelectionCall, WriteBody,
-    media_archive::Archive,
+    Caller, Command, KernelError, LayerCommand, Published, Reply, Request, SelectionCall,
+    TransactionError, media_archive::Archive,
 };
 use pm_model::{Map, Value};
 use serde_json::json;
@@ -162,8 +163,13 @@ impl Outcome {
 }
 const SWITCHED: &str =
     "Import stopped because you switched projects · import again in the intended project";
+const EDIT_OPEN: &str = "Finish the current edit, then import again";
 /// Concurrent edits move the revision; the receipts stay valid across retries.
 const ADMIT_ATTEMPTS: usize = 8;
+/// An open edit or drag refuses admission. Bytes are already retained, so wait
+/// it out on this worker: 10 seconds, in steps.
+const EDIT_WAITS: usize = 100;
+const EDIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Builtins {
     /// Blocks the caller for probing, copying and the actor's reply. Run it on
@@ -226,27 +232,31 @@ impl Builtins {
         if items.is_empty() {
             return Ok(outcome);
         }
-        let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
         let names: Vec<String> = items
             .iter()
             .filter_map(|item| Some(item.metadata.get("name")?.as_str()?.to_owned()))
             .collect();
-        let mut attempt = 0;
-        loop {
+        let (mut attempt, mut waits) = (0, 0);
+        let layers = loop {
             attempt += 1;
             let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
             if published.snapshot.doc_id != document {
                 return Err(SWITCHED.into());
             }
             let stamp = pm_panel_media::Catalog::published(&published)
-                .map_err(|e| format!("{e:?}"))?
+                .map_err(|_| "The project's media could not be read")?
                 .stamp;
+            let (layers, place) = match request.place_at.filter(|_| request.replace.is_none()) {
+                Some(at) => placement(&published, &items, at).ok_or(SWITCHED)?,
+                None => (vec![], vec![]),
+            };
             let reply = self
                 .admit_media(
                     &stamp,
                     items.clone(),
                     request.folder.clone(),
                     request.replace.clone(),
+                    place,
                     Caller::native(),
                 )?
                 .wait()
@@ -256,131 +266,129 @@ impl Builtins {
                 .kernel
                 .published(&project)
                 .is_some_and(|p| p.revision() != stamp.revision);
-            match reply {
-                Ok(ack) if !matches!(ack.reply, Reply::Throw(_)) => break,
-                _ if stale && attempt < ADMIT_ATTEMPTS => continue,
-                Ok(ack) => return Err(format!("{:?}", ack.reply)),
+            match reply.map(|ack| ack.reply) {
+                Ok(Reply::Throw(error)) if edit_open(&error) => {
+                    waits += 1;
+                    if cancel.load(Ordering::Acquire) {
+                        outcome.cancelled = true;
+                        return Ok(outcome);
+                    }
+                    if waits >= EDIT_WAITS {
+                        return Err(EDIT_OPEN.into());
+                    }
+                    attempt -= 1;
+                    std::thread::sleep(EDIT_WAIT);
+                }
+                Ok(Reply::Throw(_)) if stale && attempt < ADMIT_ATTEMPTS => {}
+                Ok(Reply::Throw(error)) => return Err(error.to_string()),
+                Ok(_) => break layers,
+                Err(_) if stale && attempt < ADMIT_ATTEMPTS => {}
                 Err(error) => return Err(error.to_string()),
             }
-        }
-        if let Some(at) = request.place_at.filter(|_| request.replace.is_none()) {
-            self.place_layers(&project, &ids, at)?;
+        };
+        if !layers.is_empty() {
+            // The import landed; a refused selection does not undo that.
+            let selection = SelectionCall::Layers {
+                ids: layers,
+                add: false,
+            };
+            let request = Request::new(Caller::native(), selection);
+            let _ = self.broker.kernel.call(&project, request).wait();
         }
         outcome.imported = names;
         Ok(outcome)
     }
+}
 
-    /// `PM.commandForAsset` for each imported asset, as one Undo step.
-    fn place_layers(&self, project: &str, ids: &[String], at: f64) -> Result<(), String> {
-        let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
-        let root = published.snapshot.root().ok_or(SWITCHED)?;
-        let open = published.snapshot.open_comp();
-        let composition = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
-        let number = |key: &str, default: f64| {
-            composition
-                .get(key)
-                .and_then(|n| n.to_value().as_f64())
-                .unwrap_or(default)
-        };
-        let (fps, dur, w, h) = (
-            number("fps", 30.),
-            number("dur", 1.),
-            number("w", 1920.),
-            number("h", 1080.),
-        );
-        let mut commands: Vec<Command> = vec![];
-        let mut layers = vec![];
-        for id in ids {
-            let asset = root
-                .get("assets")
-                .and_then(|a| a.get(id))
-                .ok_or("The media item is no longer in the project")?
-                .to_value();
-            let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
-            let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
-            let mut content = Map::new();
-            content.insert("asset", Value::from(id.as_str()));
-            match kind {
-                "audio" => {
-                    for (key, value) in
-                        [("trim", 0.), ("gain", 1.), ("fadeIn", 0.), ("fadeOut", 0.)]
-                    {
-                        content.insert(key, Value::from(value));
-                    }
+/// What a transient edit refuses, as opposed to what retrying cannot fix.
+fn edit_open(error: &KernelError) -> bool {
+    matches!(
+        error,
+        KernelError::Guard(_) | KernelError::Transaction(TransactionError::GestureInProgress)
+    )
+}
+
+/// `PM.commandForAsset` for each imported asset: new layer ids and the
+/// commands adding them at `at`. `None`: no project to place in.
+fn placement(
+    published: &Published,
+    items: &[RetainedAsset],
+    at: f64,
+) -> Option<(Vec<String>, Vec<Command>)> {
+    let root = published.snapshot.root()?;
+    let open = published.snapshot.open_comp();
+    let composition = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+    let number = |key: &str, default: f64| {
+        composition
+            .get(key)
+            .and_then(|n| n.to_value().as_f64())
+            .unwrap_or(default)
+    };
+    let (fps, dur, w, h) = (
+        number("fps", 30.),
+        number("dur", 1.),
+        number("w", 1920.),
+        number("h", 1080.),
+    );
+    let mut commands: Vec<Command> = vec![];
+    let mut layers = vec![];
+    for item in items {
+        let (id, asset) = (item.id.as_str(), &item.metadata);
+        let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
+        let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
+        let mut content = Map::new();
+        content.insert("asset", Value::from(id));
+        match kind {
+            "audio" => {
+                for (key, value) in [("trim", 0.), ("gain", 1.), ("fadeIn", 0.), ("fadeOut", 0.)] {
+                    content.insert(key, Value::from(value));
                 }
-                "video" => {
-                    content.insert("trim", Value::from(0.));
-                    content.insert("speed", Value::from(1.));
-                    let audio = asset.get("hasAudio").cloned().unwrap_or(Value::Bool(false));
-                    content.insert("embeddedAudio", audio);
+            }
+            "video" => {
+                content.insert("trim", Value::from(0.));
+                content.insert("speed", Value::from(1.));
+                let audio = asset.get("hasAudio").cloned().unwrap_or(Value::Bool(false));
+                content.insert("embeddedAudio", audio);
+            }
+            _ => {}
+        }
+        if kind != "audio" {
+            content.insert("w", Value::from(field("w").unwrap_or(w)));
+            content.insert("h", Value::from(field("h").unwrap_or(h)));
+        }
+        let layer = pm_kernel::commands::new_id("L");
+        layers.push(layer.clone());
+        let name = asset.get("name").and_then(Value::as_str).map(str::to_owned);
+        commands.push(
+            LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
+                id: layer,
+                layer_type: if kind == "audio" || kind == "video" {
+                    kind
+                } else {
+                    "image"
                 }
-                _ => {}
-            }
-            if kind != "audio" {
-                content.insert("w", Value::from(field("w").unwrap_or(w)));
-                content.insert("h", Value::from(field("h").unwrap_or(h)));
-            }
-            let layer = pm_kernel::commands::new_id("L");
-            layers.push(layer.clone());
-            let name = asset.get("name").and_then(Value::as_str).map(str::to_owned);
-            commands.push(
-                LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
-                    id: layer,
-                    layer_type: if kind == "audio" || kind == "video" {
-                        kind
-                    } else {
-                        "image"
-                    }
-                    .into(),
-                    comp: None,
-                    name,
-                    from: None,
-                    // The whole source, even past the composition end.
-                    duration: Some(field("dur").unwrap_or_else(|| (dur - at).max(1. / fps))),
-                    content,
-                    properties: Map::new(),
-                    color: None,
-                    index: None,
-                    parent: None,
-                    blend: None,
-                    motion_blur: None,
-                    visible: None,
-                    shy: None,
-                    collapsed: None,
-                    time: at,
-                }))
                 .into(),
-            );
-        }
-        let label = match commands.len() {
-            1 => "Import file".to_owned(),
-            n => format!("Import {n} files"),
-        };
-        let call = |call: Call| {
-            self.broker
-                .kernel
-                .call(project, Request::new(Caller::native(), call))
-                .wait()
-                .ok_or_else(|| SWITCHED.to_owned())?
-                .map_err(|e| e.to_string())
-        };
-        let ack = call(Call::Transact {
-            label: Some(label),
-            body: WriteBody::Commands(commands),
-            expected_revision: None,
-        })?;
-        if let Reply::Throw(error) = ack.reply {
-            return Err(error.to_string());
-        }
-        call(
-            SelectionCall::Layers {
-                ids: layers,
-                add: false,
-            }
+                comp: None,
+                name,
+                from: None,
+                // The whole source, even past the composition end.
+                duration: Some(field("dur").unwrap_or_else(|| (dur - at).max(1. / fps))),
+                content,
+                properties: Map::new(),
+                color: None,
+                index: None,
+                parent: None,
+                blend: None,
+                motion_blur: None,
+                visible: None,
+                shy: None,
+                collapsed: None,
+                time: at,
+            }))
             .into(),
-        )?;
-        Ok(())
+        );
     }
+    Some((layers, commands))
 }
 
 #[cfg(test)]
@@ -510,6 +518,142 @@ mod tests {
             published.selection.primary(),
             layer.get("id").and_then(Value::as_str)
         );
+    }
+
+    #[test]
+    fn one_undo_removes_the_layers_and_the_media_of_a_placed_import() {
+        let f = fixture();
+        let sources = vec![write(&f.root, "a.png", PNG), write(&f.root, "b.png", PNG)];
+        f.runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: sources,
+                    place_at: Some(0.),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let kernel = f.actor.handle();
+        let state = || {
+            let published = kernel.published("p").unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            let open = published.snapshot.open_comp();
+            let composition =
+                pm_kernel::model::comp_node(published.snapshot.root().unwrap(), open.as_deref())
+                    .unwrap()
+                    .to_value();
+            let layers = composition.get("layers").unwrap().as_array().unwrap().len();
+            (pm_kernel::asset_order::keys(&root).len(), layers)
+        };
+        assert_eq!(state(), (2, 2));
+        let published = kernel.published("p").unwrap();
+        assert_eq!(
+            published.history.undo_label.as_deref(),
+            Some("Import 2 files")
+        );
+        let undo = Request::new(Caller::native(), pm_kernel::HistoryCall::Undo);
+        kernel.call("p", undo).wait().unwrap().unwrap();
+        assert_eq!(state(), (0, 0));
+    }
+
+    #[test]
+    fn an_import_waits_for_an_open_edit_and_lands_when_it_closes() {
+        let f = fixture();
+        let source = write(&f.root, "a.png", PNG);
+        let kernel = f.actor.handle();
+        let begin = pm_kernel::HistoryCall::Begin {
+            label: "Drag".into(),
+        };
+        let open = Request::new(Caller::native(), begin);
+        kernel.call("p", open).wait().unwrap().unwrap();
+        let commit = std::thread::spawn({
+            let kernel = kernel.clone();
+            move || {
+                std::thread::sleep(EDIT_WAIT * 3);
+                let call = pm_kernel::HistoryCall::Commit { label: None };
+                let request = Request::new(Caller::native(), call);
+                kernel.call("p", request).wait().unwrap().unwrap();
+            }
+        });
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![source],
+                    place_at: Some(0.),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        commit.join().unwrap();
+        assert_eq!(outcome.imported, ["a.png"]);
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn a_cancel_stops_the_wait_for_an_open_edit() {
+        let f = fixture();
+        let source = write(&f.root, "a.png", PNG);
+        let begin = pm_kernel::HistoryCall::Begin {
+            label: "Drag".into(),
+        };
+        let open = Request::new(Caller::native(), begin);
+        let kernel = f.actor.handle();
+        kernel.call("p", open).wait().unwrap().unwrap();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let later = std::thread::spawn({
+            let cancel = cancel.clone();
+            move || {
+                std::thread::sleep(EDIT_WAIT * 2);
+                cancel.store(true, Ordering::Release);
+            }
+        });
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![source],
+                    ..Default::default()
+                },
+                &cancel,
+            )
+            .unwrap();
+        later.join().unwrap();
+        assert!(outcome.cancelled && outcome.imported.is_empty());
+    }
+
+    #[test]
+    fn a_kernel_or_probe_error_reads_as_words_not_as_debug_output() {
+        assert_eq!(
+            KernelError::Guard("Close the edit first".into()).to_string(),
+            "Close the edit first"
+        );
+        let f = fixture();
+        let picked = write(&f.root, "broken.png", b"not a png");
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![picked],
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let why = &outcome.failed[0].1;
+        for debug in ["Unreadable(", "Unsupported(", "Throw("] {
+            assert!(!why.contains(debug), "{why}");
+        }
     }
 
     #[test]

@@ -210,6 +210,73 @@ fn properties_native_binding_writes_kernel_and_retired_selection_rejects_lease()
 }
 
 #[test]
+fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("assets").unwrap());
+    let mut publication = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while publication.is_none() {
+        assert!(Instant::now() < deadline, "the panel publishes a tree");
+        publication = panels
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "assets");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let publication = publication.unwrap();
+    let target = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|node| node.listeners.contains_key("drop"))
+        .expect("the panel declares a drop target")
+        .id;
+    let files = json!(["/synthetic/clip.mov"]);
+    let ticket = panels
+        .event(
+            "assets",
+            publication.generation,
+            publication.surface.revision(),
+            target,
+            "drop",
+            EventDetail {
+                alt_key: Some(false),
+                drag: Some(pm_surface::events::DragData {
+                    types: vec!["public.file-url".into()],
+                    data: std::collections::BTreeMap::from([("public.file-url".to_owned(), files)]),
+                    effect: pm_surface::events::DragEffect::Copy,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    finish(ticket);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let request = loop {
+        if let Some(request) = panels
+            .take_platform_requests()
+            .into_iter()
+            .find(|r| r.operation == "project.effect")
+        {
+            break request;
+        }
+        assert!(Instant::now() < deadline, "{:?}", panels.take_errors());
+        thread::sleep(Duration::from_millis(1));
+    };
+    let effect: pm_panel_media::HostRequest = serde_json::from_value(request.input).unwrap();
+    assert_eq!(
+        effect.effect,
+        pm_panel_media::Effect::Import {
+            files: vec!["/synthetic/clip.mov".into()],
+            folder: None,
+            as_folder: false,
+        }
+    );
+    panels.close();
+}
+
+#[test]
 fn application_agent_and_settings_mount_without_creating_a_project() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let mut panels = Builtins::application(actor.handle(), || {}).unwrap();
@@ -973,7 +1040,14 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
     let stored_version = first.version().to_owned();
     let stored=RetainedAsset{id:"imported-image".into(),metadata:data::model(&json!({"name":"Synthetic.bin","kind":"image","mimeType":"application/octet-stream","w":80,"h":40,"future":{"keep":true}})).unwrap(),original:first,previous:None};
     let ack = panels
-        .admit_media(&catalog.stamp, vec![stored], None, None, Caller::native())
+        .admit_media(
+            &catalog.stamp,
+            vec![stored],
+            None,
+            None,
+            vec![],
+            Caller::native(),
+        )
         .unwrap()
         .wait()
         .unwrap()
@@ -993,7 +1067,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
         .unwrap();
     let replacement = original("replacement.bin", b"replacement complete original");
     let replacement_version = replacement.version().to_owned();
-    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),Caller::native()).unwrap().wait().unwrap().unwrap();
+    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
     assert!(ack.notice.is_none(), "{ack:?}");
     let relinked = kernel.published("synthetic").unwrap();
@@ -1040,6 +1114,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
                 }],
                 None,
                 None,
+                vec![],
                 Caller::native()
             )
             .is_err()

@@ -1663,6 +1663,15 @@ impl DocumentStore {
             .map_err(TransactionError::Invalid)?;
         let ops = diff_node_ops(self.current.root(), Some(&after));
         let mut staged = self.stage_ops(&ops, true)?;
+        if !admission.place.is_empty() {
+            let placed =
+                self.stage_commands_on(staged.document.root(), &admission.place, origin)?;
+            staged.forward.extend(placed.forward);
+            staged.inverse.splice(0..0, placed.inverse);
+            staged.scopes.extend(placed.scopes);
+            staged.changed |= placed.changed;
+            staged.document = placed.document;
+        }
         if !staged.changed {
             return Ok(None);
         }
