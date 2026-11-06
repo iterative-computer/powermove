@@ -145,6 +145,14 @@ on a separate bounded worker from their actual file and decode purpose. That
 worker pauses at playback and resumes while idle; its results stay machine-local
 and trigger a fresh viewer choice after playback ends.
 
+The native viewer (`engine-service`, 2026-11-06) has View › Viewer Media:
+Automatic (originals, a clip's proxy when its original is missing), Originals,
+Proxy Preferred and Proxy Only, plus Toggle Proxies. The choice is per clip and
+audio follows it; `ViewerStatus::proxied` counts clips on proxies, and exports
+still read originals. Its proxies today are the project's embedded ones. Native
+generation, attach-existing, optimized media, the render cache and Background
+Tasks are not ported yet, and the measured Automatic policy above is not wired.
+
 The legacy video path uploads the selected video's full raster as a WebGL
 texture, samples it bilinearly at level zero into the preview canvas, then lets
 Chromium scale that canvas to its CSS box. A 1920-pixel video can be cropped
