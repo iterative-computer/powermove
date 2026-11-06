@@ -2,6 +2,7 @@
 mod fixture;
 use fixture::*;
 use pm_design::{Accessibility, Scheme, Tokens};
+use pm_kernel::commands::keyframes::EaseSide;
 use pm_panel_timeline::render::*;
 use serde_json::json;
 use std::collections::HashMap;
@@ -216,11 +217,14 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
                 id: "key".into(),
                 point: a,
                 selected: true,
-                handles: vec![Point {
-                    seconds: 1.5,
-                    value: 0.,
-                }],
-                active_handle: Some(0),
+                handles: vec![(
+                    EaseSide::Out,
+                    Point {
+                        seconds: 1.5,
+                        value: 0.,
+                    },
+                )],
+                active_handle: Some(EaseSide::Out),
             }],
         }],
         0.,

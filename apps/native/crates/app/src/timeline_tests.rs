@@ -310,6 +310,74 @@ fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext)
     s.undo(cx);
     assert_eq!(value(&s, &ids[0]), before);
 }
+/// Selects the first key and opens the Value Graph on it.
+fn graph_on_first_key(s: &mut Stage, cx: &mut TestAppContext) -> Vec<String> {
+    let ids = keyed(s, cx, &[0.5, 1.5]);
+    let from = op_center(s, "key:");
+    s.vcx.simulate_click(from, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    ids
+}
+#[gpui::test]
+fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let graph = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let handle = graph
+        .iter()
+        .find(|o| o.id == format!("graph-handle:{}:out", ids[0]))
+        .expect("the selected key shows its out handle")
+        .bounds;
+    assert!(
+        !graph.iter().any(|o| o.id.starts_with(&format!("graph-handle:{}:", ids[1]))),
+        "an unselected key shows no handles"
+    );
+    let at = s.origin()
+        + point(
+            px((handle.x + handle.width / 2.) as f32),
+            px((handle.y + handle.height / 2.) as f32),
+        );
+    let ease = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.key(&ids[0]).unwrap().2.stored.get("outEase").cloned()
+        })
+    };
+    let before = ease(&s);
+    s.drag(cx, at, at - point(px(0.), px(30.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let after = ease(&s);
+    assert!(after.is_some() && after != before, "{before:?} -> {after:?}");
+    s.undo(cx);
+    assert_eq!(ease(&s), before);
+}
+#[gpui::test]
+fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    graph_on_first_key(&mut s, cx);
+    let keys = |s: &Stage| {
+        let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        let curve = &graph.curves()[0];
+        let handles = curve.points.iter().map(|p| p.handles.len()).sum::<usize>();
+        (curve.points.iter().map(|p| p.point.value).collect::<Vec<_>>(), handles)
+    };
+    let (values, handles) = keys(&s);
+    assert_eq!(values, vec![50., 51.]);
+    assert!(handles > 0);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph.speed", 0., None, false, cx));
+    s.idle(cx);
+    // 50 to 51 over one second, linear: one unit per second at both keys.
+    let (speeds, handles) = keys(&s);
+    assert!(speeds.iter().all(|v| (v - 1.).abs() < 1e-3), "{speeds:?}");
+    assert_eq!(handles, 0, "speed handles are not value handles");
+}
 #[gpui::test]
 fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);

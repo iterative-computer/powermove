@@ -44,6 +44,11 @@ enum Spec {
     Slide,
     Keys,
     GraphKeys,
+    /// A key's direction handle in the Value Graph.
+    Handle {
+        key: String,
+        side: pm_kernel::commands::keyframes::EaseSide,
+    },
     Property { layer: String, path: String },
     WorkIn,
     WorkOut,
@@ -102,6 +107,8 @@ enum Gesture {
         origin: Point<Pixels>,
         proedit: bool,
         readout: bool,
+        /// A handle drag: its key's layer start, for layer-local handle times.
+        handle: Option<f64>,
     },
     Scrub(Scrub),
     Marquee {
@@ -389,7 +396,16 @@ impl TimelineSurface {
         };
         self.model = built.model;
         self.scene = Some(built.scene.clone());
-        self.graph = built.graph;
+        // A drag maps the pointer through the graph's value range: hold it until
+        // release so the curve does not slide out from under the pointer.
+        self.graph = match (&self.gesture, &self.graph, built.graph) {
+            (Gesture::Dragging { .. }, Some(held), Some(next)) => {
+                let mut next = Arc::unwrap_or_clone(next);
+                (next.min, next.max) = (held.min, held.max);
+                Some(Arc::new(next))
+            }
+            (_, _, next) => next,
+        };
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
@@ -650,19 +666,36 @@ impl TimelineSurface {
         area: Rect,
         cx: &mut Context<Self>,
     ) {
-        let hit = self.graph_ops(area).and_then(|ops| {
+        let ops = self.graph_ops(area).unwrap_or_default();
+        let hit = |prefix: &str| {
             ops.iter()
                 .rev()
                 .find(|o| {
-                    o.id.starts_with("graph-key:")
+                    o.id.starts_with(prefix)
                         && x >= o.bounds.x - 3.
                         && x <= o.bounds.x + o.bounds.width + 3.
                         && y >= o.bounds.y - 3.
                         && y <= o.bounds.y + o.bounds.height + 3.
                 })
-                .map(|o| o.id["graph-key:".len()..].to_owned())
-        });
-        if let Some(key) = hit
+                .map(|o| o.id[prefix.len()..].to_owned())
+        };
+        // Handles sit over keys and other curves: they win.
+        if let Some((key, side)) = hit("graph-handle:").and_then(|h| {
+            let (key, side) = h.rsplit_once(':')?;
+            let side = match side {
+                "in" => pm_kernel::commands::keyframes::EaseSide::In,
+                _ => pm_kernel::commands::keyframes::EaseSide::Out,
+            };
+            Some((key.to_owned(), side))
+        }) {
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(Spec::Handle { key, side }),
+                release: None,
+            });
+            return;
+        }
+        if let Some(key) = hit("graph-key:")
             && let Some((layer, channel, _)) = self.model.index.key(&key)
         {
             self.queue.push_back(Job::SelectKey {
@@ -741,12 +774,17 @@ impl TimelineSurface {
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
                 );
                 let readout = matches!(spec, Spec::Property { .. });
+                let handle = match &spec {
+                    Spec::Handle { key, .. } => self.model.index.key(key).map(|(l, _, _)| l.from),
+                    _ => None,
+                };
                 let time = self.delegate.time(cx);
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
                     proedit,
                     readout,
+                    handle,
                 };
             }
             _ => {}
@@ -756,9 +794,17 @@ impl TimelineSurface {
                 origin,
                 proedit,
                 readout,
+                handle,
             } => {
-                let (origin, proedit, readout) = (*origin, *proedit, *readout);
+                let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let (Some(layer_from), Some(area), Some(graph)) =
+                    (handle, self.graph_area(), self.graph.as_ref())
+                {
+                    let (x, y) = self.local(event.position);
+                    sample.handle_time = self.time_at(x) - layer_from;
+                    sample.handle_value = graph.value_at(area, y);
+                }
                 if readout {
                     let delta = event.position - origin;
                     if let Ok(value) = pm_surface::binding::scrub(pm_surface::binding::Scrub {
@@ -1052,6 +1098,10 @@ impl TimelineSurface {
             .unwrap_or_default()
     }
     #[cfg(test)]
+    pub fn graph(&self) -> Option<Arc<Graph>> {
+        self.graph.clone()
+    }
+    #[cfg(test)]
     pub fn scene(&self) -> Option<Arc<Scene>> {
         self.scene.clone()
     }
@@ -1270,6 +1320,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
         Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
+        Spec::Handle { key, side } => DragKind::Handle { id: key, side },
         Spec::Property { layer, path } => {
             let paths: Vec<_> = model
                 .track_channels(&layer, &path)
@@ -1443,7 +1494,9 @@ impl Render for TimelineSurface {
                     },
                     move |bounds, frame, window, cx| {
                         if let Some(frame) = frame {
-                            for op in &frame.ops {
+                            // The outline row owns the keyframe toggle; the scene's
+                            // copy would sit stale beneath it.
+                            for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
                                 paint(op, bounds.origin, &tokens, window, cx);
                             }
                         }
