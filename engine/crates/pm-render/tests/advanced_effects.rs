@@ -96,6 +96,45 @@ fn half(v: f32) -> f32 {
     pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(v))
 }
 #[test]
+fn a_lut_reads_and_uploads_once_until_its_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("grade.cube");
+    std::fs::write(&path, "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("grade".into(), path.clone());
+    let value = fixture(
+        "applyColorLut",
+        1,
+        json!({"amount":100}),
+        json!({"lut":{"kind":"asset","assetId":"grade"}}),
+        None,
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    let frame = |renderer: &mut Renderer| {
+        let before = pm_perf::snapshot();
+        let pixels = draw(renderer, &value, &resolver, 32);
+        (pixels, pm_perf::snapshot().since(&before))
+    };
+    use pm_perf::Counter::{EffectAssetHits, EffectAssetMisses, UploadBytes};
+    let (first, cold) = frame(&mut renderer);
+    assert_eq!(cold.get(EffectAssetMisses), 1);
+    let (again, warm) = frame(&mut renderer);
+    assert_eq!(again, first);
+    assert_eq!(warm.get(EffectAssetMisses), 0, "the file is read once");
+    assert_eq!(warm.get(EffectAssetHits), 1);
+    assert!(
+        warm.get(UploadBytes) + 32 <= cold.get(UploadBytes),
+        "the table uploads once: {} then {}",
+        cold.get(UploadBytes),
+        warm.get(UploadBytes)
+    );
+    std::fs::write(&path, "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();
+    let (replaced, changed) = frame(&mut renderer);
+    assert_eq!(changed.get(EffectAssetMisses), 1);
+    assert_ne!(replaced, first, "a changed file is read again");
+}
+
+#[test]
 fn metal_typed_lut_1d_3d_domain_alpha_replacement_and_missing_lease() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grade.cube");

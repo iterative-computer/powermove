@@ -1682,11 +1682,11 @@ impl Renderer {
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
+        // One look at each media file per frame (`media::StampFrame`).
+        let _stamps = crate::media::StampFrame::begin();
         if self.effects.versioned_builtins {
             self.effects.assets.prepare(document, assets);
         }
-        // One look at each media file per frame (`media::StampFrame`).
-        let _stamps = crate::media::StampFrame::begin();
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;

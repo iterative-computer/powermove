@@ -458,29 +458,7 @@ impl<'c> Gpu<'c> {
                 asset_targets.push((name, ready.target.clone()));
                 continue;
             }
-            let target = Target::new(
-                device,
-                "pm effect asset lease",
-                asset.width,
-                asset.height,
-                wgpu::TextureFormat::Rgba32Float,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            );
-            let data = asset
-                .lut
-                .as_ref()
-                .map_or(asset.rgba.as_slice(), |c| c.rgba.as_slice());
-            let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-            self.queue.write_texture(
-                target.texture.as_image_copy(),
-                &bytes,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(asset.width * 16),
-                    rows_per_image: Some(asset.height),
-                },
-                target.texture.size(),
-            );
+            let target = self.effects.assets.texture(device, self.queue, asset);
             asset_targets.push((name, target));
         }
         let mut outputs: Vec<Target> = Vec::new();

@@ -148,10 +148,17 @@ pub fn lut_commands(
 
 /// Worker: validates the `.cube` and keeps a copy that outlives the original.
 fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let unreadable = |reason: String| format!("This LUT couldn’t be read. {reason}");
+    let size = std::fs::metadata(path)
+        .map_err(|e| unreadable(e.to_string()))?
+        .len();
+    if size > pm_color::lut::MAX_FILE_BYTES {
+        return Err("This LUT is too large.".into());
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| unreadable(e.to_string()))?;
     pm_color::lut::CubeLut::parse(&text)
         .and_then(|lut| lut.gpu())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| unreadable(e.to_string()))?;
     let archive = pm_kernel::media_archive::Archive::open(profile).map_err(|e| e.to_string())?;
     let original = archive
         .retain_path(path, "text/plain", &AtomicBool::new(false))

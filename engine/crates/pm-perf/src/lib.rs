@@ -177,6 +177,9 @@ counters! {
     SvgFallbackFeature = "engine.svg_fallback.feature",
     SvgFallbackLimit = "engine.svg_fallback.limit",
     SvgFallbackDevice = "engine.svg_fallback.device",
+    /// Effect images and LUTs found unchanged on disk, and read again.
+    EffectAssetHits = "cache.effect_asset.hits",
+    EffectAssetMisses = "cache.effect_asset.misses",
 }
 
 /// The number of counters.

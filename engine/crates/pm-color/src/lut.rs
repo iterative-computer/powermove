@@ -4,6 +4,8 @@ use std::fmt;
 
 /// The largest finite half-float: a LUT stays within working storage.
 const MAX_VALUE: f64 = 65504.0;
+/// The largest `.cube` file; a 129-point cube is about 80 MiB of text.
+pub const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 /// The widest texture row a table may use (Metal's 2D limit).
 const MAX_ROW: usize = 16384;
 
