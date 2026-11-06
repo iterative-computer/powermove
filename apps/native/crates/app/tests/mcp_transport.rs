@@ -387,6 +387,7 @@ fn every_catalog_tool_has_a_body_or_a_documented_refusal() {
         }
         // These two validate their arguments ahead of the capability check.
         let arguments = match tool.as_str() {
+            "thread_read" => json!({"threadId":"none"}),
             "fork_builtin_extension" => json!({"id":"timeline"}),
             "publish_extensions" => json!({"extensions":[]}),
             _ => json!({}),

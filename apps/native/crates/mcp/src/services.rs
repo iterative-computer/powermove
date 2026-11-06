@@ -140,6 +140,10 @@ pub struct ImportedMedia {
 pub trait MediaImporter: Send + Sync {
     fn import(&self, request: &MediaImport) -> Result<ImportedMedia>;
 }
+/// Reads the durable agent thread archive, whose format the app owns.
+pub trait ThreadArchive: Send + Sync {
+    fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
+}
 pub trait ExportChild: Send + Sync {
     fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
     fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {

@@ -89,6 +89,52 @@ fn layers(f: &Fixture) -> usize {
         .unwrap()
         .len()
 }
+/// What the agent panel saved is what `thread_read` returns.
+#[test]
+fn thread_tools_page_the_durable_archive() {
+    let fixture = Fixture::new();
+    crate::mcp_services::connect_engine(&fixture.tools, Arc::default()).unwrap();
+    let long = "é".repeat(30);
+    let archive = json!({"version":1,"threads":[{"id":"t1","title":"Headline",
+        "updatedAt":5,"provider":"claude","access":"project","lastRunStatus":"completed",
+        "lastRunId":"r1","conversation":[{"role":"user","text":long},
+        {"role":"assistant","text":"Done."}]}]});
+    fixture
+        .host
+        .kernel
+        .state_transaction(state::StateTransaction {
+            expected_revision: None,
+            ops: vec![state::StateOp::Setting {
+                key: "agentThreads.test".into(),
+                value: Some(model(&archive)),
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut c = fixture.connection();
+    c.dispatch("start_session", &json!({"prompt":"read"}))
+        .unwrap();
+    let listed = c.dispatch("thread_list", &json!({})).unwrap();
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["threads"][0]["threadId"], "t1");
+    assert_eq!(listed["threads"][0]["status"], "completed");
+    assert_eq!(listed["threads"][0]["busy"], false);
+    assert_eq!(listed["threads"][0]["summary"], "Done.");
+    let read = c
+        .dispatch(
+            "thread_read",
+            &json!({"threadId":"t1","limit":1,"maxCharsPerMessage":10}),
+        )
+        .unwrap();
+    assert_eq!(read["messages"][0]["text"], "é".repeat(10));
+    assert_eq!(read["messages"][0]["nextTextOffset"], 10);
+    assert_eq!(read["nextOffset"], 1);
+    assert!(
+        c.dispatch("thread_read", &json!({"threadId":"t2"}))
+            .is_err()
+    );
+}
 #[test]
 fn live_mcp_folds_into_ui_gesture_without_regrouping_or_rollback() {
     let f = Fixture::new();

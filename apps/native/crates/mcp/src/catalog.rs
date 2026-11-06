@@ -204,6 +204,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "import_media",
     "replace_media",
     "import_media_to_timeline",
+    "thread_list",
+    "thread_read",
     "validate_effect",
     "fork_builtin_extension",
     "store_search",
@@ -212,6 +214,8 @@ pub const IMPLEMENTED: &[&str] = &[
 ];
 /// Adapter availability is distinct from a working standalone backend.
 pub const HOST_BACKED: &[&str] = &[
+    "thread_list",
+    "thread_read",
     "import_media",
     "replace_media",
     "import_media_to_timeline",
@@ -245,6 +249,7 @@ pub fn backing(name: &str) -> &'static str {
         | "media_contact_sheet"
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
+        "thread_list" | "thread_read" => "durable agent thread archive",
         "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
         "project_memory" => {
             "kernel non-revision durable memory metadata admission and application actor binding"

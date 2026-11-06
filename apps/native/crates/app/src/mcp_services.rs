@@ -15,10 +15,11 @@ use pm_mcp::{
     },
     services::{
         ExportChild, FrozenProject, Image, ImportedMedia, MediaImport, MediaImporter, MediaRequest,
-        VideoExportRequest,
+        ThreadArchive, VideoExportRequest,
     },
 };
 use pm_media::preview::PreviewReader;
+use pm_model::json::to_canonical_string;
 use pm_protocol::{
     color::{OutputColor, Precision},
     common::{FrameRate, SessionId, Size, TickRange, Ticks},
@@ -44,6 +45,7 @@ pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()>
     automation.export_child = jobs.clone();
     automation.media_importer = Some(jobs.clone());
     automation.media_registry = Some(jobs.clone());
+    automation.threads = Some(jobs.clone());
     automation.engine = Some(jobs);
     Ok(())
 }
@@ -517,6 +519,83 @@ impl MediaImporter for EngineJobs {
             "imported"
         };
         Ok(imported(status, id, ack.revision))
+    }
+}
+/// The last thing the agent said, which is what a caller wants at a glance.
+fn thread_summary(thread: &Value) -> Value {
+    let messages = thread["conversation"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    pm_agents::conversation::for_agent(messages)
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map_or(Value::Null, |message| json!(message.text))
+}
+fn describe_thread(thread: &Value) -> Value {
+    let settings = |key: &str| thread[key].clone();
+    let status = thread["lastRunStatus"].as_str().unwrap_or("idle");
+    json!({"threadId":thread["id"],"title":thread["title"],"updatedAt":thread["updatedAt"],
+        "provider":settings("provider"),"model":settings("model"),
+        "reasoningEffort":settings("reasoningEffort"),"access":thread["access"].as_str().unwrap_or("editor"),
+        "busy":matches!(status, "queued" | "running" | "waiting"),"runId":thread["lastRunId"],
+        "status":status,"summary":thread_summary(thread)})
+}
+impl ThreadArchive for EngineJobs {
+    fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value> {
+        let state = self.kernel.state();
+        let archive = match project {
+            Some(project) => state.settings.get(&format!("agentThreads.{project}")),
+            None => None,
+        }
+        .and_then(|value| serde_json::from_str::<Value>(&to_canonical_string(value)).ok())
+        .unwrap_or_else(|| json!({"threads":[]}));
+        let threads = archive["threads"].as_array().map_or(&[][..], Vec::as_slice);
+        let count = |key: &str, default: usize| args[key].as_u64().map_or(default, |n| n as usize);
+        let offset = count("offset", 0);
+        if tool == "thread_list" {
+            let limit = count("limit", 30);
+            let page = threads.iter().skip(offset).take(limit);
+            return Ok(
+                json!({"threads":page.map(describe_thread).collect::<Vec<_>>(),
+                "total":threads.len(),
+                "nextOffset":(offset + limit < threads.len()).then_some(offset + limit)}),
+            );
+        }
+        let thread = threads
+            .iter()
+            .find(|thread| thread["id"] == args["threadId"])
+            .ok_or_else(|| Error::invalid("This thread does not exist in the current project."))?;
+        let conversation = thread["conversation"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let limit = count("limit", 20);
+        let start = count("textOffset", 0);
+        let width = count("maxCharsPerMessage", 12_000).min(160_000 / limit);
+        let messages = conversation
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(limit)
+            .map(|(position, message)| {
+                let source = pm_agents::conversation::message_text(message)
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                let end = (start + width).min(source.len());
+                let text = String::from_utf16_lossy(source.get(start..end).unwrap_or_default());
+                let role = if message["role"] == "trace" {
+                    json!("assistant")
+                } else {
+                    message["role"].clone()
+                };
+                json!({"position":position,"role":role,"text":text,"truncated":end < source.len(),
+                "nextTextOffset":(end < source.len()).then_some(end)})
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"thread":describe_thread(thread),"messages":messages,"activity":"","questions":[],
+            "nextOffset":(offset + limit < conversation.len()).then_some(offset + limit)}),
+        )
     }
 }
 impl MediaRegistry for EngineJobs {

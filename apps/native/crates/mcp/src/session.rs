@@ -221,6 +221,17 @@ impl McpSession {
             )?)
             .map_err(|_| Error::invalid("Invalid extension fork result"));
         }
+        if ["thread_list", "thread_read"].contains(&name) {
+            catalog::validate(name, args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let threads = host
+                .threads
+                .as_deref()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            return threads.read(name, session.project.as_deref(), args);
+        }
         if ["store_search", "store_extension", "store_source"].contains(&name) {
             if let Some(id) = &session.project {
                 assert_project(session, &host, id)?;

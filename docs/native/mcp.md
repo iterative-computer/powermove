@@ -26,7 +26,10 @@ no production caller.
   3D models import but aren't placed; use `edit_3d`. `list_media` reports
   availability from the kernel's media table.
 
-Of the 68 tools, 34 have bodies in the app. These refuse with
+- `thread_list` and `thread_read` read the durable thread archive. `activity` and
+  `questions` stay empty, because a live session isn't reachable from an MCP worker.
+
+Of the 68 tools, 36 have bodies in the app. These refuse with
 `not_available_in_this_build` and a reason. `mcp_transport.rs` holds this table to
 the running binary in both directions.
 
@@ -39,7 +42,7 @@ the running binary in both directions.
 | `publish_visual_reply` | A safe viewer. `pm_agents::visual` validates input. |
 | `store_search`, `store_extension`, `store_source` | A production `StoreTransport` and origin. `NativeStoreReads` is ready in `pm-mcp-backends`. |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | The signed Store envelope and install host. |
-| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_launch`, `thread_list`, `thread_read`, `thread_send`, `thread_cancel`, `thread_watch`, `thread_unwatch` | A production `Threads` and orchestration host over `ProviderRuns`. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_launch`, `thread_send`, `thread_cancel`, `thread_watch`, `thread_unwatch` | A production `Threads` and orchestration host over `ProviderRuns`. |
 <!-- refused-tools -->
 
 The sections below are older dated notes. Where they differ, this section wins.
@@ -734,7 +737,7 @@ provisional UI was made.
 
 | Tools | Required backing still absent on this base |
 | --- | --- |
-| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_list`, `thread_read`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
+| `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_cancel`, `task_send`, `thread_launch`, `thread_send`, `thread_watch`, `thread_unwatch`, `thread_cancel`, `publish_visual_reply` | Root-owned provider/model/task/thread/watch/visual-attachment coordinator, authority, durable lifecycle, cancellation/draining and delivery. pm-agents provider/conversation primitives alone are insufficient. |
 | `publish_extensions`, `stage_fork_rebase` | Complete API pack, provenance/base inventory, compiler/scanner/isolated activation admission and atomic promotion/reload/rebase coordinator. |
 | `import_media_to_timeline`, `import_media`, `replace_media` | Durable original-byte/fingerprint/probe admission, retained runtime versions and native media Undo coordinated with the kernel. File-open ingress does not implement media import. |
 | `edit_3d` | Complete scene edit/validation admission: `kernel/src/commands/scene3d.rs` still returns `NotImplemented`. |
