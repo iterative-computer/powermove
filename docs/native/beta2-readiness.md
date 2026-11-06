@@ -14,16 +14,10 @@ The historical beta2 gaps below are superseded in these owned paths:
   an exact previously owned copy remains a valid fallback. Key/revision, full
   digest and proxy provenance are checked independently; changed bytes cannot
   re-enter through the reference's direct-path alias.
-- `PreparedImport` and `MediaCommand::AdmitImport` coordinate complete verified
-  worker outputs in one kernel transaction. A durable job receipt deduplicates
-  replay and rejects changed reuse. `ActorImportHook` connects the existing
-  generation-fenced queue to `KernelHandle::admit_import` on the real single-writer
-  actor. A queued document-session fence refuses completion after close/reopen;
-  `KernelImportHook` remains available for standalone store owners. Folder/Finder/cloud/Figma callers
-  provide their existing complete asset metadata and materialized input files.
-  The service copies and verifies each file into a private owned output before
-  admission, so it survives source loss even before Save. This layer does not
-  invent a cloud downloader or Figma converter.
+- Import reaches the kernel by one route: worker `RetainedAsset` receipts through
+  `Call::AdmitMedia`, which admits bytes, metadata and any placed layers in one
+  transaction and one Undo step. Cloud and Figma output must materialize as a
+  local file and use the same route; neither has a caller yet.
   Retained native original/history IDs remain reserved, and worker metadata
   cannot select `originalVersion` without the retained-media admission path.
   Reusing an unreferenced media ID also requires the same MIME and full SHA-256;

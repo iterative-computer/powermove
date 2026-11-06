@@ -5460,7 +5460,6 @@ dependencies = [
  "fs2",
  "pm-captions",
  "pm-first-launch",
- "pm-kernel",
  "pm-model",
  "pm-native-migrate",
  "pm-promedia",
