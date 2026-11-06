@@ -95,6 +95,29 @@ fn selected(s: &Stage) -> Vec<String> {
     published(&s.rig.kernel).selection.layers().to_vec()
 }
 
+/// Whether `source` has a match arm for the quoted `name`: the name in a
+/// pattern, followed by other alternatives or a guard, then `=>`.
+fn match_arm(source: &str, name: &str) -> bool {
+    let quoted = format!("\"{name}\"");
+    source.match_indices(&quoted).any(|(at, _)| {
+        let mut rest = source[at + quoted.len()..].trim_start();
+        loop {
+            if rest.starts_with("=>") || rest.starts_with("if ") {
+                return true;
+            }
+            if let Some(next) = rest.strip_prefix('|') {
+                rest = next.trim_start();
+            } else if let Some(next) = rest.strip_prefix('"') {
+                let Some(end) = next.find('"') else {
+                    return false;
+                };
+                rest = next[end + 1..].trim_start();
+            } else {
+                return false;
+            }
+        }
+    })
+}
 #[gpui::test]
 fn every_keymap_and_menu_command_has_an_owner(_: &mut TestAppContext) {
     // Session and shell arms, by the command names their matches handle.
@@ -102,12 +125,9 @@ fn every_keymap_and_menu_command_has_an_owner(_: &mut TestAppContext) {
     let view = include_str!("../../shell/src/view.rs");
     let native = include_str!("../../shell/src/native.rs");
     let known = |name: &str| {
-        let quoted = format!("\"{name}\"");
         route(name, &[]).is_some()
             || UNAVAILABLE.contains(&name)
-            || session.contains(&quoted)
-            || view.contains(&quoted)
-            || native.contains(&quoted)
+            || [session, view, native].iter().any(|s| match_arm(s, name))
             || name.starts_with("tool")
     };
     let mut names: Vec<String> = pm_shell::keyboard::shipped()
@@ -123,6 +143,8 @@ fn every_keymap_and_menu_command_has_an_owner(_: &mut TestAppContext) {
         );
     }
     names.retain(|n| !n.is_empty());
+    assert!(match_arm(r#""a" | "zoomIn" => {}"#, "zoomIn"));
+    assert!(!match_arm(r#"let label = "zoomIn";"#, "zoomIn"));
     let missing: Vec<_> = names.iter().filter(|n| !known(n)).collect();
     assert!(missing.is_empty(), "{missing:?}");
 }
