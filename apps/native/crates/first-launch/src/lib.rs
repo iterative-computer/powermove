@@ -12,7 +12,9 @@ pub mod sparkle;
 pub mod store_preparation;
 pub mod surfaces;
 pub use checkpoint::Checkpoint;
-pub use delta::{Conflict, ConflictKind, DeltaPrepared, delta, delta_if_changed, delta_media, delta_store};
+pub use delta::{
+    Conflict, ConflictKind, DeltaPrepared, delta, delta_if_changed, delta_media, delta_store,
+};
 pub use disk::LowDisk;
 
 use anyhow::{Context, Result, ensure};
@@ -570,8 +572,7 @@ fn media(
     let disk_records =
         pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
     // One record publication per source record, however many objects it has.
-    let total =
-        batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
+    let total = batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
     migration::migrate_many_with_disk(
         &batches
             .iter()
@@ -679,12 +680,7 @@ fn seal_shared(shared: &Path) -> Result<()> {
     Ok(())
 }
 /// Verified copy into a native path, published by rename. Never leaves the profile.
-fn place_file(
-    from: &Path,
-    target: &Path,
-    entry: &disk::FileEntry,
-    native: &Path,
-) -> Result<()> {
+fn place_file(from: &Path, target: &Path, entry: &disk::FileEntry, native: &Path) -> Result<()> {
     disk::private_dir(target.parent().unwrap())?;
     ensure!(
         target.parent().unwrap().canonicalize()?.starts_with(native),

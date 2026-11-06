@@ -2,12 +2,12 @@
 //! checkpoint: what the original app changed comes in, native edits stay, and an
 //! edit on both sides keeps both (the original's bytes stay in its checkpoint and
 //! the conflict is listed in the Migration Report). Checkpoints are never rewritten.
+use crate::{Checkpoint, store_preparation};
 use crate::{
     Config, Event, Outcome, State, Step, as_json, checkpoint, closure, disk, extensions,
-    imported_key, media, place_file, project_key, publish, read_batches,
-    require_supported_media, seal_shared, summary, to_kernel, validate, validate_native_paths,
+    imported_key, media, place_file, project_key, publish, read_batches, require_supported_media,
+    seal_shared, summary, to_kernel, validate, validate_native_paths,
 };
-use crate::{Checkpoint, store_preparation};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use pm_kernel::{
@@ -522,8 +522,12 @@ impl Merge<'_> {
     /// Three way by relative path, extension trees included. Returns whether an
     /// extension changed, so its registration can be refreshed.
     fn files(&mut self) -> Result<bool> {
-        let paths: BTreeSet<&PathBuf> =
-            self.base.files.keys().chain(self.next.files.keys()).collect();
+        let paths: BTreeSet<&PathBuf> = self
+            .base
+            .files
+            .keys()
+            .chain(self.next.files.keys())
+            .collect();
         let shared = self.native.join("extensions-shared");
         let mut extensions_changed = false;
         for relative in paths {

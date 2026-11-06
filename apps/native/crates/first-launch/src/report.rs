@@ -54,10 +54,18 @@ pub fn load(native: &Path) -> Result<Report> {
     };
     for id in &state.history_refusals {
         let copy = state.receipts.get(id).map_or(id, |r| &r.native);
-        push(copy.clone(), project_name(&library, copy), ReportKind::History);
+        push(
+            copy.clone(),
+            project_name(&library, copy),
+            ReportKind::History,
+        );
     }
     for id in &state.missing_projects {
-        push(id.clone(), project_name(&source, id), ReportKind::MissingProjects);
+        push(
+            id.clone(),
+            project_name(&source, id),
+            ReportKind::MissingProjects,
+        );
     }
     let passes: serde_json::Value = disk::json(&native.join("Media Store/migration.json"))?;
     if let Some(pass) = passes

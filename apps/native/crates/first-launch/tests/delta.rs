@@ -2,8 +2,8 @@
 //! comes in, native work stays, both sides of a conflict are kept.
 mod support;
 use pm_first_launch::{
-    Config, ConflictKind, DeltaPrepared, Event, Launch, Outcome, State, Step, default_paths,
-    delta, delta_if_changed, delta_media, delta_store, detect, onboarding_completed, report, run,
+    Config, ConflictKind, DeltaPrepared, Event, Launch, Outcome, State, Step, default_paths, delta,
+    delta_if_changed, delta_media, delta_store, detect, onboarding_completed, report, run,
     surfaces::migration::ReportKind,
 };
 use pm_kernel::{
@@ -104,7 +104,9 @@ fn every_change_in_the_original_app_comes_in_unrenamed_and_the_source_stays() {
     )
     .unwrap();
     write(
-        &config.electron_profile.join("extensions/later/manifest.json"),
+        &config
+            .electron_profile
+            .join("extensions/later/manifest.json"),
         &json!({"id":"later","version":"2.0.0"}),
     );
     fs::write(
@@ -138,7 +140,10 @@ fn every_change_in_the_original_app_comes_in_unrenamed_and_the_source_stays() {
     assert_eq!(name_of(&config, &id), "Edited in the original app");
     let added = state(&config).receipts["added"].native.clone();
     assert_eq!(name_of(&config, &added), "New in the original app");
-    assert_eq!(library(&config).read("theme").unwrap().unwrap().as_str(), Some("light"));
+    assert_eq!(
+        library(&config).read("theme").unwrap().unwrap().as_str(),
+        Some("light")
+    );
     assert!(library(&config).read("ext.synthetic").unwrap().is_none());
     let shared = config.native_profile.join("extensions-shared");
     assert_eq!(
@@ -181,7 +186,11 @@ fn every_change_in_the_original_app_comes_in_unrenamed_and_the_source_stays() {
     ));
     assert!(kernel.state().extensions.contains_key("later"));
     assert_eq!(
-        kernel.state().settings.get("theme").and_then(|v| v.as_str()),
+        kernel
+            .state()
+            .settings
+            .get("theme")
+            .and_then(|v| v.as_str()),
         Some("light")
     );
 }
@@ -232,11 +241,18 @@ fn native_work_stays_and_a_change_on_both_sides_keeps_both() {
     );
     let conflicts = state(&config).conflicts;
     assert!(conflicts.iter().any(|c| c.kind == ConflictKind::Project));
-    assert!(conflicts.iter().any(|c| c.kind == ConflictKind::Setting && c.id == "theme"));
+    assert!(
+        conflicts
+            .iter()
+            .any(|c| c.kind == ConflictKind::Setting && c.id == "theme")
+    );
     assert!(conflicts.iter().any(|c| c.kind == ConflictKind::File));
     let base = state(&config).delta_base.unwrap();
     let delta_dir = config.native_profile.join("first-launch-deltas").join(base);
-    assert_eq!(fs::read(delta_dir.join("profile").join(artifact)).unwrap(), b"original artifact");
+    assert_eq!(
+        fs::read(delta_dir.join("profile").join(artifact)).unwrap(),
+        b"original artifact"
+    );
     let rows = report::load(&config.native_profile).unwrap();
     assert_eq!(
         rows.sections()[&ReportKind::Conflicts].len(),
@@ -258,7 +274,10 @@ fn trash_follows_only_while_the_copy_is_untouched_and_nothing_is_ever_purged() {
     run(&config, |_| Ok(())).unwrap();
     let ids = checkpoint(&config).projects;
     let rows: Value = read(&store(&config, "projects.json"));
-    write(&store(&config, "projectTrash.json"), &json!([rows[0].clone()]));
+    write(
+        &store(&config, "projectTrash.json"),
+        &json!([rows[0].clone()]),
+    );
     write(&store(&config, "projects.json"), &json!([rows[1].clone()]));
     delta(&config, |_| Ok(())).unwrap();
     let trashed = library(&config).trash().unwrap();
@@ -277,10 +296,26 @@ fn every_interruption_resumes_without_false_conflicts_or_duplicates() {
     let stops: [fn(&Event) -> bool; 6] = [
         |e| *e == Event::Started(Step::Bootstrap),
         |e| *e == Event::Started(Step::Library),
-        |e| matches!(e, Event::Progress { step: Step::Library, .. }),
+        |e| {
+            matches!(
+                e,
+                Event::Progress {
+                    step: Step::Library,
+                    ..
+                }
+            )
+        },
         |e| *e == Event::Started(Step::LocalStorage),
         |e| *e == Event::Started(Step::Extensions),
-        |e| matches!(e, Event::Progress { step: Step::Media, .. }),
+        |e| {
+            matches!(
+                e,
+                Event::Progress {
+                    step: Step::Media,
+                    ..
+                }
+            )
+        },
     ];
     for stop in stops {
         let t = tempdir().unwrap();
@@ -290,7 +325,9 @@ fn every_interruption_resumes_without_false_conflicts_or_duplicates() {
         source_project(&config, "added", "New in the original app");
         write(&store(&config, "theme.json"), &json!("light"));
         write(
-            &config.electron_profile.join("extensions/later/manifest.json"),
+            &config
+                .electron_profile
+                .join("extensions/later/manifest.json"),
             &json!({"id":"later","version":"2.0.0"}),
         );
         media_db(&config.electron_profile, true);
@@ -304,13 +341,31 @@ fn every_interruption_resumes_without_false_conflicts_or_duplicates() {
         });
         assert!(result.is_err());
         assert!(hit);
-        assert!(config.native_profile.join("first-launch-deltas/pending").exists());
+        assert!(
+            config
+                .native_profile
+                .join("first-launch-deltas/pending")
+                .exists()
+        );
         delta(&config, |_| Ok(())).unwrap();
-        assert!(!config.native_profile.join("first-launch-deltas/pending").exists());
+        assert!(
+            !config
+                .native_profile
+                .join("first-launch-deltas/pending")
+                .exists()
+        );
         assert_eq!(name_of(&config, &id), "Edited in the original app");
         assert_eq!(library(&config).projects().unwrap().len(), 2);
-        assert_eq!(library(&config).read("theme").unwrap().unwrap().as_str(), Some("light"));
-        assert!(config.native_profile.join("extensions-shared/later/manifest.json").is_file());
+        assert_eq!(
+            library(&config).read("theme").unwrap().unwrap().as_str(),
+            Some("light")
+        );
+        assert!(
+            config
+                .native_profile
+                .join("extensions-shared/later/manifest.json")
+                .is_file()
+        );
         assert_eq!(state(&config).conflicts, Default::default());
     }
 }
@@ -324,7 +379,10 @@ fn an_unchanged_source_costs_nothing_and_store_and_media_run_apart() {
         delta_if_changed(&config, |_| panic!("no events for an unchanged source")).unwrap(),
         DeltaPrepared::Unchanged
     ));
-    assert_eq!(bytes, fs::read(config.native_profile.join("migration.json")).unwrap());
+    assert_eq!(
+        bytes,
+        fs::read(config.native_profile.join("migration.json")).unwrap()
+    );
     assert!(!config.native_profile.join("first-launch-deltas").exists());
 
     write(&store(&config, "theme.json"), &json!("light"));
@@ -342,7 +400,10 @@ fn an_unchanged_source_costs_nothing_and_store_and_media_run_apart() {
             electron_profile: None,
         })
         .unwrap();
-    assert_eq!(library(&config).read("theme").unwrap().unwrap().as_str(), Some("light"));
+    assert_eq!(
+        library(&config).read("theme").unwrap().unwrap().as_str(),
+        Some("light")
+    );
     assert!(matches!(
         delta_media(&config, |_| Ok(())).unwrap(),
         Outcome::Complete { .. }
@@ -370,7 +431,10 @@ fn a_running_original_app_waits_and_a_store_pass_writes_nothing() {
         delta_store(&config, |_| Ok(())).unwrap(),
         DeltaPrepared::WaitingForElectron
     ));
-    assert_eq!(library(&config).read("theme").unwrap().unwrap().as_str(), Some("dark"));
+    assert_eq!(
+        library(&config).read("theme").unwrap().unwrap().as_str(),
+        Some("dark")
+    );
     assert!(!config.native_profile.join("first-launch-deltas").exists());
 }
 
@@ -439,7 +503,10 @@ fn the_report_lists_what_needs_review_without_any_secret_value() {
     let report = report::load(&config.native_profile).unwrap();
     let sections = report.sections();
     assert_eq!(sections[&ReportKind::Proxies].len(), 1);
-    assert_eq!(sections[&ReportKind::Quarantined][0].display_name, "theme.json.corrupt-1");
+    assert_eq!(
+        sections[&ReportKind::Quarantined][0].display_name,
+        "theme.json.corrupt-1"
+    );
     assert_eq!(sections[&ReportKind::SignIns][0].display_name, "synthetic");
     assert!(!format!("{report:?}").contains("TOKEN"));
     assert!(!format!("{report:?}").contains("AAAA"));

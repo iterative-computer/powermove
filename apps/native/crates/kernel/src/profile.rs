@@ -146,13 +146,7 @@ impl<'a> ProfileStorage<'a> {
             "local-storage.json",
             entries
                 .iter()
-                .map(|e| {
-                    object(&[
-                        ("origin", &e.origin),
-                        ("key", &e.key),
-                        ("value", &e.value),
-                    ])
-                })
+                .map(|e| object(&[("origin", &e.origin), ("key", &e.key), ("value", &e.value)]))
                 .collect(),
         )
     }
