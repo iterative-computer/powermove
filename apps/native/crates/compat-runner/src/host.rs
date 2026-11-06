@@ -84,6 +84,7 @@ struct Published {
     toasts: Vec<String>,
     batches: VecDeque<AdmittedDomBatch>,
     canvases: Vec<CanvasFrame>,
+    surfaces: Vec<Value>,
     ready: bool,
     revision: u64,
 }
@@ -262,6 +263,10 @@ impl ExtensionHost {
     pub fn records(&self) -> Vec<Value> {
         let published = self.shared.published.lock().unwrap();
         published.records.values().cloned().collect()
+    }
+    /// Enabled v4 surface extensions with their compiled graphs.
+    pub fn surfaces(&self) -> Vec<Value> {
+        self.shared.published.lock().unwrap().surfaces.clone()
     }
     pub fn take_toasts(&self) -> Vec<String> {
         std::mem::take(&mut self.shared.published.lock().unwrap().toasts)
@@ -656,12 +661,18 @@ impl Owner {
             Ok(manifest) => compile::compile(
                 &found.directory,
                 manifest["entry"].as_str().unwrap_or("index.ts"),
+                manifest["apiVersion"].as_u64().unwrap_or(1),
                 compiler,
                 Some(&self.config.cache),
             ),
             Err(error) => Err(error.clone()),
         };
         let mut record = discovery::record(found, enabled, graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone));
+        // Surface extensions get their own realm from the panel host.
+        if record["manifest"]["apiVersion"].as_u64() >= Some(4) {
+            record["surface"] = json!(true);
+            return record;
+        }
         if record["trust"] != "store" || record["health"]["state"] != "ok" || !enabled {
             return record;
         }
@@ -709,7 +720,16 @@ impl Owner {
                 (record["id"].as_str().unwrap_or_default().to_owned(), row)
             })
             .collect();
-        self.shared.update(|p| p.records = records);
+        let surfaces: Vec<Value> = self
+            .records
+            .iter()
+            .filter(|r| r["surface"] == true && r["health"]["state"] == "ok" && r["enabled"] == true)
+            .cloned()
+            .collect();
+        self.shared.update(|p| {
+            p.records = records;
+            p.surfaces = surfaces;
+        });
     }
     fn start_realm(&mut self) -> Result<()> {
         let events = Arc::new(Events {
@@ -783,7 +803,7 @@ impl Owner {
         Value::Array(
             self.records
                 .iter()
-                .filter(|record| record["confined"] != true)
+                .filter(|record| record["confined"] != true && record["surface"] != true)
                 .cloned()
                 .collect(),
         )
@@ -1064,6 +1084,34 @@ mod tests {
         assert_eq!(definitions[0]["origin"], "store");
         assert_eq!(definitions[0]["id"], "synthetic-store.tint");
         assert!(command(&fixture, "synthetic-store.mark"));
+    }
+    #[test]
+    fn a_v4_extension_compiles_as_a_surface_and_stays_out_of_the_trusted_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        fs::create_dir_all(extensions.join("synthetic-v4")).unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/manifest.json"),
+            json!({"id":"synthetic-v4","name":"Synthetic surface","version":"1.0.0","apiVersion":4,"entry":"panel.tsx"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/panel.tsx"),
+            "import { useState } from 'powermove/hooks';
+             export const view = () => <text>{String(useState(1)[0])}</text>;",
+        )
+        .unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let surfaces = fixture.host.surfaces();
+        assert_eq!(surfaces.len(), 1);
+        let graph = &surfaces[0]["graph"];
+        let source = graph["sources"]["panel.tsx"].as_str().unwrap();
+        assert!(source.contains("powermove/jsx-runtime"), "{source}");
+        assert_eq!(
+            graph["edges"]["panel.tsx"]["powermove/hooks"],
+            "runtime:powermove/hooks"
+        );
     }
     #[test]
     fn one_bad_extension_leaves_the_others_running() {

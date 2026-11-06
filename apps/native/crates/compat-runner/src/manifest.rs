@@ -1,7 +1,8 @@
 //! The frozen extension manifest contract (`@powermove/registry/manifest`).
 use serde_json::{Map, Value, json};
 
-pub const API_VERSION: u64 = 3;
+/// The frozen parser's ceiling is 3; 4 is the native surface API.
+pub const API_VERSION: u64 = 4;
 pub const SOURCE_FILES: usize = 400;
 pub const SOURCE_BYTES: usize = 8 * 1024 * 1024;
 pub const BUNDLE_BYTES: usize = 16 * 1024 * 1024;
@@ -57,7 +58,9 @@ pub fn safe_entry(entry: &str) -> bool {
         && !entry.starts_with('/')
         && !entry.contains("..")
         && !entry.contains('\0')
-        && [".ts", ".js", ".mjs"].iter().any(|s| entry.ends_with(s))
+        && [".ts", ".tsx", ".js", ".mjs"]
+            .iter()
+            .any(|s| entry.ends_with(s))
 }
 fn link_origin(value: &Value) -> bool {
     let Some(text) = value.as_str().filter(|t| t.len() <= LINK_CHARS) else {
@@ -275,7 +278,7 @@ mod tests {
         for (key, value, error) in [
             ("id", json!("Bad"), "invalid \"id\" (a-z, 0-9, -; 2–64 chars)"),
             ("version", json!("1.0"), "invalid \"version\" (x.y.z)"),
-            ("apiVersion", json!(9), "apiVersion 9 is newer than this app (3)"),
+            ("apiVersion", json!(9), "apiVersion 9 is newer than this app (4)"),
             ("entry", json!("../x.ts"), "invalid \"entry\" path"),
             ("contributes", json!(["nope"]), "invalid \"contributes\""),
             ("replaces", json!(["synthetic"]), "extension cannot reference itself"),

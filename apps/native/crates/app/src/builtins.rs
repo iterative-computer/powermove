@@ -134,6 +134,10 @@ impl Controller {
         })
         .detach();
     }
+    /// A surface extension's first commit landed; its panel can render.
+    pub fn surface_ready(&mut self, id: String) {
+        self.builtins.ready.insert(id);
+    }
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
         let Some(published) = self.published.clone() else {
             return;

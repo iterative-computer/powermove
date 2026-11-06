@@ -1321,3 +1321,29 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     assert!(panels.take_errors().is_empty());
     actor.shutdown();
 }
+
+#[test]
+fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_the_native_path() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';export const view = () => jsx('text', {children:'Synthetic surface'});"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(panels.mount_extension("synthetic-surface", &graph).unwrap());
+    let publication = panels
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "synthetic-surface")
+        .expect("a surface publication");
+    assert_eq!(publication.panel, "synthetic-surface");
+    assert!(panels.mount_extension("timeline", &graph).is_err());
+    let errors = panels.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}

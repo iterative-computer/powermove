@@ -4745,6 +4745,7 @@ dependencies = [
  "pm-kernel",
  "pm-mcp",
  "pm-model",
+ "pm-protocol",
  "pm-recorder",
  "pm-remote-dom",
  "pm-runtime-v8",

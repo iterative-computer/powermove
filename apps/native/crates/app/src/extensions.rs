@@ -78,6 +78,8 @@ pub struct Extensions {
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
+    /// Mounted v4 surface extensions and their titles.
+    surfaces: BTreeMap<String, String>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
 }
@@ -164,11 +166,45 @@ impl Controller {
         }
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
+            self.mount_surfaces(cx);
             if let Some(contributions) = self.extensions.host.as_ref().and_then(|h| h.contributions()) {
                 self.apply_contributions(&contributions, cx);
             }
         }
         self.present_page(cx);
+    }
+    /// Each v4 extension gets its own realm and draws through the v4 panel path.
+    fn mount_surfaces(&mut self, cx: &mut Context<Self>) {
+        let (Some(host), Some(runtime)) = (&self.extensions.host, self.builtins.runtime.clone())
+        else {
+            return;
+        };
+        for surface in host.surfaces() {
+            let Some(id) = surface["id"].as_str().map(str::to_owned) else {
+                continue;
+            };
+            if self.extensions.surfaces.contains_key(&id) {
+                continue;
+            }
+            let title = surface["manifest"]["name"].as_str().unwrap_or(&id).to_owned();
+            self.extensions.surfaces.insert(id.clone(), title);
+            let ticket = runtime.mount_extension(&id, &surface["graph"]);
+            cx.spawn(async move |this, cx| {
+                let mounted = match ticket {
+                    Ok(ticket) => ticket.await.map(|_| ()),
+                    Err(error) => Err(error),
+                };
+                let _ = this.update(cx, |v, cx| {
+                    match mounted {
+                        Ok(()) => v.surface_ready(id),
+                        Err(error) => v.message = format!("{id} could not start: {error}"),
+                    }
+                    v.drain_builtins(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
     fn apply_contributions(&mut self, value: &Value, cx: &mut Context<Self>) {
         let panels: Vec<(String, String)> = value["panels"]
@@ -182,7 +218,8 @@ impl Controller {
             })
             .collect();
         self.extensions.known_panels = panels.iter().map(|(id, _)| id.clone()).collect();
-        layout::set_contributed_panels(panels);
+        let surfaces = self.extensions.surfaces.clone().into_iter();
+        layout::set_contributed_panels(panels.into_iter().chain(surfaces));
         let choices: Vec<Choice> = value["commands"]
             .as_array()
             .into_iter()

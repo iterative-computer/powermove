@@ -23,8 +23,9 @@ export function acquire(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }";
-const SUFFIXES: [&str; 6] = [
+const SUFFIXES: [&str; 7] = [
     ".ts",
+    ".tsx",
     ".js",
     ".mjs",
     ".svelte",
@@ -34,7 +35,12 @@ const SUFFIXES: [&str; 6] = [
 /// Bump with any change to module transforms; compiled graphs are cached by it.
 const COMPILER: &str = "native-1";
 
-fn runtime_import(specifier: &str) -> bool {
+fn runtime_import(specifier: &str, surface: bool) -> bool {
+    if surface {
+        return specifier == "preact"
+            || specifier.starts_with("preact/")
+            || specifier.starts_with("powermove/");
+    }
     specifier == "powermove" || specifier == "svelte" || specifier.starts_with("svelte/")
 }
 
@@ -84,6 +90,8 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 struct Sources<'a> {
+    /// A v4 surface extension: JSX, and the published `powermove/*` modules.
+    surface: bool,
     root: PathBuf,
     svelte: &'a SvelteCompiler,
     seen: BTreeMap<PathBuf, String>,
@@ -171,7 +179,7 @@ impl Sources<'_> {
         if name.ends_with(".svelte.ts") || name.ends_with(".svelte.js") {
             return self.svelte(source, file, SvelteUnit::Module);
         }
-        if name.ends_with(".ts") {
+        if name.ends_with(".ts") || name.ends_with(".tsx") {
             return strip_typescript(source, &name).map_err(|e| e.to_string());
         }
         Ok(source.to_owned())
@@ -222,7 +230,7 @@ impl Sources<'_> {
                     .entry(STYLES.into())
                     .or_insert_with(|| STYLE_MODULE.into());
                 STYLES.to_owned()
-            } else if runtime_import(&specifier) {
+            } else if runtime_import(&specifier, self.surface) {
                 format!("runtime:{specifier}")
             } else {
                 let file = self.resolve(&specifier, directory)?;
@@ -271,6 +279,7 @@ fn digest_tree(root: &Path) -> Result<String, String> {
 pub fn compile(
     directory: &Path,
     entry: &str,
+    api_version: u64,
     svelte: &SvelteCompiler,
     cache: Option<&Path>,
 ) -> Result<ModuleGraph, String> {
@@ -293,6 +302,7 @@ pub fn compile(
         return Ok(graph);
     }
     let mut sources = Sources {
+        surface: api_version >= 4,
         root: root.clone(),
         svelte,
         seen: BTreeMap::new(),
@@ -303,10 +313,14 @@ pub fn compile(
             hash,
         },
     };
-    let bundle = format!(
-        "export {{ default }} from {entry}; export * from {entry}; export {{ styles as __powermoveStyles, acquire as __powermoveAcquireStyles }} from '{STYLES}';",
-        entry = json!(format!("./{entry}"))
-    );
+    let entry_path = json!(format!("./{entry}"));
+    let bundle = if api_version >= 4 {
+        format!("export * from {entry_path};")
+    } else {
+        format!(
+            "export {{ default }} from {entry_path}; export * from {entry_path}; export {{ styles as __powermoveStyles, acquire as __powermoveAcquireStyles }} from '{STYLES}';"
+        )
+    };
     sources.link(BUNDLE, bundle, &root).map_err(|e| {
         if id.is_empty() { e } else { truncate(e) }
     })?;

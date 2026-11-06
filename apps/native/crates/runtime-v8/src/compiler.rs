@@ -226,7 +226,13 @@ pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
     use oxc_span::SourceType;
     use oxc_transformer::{TransformOptions, Transformer};
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let jsx = filename.ends_with(".tsx");
+    let kind = if jsx {
+        SourceType::tsx()
+    } else {
+        SourceType::ts()
+    };
+    let parsed = Parser::new(&allocator, source, kind).parse();
     if !parsed.diagnostics.is_empty() {
         return Err(Error::JavaScript(format!(
             "TypeScript parse: {:?}",
@@ -244,8 +250,13 @@ pub fn strip_typescript(source: &str, filename: &str) -> Result<String> {
             semantic.diagnostics
         )));
     }
-    let options =
+    let mut options =
         TransformOptions::from_target("es2022").map_err(|e| Error::JavaScript(e.to_string()))?;
+    if jsx {
+        // v4 surfaces: the published `powermove` JSX aliases.
+        options.jsx.runtime = oxc_transformer::JsxRuntime::Automatic;
+        options.jsx.import_source = Some("powermove".into());
+    }
     let transformed = Transformer::new(&allocator, std::path::Path::new(filename), &options)
         .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
     if !transformed.diagnostics.is_empty() {
