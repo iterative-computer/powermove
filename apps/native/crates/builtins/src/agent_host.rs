@@ -2,10 +2,16 @@
 //! missing runtime never consumes a draft or starts a fictitious run. Runs start
 //! on the panel worker and a dedicated worker delivers their events durably.
 use crate::models::KernelStore;
-use pm_agents::launch::{self, Environment, Request};
+use pm_agents::{
+    Provider,
+    account::{Accounts, State},
+    launch::{self, Environment, Request},
+    runtime::Runtime,
+};
 use pm_kernel::KernelHandle;
 use pm_panel_agentpanel::{
     Error,
+    input::Catalog,
     model::{Effect, EffectKind, Panel},
     runtime::ProviderRuns,
 };
@@ -23,7 +29,8 @@ use std::{
 /// Everything the panel shares with its window, without locking a Backend.
 pub(crate) struct AgentLink {
     environment: Mutex<Option<Environment>>,
-    realm: Mutex<Option<Realm>>,
+    accounts: Mutex<Option<Arc<Accounts>>>,
+    realms: Mutex<Vec<Realm>>,
     closing: AtomicBool,
     sequence: AtomicU64,
 }
@@ -31,21 +38,51 @@ impl Default for AgentLink {
     fn default() -> Self {
         Self {
             environment: Mutex::default(),
-            realm: Mutex::default(),
+            accounts: Mutex::default(),
+            realms: Mutex::default(),
             closing: AtomicBool::new(false),
             sequence: AtomicU64::new(1),
         }
     }
 }
 impl AgentLink {
-    pub fn set_environment(&self, environment: Environment) {
+    /// Reads who is signed in on workers; the panel updates when they answer.
+    pub fn set_environment(
+        self: &Arc<Self>,
+        environment: Environment,
+        open: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    ) {
+        let weak = Arc::downgrade(self);
+        let accounts = Accounts::new(
+            environment.clone(),
+            open,
+            Arc::new(move || {
+                if let Some(link) = weak.upgrade() {
+                    link.touch();
+                    link.publish();
+                }
+            }),
+        );
         *self.environment.lock().unwrap() = Some(environment);
+        *self.accounts.lock().unwrap() = Some(accounts.clone());
+        accounts.refresh(Provider::Chatgpt);
+        accounts.refresh(Provider::Claude);
     }
-    pub fn set_realm(&self, realm: Realm) {
-        *self.realm.lock().unwrap() = Some(realm);
+    pub fn add_realm(&self, realm: Realm) {
+        self.realms.lock().unwrap().push(realm);
     }
     pub fn close(&self) {
         self.closing.store(true, Ordering::Release);
+        if let Some(accounts) = self.accounts() {
+            accounts.close();
+        }
+    }
+    pub fn accounts(&self) -> Option<Arc<Accounts>> {
+        self.accounts.lock().unwrap().clone()
+    }
+    /// Changes when a sign-in does, so Settings republishes.
+    pub fn accounts_revision(&self) -> u64 {
+        self.accounts().map_or(0, |accounts| accounts.revision())
     }
     pub fn sequence(&self) -> u64 {
         self.sequence.load(Ordering::Acquire)
@@ -53,15 +90,80 @@ impl AgentLink {
     pub fn touch(&self) {
         self.sequence.fetch_add(1, Ordering::AcqRel);
     }
-    pub fn available(&self, provider: pm_agents::Provider) -> bool {
-        self.environment
+    /// A run needs its runtime and a signed-in account.
+    pub fn available(&self, provider: Provider) -> bool {
+        self.connection(provider).0 == "connected"
+    }
+    /// The panel's connection state and what to tell the user about it.
+    pub fn connection(&self, provider: Provider) -> (&'static str, String) {
+        let name = match provider {
+            Provider::Chatgpt => "ChatGPT",
+            Provider::Claude => "Claude",
+            Provider::Compatible => {
+                return (
+                    "unavailable",
+                    "Connect an API, Ollama, or LM Studio in Settings.".into(),
+                );
+            }
+        };
+        let installed = self
+            .environment
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|environment| environment.available(provider))
+            .is_some_and(|environment| environment.available(provider));
+        let accounts = self.accounts().filter(|_| installed);
+        let Some(accounts) = accounts else {
+            let reason = format!("Powermove's built-in {name} runtime is missing.");
+            return ("unavailable", reason);
+        };
+        let status = accounts.status(provider);
+        let signed_out = || format!("Sign in to {name} in Settings.");
+        match status.state {
+            State::Checking => ("checking", String::new()),
+            State::Connecting => ("waiting", String::new()),
+            State::Connected => ("connected", String::new()),
+            State::Disconnected => ("unavailable", status.detail.unwrap_or_else(signed_out)),
+            State::Unavailable => ("unavailable", status.detail.unwrap_or_else(signed_out)),
+        }
+    }
+    /// Providers this install can run, and the choices of the given one.
+    pub fn catalog(&self, provider: Provider) -> Catalog {
+        let environment = self.environment.lock().unwrap();
+        let mut providers = vec![];
+        for (candidate, label) in [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")] {
+            let runtime = match candidate {
+                Provider::Claude => Runtime::Claude,
+                _ => Runtime::Codex,
+            };
+            let installed = environment.as_ref().and_then(|e| e.binary(runtime));
+            if installed.is_some() || candidate == provider {
+                providers.push((candidate.name().to_owned(), label.to_owned()));
+            }
+        }
+        drop(environment);
+        let listed = self
+            .accounts()
+            .map_or_else(Vec::new, |accounts| accounts.models(provider));
+        let mut models = vec![(String::new(), "Default".to_owned())];
+        let mut efforts = vec![String::new()];
+        for model in listed {
+            models.push((model.id, model.label));
+            for effort in model.efforts {
+                if !efforts.contains(&effort) {
+                    efforts.push(effort);
+                }
+            }
+        }
+        Catalog {
+            models,
+            providers,
+            efforts,
+            claude: provider == Provider::Claude,
+        }
     }
     fn publish(&self) {
-        if let Some(realm) = self.realm.lock().unwrap().as_ref() {
+        for realm in self.realms.lock().unwrap().iter() {
             let _ = realm.eval("__pmBuiltin.publish()");
         }
     }
@@ -94,7 +196,8 @@ pub fn admit(action: &Value, connected: bool) -> Result<(), String> {
     let allowed = match action["type"].as_str() {
         Some(
             "draft" | "focus" | "newThread" | "switchThread" | "disclose" | "removeAttachment"
-            | "setModel" | "chooseAnswer" | "typeAnswer" | "keepResult" | "openSettings",
+            | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer" | "keepResult"
+            | "openSettings",
         ) => true,
         Some("submit" | "stop" | "answer") => connected,
         Some("setAccess") => matches!(

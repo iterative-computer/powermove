@@ -7,7 +7,7 @@ use crate::{
     interaction::Submission,
     model::{Effect, Panel, ShellAction},
 };
-use pm_agents::{Access, ApprovalMode};
+use pm_agents::{Access, ApprovalMode, Provider};
 use serde_json::{Value, json};
 use std::ops::Range;
 
@@ -18,6 +18,8 @@ pub struct Context<'a> {
     pub new_thread: &'a str,
     pub now: u64,
     pub popover_open: bool,
+    /// The choices of a provider the thread switches to.
+    pub catalogs: &'a dyn Fn(Provider) -> crate::input::Catalog,
 }
 /// Keep a matching immutable archive/index together. Refresh after structural
 /// archive changes, on a worker; streaming live rows need no archive rebuild.
@@ -74,7 +76,11 @@ impl Window {
                 (format!("live:{}", row.id), row.value.as_ref())
             };
             let command_id = value["id"].as_str().unwrap_or_default();
-            items.push(json!({"id":id,"commandId":id,"value":value,
+            let chosen = session
+                .questions
+                .get(command_id)
+                .map_or_else(Default::default, |draft| draft.answers(value));
+            items.push(json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
                 "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))}));
         }
         let mut value = panel.inspect(&self.thread)?;
@@ -158,11 +164,18 @@ pub fn dispatch_at(
         .get("target")
         .and_then(Value::as_object)
         .ok_or(Error::Stale)?;
+    // A streaming run republishes constantly. Input that names its own target
+    // can't wait for the next publication, or typing and Stop would drop out.
+    let kind = envelope["action"]["type"].as_str().unwrap_or_default();
+    let ordered = !matches!(
+        kind,
+        "key" | "submit" | "stop" | "answer" | "chooseAnswer" | "typeAnswer" | "disclose"
+    );
     if sequence == 0
-        || envelope["sequence"].as_u64() != Some(sequence)
+        || ordered && envelope["sequence"].as_u64() != Some(sequence)
         || target.get("project") != Some(&json!(panel.project()))
         || target.get("thread") != Some(&json!(thread))
-        || target.get("run") != Some(&json!(run))
+        || kind != "key" && target.get("run") != Some(&json!(run))
     {
         return Err(Error::Stale);
     }
@@ -321,6 +334,20 @@ pub fn dispatch(
         }
         "openAttachment" => Some(panel.open_attachment(thread, string(action, "id")?)?),
         "setAccess" => panel.set_access(thread, string(action, "access")?)?,
+        "setProvider" => {
+            let provider = match string(action, "provider")? {
+                "chatgpt" => Provider::Chatgpt,
+                "claude" => Provider::Claude,
+                _ => return Err(Error::Invalid("provider")),
+            };
+            panel.set_provider(
+                thread,
+                provider,
+                String::new(),
+                (context.catalogs)(provider),
+            )?;
+            None
+        }
         "setModel" => {
             panel.set_model(
                 thread,
@@ -417,6 +444,7 @@ mod tests {
                 new_thread: "new",
                 now: 10,
                 popover_open: true,
+                catalogs: &|_| Default::default(),
             },
         )
     }
@@ -653,6 +681,7 @@ mod admission_tests {
             new_thread: "new",
             now: 0,
             popover_open: true,
+            catalogs: &|_| Default::default(),
         }
     }
     #[test]
@@ -674,6 +703,20 @@ mod admission_tests {
         assert!(!panel.session("t").unwrap().draft.sendable());
         dispatch_at(&mut panel, 1, &good, context()).unwrap();
         assert!(panel.session("t").unwrap().draft.sendable());
+    }
+    #[test]
+    fn typing_outlives_a_publication_and_a_run_boundary_but_not_a_thread() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let key = |thread: &str| {
+            json!({"sequence":1,"target":{"project":"p","thread":thread,"run":"finished"},
+                "action":{"type":"key","key":{"key":"a"}}})
+        };
+        dispatch_at(&mut panel, 9, &key("t"), context()).unwrap();
+        assert!(panel.session("t").unwrap().draft.sendable());
+        assert!(matches!(
+            dispatch_at(&mut panel, 9, &key("other"), context()),
+            Err(Error::Stale)
+        ));
     }
     #[test]
     fn malformed_ime_flags_cannot_turn_into_a_submit() {
@@ -729,6 +772,7 @@ mod scoped_tests {
                 new_thread: "n",
                 now: 0,
                 popover_open: true,
+                catalogs: &|_| Default::default(),
             },
         )
         .unwrap();

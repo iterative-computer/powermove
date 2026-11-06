@@ -4,6 +4,7 @@ use crate::{
     data::{Backend, wire},
     models::NativeCommand,
 };
+use pm_agents::{Provider, account::State};
 use pm_kernel::{
     Call, Request, WriteBody,
     commands::comps::{CompCommand, CompPatch},
@@ -11,6 +12,51 @@ use pm_kernel::{
 use serde_json::{Value, json};
 
 impl Backend {
+    /// Live subscription rows. These replace the catalogue's disabled ones by id.
+    pub(crate) fn account_rows(&self) -> Vec<Value> {
+        let Some(accounts) = self.native.agent_link.accounts() else {
+            return vec![];
+        };
+        [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")]
+            .into_iter()
+            .map(|(provider, name)| {
+                let status = accounts.status(provider);
+                let who = [status.email, status.plan]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let id = format!("account.{}", name.to_lowercase());
+                let mut row =
+                    json!({"id":id,"section":"accounts","group":"Subscriptions","label":name});
+                let (action, label) = match status.state {
+                    State::Connected => (Some("account.disconnect"), "Sign Out"),
+                    State::Connecting => (Some("account.disconnect"), "Cancel"),
+                    State::Disconnected => (Some("account.connect"), "Sign In…"),
+                    State::Checking | State::Unavailable => (None, ""),
+                };
+                match action {
+                    Some(action) => {
+                        row["control"] = json!("action");
+                        row["action"] = json!(action);
+                        row["actionLabel"] = json!(label);
+                        if let Some(detail) = status.detail {
+                            row["detail"] = json!(detail);
+                        } else if !who.is_empty() {
+                            row["detail"] = json!(who);
+                        }
+                    }
+                    None => {
+                        row["control"] = json!("status");
+                        let checking = status.state == State::Checking;
+                        let value = status.detail.filter(|_| !checking);
+                        row["value"] = json!(value.as_deref().unwrap_or("Checking…"));
+                    }
+                }
+                row
+            })
+            .collect()
+    }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
         let Some(p) = self.published() else {
             return Ok(vec![]);
@@ -168,8 +214,27 @@ impl Backend {
                 ))
             }
             Some("extensions.retry") => Ok(NativeCommand::Value(self.settings_snapshot()?)),
+            Some("row") => {
+                let id = action["id"].as_str().unwrap_or_default();
+                let provider = match id {
+                    "account.chatgpt" => Provider::Chatgpt,
+                    "account.claude" => Provider::Claude,
+                    _ => return Err("Settings service is unavailable for this action".into()),
+                };
+                let accounts = self
+                    .native
+                    .agent_link
+                    .accounts()
+                    .ok_or("Agent accounts are unavailable")?;
+                match action["action"].as_str() {
+                    Some("account.connect") => accounts.connect(provider),
+                    Some("account.disconnect") => accounts.disconnect(provider),
+                    _ => return Err("Unknown account action".into()),
+                }
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Enabling needs runtime activation as well as a registry flag.
-            // Accounts, speech and archive actions require their actual services.
+            // Speech and archive actions require their actual services.
             _ => Err("Settings service is unavailable for this action".into()),
         }
     }

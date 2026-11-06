@@ -1,5 +1,6 @@
 //! Headless agent services. All runtime and disk work belongs on workers.
 //! OAuth homes are opaque runtime-owned paths, never read or modified here.
+pub mod account;
 pub mod approvals;
 pub mod claude;
 pub mod claude_launch;

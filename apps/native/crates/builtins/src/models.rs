@@ -500,9 +500,20 @@ impl Backend {
     }
     pub(crate) fn agent_snapshot(&mut self) -> Result<Value, String> {
         let agent = self.native.agent.clone().ok_or("Agent panel is not open")?;
-        let state = agent.lock().unwrap();
+        let mut state = agent.lock().unwrap();
+        let active = state.panel.active_id().to_owned();
+        let provider = state
+            .panel
+            .session(&active)
+            .map_err(|e| format!("{e:?}"))?
+            .settings
+            .provider;
+        state
+            .panel
+            .set_catalog(&active, self.native.agent_link.catalog(provider))
+            .map_err(|e| format!("{e:?}"))?;
         let panel = &state.panel;
-        let active = panel.active_id();
+        let active = active.as_str();
         let window =
             pm_panel_agentpanel::v4::Window::new(panel, active).map_err(|e| format!("{e:?}"))?;
         let count = window.count(panel).map_err(|e| format!("{e:?}"))?;
@@ -514,16 +525,10 @@ impl Backend {
             )
             .map_err(|e| format!("{e:?}"))?;
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
-        let provider = session.settings.provider;
-        let connected = self.native.agent_link.available(provider);
+        let (connection, reason) = self.native.agent_link.connection(provider);
         let needs_answer = session.needs_answer();
-        let reason = if provider == pm_agents::Provider::Compatible {
-            "Connect an API, Ollama, or LM Studio in Settings."
-        } else {
-            "ChatGPT couldn’t be reached."
-        };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":if connected {"connected"} else {"unavailable"},"reason":reason,"presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"reason":reason,"presentation":"popover","atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
@@ -542,10 +547,13 @@ impl Backend {
         });
         let state = self.kernel.state();
         let extensions=state.extensions.values().map(|e|json!({"id":e.id,"name":e.id,"type":"Other","source":if e.installed{"Installed"}else{"Built in"},"enabled":e.enabled,"about":"","includes":[],"shortcuts":[],"files":[],"variables":[],"canArchive":false})).collect::<Vec<_>>();
-        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":[],"extensions":extensions,"extensionsState":"ready","speech":[]});
+        let accounts = self.account_rows();
+        let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready","speech":[]});
         if let Some(project) = project {
             publication["project"] = project;
-            publication["rows"] = json!(self.settings_rows()?);
+            let mut rows = self.settings_rows()?;
+            rows.extend(self.account_rows());
+            publication["rows"] = json!(rows);
             let p = self.published().ok_or("Project closed")?;
             let root = p.snapshot.root().ok_or("Project closed")?;
             let mut notes = pm_model::Map::new();
@@ -956,6 +964,14 @@ impl Backend {
                         .settings
                         .provider;
                     let action = &args["action"];
+                    if action["type"] == "retryConnection" {
+                        if let Some(accounts) = link.accounts() {
+                            accounts.refresh(provider);
+                        }
+                        drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     crate::agent_host::admit(action, link.available(provider))?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
@@ -963,6 +979,7 @@ impl Backend {
                     let run = new_id("run");
                     let request = new_id("request");
                     let new_thread = new_id("thread");
+                    let catalogs = |provider| link.catalog(provider);
                     let effect = pm_panel_agentpanel::v4::dispatch_at(
                         &mut state.panel,
                         link.sequence(),
@@ -973,6 +990,7 @@ impl Backend {
                             new_thread: &new_thread,
                             now: crate::agent_host::now_ms(),
                             popover_open: true,
+                            catalogs: &catalogs,
                         },
                     )
                     .map_err(|e| format!("{e:?}"))?;

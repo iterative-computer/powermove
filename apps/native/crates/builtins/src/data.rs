@@ -130,7 +130,8 @@ impl Backend {
     pub(crate) fn sync(&mut self) -> Result<(), String> {
         let published = self.published();
         if self.model.is_none() {
-            let stamp = self.kernel.state().revision.to_string();
+            let accounts = self.native.agent_link.accounts_revision();
+            let stamp = format!("{}:{accounts}", self.kernel.state().revision);
             if self.native.stamp != stamp {
                 self.native.stamp = stamp;
                 self.native.settings_sequence += 1;
@@ -140,12 +141,13 @@ impl Backend {
         }
         let published = published.ok_or("project closed")?;
         let stamp = format!(
-            "{}:{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{:?}:{}",
             published.snapshot.doc_id,
             published.revision(),
             published.metadata_revision,
             self.kernel.state().revision,
-            published.selection.primary()
+            published.selection.primary(),
+            self.native.agent_link.accounts_revision()
         );
         if self.native.stamp != stamp {
             self.native.stamp = stamp;

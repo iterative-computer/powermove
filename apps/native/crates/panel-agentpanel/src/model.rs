@@ -99,7 +99,7 @@ pub struct Session {
     result_message: Option<String>,
     pub stop_error: Option<String>,
     pub disclosures: HashMap<String, bool>,
-    questions: HashMap<String, QuestionDraft>,
+    pub(crate) questions: HashMap<String, QuestionDraft>,
     next_message: u64,
 }
 impl Session {
@@ -1314,6 +1314,7 @@ impl Panel {
         s.settings_dirty = true;
         s.settings.provider = provider;
         s.settings.model = model;
+        s.settings.effort.clear();
         s.catalog = catalog;
         Ok(())
     }

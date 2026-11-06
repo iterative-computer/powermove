@@ -3,6 +3,7 @@ use super::*;
 use pm_agents::{Provider, launch::Environment};
 use pm_kernel::{KernelActor, KernelConfig, OpenSource};
 use pm_surface::events::EventDetail;
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -50,14 +51,7 @@ fn environment(profile: &Path, mode: &str) -> Environment {
             ("CLAUDE_BINARY".into(), fake.to_string_lossy().into_owned()),
         ]),
         tools: vec!["get_project_state".into()],
-        inspection_tools: vec!["get_project_state".into()],
-    }
-}
-fn catalog() -> pm_panel_agentpanel::input::Catalog {
-    pm_panel_agentpanel::input::Catalog {
-        providers: vec![("claude".into(), "Claude".into())],
-        models: vec![("fixture".into(), "Fixture".into())],
-        ..Default::default()
+        composition_tools: vec!["get_project_state".into()],
     }
 }
 struct Agent {
@@ -65,15 +59,59 @@ struct Agent {
     latest: Option<Publication>,
 }
 impl Agent {
-    fn mount(actor: &KernelActor, environment: Environment) -> Self {
+    /// A browser that only remembers what it was asked to open.
+    fn mount_recording(
+        actor: &KernelActor,
+        environment: Environment,
+        opened: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
         let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
-        panels.set_agent_environment(environment);
+        panels.set_agent_environment(
+            environment,
+            std::sync::Arc::new(move |url| {
+                opened.lock().unwrap().push(url.to_owned());
+                Ok(())
+            }),
+        );
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
         Self {
             panels,
             latest: None,
         }
+    }
+    fn mount(actor: &KernelActor, environment: Environment) -> Self {
+        Self::mount_recording(actor, environment, Default::default())
+    }
+    /// Sign-in status arrives from a worker; a run needs it.
+    fn connected(&mut self, provider: Provider) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.panels.broker.agent.available(provider) {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}",
+                self.panels.broker.agent.connection(provider)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.text();
+    }
+    fn change(&mut self, id: &str, value: &str) {
+        self.fire(
+            id,
+            "change",
+            EventDetail {
+                value: Some(json!(value)),
+                ..Default::default()
+            },
+        );
+    }
+    fn click(&mut self, id: &str) {
+        self.fire(id, "click", EventDetail::default());
+    }
+    fn send(&mut self, text: &str) {
+        self.type_text(text);
+        self.key("Enter", false);
     }
     fn surface(&mut self) -> &Publication {
         if let Some(latest) = self.panels.take_publications().pop() {
@@ -160,9 +198,9 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
     assert!(!panel.text().contains("Connect Your Agent"));
-    panel.type_text("Hi");
-    panel.key("Enter", false);
+    panel.send("Hi");
     panel.wait(idle);
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -188,6 +226,7 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
         "{stored}"
     );
     let mut reopened = Agent::mount(&actor, environment(root.path(), "reply"));
+    reopened.connected(Provider::Chatgpt);
     assert!(reopened.text().contains("Saw: Hi"));
     reopened.panels.close();
 }
@@ -196,9 +235,9 @@ fn stop_cancels_a_held_run_through_the_provider() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
-    panel.type_text("Wait");
-    panel.key("Enter", false);
-    panel.fire("agent-stop", "click", EventDetail::default());
+    panel.connected(Provider::Chatgpt);
+    panel.send("Wait");
+    panel.click("agent-stop");
     panel.wait(idle);
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -212,45 +251,193 @@ fn stop_cancels_a_held_run_through_the_provider() {
     panel.panels.close();
 }
 #[test]
-fn claude_question_answer_reaches_the_process_and_its_structured_reply_shows() {
+fn claude_question_is_answered_with_the_cards_own_buttons() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Claude);
+    panel.change("agent-provider", "claude");
+    panel.connected(Provider::Claude);
+    panel.send("Style");
     let agent = panel.agent();
     let thread = thread_id(&agent);
-    agent
-        .lock()
-        .unwrap()
-        .panel
-        .set_provider(&thread, Provider::Claude, "fixture".into(), catalog())
-        .unwrap();
-    panel.type_text("Style");
-    panel.key("Enter", false);
-    panel.wait(|state| {
-        state
+    let open =
+        |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+    panel.wait(open);
+    assert!(panel.text().contains("Choose a style?"));
+    panel.click("live:question-question-0-Soft");
+    panel.click("live:question-answer");
+    panel.wait(idle);
+    assert!(panel.text().contains("Using Soft"));
+    panel.panels.close();
+}
+#[test]
+fn supervised_approval_reaches_the_process_and_deny_too() {
+    for (choice, reply) in [("Allow once", "Using allow"), ("Deny", "Using deny")] {
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor();
+        let mut panel = Agent::mount(&actor, environment(root.path(), "approval"));
+        panel.connected(Provider::Claude);
+        panel.change("agent-provider", "claude");
+        panel.change("agent-access", "supervised");
+        panel.connected(Provider::Claude);
+        panel.send("Build");
+        let agent = panel.agent();
+        let thread = thread_id(&agent);
+        let open =
+            |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+        panel.wait(open);
+        assert!(panel.text().contains("Run this command?"));
+        let answer = agent
+            .lock()
+            .unwrap()
             .panel
             .session(&thread)
             .unwrap()
-            .question("question")
-            .is_some()
-    });
-    assert!(panel.text().contains("Choose a style?"));
-    {
-        let mut state = agent.lock().unwrap();
-        state
-            .panel
-            .choose_answer(&thread, "question", "question-0", "Soft")
+            .trace
+            .rows
+            .values()
+            .find(|row| row["kind"] == "question")
+            .map(|row| row["id"].as_str().unwrap().to_owned())
             .unwrap();
+        panel.click(&format!("live:{answer}-decision-{choice}"));
+        panel.click(&format!("live:{answer}-answer"));
+        panel.wait(idle);
+        assert!(panel.text().contains(reply), "{}", panel.text());
+        panel.panels.close();
     }
-    panel.panels.realms["agent"]
-        .eval(format!(
-            "__pmBuiltin.command('panel.agent.dispatch',{})",
-            json!({"sequence":panel.panels.broker.agent.sequence(),"target":{"project":"synthetic","thread":thread,"run":agent.lock().unwrap().panel.session(&thread).unwrap().run.as_ref().unwrap().id},"action":{"type":"answer","step":"question","skip":false}})
-        ))
-        .map(finish)
-        .unwrap();
+}
+#[test]
+fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut environment = environment(root.path(), "reply");
+    let record = root.path().join("argv.json");
+    environment.vars.insert(
+        "PM_FAKE_RECORD".into(),
+        record.to_string_lossy().into_owned(),
+    );
+    environment.tools = pm_mcp_tools();
+    environment.composition_tools = vec![
+        "start_session".into(),
+        "apply_commands".into(),
+        "get_project_state".into(),
+    ];
+    let mut panel = Agent::mount(&actor, environment);
+    panel.connected(Provider::Claude);
+    panel.change("agent-provider", "claude");
+    panel.change("agent-model", "fixture");
+    panel.change("agent-effort", "high");
+    panel.connected(Provider::Claude);
+    panel.send("Go");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    let open =
+        |state: &agent_host::AgentState| state.panel.session(&thread).unwrap().needs_answer();
+    panel.wait(open);
+    let args: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    let value = |flag: &str| {
+        let at = args.iter().position(|a| a == flag).unwrap();
+        args[at + 1].clone()
+    };
+    assert_eq!(value("--model"), "fixture");
+    assert_eq!(value("--effort"), "high");
+    let allowed = value("--allowedTools");
+    assert!(
+        allowed.contains("mcp__powermove__start_session"),
+        "{allowed}"
+    );
+    assert!(
+        allowed.contains("mcp__powermove__apply_commands"),
+        "{allowed}"
+    );
+    assert!(
+        !allowed.contains("mcp__powermove__export_video"),
+        "{allowed}"
+    );
+    panel.panels.close();
+}
+fn pm_mcp_tools() -> Vec<String> {
+    vec![
+        "start_session".into(),
+        "apply_commands".into(),
+        "export_video".into(),
+    ]
+}
+#[test]
+fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let opened = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let mut panel = Agent::mount_recording(
+        &actor,
+        environment(root.path(), "signed-out"),
+        opened.clone(),
+    );
+    finish(panel.panels.mount("settings").unwrap());
+    let accounts = panel.panels.broker.agent.clone();
+    let read = |accounts: &agent_host::AgentLink| accounts.connection(Provider::Chatgpt);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read(&accounts).0 == "checking" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
+    assert!(panel.text().contains("Connect Your Agent"));
+    let settings = |panel: &Agent, action: Value| {
+        let entries = panel.panels.broker.entries.lock().unwrap();
+        let mut backend = entries["settings"].backend.lock().unwrap();
+        let revision = backend.settings_snapshot().unwrap()["revision"].clone();
+        match backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":action}),
+            )
+            .unwrap()
+        {
+            models::NativeCommand::Value(value) => value,
+            _ => panic!("settings value"),
+        }
+    };
+    let row = |publication: &Value, id: &str| {
+        publication["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let before = settings(&panel, json!({"type":"extensions.retry"}));
+    assert_eq!(row(&before, "account.chatgpt")["actionLabel"], "Sign In…");
+    settings(
+        &panel,
+        json!({"type":"row","id":"account.chatgpt","action":"account.connect"}),
+    );
+    panel.connected(Provider::Chatgpt);
+    assert_eq!(
+        opened.lock().unwrap().as_slice(),
+        ["https://chatgpt.com/auth"]
+    );
+    let after = settings(&panel, json!({"type":"extensions.retry"}));
+    let chatgpt = row(&after, "account.chatgpt");
+    assert_eq!(chatgpt["actionLabel"], "Sign Out");
+    assert_eq!(chatgpt["detail"], "user@example.invalid · plus");
+    assert!(!panel.text().contains("Connect Your Agent"));
+    panel.change("agent-model", "fixture-5");
+    panel.send("Hi");
     panel.wait(idle);
-    assert!(panel.text().contains("Using Soft"));
+    assert!(panel.text().contains("Saw: Hi"));
+    settings(
+        &panel,
+        json!({"type":"row","id":"account.chatgpt","action":"account.disconnect"}),
+    );
+    while read(&accounts).0 == "connected" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(panel.text().contains("Connect Your Agent"));
     panel.panels.close();
 }
 #[test]
@@ -260,6 +447,6 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     let mut environment = environment(root.path(), "reply");
     environment.resources = None;
     let mut panel = Agent::mount(&actor, environment);
-    assert!(panel.text().contains("Connect Your Agent"));
+    assert!(panel.text().contains("runtime is missing"));
     panel.panels.close();
 }

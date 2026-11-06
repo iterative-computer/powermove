@@ -60,12 +60,14 @@ export function messages(): Row[] {
     {
       id: "history:message-0",
       commandId: "",
+      chosen: {},
       value: { role: "user", text: "Make the headline" },
       open: false,
     },
     {
       id: "live:text-1",
       commandId: "text-1",
+      chosen: {},
       value: { kind: "text", text: "Done. Headline now scales from 92 % …" },
       open: false,
     },
@@ -103,6 +105,7 @@ export const states: Record<string, () => Publication> = {
         {
           id: "live:q",
           commandId: "q",
+          chosen: {},
           open: false,
           value: {
             kind: "question",
@@ -119,6 +122,7 @@ export const states: Record<string, () => Publication> = {
         {
           id: "live:tool",
           commandId: "tool",
+          chosen: {},
           open: true,
           value: {
             kind: "tool",
@@ -138,6 +142,7 @@ export const states: Record<string, () => Publication> = {
       {
         id: "error",
         commandId: "",
+        chosen: {},
         open: false,
         value: { kind: "error", text: "ChatGPT couldn’t be reached." },
       },

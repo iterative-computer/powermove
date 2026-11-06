@@ -154,16 +154,20 @@ impl Builtins {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
-        if panel == "agent" {
-            self.broker.agent.set_realm(realm.clone());
+        if matches!(panel, "agent" | "settings") {
+            self.broker.agent.add_realm(realm.clone());
         }
         let ticket = realm.eval(format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)))?;
         self.realms.insert(panel.into(), realm);
         Ok(ticket)
     }
     /// What agent runs may use. Without this the panel reports no connection.
-    pub fn set_agent_environment(&self, environment: pm_agents::launch::Environment) {
-        self.broker.agent.set_environment(environment);
+    pub fn set_agent_environment(
+        &self,
+        environment: pm_agents::launch::Environment,
+        open: std::sync::Arc<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>,
+    ) {
+        self.broker.agent.set_environment(environment, open);
     }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         self.realms

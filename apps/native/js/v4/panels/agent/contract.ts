@@ -5,6 +5,8 @@ export interface Row {
   id: string;
   commandId: string;
   value: Record<string, Json>;
+  /** Choices made on an open question, by question id. */
+  chosen: Record<string, string[]>;
   open: boolean;
 }
 export type Access = "editor" | "supervised" | "auto" | "full";
@@ -51,9 +53,8 @@ export interface Snapshot {
 /** These facts belong to the shell/provider/native input coordinator, not Panel. */
 export interface NativeFacts {
   connection: "checking" | "waiting" | "connected" | "unavailable";
-  reason:
-    | "ChatGPT couldn’t be reached."
-    | "Connect an API, Ollama, or LM Studio in Settings.";
+  /** What to tell the user when `connection` isn't "connected". */
+  reason: string;
   presentation: "popover" | "docked";
   atMinimumDockWidth: boolean;
   visible: boolean;
@@ -101,7 +102,9 @@ export type Action =
     }
   | { type: "disclose"; id: string; open: boolean }
   | { type: "setAccess"; access: Access }
+  | { type: "setProvider"; provider: string }
   | { type: "setModel"; model: string; effort: string }
+  | { type: "retryConnection" }
   | { type: "chooseAnswer"; step: string; question: string; option: string }
   | { type: "typeAnswer"; step: string; question: string; text: string }
   | { type: "answer"; step: string; skip: boolean }

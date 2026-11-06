@@ -52,10 +52,23 @@ pub fn names() -> Vec<String> {
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect()
 }
-pub fn inspection_names() -> Vec<String> {
+/// What a Composition-only run may call: inspection, plus edits that go through
+/// its own session, so the provider's shell and files stay out of reach.
+pub fn composition_names() -> Vec<String> {
+    const EDITS: &[&str] = &[
+        "start_session",
+        "finish_session",
+        "rollback_changes",
+        "project_memory",
+        "select_layers",
+        "apply_commands",
+        "edit_layer_strips",
+        "edit_video",
+        "edit_3d",
+    ];
     names()
         .into_iter()
-        .filter(|name| permits("inspection", name))
+        .filter(|name| permits("inspection", name) || EDITS.contains(&name.as_str()))
         .collect()
 }
 pub fn validate(name: &str, args: &Value) -> Result<()> {

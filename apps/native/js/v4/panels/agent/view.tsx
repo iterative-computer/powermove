@@ -3,6 +3,7 @@ import { useLayoutEffect, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
 import type {
+  Access,
   Action,
   AgentModel,
   NativeFacts,
@@ -43,6 +44,21 @@ const copy = {
   auto: "Auto",
   full: "Full access",
 } as const;
+const effortCopy: Record<string, string> = {
+  "": "Default effort",
+  none: "No effort",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
+};
+/** Full access needs a consent alert the host doesn't have yet. */
+const accessChoices = (current: keyof typeof copy) =>
+  (Object.keys(copy) as (keyof typeof copy)[]).filter(
+    (v) => v !== "full" || current === "full",
+  );
 export function elapsed(ms: number) {
   const seconds = Math.floor(Math.max(0, ms) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -68,18 +84,21 @@ function Placeholder({
 }
 /** The kit owns system push/default/destructive button presentation. */
 function Push({
+  id,
   label,
-  danger,
+  selected,
   onClick,
 }: {
+  id?: string;
   label: string;
-  danger?: boolean;
+  selected?: boolean;
   onClick?: () => void;
 }) {
   return (
     <UI.PushButton
+      id={id}
       label={label}
-      role={danger ? "destructive" : "normal"}
+      role={selected ? "default" : "normal"}
       disabled={!onClick}
       onClick={onClick}
     />
@@ -209,33 +228,61 @@ function Message({
       <div
         role="listitem"
         label={`Question from the agent: ${questionTitle}`}
-        metadata={{ rowId: row.id, apiGap: "pushButton" }}
+        metadata={{ rowId: row.id }}
         style={card(n.presentation === "popover")}
       >
         <text style={title}>{questionTitle}</text>
         {questions.map((q) =>
           q && typeof q === "object" && !Array.isArray(q) ? (
-            <Placeholder gap="pushButton" label={str(q.question)}>
+            <div
+              role="group"
+              label={str(q.question)}
+              style={{ ...vertical }}
+            >
               <text style={body}>{str(q.question)}</text>
-            </Placeholder>
+              {(Array.isArray(q.options) ? q.options : []).map((o) => {
+                const label =
+                  o && typeof o === "object" && !Array.isArray(o)
+                    ? str(o.label)
+                    : "";
+                const id = str(q.id);
+                return (
+                  <Push
+                    id={`${row.id}-${id}-${label}`}
+                    label={label}
+                    selected={row.chosen[id]?.includes(label)}
+                    onClick={() =>
+                      send({
+                        type: "chooseAnswer",
+                        step: row.commandId,
+                        question: id,
+                        option: label,
+                      })
+                    }
+                  />
+                );
+              })}
+            </div>
           ) : null,
         )}
-        {v.transport === "reply" && <Push label="Skip" />}
-        <Push label="Answer" />
-      </div>
-    );
-  if (kind === "approval")
-    return (
-      <div
-        role="listitem"
-        label={text}
-        metadata={{ rowId: row.id, apiGap: "pushButton" }}
-        style={card(n.presentation === "popover")}
-      >
-        <text style={title}>{text}</text>
-        <Push label="Allow" />
-        <Push label="Allow for This Thread" />
-        <Push label="Deny" danger />
+        {v.transport === "reply" && (
+          <Push
+            id={`${row.id}-skip`}
+            label="Skip"
+            onClick={() =>
+              send({ type: "answer", step: row.commandId, skip: true })
+            }
+          />
+        )}
+        <Push
+          id={`${row.id}-answer`}
+          label="Answer"
+          onClick={
+            Object.values(row.chosen).some((a) => a.length > 0)
+              ? () => send({ type: "answer", step: row.commandId, skip: false })
+              : undefined
+          }
+        />
       </div>
     );
   if (kind === "visual")
@@ -345,6 +392,13 @@ function Message({
       <text>{text}</text>
     </div>
   );
+}
+/** A saved choice the catalog no longer lists stays visible rather than blank. */
+function pairs(entries: [string, string][], current: string) {
+  const options = entries.map(([v, label]) => ({ v, label }));
+  return entries.some(([v]) => v === current)
+    ? options
+    : [...options, { v: current, label: current }];
 }
 export function AgentView({
   publication: { snapshot: s, native: n },
@@ -488,7 +542,10 @@ export function AgentView({
             explanation={n.reason}
             action={
               <>
-                <Push label="Try Again" />
+                <Push
+                  label="Try Again"
+                  onClick={() => send({ type: "retryConnection" })}
+                />
                 <Push
                   label="Connection Settings…"
                   onClick={() => send({ type: "openSettings" })}
@@ -626,16 +683,62 @@ export function AgentView({
             label={`Agent access, ${copy[s.settings.access]}`}
             value={s.settings.access}
             binding={n.bindings.access}
-            disabled
+            disabled={working || s.composerDisabled}
             metadata={{ apiGap: "accessMenu" }}
-            options={Object.entries(copy).map(([v, label]) => ({ v, label }))}
+            onChange={(e) =>
+              send({ type: "setAccess", access: e.value as Access })
+            }
+            options={accessChoices(s.settings.access).map((v) => ({
+              v,
+              label: copy[v],
+            }))}
           />
-          <UI.ToolbarItem
+          <UI.PopUpButton
+            id="agent-provider"
+            label="Agent provider"
+            value={s.settings.provider}
+            binding={n.bindings.model}
+            disabled={working || s.composerDisabled}
+            onChange={(e) =>
+              send({ type: "setProvider", provider: String(e.value) })
+            }
+            options={pairs(s.catalog.providers, s.settings.provider)}
+          />
+          <UI.PopUpButton
             id="agent-model"
-            label={`Model and reasoning effort, ${s.settings.model}, ${s.settings.effort}`}
-            disabled
-            metadata={{ apiGap: "modelPicker" }}
-          >{`${s.settings.model} · ${s.settings.effort}`}</UI.ToolbarItem>
+            label="Model"
+            value={s.settings.model}
+            binding={n.bindings.model}
+            disabled={working || s.composerDisabled}
+            onChange={(e) =>
+              send({
+                type: "setModel",
+                model: String(e.value),
+                effort: s.settings.effort,
+              })
+            }
+            options={pairs(s.catalog.models, s.settings.model)}
+          />
+          {s.catalog.efforts.length > 1 && (
+            <UI.PopUpButton
+              id="agent-effort"
+              label="Reasoning effort"
+              value={s.settings.effort}
+              binding={n.bindings.model}
+              disabled={working || s.composerDisabled}
+              onChange={(e) =>
+                send({
+                  type: "setModel",
+                  model: s.settings.model,
+                  effort: String(e.value),
+                })
+              }
+              options={s.catalog.efforts.map((v) => ({
+                v,
+                label: effortCopy[v] ?? v,
+              }))}
+            />
+          )}
           {working ? (
             <UI.ToolbarItem
               id="agent-stop"
