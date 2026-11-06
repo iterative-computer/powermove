@@ -144,6 +144,18 @@ pub struct Engine {
     offscreen: Option<metal::Texture>,
     pub cache_enabled: bool,
     studio_content: Option<(usize, u64)>,
+    /// Set by the device's lost callback, or an error that is not a
+    /// validation error: the worker rebuilds the engine on a new device.
+    lost: Arc<AtomicBool>,
+    /// Wakes an idle worker when the device is lost ([`Engine::set_waker`]).
+    waker: Waker,
+}
+type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
+fn lose(lost: &AtomicBool, waker: &Waker) {
+    lost.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(wake) = &*waker.lock().unwrap() {
+        wake.try_send(()).ok();
+    }
 }
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
@@ -159,7 +171,50 @@ pub struct Submission {
     pub stand_ins: bool,
 }
 impl Engine {
+    /// A fresh engine on a new device after `lost` reported a loss. Fonts
+    /// carry over; every surface, cache and program is made again.
+    pub fn rebuild(&self) -> Result<Self> {
+        let mut next = Self::new(Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?)?;
+        next.set_waker(self.waker.lock().unwrap().clone());
+        next.mastering = self.mastering;
+        next.cache_enabled = self.cache_enabled;
+        if let Some(fonts) = &self.fonts {
+            next.set_fonts(fonts.clone());
+        }
+        Ok(next)
+    }
+    pub fn set_waker(&self, wake: Option<std::sync::mpsc::SyncSender<()>>) {
+        *self.waker.lock().unwrap() = wake;
+    }
+    /// Non-blocking: runs wgpu's completed callbacks, a device loss among them.
+    pub fn poll(&self) {
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+    }
+    pub fn lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Test hook: lose the device as a removed or reset GPU does.
+    pub fn destroy_device(&self) {
+        self.gpu.device.destroy();
+    }
     pub fn new(gpu: Gpu) -> Result<Self> {
+        let lost = Arc::new(AtomicBool::new(false));
+        let waker = Waker::default();
+        let (flag, wake) = (lost.clone(), waker.clone());
+        gpu.device.set_device_lost_callback(move |reason, message| {
+            eprintln!("Viewer GPU device lost ({reason:?}): {message}");
+            lose(&flag, &wake);
+        });
+        // wgpu's default handler panics, which would stop every viewer. A
+        // validation error fails one frame; anything else rebuilds.
+        let (flag, wake) = (lost.clone(), waker.clone());
+        gpu.device
+            .on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                if !matches!(error, wgpu::Error::Validation { .. }) {
+                    lose(&flag, &wake);
+                }
+                eprintln!("Viewer GPU error: {error}");
+            }));
         let metal = metal_device(&gpu);
         let library = metal
             .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
@@ -206,6 +261,8 @@ impl Engine {
             offscreen: None,
             cache_enabled: true,
             studio_content: None,
+            lost,
+            waker,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -411,6 +468,10 @@ impl Engine {
         };
         trace.lock().unwrap().drawable_asked = now();
         let drawable = if let Some(layer) = layer {
+            // A rebuilt engine has a new device; the layer follows it.
+            if layer.device().as_ptr() != self.metal.as_ptr() {
+                layer.set_device(&self.metal);
+            }
             let Some(d) = layer.next_drawable() else {
                 return Ok(None);
             };

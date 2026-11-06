@@ -182,6 +182,8 @@ pub struct ViewerStatus {
     /// Playing or waiting for the audio epoch: the host should keep its
     /// display-phase source running so the start can align to vsync.
     pub wants_display: bool,
+    /// GPU devices lost and rebuilt under this viewer.
+    pub device_losses: u64,
 }
 struct View {
     config: ViewerConfig,
@@ -242,6 +244,8 @@ struct Shared {
     interactive: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    lose_device: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub struct Viewer {
@@ -579,6 +583,8 @@ impl EngineService {
             interactive: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
+            #[cfg(test)]
+            lose_device: Default::default(),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -767,6 +773,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
         objc2_foundation::NSThread::currentThread()
             .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
     });
+    engine.set_waker(Some(shared.wake.clone()));
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
     let recorder =
@@ -782,6 +789,47 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
     loop {
+        #[cfg(test)]
+        if shared
+            .lose_device
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            engine.destroy_device();
+        }
+        // Delivers a pending device-lost callback even while idle.
+        engine.poll();
+        if engine.lost() {
+            // Work on the lost device never completes: forget it, rebuild,
+            // and draw every viewer again on the new device.
+            flights.clear();
+            let rebuilt = engine.rebuild();
+            let mut state = shared.state.lock().unwrap();
+            match rebuilt {
+                Ok(next) => {
+                    engine = next;
+                    for (id, v) in state.views.iter_mut() {
+                        v.status.device_losses += 1;
+                        v.status.error = None;
+                        v.stamp.sequence += 1;
+                        v.dirty = true;
+                        if let Some(r) = runtime.get_mut(id) {
+                            r.last = None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    for v in state.views.values_mut() {
+                        v.status.error = Some(format!("The GPU was lost and is not back yet: {e}"));
+                    }
+                }
+            }
+            state.notify();
+            drop(state);
+            if engine.lost() {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        }
         let mut state = shared.state.lock().unwrap();
         // Completion is distinct from display. Never synthesize presentedTime.
         let mut i = 0;
@@ -1483,5 +1531,74 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// A removed or reset GPU: the worker rebuilds its device and the
+    /// viewer draws again without anyone reopening it.
+    #[test]
+    fn a_lost_device_is_rebuilt_and_the_viewer_draws_again() {
+        let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        #[cfg(feature = "kernel")]
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(project).snapshot();
+        #[cfg(not(feature = "kernel"))]
+        let snapshot = Snapshot {
+            doc_id: 98,
+            revision: 1,
+            document: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+        };
+        let service = EngineService::start(pm_gpu::Gpu::new("lost-device-test").unwrap()).unwrap();
+        let v = service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot,
+                media: Default::default(),
+                output: Output {
+                    width: 160,
+                    height: 90,
+                    display: 1,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: None,
+                audio: false,
+            })
+            .unwrap();
+        let drawn = |v: &Viewer| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let status = v.status();
+                if let Some(frame) = &status.frame
+                    && frame.gpu_ok
+                    && frame.pixels.is_some()
+                    && Some(frame.stamp) == v.stamp()
+                {
+                    return status;
+                }
+                assert!(std::time::Instant::now() < deadline, "{status:?}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        v.capture_next().unwrap();
+        let before = drawn(&v).frame.unwrap().pixels.unwrap();
+        service
+            .shared
+            .lose_device
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.shared.wake.try_send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while v.status().device_losses == 0 {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        v.capture_next().unwrap();
+        let after = drawn(&v);
+        assert_eq!(after.error, None);
+        assert_eq!(after.device_losses, 1);
+        assert_eq!(after.frame.unwrap().pixels.unwrap(), before, "same picture on the new device");
     }
 }
