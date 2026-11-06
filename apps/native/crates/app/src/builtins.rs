@@ -559,7 +559,9 @@ impl Controller {
                                 pm_panel_media::Effect::PickFolder { folder } => {
                                     self.pick_media_folder(folder, cx)
                                 }
-                                // A drop on the panel: assets only, no layers.
+                                // A drop on the panel: assets only, no layers. Option
+                                // separates a folder from a sequence, and no sequence
+                                // imports yet, so it changes nothing here.
                                 pm_panel_media::Effect::Import { files, folder, .. } => self
                                     .import(
                                         pm_builtins::media_import::ImportRequest {
