@@ -73,13 +73,13 @@ impl Inputs {
             let asset = assets.and_then(|a| a.get(id));
             STORAGE_FIELDS.map(|field| asset.and_then(|a| a.get(field)).map(Node::to_value))
         };
-        let ids = |assets: Option<&Node>| {
+        let ids = |assets: Option<&Node>| -> BTreeSet<String> {
             assets
                 .and_then(|a| match a.kind() {
                     NodeKind::Object(map) => Some(map.keys().map(|k| k.to_string()).collect()),
                     _ => None,
                 })
-                .unwrap_or_else(BTreeSet::new)
+                .unwrap_or_default()
         };
         let (old_assets, new_assets) = (old.assets.as_ref(), self.assets.as_ref());
         for id in ids(old_assets).union(&ids(new_assets)) {

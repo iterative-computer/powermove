@@ -80,6 +80,9 @@ impl Controller {
         });
         if let Some(path) = projects.into_iter().next() {
             self.open_file(path, cx);
+        } else if !media.is_empty() && self.session.is_none() {
+            self.message = "Open a project before importing media".into();
+            cx.notify();
         } else if !media.is_empty() {
             let place_at = Some(self.time());
             self.import(

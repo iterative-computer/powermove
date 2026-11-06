@@ -506,11 +506,14 @@ mod tests {
 
 /// Native decoder probes; no metadata-only Ready state or proxy promotion.
 #[cfg(target_os = "macos")]
+/// Path, kind, then length, modification time and inode.
+type ProbeKey = (PathBuf, String, (u64, i64, i64, u64));
+
 /// Decode results by file identity. Proving that media decodes costs a real
 /// decode, so one file is probed once however many revisions observe it.
 #[derive(Default)]
 pub struct MediaProbes {
-    results: Mutex<HashMap<(PathBuf, String, (u64, i64, i64, u64)), Result<(), String>>>,
+    results: Mutex<HashMap<ProbeKey, Result<(), String>>>,
     runs: AtomicU64,
 }
 impl MediaProbes {

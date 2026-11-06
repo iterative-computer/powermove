@@ -187,6 +187,29 @@ pub fn effect_options(state: &pm_kernel::state::StateSnapshot) -> Vec<Value> {
     result
 }
 
+pub fn announce(window: &objc2_app_kit::NSWindow, message: &str) {
+    use objc2_app_kit::{
+        NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
+        NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+        NSAccessibilityPriorityLevel,
+    };
+    use objc2_foundation::{NSDictionary, NSNumber};
+    let text = NSString::from_str(message);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0);
+    let values: [&AnyObject; 2] = [text.as_ref(), priority.as_ref()];
+    unsafe {
+        let info = NSDictionary::from_slices(
+            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+            &values,
+        );
+        NSAccessibilityPostNotificationWithUserInfo(
+            window.as_ref(),
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
+}
+
 #[cfg(test)]
 mod menu_tests {
     use super::*;
@@ -249,28 +272,5 @@ mod menu_tests {
         assert_eq!(options[1]["label"], "Blur");
         assert_eq!(options[1]["children"].as_array().unwrap().len(), 1);
         assert_eq!(options[2]["label"], "Light");
-    }
-}
-
-pub fn announce(window: &objc2_app_kit::NSWindow, message: &str) {
-    use objc2_app_kit::{
-        NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
-        NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
-        NSAccessibilityPriorityLevel,
-    };
-    use objc2_foundation::{NSDictionary, NSNumber};
-    let text = NSString::from_str(message);
-    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0);
-    let values: [&AnyObject; 2] = [text.as_ref(), priority.as_ref()];
-    unsafe {
-        let info = NSDictionary::from_slices(
-            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
-            &values,
-        );
-        NSAccessibilityPostNotificationWithUserInfo(
-            window.as_ref(),
-            NSAccessibilityAnnouncementRequestedNotification,
-            Some(&info),
-        );
     }
 }
