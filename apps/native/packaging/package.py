@@ -160,8 +160,9 @@ def bundle(executable, destination, channel, version, build, update_config,
     # the killable shader compiler. They sit beside the build's main binary.
     for helper in HELPERS:
         sibling = executable.with_name(helper)
-        if sibling.is_file():
-            shutil.copy2(sibling, contents / "MacOS" / helper)
+        if not sibling.is_file():
+            raise ValueError(f"{helper} must be built beside the native binary")
+        shutil.copy2(sibling, contents / "MacOS" / helper)
     with (contents / "Info.plist").open("wb") as file:
         plistlib.dump(metadata, file, sort_keys=True)
     (contents / "PkgInfo").write_bytes(b"APPL????")
