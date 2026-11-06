@@ -679,6 +679,7 @@ impl Controller {
                 height: 360,
                 display: 0,
                 headroom: 1.,
+                crop: None,
             },
             layer: Some(self.host.borrow().viewer_layer()),
             rate: self.rate,

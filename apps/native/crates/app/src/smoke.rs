@@ -103,7 +103,7 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
             let scene = Scene {
                 doc: p.snapshot.document.clone(),
                 comp,
-                media: media.export_paths(false),
+                media: std::sync::Arc::new(media.export_paths(false)),
                 content: p.snapshot.doc_id,
             };
             let size = Size::new(320, 180);

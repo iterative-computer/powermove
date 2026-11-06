@@ -488,6 +488,7 @@ impl Popout {
             height: size.height.round().max(1.) as u32,
             display: 0,
             headroom: 1.,
+            crop: None,
         };
         self.window
             .screen()
