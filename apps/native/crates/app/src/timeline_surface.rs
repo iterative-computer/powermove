@@ -132,6 +132,8 @@ pub struct TimelineSurface {
     fitted: bool,
     gesture: Gesture,
     cursor: CursorStyle,
+    /// A wheel or pinch view change waiting for the gesture to rest.
+    idle_persist: Option<Task<()>>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 const PPS: (f64, f64) = (4., 4000.);
@@ -171,6 +173,7 @@ impl TimelineSurface {
             fitted: false,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
+            idle_persist: None,
         };
         this.restore_view();
         cx.spawn(async move |this, cx| {
@@ -294,7 +297,21 @@ impl TimelineSurface {
         self.view.scroll_time = (anchor - (x - self.view.layer_column) / self.view.pps)
             .max(self.model.index.minimum_time());
         self.fitted = true;
-        self.changed(true, cx);
+        self.changed_while_hot(cx);
+    }
+    /// Wheel and pinch move the view locally on every event; each write
+    /// publishes to every panel, so it waits until the gesture rests.
+    fn changed_while_hot(&mut self, cx: &mut Context<Self>) {
+        self.changed(false, cx);
+        self.idle_persist = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::gizmo::NAVIGATION_IDLE)
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.idle_persist = None;
+                s.changed(true, cx);
+            });
+        }));
     }
     fn changed(&mut self, persist: bool, cx: &mut Context<Self>) {
         self.frame = None;
@@ -907,7 +924,7 @@ impl TimelineSurface {
             self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
             self.clamp_scroll();
         }
-        self.changed(true, cx);
+        self.changed_while_hot(cx);
     }
     fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = self.local(event.position);
@@ -1049,6 +1066,10 @@ impl TimelineSurface {
     #[cfg(test)]
     pub fn pps(&self) -> f64 {
         self.view.pps
+    }
+    #[cfg(test)]
+    pub fn scroll_time(&self) -> f64 {
+        self.view.scroll_time
     }
     #[cfg(test)]
     pub fn scroll_y(&self) -> f64 {

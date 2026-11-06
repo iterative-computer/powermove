@@ -732,6 +732,42 @@ fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(s.surface.read_with(&s.vcx, |t, _| t.pps()) > after);
 }
+/// Wheel scrolling moves the view at once and writes it once, after it rests:
+/// every write publishes to all panels.
+#[gpui::test]
+fn a_wheel_burst_writes_the_view_once_it_rests(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let stored = |s: &Stage| {
+        let state = s.rig.kernel.state();
+        state
+            .ui
+            .get(PROJECT)
+            .and_then(|ui| ui.timeline.get("nativeScrollTime"))
+            .and_then(pm_model::Value::as_f64)
+    };
+    let before = stored(&s);
+    for _ in 0..5 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    assert!(shown > 0., "the view moved with the wheel");
+    assert_eq!(stored(&s), before, "nothing is written mid-gesture");
+    s.vcx
+        .executor()
+        .advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
+    s.idle(cx);
+    assert_eq!(stored(&s), Some(shown));
+}
 #[gpui::test]
 fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
