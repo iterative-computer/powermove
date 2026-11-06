@@ -539,6 +539,9 @@ pub struct PreparedEdit {
     after: Value,
 }
 impl PreparedEdit {
+    pub fn document(&self) -> u64 {
+        self.document
+    }
     pub fn submit(
         self,
         handle: &KernelHandle,

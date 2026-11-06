@@ -317,6 +317,18 @@ export function accountRows(): Row[] {
       "Remember Installs on This Account",
       "switch",
     ),
+    {
+      ...row(
+        "bring-sign-ins",
+        "Powermove Account",
+        "Sign-Ins from the Original App",
+        "action",
+        "Copies your extension secrets and sign-ins, with one macOS Keychain request.",
+      ),
+      action: "account.bring-sign-ins",
+      actionLabel: "Bring Sign-Ins from the Original App…",
+      disabled: false,
+    },
     // No status until the subscription service publishes one: a default
     // "Restart needed" would claim a state nobody observed (design review).
     ...["ChatGPT", "Claude"].map((name) =>

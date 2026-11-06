@@ -18,7 +18,6 @@ pm-captions = { path = "../../../../engine/crates/pm-captions" }
 toml_edit = "0.25"
 pm-native-migrate = { path = "../migrate" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
-pm-first-launch = { path = "../first-launch" }
 pm-promedia = { path = "../promedia" }
 
 [dev-dependencies]

@@ -361,6 +361,80 @@ fn discard_reopens_base_without_saving_recovered_content_and_archives_journal() 
     );
 }
 #[test]
+fn open_saved_version_sets_an_unreadable_journal_aside_and_opens_the_saved_project() {
+    let root = common::TempDir::new("open-saved");
+    crash(&root.0);
+    let session = fs::read_dir(root.path("journals/p"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::remove_file(session.join("checkpoint-00000000.json")).unwrap();
+    let mut changed = value();
+    changed
+        .as_object_mut()
+        .unwrap()
+        .insert("name", Value::from("Foreign change"));
+    fs::write(
+        root.path("store/project.p.json"),
+        pm_model::json::to_canonical_string(&changed),
+    )
+    .unwrap();
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "p".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "p".into(),
+            },
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired {
+        ticket,
+        recovery: RecoveryResult::Unrecoverable { .. },
+    } = reply
+    else {
+        panic!("{reply:?}");
+    };
+    opened(
+        k.shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::OpenSavedVersion,
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        fs::read_dir(root.path("journals/p/discarded"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(
+        fs::read_to_string(root.path("store/project.p.json"))
+            .unwrap()
+            .contains("Foreign change")
+    );
+}
+#[test]
+fn open_saved_version_cannot_walk_past_recoverable_edits() {
+    let root = common::TempDir::new("open-saved-refused");
+    crash(&root.0);
+    let mut k = kernel(&root.0);
+    let ticket = prepare(&mut k, &root.0);
+    assert!(
+        k.shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::OpenSavedVersion,
+        })
+        .is_err()
+    );
+    assert!(k.project("p").is_none());
+    assert!(!root.path("journals/p/discarded").exists());
+}
+#[test]
 fn recovery_as_copy_preserves_base_and_acknowledged_work() {
     let root = common::TempDir::new("recover-copy");
     crash(&root.0);

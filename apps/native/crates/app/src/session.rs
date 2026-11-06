@@ -28,6 +28,9 @@ pub struct Controller {
     pub engine: Arc<EngineService>,
     pub host: Rc<RefCell<Host>>,
     pub profile: PathBuf,
+    /// The original app's profile, when this Mac has one. A file it might hold
+    /// opens as a copy while it runs. The native library is never affected.
+    pub electron: Option<PathBuf>,
     pub session: Option<SessionHandle>,
     pub published: Option<Arc<Published>>,
     pub mirror: Option<QueryMirror>,
@@ -50,7 +53,8 @@ pub struct Controller {
     pub message: String,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
-    pub show_library: bool,
+    pub library: Option<Entity<crate::project_library::ProjectLibrary>>,
+    pub errors: crate::error_log::Shared,
     pub rate: pm_time::Rate,
     pub duration: f64,
     pub dimensions: [f64; 2],
@@ -66,7 +70,6 @@ pub struct Controller {
     pub close_operation: Option<crate::mcp::Operation>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
-    pub(crate) new_project_open: bool,
     /// Queued batches and the cancel flag of the running one.
     pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -152,6 +155,7 @@ impl Controller {
         kernel: KernelHandle,
         engine: Arc<EngineService>,
         profile: PathBuf,
+        electron: Option<PathBuf>,
         mcp: Arc<crate::mcp::Host>,
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
@@ -178,7 +182,8 @@ impl Controller {
                         for e in events {
                             match e {
                                 KernelEvent::Durability { message } => {
-                                    v.message = format!("Recovery warning: {message}")
+                                    v.message = format!("Recovery warning: {message}");
+                                    v.errors.borrow_mut().push("Recovery", &message);
                                 }
                                 KernelEvent::Notice { notice, .. } => {
                                     v.message = format!("Kernel notice: {notice:?}")
@@ -227,6 +232,7 @@ impl Controller {
             kernel,
             engine,
             profile,
+            electron,
             host,
             session: None,
             published: None,
@@ -248,7 +254,8 @@ impl Controller {
             message: "No project".into(),
             path: None,
             recent: vec![],
-            show_library: false,
+            library: None,
+            errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
             duration: 1.,
             dimensions: [1920., 1080.],
@@ -262,7 +269,6 @@ impl Controller {
             close_operation: None,
             save_pending: false,
             close_after_save: None,
-            new_project_open: false,
             imports: Default::default(),
             importing: None,
         }
@@ -589,19 +595,6 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
-        let id = match &source {
-            SessionSource::Library { project, .. } => project.clone(),
-            SessionSource::File(path) => stable_id(path),
-            SessionSource::New(_) => pm_kernel::new_id("app"),
-        };
-        self.open_as(id, source, cx);
-    }
-    pub(crate) fn open_as(
-        &mut self,
-        open_id: String,
-        source: SessionSource,
-        cx: &mut Context<Self>,
-    ) {
         if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -612,6 +605,73 @@ impl Controller {
             cx.notify();
             return;
         };
+        let open_id = match &source {
+            SessionSource::Library { project, .. } => project.clone(),
+            SessionSource::File(p) => stable_id(p),
+            SessionSource::New(_) => pm_kernel::new_id("app"),
+        };
+        let name = match &source {
+            SessionSource::File(path) => path
+                .file_stem()
+                .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned()),
+            SessionSource::Library { project, .. } => self
+                .recent
+                .iter()
+                .find(|(id, _)| id == project)
+                .map_or("Untitled".into(), |(_, name)| name.clone()),
+            SessionSource::New(_) => "Untitled".into(),
+        };
+        let path = match &source {
+            SessionSource::File(path) => Some(path.clone()),
+            _ => None,
+        };
+        let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
+        let pending = self.kernel.shell(ShellCall::PrepareOpen {
+            id: open_id,
+            source,
+            electron_profile,
+        });
+        let saved = path.as_ref().is_none_or(|p| p.exists());
+        self.settle_open(operation, name, path, saved, pending, cx);
+    }
+    /// A project the Library's worker already opened.
+    pub fn adopt_reply(
+        &mut self,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(operation) = self.mcp.try_operation() else {
+            self.message =
+                "A project operation is in progress. Try opening again when it finishes.".into();
+            cx.notify();
+            // Nothing will adopt this session, so it can't stay open in the kernel.
+            if let ShellReply::Opened { session, .. } = reply {
+                let closing = self.kernel.shell(ShellCall::Close(session));
+                cx.spawn(async move |_, _| drop(closing.await)).detach();
+            }
+            return;
+        };
+        // A library project's saved version is in the library, wherever its file went.
+        self.settle_open(
+            operation,
+            name,
+            file,
+            true,
+            async move { Some(Ok(reply)) },
+            cx,
+        );
+    }
+    fn settle_open(
+        &mut self,
+        operation: crate::mcp::Operation,
+        name: String,
+        path: Option<PathBuf>,
+        saved: bool,
+        pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
+        cx: &mut Context<Self>,
+    ) {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
@@ -619,60 +679,133 @@ impl Controller {
         self.opening = true;
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
-            let _operation=operation;
-            let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
-            if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
-                let ticket = ticket.clone();
-                let description = match recovery {
-                    RecoveryResult::Recovered { truncated: true } => "Some recent changes could not be read. You can recover earlier changes, open them as a copy, or discard them. The original project is kept.",
-                    RecoveryResult::OfferCopy { .. } => "The original project has changed. Recovered work will open as a separate copy so the original stays safe.",
-                    RecoveryResult::Unrecoverable { .. } => "Recovery data could not be read. It will be kept if recovery cannot complete. Discard archives it and opens the original project.",
-                    _ => "Unsaved changes are available. Recover them, open them as a copy, or discard them and open the original project.",
-                };
-                let choice = this.update(cx, |v, _| {
-                    v.recovery_pending = true;
-                    platform::choice(&v.host.borrow().window, "Unsaved work was found", description,
-                        &["Recover", "Open as Copy", "Discard"])
-                });
-                let choice = match choice { Ok(rx) => rx.recv().await.ok(), Err(_) => None };
-                let decision = match choice {
-                    Some(0) => Some(RecoveryDecision::Recover),
-                    Some(1) => Some(RecoveryDecision::OpenAsCopy),
-                    Some(2) => Some(RecoveryDecision::Discard),
-                    _ => None,
-                };
-                if let Some(decision) = decision {
-                    result = kernel.shell(ShellCall::DecideRecovery { ticket, decision }).await;
+            let _operation = operation;
+            let mut result = pending.await;
+            if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
+                let recovery = crate::surfaces::recovery_kernel::PreparedRecovery::from_reply(
+                    reply, &name, false, saved,
+                );
+                if let Some(recovery) = recovery {
+                    use crate::surfaces::recovery::{Owner, Prompt, RecoverySurface};
+                    if let RecoverySurface::Alert(alert) = recovery.surface.clone() {
+                        let prompt = Prompt {
+                            id: pm_kernel::new_id("recovery"),
+                            revision: 0,
+                            owner: Owner::Window(name.clone()),
+                            alert,
+                        };
+                        let answer = this.update(cx, |v, _| {
+                            if matches!(
+                                reply,
+                                ShellReply::RecoveryRequired {
+                                    recovery: RecoveryResult::Unrecoverable { .. },
+                                    ..
+                                }
+                            ) {
+                                v.errors.borrow_mut().push("Project", &prompt.alert.message);
+                            }
+                            v.recovery_pending = true;
+                            crate::surfaces::recovery_macos::sheet(
+                                &prompt,
+                                &v.host.borrow().window,
+                            )
+                        });
+                        let response = match answer {
+                            Ok(rx) => rx.recv().await.ok(),
+                            Err(_) => None,
+                        };
+                        let call = response
+                            .and_then(|r| r.action)
+                            .and_then(|action| recovery.decision(action));
+                        if let Some(call) = call {
+                            result = kernel.shell(call).await;
+                        }
+                    }
                 }
             }
             let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
                 let published = kernel.published(&session.project).unwrap();
-                cx.background_executor().spawn(async move {
-                    crate::media_refresh::resolve(&published, &cache)
-                }).await.map(Some)
-            } else { Ok(None) };
+                cx.background_executor()
+                    .spawn(async move { crate::media_refresh::resolve(&published, &cache) })
+                    .await
+                    .map(Some)
+            } else {
+                Ok(None)
+            };
             let mut previous_save_failed = false;
-            if matches!(&result, Some(Ok(ShellReply::Opened {..})))
-                && let Some(old)=old {
-                previous_save_failed = !matches!(kernel.shell(ShellCall::Close(old)).await,Some(Ok(ShellReply::Closed{..})));
+            if matches!(&result, Some(Ok(ShellReply::Opened { .. })))
+                && let Some(old) = old
+            {
+                previous_save_failed = !matches!(
+                    kernel.shell(ShellCall::Close(old)).await,
+                    Some(Ok(ShellReply::Closed { .. }))
+                );
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
                 match result {
-                    Some(Ok(ShellReply::Opened { session, recovery: _, decision, info })) => {
-                        let media = match media { Ok(m) => m, Err(e) => { v.message = format!("Media could not be resolved: {e}"); None } };
+                    Some(Ok(ShellReply::Opened {
+                        session,
+                        recovery: _,
+                        decision,
+                        info,
+                    })) => {
+                        let media = match media {
+                            Ok(m) => m,
+                            Err(e) => {
+                                v.message = format!("Media could not be resolved: {e}");
+                                None
+                            }
+                        };
                         v.adopt(session, decision, info.history_rejected, media, cx);
-
-                        if previous_save_failed { v.message.push_str(" · Previous project could not be saved; its recovery journal is retained"); }
-
+                        if previous_save_failed {
+                            v.message.push_str(
+                                " · Previous project could not be saved; its recovery journal is retained",
+                            );
+                        }
                         v.load_recent(cx);
                     }
-                    other => { v.message = format!("Open failed: {other:?}"); }
+                    Some(Err(error)) => v.report_open_failure(&name, path, &error, cx),
+                    Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
+                    }
+                    other => v.message = format!("Open failed: {other:?}"),
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
+    }
+    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    fn report_open_failure(
+        &mut self,
+        name: &str,
+        path: Option<PathBuf>,
+        error: &KernelFailure,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::surfaces::documents::{self, Action};
+        let exists = path.as_ref().is_some_and(|p| p.exists());
+        let alert = documents::open_error(name, open_failure_code(error), exists);
+        self.errors.borrow_mut().push("Project", &alert.message);
+        self.message = String::new();
+        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
+        let rx = platform::choice(
+            &self.host.borrow().window,
+            &alert.message,
+            &alert.informative,
+            &labels,
+        );
+        cx.spawn(async move |_, _| {
+            let choice = rx.recv().await.ok();
+            if alert.action_at(choice) == Some(Action::ShowInFinder)
+                && let Some(path) = path
+            {
+                platform::reveal(&path);
+            }
+        })
+        .detach();
     }
     fn adopt(
         &mut self,
@@ -706,11 +839,13 @@ impl Controller {
         self.selected = None;
         self.refresh(cx);
         // The status bar shows document state and counts; only exceptions get words.
+        let notice = self.errors.borrow_mut().take_notice();
         self.message = [
             copy_notice(&decision).map(str::to_owned),
             history_rejected
                 .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
             (offline > 0).then(|| crate::media::failure_note(offline)),
+            notice,
         ]
         .into_iter()
         .flatten()
@@ -727,7 +862,6 @@ impl Controller {
                 .unwrap_or(0.);
             self.seek(time);
         }
-        self.show_library = false;
         self.mcp.bind(self.session.clone());
     }
     fn bind_composition(&mut self) {
@@ -942,7 +1076,6 @@ impl Controller {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
-            "newProject" => self.show_new_project(cx),
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),
             // The engine draws no sequence yet; say so rather than do nothing.
@@ -958,10 +1091,6 @@ impl Controller {
                     }
                 })
                 .detach();
-            }
-            "openRecent" | "projects" => {
-                self.show_library = !self.show_library;
-                self.load_recent(cx);
             }
             "save" => self.save(None, cx),
             "saveAs" => self.save_dialog(cx),
@@ -1194,10 +1323,21 @@ impl Controller {
                     self.message = e.to_string();
                 }
             }
-            _ => return false,
+            name => return self.surface_command(name, cx),
         }
         cx.notify();
         true
+    }
+}
+/// The wire code the open alert's copy is keyed on.
+fn open_failure_code(error: &KernelFailure) -> &'static str {
+    let text = format!("{error:?}").to_lowercase();
+    if text.contains("permission") {
+        "permissionDenied"
+    } else if text.contains("not found") || text.contains("no such file") {
+        "notFound"
+    } else {
+        "invalidData"
     }
 }
 pub const SAVING: &str = "Saving…";

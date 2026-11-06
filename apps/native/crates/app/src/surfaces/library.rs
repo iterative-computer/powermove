@@ -10,16 +10,10 @@
 //! * N1/N3: unsupported kernel operations refuse explicitly, never succeed.
 //! * Prune rule/N6: no existing UI, extension or storage path is removed.
 //!
-//! Integration still required outside this lane: route File > Project Library,
-//! Welcome > Show All Projects and New Project to this controller; implement
-//! LibraryHost using window::LibraryWindow, window::grid_card and the native
-//! factories in library_appkit.rs. Existing consumers remain until that host is
-//! attached; these factories do not claim that a window is already installed.
+//! `crate::project_library` hosts this controller: File ▸ Projects…, File ▸ New
+//! Project and the library's alerts and sheets all reach the kernel through it.
 
-// Each surface also builds as an independent portable verification target.
-#[allow(clippy::duplicate_mod)]
-#[path = "sheet_layout.rs"]
-pub mod sheet_layout;
+pub use crate::surfaces::sheet_layout;
 
 #[cfg(target_os = "macos")]
 #[path = "library_appkit.rs"]
@@ -32,9 +26,6 @@ pub mod form;
 pub mod kernel;
 #[path = "library_model.rs"]
 pub mod model;
-#[cfg(target_os = "macos")]
-#[path = "library_window.rs"]
-pub mod window;
 
 pub use controller::*;
 pub use form::*;
