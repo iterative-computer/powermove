@@ -146,6 +146,18 @@ impl FailureStage {
     pub fn webgl_refuses(self) -> bool {
         matches!(self, FailureStage::Limits | FailureStage::EsValidate)
     }
+
+    /// Says nothing about the source: the same program may translate on the
+    /// next try, so no cache may remember this failure.
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            FailureStage::CompilerBusy
+                | FailureStage::CompilerProcess
+                | FailureStage::CompilerResources
+                | FailureStage::Deadline
+        )
+    }
 }
 
 /// Why a program cannot run.

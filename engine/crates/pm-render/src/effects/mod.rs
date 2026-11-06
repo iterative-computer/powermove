@@ -406,6 +406,14 @@ impl Effects {
             return definition_error(&snapshot.id, &entry.status);
         }
         let prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
+        if let Err(f) = prepared.as_ref()
+            && f.stage.retryable()
+        {
+            // A busy or crashed compiler says nothing about this source:
+            // remembering it would refuse a healthy definition until it changes.
+            self.entries.remove(&key);
+            return definition_error(&snapshot.id, &Status::NeedsFallback(f.clone()));
+        }
         let (status, prepared) = match prepared.as_ref() {
             Ok(p) => (Status::Ready, Some(Arc::new(p.clone()))),
             Err(f) if f.stage.webgl_refuses() => (Status::Refused(f.clone()), None),

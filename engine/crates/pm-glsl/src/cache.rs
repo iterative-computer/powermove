@@ -126,9 +126,7 @@ impl Cache {
                 result
             }
         });
-        if !matches!(entry.as_ref(), Err(f) if matches!(f.stage,
-            FailureStage::CompilerBusy | FailureStage::CompilerProcess | FailureStage::CompilerResources | FailureStage::Deadline))
-        {
+        if !matches!(entry.as_ref(), Err(f) if f.stage.retryable()) {
             self.memory_put(key, entry.clone());
         }
         entry
