@@ -793,7 +793,8 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{external_link, menu_entries, store_entries};
+    use serde_json::json;
 
     #[test]
     fn extension_menus_keep_their_choice_tokens_and_only_web_links_open() {

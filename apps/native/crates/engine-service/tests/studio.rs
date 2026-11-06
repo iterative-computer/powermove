@@ -124,6 +124,7 @@ fn metal_native_document_reflection_final_repeat_and_service_export() {
         comp: "test".into(),
         media: Default::default(),
         content: 1,
+        definitions: Default::default(),
     };
     assert_eq!(
         reflected,
@@ -458,7 +459,8 @@ fn metal_imported_multi_object_reflection_preview_final_and_export() {
                 doc: doc.clone(),
                 comp: "test".into(),
                 media: media.clone(),
-                content: 1
+                content: 1,
+                definitions: Default::default(),
             },
             Ticks::ZERO,
             Size::new(64, 64)
@@ -584,7 +586,8 @@ fn metal_imported_step_keeps_xde_parts_preview_final_and_child_export() {
                 doc: doc.clone(),
                 comp: "test".into(),
                 media: media.clone(),
-                content: 1
+                content: 1,
+                definitions: Default::default(),
             },
             Ticks::ZERO,
             Size::new(64, 64)
@@ -697,7 +700,8 @@ fn metal_imported_splats_keep_gaussian_pixels_layer_order_and_export() {
                 doc: doc.clone(),
                 comp: "test".into(),
                 media: media.clone(),
-                content: 1
+                content: 1,
+                definitions: Default::default(),
             },
             Ticks::ZERO,
             Size::new(65, 65)

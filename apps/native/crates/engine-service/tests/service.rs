@@ -34,6 +34,7 @@ fn scene(s: &Snapshot) -> Scene {
         comp: s.open_comp().unwrap(),
         media: Default::default(),
         content: s.doc_id,
+        definitions: Default::default(),
     }
 }
 fn config(s: Snapshot) -> ViewerConfig {
