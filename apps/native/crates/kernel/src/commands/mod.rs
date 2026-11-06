@@ -37,9 +37,7 @@
 //! | [`Command::Transform`] | [`transform`] | nudge, center anchor, align, distribute |
 //!
 //! Every variant is typed and documented (parameters, validation, undo
-//! label, the old function it ports) even before it is implemented; an
-//! unported one returns [`CommandError::NotImplemented`] and is listed with
-//! its status in `docs/gpui/core-api.md`.
+//! label, the old function it ports).
 //!
 //! The four spine commands ([`Command::SetStaticOpacity`],
 //! [`Command::SetLayerName`], [`Command::SetLayerVisible`],
@@ -77,6 +75,8 @@ use pm_model::{Node, Op};
 
 use crate::error::CommandError;
 
+pub mod capabilities;
+pub mod precompose;
 pub mod pro_edit;
 pub mod pro_links;
 pub mod pro_source;
@@ -275,7 +275,7 @@ impl Command {
     /// Validates against `root` (the scratch project tree) and returns the
     /// operations; empty when the document already says so.
     pub fn plan(&self, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
-        self.plan_with_state(root, origin, None)
+        self.plan_with_state(root, origin, None, None)
     }
 
     pub(crate) fn plan_with_state(
@@ -283,9 +283,11 @@ impl Command {
         root: &Node,
         origin: Origin,
         state: Option<&crate::state::StateSnapshot>,
+        text: Option<&crate::text_host::SharedTextHost>,
     ) -> Result<Vec<Op>, CommandError> {
         let mut cx = Cx::new(root, origin);
         cx.state = state;
+        cx.text = text;
         match self {
             Command::SetStaticOpacity { .. }
             | Command::SetLayerName { .. }

@@ -378,7 +378,7 @@ impl Inspector {
         let mut commands = Vec::new();
         let mut ids = Vec::new();
         for fx in saved {
-            let Some(definition) = self.definitions.get(text(&fx, "type")) else {
+            let Some(definition) = self.saved_effect_definition(&fx) else {
                 continue;
             };
             let id = pm_kernel::new_id("f");
@@ -424,23 +424,29 @@ impl Inspector {
             },
         ))
     }
-    pub fn add_effect(
-        &self,
+    pub fn add_effect_at(
+        &mut self,
         caller: Caller,
         layer: &str,
         kind: &str,
+        time: f64,
     ) -> Result<Request, InspectorError> {
+        if !time.is_finite() {
+            return Err(InspectorError::InvalidInput);
+        }
         let definition = self
             .definitions
             .get(kind)
+            .cloned()
             .ok_or_else(|| InspectorError::MissingDefinition(kind.into()))?;
+        let definition = self.contextual_effect_definition(layer, definition, time)?;
         self.transaction(
             caller,
             vec![
                 EffectCommand::Add(Box::new(AddEffect {
                     layer_id: layer.into(),
                     effect_id: pm_kernel::new_id("f"),
-                    definition: definition.clone(),
+                    definition,
                     parameters: Map::new(),
                     inputs: None,
                     open: true,

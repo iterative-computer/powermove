@@ -189,7 +189,7 @@ a MediaRegistry is injected. It does not guess drawing coverage from geometry.
 
 Import/replacement remain pending: kernel AddAsset records metadata but does not
 verify persisted bytes, fingerprint a file, retain runtime versions or coordinate
-media Undo. SetAssetFolder, full transform_layers, caption edit and 3D command
+media Undo. Caption edit and 3D command
 variants also remain unimplemented in the kernel. Metadata-only “import” and
 partial transform success would violate N3/N4/N6. No new public tool or schema is
 introduced to bypass these gaps.
@@ -326,12 +326,11 @@ Effect/transition commands require real registered JSON definitions; no fake
 registry entry or callable default is invented. The host reads the kernel's
 transport playhead instead of keeping a separate time store.
 
-The frozen command vocabulary contains `transform_layers`, `add_captions` and
-`edit_captions`, whose complete legacy adapters are pending. Caption commands
-in the kernel are currently declarations returning NotImplemented. Transform
-nudge/align/distribute exist, but full transform adapter/center-anchor/font
-support does not. These command variants return explicit unavailable errors
-before applying any batch. The frozen `availableOperations` vocabulary is not
+The frozen command vocabulary contains `add_captions` and `edit_captions`,
+whose complete legacy adapters are pending. `transform_layers` compiles to
+primitive edits in the kernel over the batch's selection and playhead; text
+geometry needs the app's fonts, so a headless kernel refuses it. Unsupported
+variants return explicit unavailable errors before applying any batch. The frozen `availableOperations` vocabulary is not
 a claim that these variants work. Some engine-dependent layer/property operations
 can also be refused by kernel validation. Full legacy edit-command conformance
 is still required; the six source-paired bodies are not evidence for all variants.

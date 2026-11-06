@@ -113,6 +113,7 @@ fn child(root: &Path) {
             max_segment_bytes: 32768,
             ..Default::default()
         },
+        ..Default::default()
     });
     k.shell(ShellCall::AttachLibrary {
         profile: root.into(),

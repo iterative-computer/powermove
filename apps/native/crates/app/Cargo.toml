@@ -18,6 +18,7 @@ pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
 pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
 pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
 metal = "0.33"
@@ -44,6 +45,10 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 pm-panel-media = { path = "../panel-media" }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 
+[[test]]
+name = "text_commands"
+harness = false
+
 [[example]]
 name = "pm-corpus"
 path = "../../../../tools/corpus/main.rs"
@@ -58,7 +63,5 @@ version = "0.4"
 path = "../../../../engine/crates/pm-export"
 [dev-dependencies.pm-audio]
 path = "../../../../engine/crates/pm-audio"
-[dev-dependencies.pm-eval]
-path = "../../../../engine/crates/pm-eval"
 [dev-dependencies.pm-render]
 path = "../../../../engine/crates/pm-render"

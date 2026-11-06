@@ -658,15 +658,8 @@ impl Controller {
                     continue;
                 }
                 "effectMenu" => {
-                    let state = self.kernel.state();
-                    let options = state
-                        .registries
-                        .get("effects")
-                        .into_iter()
-                        .flatten()
-                        .map(|entry| json!({"id":entry.id,"label":entry.id}))
-                        .collect::<Vec<_>>();
-                    let selected = options.clone();
+                    let options = effect_menu(&self.kernel.state());
+                    let selected = crate::v4_native::flatten(&options);
                     let runtime = runtime.clone();
                     crate::v4_native::menu(window, &options, cx, move |index, _| {
                         runtime.platform_reply(
@@ -696,6 +689,30 @@ impl Controller {
             runtime.platform_reply(request.id, result);
         }
     }
+}
+/// One submenu per category, in registration order, as Effect in After Effects.
+fn effect_menu(state: &pm_kernel::state::StateSnapshot) -> Vec<Value> {
+    let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+    for entry in state.registries.get("effects").into_iter().flatten() {
+        // The last provider of an id wins; earlier registrations stay hidden.
+        if state
+            .provider("effects", &entry.id)
+            .is_none_or(|winner| winner.token != entry.token)
+        {
+            continue;
+        }
+        let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+        let group = text("group").unwrap_or("Effects");
+        let item = json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id)});
+        match groups.iter_mut().find(|(name, _)| name == group) {
+            Some((_, items)) => items.push(item),
+            None => groups.push((group.to_owned(), vec![item])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(label, children)| json!({"label":label,"children":children}))
+        .collect()
 }
 struct SurfaceWindow {
     owner: Entity<Controller>,

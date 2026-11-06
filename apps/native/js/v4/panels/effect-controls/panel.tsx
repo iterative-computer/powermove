@@ -282,7 +282,17 @@ export function EffectControls(props: PanelProps) {
               }}
             >
               {p.rows.map((row) =>
-                row.kind === "parameter" ? (
+                row.kind === "action" ? (
+                  <UI.PushButton
+                    key={row.id}
+                    label={row.label}
+                    disabled={p.locked || row.readonly}
+                    onClick={(e) => {
+                      stop(e);
+                      send({ type: "action", id: row.effect, index: row.index });
+                    }}
+                  />
+                ) : row.kind === "parameter" ? (
                   <ParameterView
                     key={row.id}
                     row={row}

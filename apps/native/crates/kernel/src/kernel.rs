@@ -32,6 +32,8 @@ pub struct KernelConfig {
     /// journal (tests, headless tools that never edit).
     pub journal_root: Option<PathBuf>,
     pub journal: JournalConfig,
+    /// Fonts for commands that measure text. `None`: those commands refuse.
+    pub text: Option<crate::text_host::SharedTextHost>,
 }
 
 /// Where an opened project comes from.
@@ -139,7 +141,7 @@ impl Kernel {
             compacting: false,
             pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
-            state: Default::default(),
+            state: crate::state::StateSnapshot::seeded(),
         }
     }
 
@@ -437,7 +439,7 @@ impl Kernel {
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
         slot.project
             .store_mut()
-            .set_runtime_state(self.state.clone());
+            .set_runtime_state(self.state.clone(), self.config.text.clone());
         let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
         if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
             return Err(KernelFailure::Storage(

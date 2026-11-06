@@ -163,11 +163,6 @@ impl Context {
             })],
         )
     }
-    pub fn precompose(&self, _draft: &PrecomposeDraft) -> Result<PreparedEdit, DialogError> {
-        Err(DialogError::MissingBacking(
-            "pm-kernel::CompCommand::Precompose is NotImplemented; adjustDuration/openAfter also need kernel/session support",
-        ))
-    }
     /// Snapshot-derived key selection excludes locked ancestors, not just the layer.
     pub fn keys(&self, ids: &[String]) -> Result<Vec<Key>, DialogError> {
         let comp = self.comp()?;

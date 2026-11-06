@@ -228,6 +228,7 @@ type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 /// threading model.
 pub struct DocumentStore {
     runtime_state: Option<crate::state::StateSnapshot>,
+    text_host: Option<crate::text_host::SharedTextHost>,
     doc_id: u64,
     current: Arc<Document>,
     file: ProjectFile,
@@ -315,6 +316,7 @@ impl DocumentStore {
         let token = history.state_token();
         DocumentStore {
             runtime_state: None,
+            text_host: None,
             doc_id: new_doc_id(),
             current: Arc::new(document),
             file,
@@ -339,8 +341,13 @@ impl DocumentStore {
     // ── reading ────────────────────────────────────────────────────────────
 
     /// Contribution facts for worker-side planning. Never authored or persisted.
-    pub fn set_runtime_state(&mut self, state: crate::state::StateSnapshot) {
+    pub fn set_runtime_state(
+        &mut self,
+        state: crate::state::StateSnapshot,
+        text: Option<crate::text_host::SharedTextHost>,
+    ) {
         self.runtime_state = Some(state);
+        self.text_host = text;
     }
 
     pub fn doc_id(&self) -> u64 {
@@ -1025,7 +1032,12 @@ impl DocumentStore {
                 (_, Some(c)) => {
                     crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
                 }
-                (Some(c), None) => c.plan_with_state(tree, origin, self.runtime_state.as_ref())?,
+                (Some(c), None) => c.plan_with_state(
+                    tree,
+                    origin,
+                    self.runtime_state.as_ref(),
+                    self.text_host.as_ref(),
+                )?,
                 (None, None) => Vec::new(),
             };
             for op in ops {

@@ -351,6 +351,7 @@ impl KernelActor {
     pub fn spawn(config: KernelConfig) -> KernelActor {
         let (tx, rx) = mpsc::channel::<Msg>();
         let shared = Arc::new(Shared::default());
+        *shared.state.lock().expect("state") = Arc::new(crate::state::StateSnapshot::seeded());
         let thread = {
             let shared = shared.clone();
             thread::Builder::new()

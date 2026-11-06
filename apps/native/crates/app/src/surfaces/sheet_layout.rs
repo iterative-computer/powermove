@@ -185,6 +185,20 @@ pub mod native {
             self.row(label, &group);
             self.fields.insert(id.into(), field);
         }
+        /// A radio or checkbox whose title is its own full-width label.
+        pub fn option(&mut self, id: &str, control: Retained<NSControl>) {
+            self.y -= self.layout.row;
+            control.setIdentifier(Some(&NSString::from_str(id)));
+            control.setFrame(NSRect::new(
+                NSPoint::new(self.layout.inset, self.y),
+                NSSize::new(
+                    self.layout.width - 2. * self.layout.inset,
+                    self.layout.field,
+                ),
+            ));
+            self.content.addSubview(&control);
+            self.controls.insert(id.into(), control);
+        }
         pub fn control(&mut self, id: &str, label: &str, control: Retained<NSControl>) {
             control.setAccessibilityLabel(Some(&NSString::from_str(label)));
             control.setIdentifier(Some(&NSString::from_str(id)));

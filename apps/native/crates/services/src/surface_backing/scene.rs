@@ -1,6 +1,5 @@
 //! S098. Source intent: layers-3d/{scene-model,SceneField,LayerInspector}.
-//! Structural command planning is separate from capability admission. The current
-//! kernel Scene3dCommand is NotImplemented: do not infer support from this model.
+//! Structural command planning is separate from capability admission.
 use super::{Session, invalid, unavailable};
 use crate::Result;
 use serde_json::{Value, json};

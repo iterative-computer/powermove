@@ -691,22 +691,6 @@ fn kernel_fences_revision_and_reopened_document_session() {
     ));
     assert_eq!(root(&h), saved);
 }
-#[test]
-fn kernel_precompose_missing_backing_is_explicit() {
-    let (_actor, _h, c) = fixture();
-    assert!(matches!(
-        c.precompose(&PrecomposeDraft {
-            name: "Pre-comp 1".into(),
-            layer_name: Some("L".into()),
-            can_leave: true,
-            leave: false,
-            adjust_duration: false,
-            open_after: false
-        }),
-        Err(DialogError::MissingBacking(_))
-    ));
-}
-
 #[derive(Default)]
 struct Archive {
     entries: Vec<Value>,

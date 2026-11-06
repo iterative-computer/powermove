@@ -1,5 +1,6 @@
 //! Application v4 embedding. JavaScript owns presentation; the kernel remains
 //! the only document writer. GPUI consumes immutable accepted surfaces.
+#![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
 #[cfg(test)]
 mod agent_tests;
@@ -685,6 +686,7 @@ fn inspector_platform<'a>(panel: &str, request: &'a Value) -> Result<(&'a str, V
     if panel == "inspector" && operation == "inspector" {
         match input["type"].as_str() {
             Some("add-effect-menu") => return Ok(("effectMenu", input.clone())),
+            Some("animator-menu") => return Ok(("contextMenu", input["items"].clone())),
             Some("row-menu") => {
                 let items = input["items"]
                     .as_array()
