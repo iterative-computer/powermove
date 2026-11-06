@@ -110,6 +110,9 @@ pub enum VerifyLevel {
     Full,
 }
 
+/// Room to leave beyond the file's own size when a full disk stops a save.
+const RECLAIM_MARGIN: u64 = 64 << 20;
+
 /// Test hooks that simulate failures.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +120,8 @@ pub enum WriteFault {
     /// Writes fail with "No space left on device" once this many bytes were
     /// written by the save.
     DiskFullAfter(u64),
+    /// [`DiskFullAfter`](Self::DiskFullAfter) for the first attempt only.
+    DiskFullOnce(u64),
     /// Everything is written and synced, then the save fails before publishing.
     FailBeforePublish,
 }
@@ -571,6 +576,23 @@ impl SavePlan {
     /// [`ProjectIoError::Finalize`] and [`ProjectIoError::Conflict`] for the
     /// two cases that say otherwise).
     pub fn run(&self) -> Result<SaveReceipt, ProjectIoError> {
+        let fault = self.options.fault;
+        let error = match self.attempt(fault) {
+            Err(e) if e.is_disk_full() => e,
+            outcome => return outcome,
+        };
+        // Deleting archived generations is the last resort, not a budget: an
+        // old version must not cost the user the work they are saving now.
+        let needed = fs::metadata(&self.destination).map_or(0, |m| m.len()) + RECLAIM_MARGIN;
+        match &self.options.backups {
+            Some(policy) if durable::reclaim_archived(policy, needed) > 0 => {
+                self.attempt(fault.filter(|f| !matches!(f, WriteFault::DiskFullOnce(_))))
+            }
+            _ => Err(error),
+        }
+    }
+
+    fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         self.validate()?;
         let dest = &self.destination;
         let publish = match &self.publish {
@@ -690,8 +712,8 @@ impl SavePlan {
             (temp, file, 0, Sha256::new(), None, SaveLayout::Compacted)
         };
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
-        let limit = match self.options.fault {
-            Some(WriteFault::DiskFullAfter(n)) => Some(n),
+        let limit = match fault {
+            Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
             _ => None,
         };
         let mut out = Out {
@@ -832,7 +854,7 @@ impl SavePlan {
             &mut buf,
         )?;
         drop(file);
-        if self.options.fault == Some(WriteFault::FailBeforePublish) {
+        if fault == Some(WriteFault::FailBeforePublish) {
             return Err(ProjectIoError::Invalid(
                 "Injected failure before publishing".into(),
             ));
