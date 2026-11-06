@@ -168,12 +168,13 @@ impl Backend {
         {
             return Ok(());
         }
-        self.last_registries = Some(state.registries.clone());
+        let registries = state.registries.clone();
         let mut latest = BTreeMap::new();
         for registration in state.registries.get("effects").into_iter().flatten() {
             latest.insert(registration.id.clone(), wire(&registration.definition));
         }
         if self.last_effects == latest {
+            self.last_registries = Some(registries);
             return Ok(());
         }
         let next_effects = latest.clone();
@@ -274,6 +275,8 @@ impl Backend {
             .install_effect_catalog(catalog)
             .map_err(|e| e.to_string())?;
         self.last_effects = next_effects;
+        // Only now: a failed conversion must fail every sync, not just the first.
+        self.last_registries = Some(registries);
         Ok(())
     }
     pub(crate) fn projection(&mut self) -> Result<Value, String> {

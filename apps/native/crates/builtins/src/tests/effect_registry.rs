@@ -239,3 +239,41 @@ fn effects_panel_add_button_applies_to_the_selected_layer() {
     assert_eq!(effects(&kernel)[0]["type"], "blur");
     assert!(panels.take_errors().is_empty());
 }
+
+/// A definition that cannot convert keeps failing: one error, then a silent
+/// panel without the catalog, would hide it.
+#[test]
+fn a_malformed_registered_definition_fails_every_sync() {
+    let actor = setup(json!([]));
+    let kernel = actor.handle();
+    kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Register {
+                registry: "effects".into(),
+                entry: pm_kernel::state::Registration {
+                    token: "synthetic-malformed".into(),
+                    owner: Caller::native().writer,
+                    id: "synthetic.malformed".into(),
+                    definition: data::model(&json!({"frag":"void main(){}","params":"bad"}))
+                        .unwrap(),
+                },
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut backend = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "synthetic-registry".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    assert!(backend.sync().is_err());
+    assert!(backend.sync().is_err());
+}
