@@ -76,6 +76,9 @@ pub enum RecoveryDecision {
     Recover,
     OpenAsCopy,
     Discard,
+    /// Only for an unrecoverable journal: it is kept, set aside, and the saved
+    /// project opens. Recoverable edits can't be walked past with this.
+    OpenSavedVersion,
 }
 
 #[derive(Clone, Debug)]
@@ -1072,15 +1075,19 @@ impl Kernel {
             }
             _ => None,
         };
-        if choice.is_some()
-            && choice != Some(RecoveryDecision::Discard)
-            && matches!(&recovered, Recovery::Unrecoverable { .. })
+        let setting_aside = matches!(
+            choice,
+            Some(RecoveryDecision::Discard | RecoveryDecision::OpenSavedVersion)
+        );
+        let unrecoverable = matches!(&recovered, Recovery::Unrecoverable { .. });
+        if (choice.is_some() && !setting_aside && unrecoverable)
+            || (choice == Some(RecoveryDecision::OpenSavedVersion) && !unrecoverable)
         {
             return Err(failure(
                 "Recovery could not be replayed; files are retained",
             ));
         }
-        if choice == Some(RecoveryDecision::Discard) {
+        if setting_aside {
             // Explicitly rejected sessions remain archived. No save of recovered
             // content, and no unrelated journal session is retired.
             let paths = match &recovered {
@@ -1119,7 +1126,7 @@ impl Kernel {
                 None,
             );
         }
-        let recovered = if choice == Some(RecoveryDecision::Discard) {
+        let recovered = if setting_aside {
             Recovery::Nothing
         } else {
             recovered

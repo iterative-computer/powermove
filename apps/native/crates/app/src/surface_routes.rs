@@ -3,7 +3,7 @@
 //! target instead of guessing. Other lanes add their own commands in `session.rs`.
 use crate::{
     dialogs::{
-        CompositionDraft, DialogId, WindowId,
+        CompositionDraft, DialogId, RESOLUTIONS, WindowId,
         kernel::{Context as Dialog, DialogError},
     },
     project_library::{Outbound, ProjectLibrary, Sink, current_format},
@@ -19,9 +19,13 @@ impl Controller {
         match name {
             "newProject" => self.new_project(cx),
             "projects" | "openRecent" => self.show_project_library(cx),
-            "newComposition" => self.composition_sheet(false, cx),
-            "compositionSettings" => self.composition_sheet(true, cx),
-            "precompose" => self.precompose_sheet(cx),
+            "newComposition" => self.composition_sheet(false, None, cx),
+            "compositionSettings" => self.composition_sheet(true, None, cx),
+            "precompose" => {
+                // The kernel command is `NotImplemented`, so no sheet can promise it.
+                self.message = "Pre-compose isn’t available yet.".into();
+                cx.notify();
+            }
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }
@@ -39,7 +43,7 @@ impl Controller {
         let this = cx.entity().downgrade();
         let sink: Sink = Rc::new(move |outbound, cx| {
             let _ = this.update(cx, |v, cx| match outbound {
-                Outbound::Opened(reply) => v.adopt_reply(*reply, cx),
+                Outbound::Opened { reply, name, file } => v.adopt_reply(*reply, name, file, cx),
                 Outbound::Focus => v.host.borrow().window.makeKeyAndOrderFront(None),
                 Outbound::Message(text) => {
                     v.message = text;
@@ -144,15 +148,24 @@ impl Controller {
         let project = self.session.as_ref()?.project.clone();
         Some((project.clone(), WindowId(project)))
     }
-    pub fn composition_sheet(&mut self, settings: bool, cx: &mut Context<Self>) {
+    /// `target` is the composition to edit; the open one when there's none.
+    pub fn composition_sheet(
+        &mut self,
+        settings: bool,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some((project, owner)) = self.dialog_owner() else {
             self.message = "Open a project first.".into();
+            cx.notify();
             return;
         };
-        let context = match Dialog::capture(&self.kernel, &project) {
-            Ok(context) => context,
-            Err(_) => return,
+        let Ok(mut context) = Dialog::capture(&self.kernel, &project) else {
+            return;
         };
+        if let Some(target) = target {
+            context.composition = target;
+        }
         let Ok(draft) = context.composition_draft(settings) else {
             return;
         };
@@ -197,53 +210,14 @@ impl Controller {
                         });
                         return;
                     }
-                    _ => open.enable("apply", read_composition(&open, &draft).errors().is_empty()),
-                }
-            }
-        })
-        .detach();
-    }
-    fn precompose_sheet(&mut self, cx: &mut Context<Self>) {
-        let Some((project, owner)) = self.dialog_owner() else {
-            self.message = "Open a project first.".into();
-            return;
-        };
-        let Ok(context) = Dialog::capture(&self.kernel, &project) else {
-            return;
-        };
-        let selected = self
-            .published
-            .as_ref()
-            .map_or(vec![], |p| p.selection.layers().to_vec());
-        if selected.is_empty() {
-            self.message = "Select the layers to pre-compose.".into();
-            cx.notify();
-            return;
-        }
-        let Ok(draft) = context.precompose_draft(&selected) else {
-            return;
-        };
-        let surface = draft.surface(DialogId(format!("precompose:{project}")), owner);
-        let tokens = self.host.borrow().tokens.clone();
-        let open = OpenSheet::present(
-            from_surface(&surface, &tokens),
-            &self.host.borrow().window,
-            surface.first_selected.as_deref(),
-        );
-        let actions = open.actions.clone();
-        cx.spawn(async move |this, cx| {
-            while let Ok(action) = actions.recv().await {
-                if action == "cancel" || action == "apply" {
-                    open.close();
-                    if action == "apply" {
-                        let error = context.precompose(&draft).err();
-                        let _ = this.update(cx, |v, cx| {
-                            if let Some(error) = error {
-                                v.report_dialog_error(error, cx);
-                            }
-                        });
+                    action => {
+                        if action == "resolution" {
+                            choose_resolution(&open, &draft);
+                        }
+                        let current = read_composition(&open, &draft);
+                        open.select("resolution", current.resolution_index());
+                        open.enable("apply", current.errors().is_empty());
                     }
-                    return;
                 }
             }
         })
@@ -272,8 +246,19 @@ fn read_composition(open: &OpenSheet, seed: &CompositionDraft) -> CompositionDra
         fps: open.number("fps"),
         duration: open.number("duration"),
         background: open
-            .colour("background")
+            .changed_colour("background")
             .unwrap_or_else(|| seed.background.clone()),
+    }
+}
+/// A resolution preset fills the size fields. `Custom` leaves them alone.
+fn choose_resolution(open: &OpenSheet, seed: &CompositionDraft) {
+    let mut draft = read_composition(open, seed);
+    let Some((label, ..)) = open.popup("resolution").and_then(|i| RESOLUTIONS.get(i)) else {
+        return;
+    };
+    if draft.choose_resolution(label) {
+        open.set_text("size.0", &draft.width.to_string());
+        open.set_text("size.1", &draft.height.to_string());
     }
 }
 /// Off main: the scratch store rebuilds the document to prove the edit.

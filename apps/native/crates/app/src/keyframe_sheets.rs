@@ -64,6 +64,7 @@ fn prepare(
     }
 }
 /// Everything the worker needs from a sheet, read on main.
+#[derive(Debug, PartialEq)]
 pub struct Fields {
     value: String,
     time: String,
@@ -71,12 +72,13 @@ pub struct Fields {
     outgoing: [String; 2],
 }
 impl Fields {
-    fn read(open: &OpenSheet) -> Self {
+    /// `text` reads a field by the id its surface gave it.
+    fn read(text: impl Fn(&str) -> String) -> Self {
         Self {
-            value: open.text("value"),
-            time: open.text("time"),
-            incoming: [open.text("incomingSpeed"), open.text("incomingInfluence")],
-            outgoing: [open.text("outgoingSpeed"), open.text("outgoingInfluence")],
+            value: text("value"),
+            time: text("time"),
+            incoming: [text("in.speed"), text("in.influence")],
+            outgoing: [text("out.speed"), text("out.influence")],
         }
     }
     fn velocity(&self) -> VelocityDraft {
@@ -130,7 +132,7 @@ impl Controller {
                     outgoing_speed: number(keys.iter().map(|k| k.outgoing.speed).collect()),
                     outgoing_influence: number(keys.iter().map(|k| k.outgoing.influence).collect()),
                 }
-                .surface(id, owner, keys.len(), "/s")
+                .surface(id, owner, keys.len(), "")
             }
             Kind::Scale => ScaleDraft::default().surface(id, owner),
         };
@@ -142,6 +144,8 @@ impl Controller {
         );
         let (actions, kernel) = (open.actions.clone(), self.kernel.clone());
         let open = Rc::new(open);
+        // Apply with nothing typed is no edit: velocity would turn keys Bezier.
+        let seeded = Fields::read(|id| open.text(id));
         cx.spawn(async move |this, cx| {
             while let Ok(action) = actions.recv().await {
                 match action.as_str() {
@@ -150,7 +154,11 @@ impl Controller {
                         return;
                     }
                     "apply" => {
-                        let fields = Fields::read(&open);
+                        let fields = Fields::read(|id| open.text(id));
+                        if fields == seeded {
+                            open.close();
+                            return;
+                        }
                         let (context, kernel, ids) = (context.clone(), kernel.clone(), ids.clone());
                         let result = cx
                             .background_executor()
@@ -179,7 +187,42 @@ impl Controller {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Kind, property_label};
+    use super::{Fields, Kind, property_label};
+    use crate::dialogs::{DialogId, MixedNumber, ScaleDraft, VelocityDraft, WindowId};
+    use std::collections::BTreeMap;
+    /// What a person typed into the surface's own fields. An id the surface
+    /// doesn't have reads blank, as `OpenSheet::text` does.
+    fn typed(fields: &[crate::dialogs::Field], text: &[&str]) -> BTreeMap<String, String> {
+        fields
+            .iter()
+            .map(|f| f.id.clone())
+            .zip(text.iter().map(|t| (*t).to_owned()))
+            .collect()
+    }
+    #[test]
+    fn velocity_reads_the_ids_its_surface_creates() {
+        let number = MixedNumber::new(&[1.]);
+        let surface = VelocityDraft {
+            incoming_speed: number.clone(),
+            incoming_influence: number.clone(),
+            outgoing_speed: number.clone(),
+            outgoing_influence: number,
+        }
+        .surface(DialogId("k".into()), WindowId("w".into()), 1, "");
+        let typed = typed(&surface.fields, &["50", "80", "60", "70"]);
+        let draft = Fields::read(|id| typed.get(id).cloned().unwrap_or_default()).velocity();
+        assert_eq!(draft.incoming_speed.parsed(), Ok(Some(50.)));
+        assert_eq!(draft.incoming_influence.parsed(), Ok(Some(80.)));
+        assert_eq!(draft.outgoing_speed.parsed(), Ok(Some(60.)));
+        assert_eq!(draft.outgoing_influence.parsed(), Ok(Some(70.)));
+    }
+    #[test]
+    fn scale_reads_the_ids_its_surface_creates() {
+        let surface = ScaleDraft::default().surface(DialogId("k".into()), WindowId("w".into()));
+        let typed = typed(&surface.fields, &["50", "200"]);
+        let fields = Fields::read(|id| typed.get(id).cloned().unwrap_or_default());
+        assert_eq!((fields.time.as_str(), fields.value.as_str()), ("50", "200"));
+    }
     #[test]
     fn commands_map_to_their_sheets() {
         assert_eq!(Kind::of("keyframeValue"), Some(Kind::Value));

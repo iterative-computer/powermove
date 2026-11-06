@@ -169,8 +169,10 @@ pub fn new_project_sheet(
     let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), objc2_foundation::NSRect::ZERO);
     well.setColorWellStyle(NSColorWellStyle::Minimal);
     well.setEnabled(!form.submitting);
-    // Authored strings are never converted here. The colour worker binds the
-    // preview colour without changing form.background (N3).
+    // A preview only. The authored string is read back once the well changes (N3).
+    if let Some(rgb) = crate::sheets::hex_colour(&form.background) {
+        well.setColor(&crate::dialogs::sheet_layout::native::colour(rgb));
+    }
     sheet.control("background", "Background", well.into_super());
     let (label, create, cancel) = form.buttons();
     sheet.button("cancel", "Cancel", cancel, false, true);

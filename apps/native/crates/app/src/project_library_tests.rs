@@ -62,7 +62,7 @@ fn open<'a>(
         let log = log.clone();
         Rc::new(move |outbound, _| {
             log.borrow_mut().push(match outbound {
-                Outbound::Opened(_) => "opened".into(),
+                Outbound::Opened { name, .. } => format!("opened {name}"),
                 Outbound::Focus => "focus".into(),
                 Outbound::Message(text) => text,
             })
@@ -152,7 +152,7 @@ fn a_click_selects_and_return_opens_through_the_kernel() {
         assert!(start.elapsed() < Duration::from_secs(10), "never opened");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(*log.borrow(), ["opened"]);
+    assert_eq!(*log.borrow(), ["opened First Film"]);
     assert!(fixture.actor.handle().published("first").is_some());
 }
 #[::core::prelude::v1::test]

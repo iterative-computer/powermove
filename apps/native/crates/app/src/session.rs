@@ -252,7 +252,7 @@ impl Controller {
             path: None,
             recent: vec![],
             library: None,
-            errors: Default::default(),
+            errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
             duration: 1.,
             dimensions: [1920., 1080.],
@@ -569,20 +569,25 @@ impl Controller {
         self.settle_open(operation, name, path, pending, cx);
     }
     /// A project the Library's worker already opened.
-    pub fn adopt_reply(&mut self, reply: ShellReply, cx: &mut Context<Self>) {
+    pub fn adopt_reply(
+        &mut self,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(operation) = self.mcp.try_operation() else {
             self.message =
                 "A project operation is in progress. Try opening again when it finishes.".into();
             cx.notify();
+            // Nothing will adopt this session, so it can't stay open in the kernel.
+            if let ShellReply::Opened { session, .. } = reply {
+                let closing = self.kernel.shell(ShellCall::Close(session));
+                cx.spawn(async move |_, _| drop(closing.await)).detach();
+            }
             return;
         };
-        self.settle_open(
-            operation,
-            "Untitled".into(),
-            None,
-            async move { Some(Ok(reply)) },
-            cx,
-        );
+        self.settle_open(operation, name, file, async move { Some(Ok(reply)) }, cx);
     }
     fn settle_open(
         &mut self,
@@ -607,7 +612,7 @@ impl Controller {
             if let Some(Ok(reply @ ShellReply::RecoveryRequired { .. })) = &result {
                 let saved = path.as_ref().is_none_or(|p| p.exists());
                 let recovery = crate::surfaces::recovery_kernel::PreparedRecovery::from_reply(
-                    reply, &name, true, saved,
+                    reply, &name, false, saved,
                 );
                 if let Some(recovery) = recovery {
                     use crate::surfaces::recovery::{Owner, Prompt, RecoverySurface};
@@ -619,6 +624,15 @@ impl Controller {
                             alert,
                         };
                         let answer = this.update(cx, |v, _| {
+                            if matches!(
+                                reply,
+                                ShellReply::RecoveryRequired {
+                                    recovery: RecoveryResult::Unrecoverable { .. },
+                                    ..
+                                }
+                            ) {
+                                v.errors.borrow_mut().push("Project", &prompt.alert.message);
+                            }
                             v.recovery_pending = true;
                             crate::surfaces::recovery_macos::sheet(
                                 &prompt,
@@ -689,6 +703,9 @@ impl Controller {
                         v.load_recent(cx);
                     }
                     Some(Err(error)) => v.report_open_failure(&name, path, &error, cx),
+                    Some(Ok(ShellReply::RecoveryRequired { .. })) => {
+                        v.message = format!("“{name}” wasn’t opened. Its recovery data is kept.");
+                    }
                     other => v.message = format!("Open failed: {other:?}"),
                 }
                 cx.notify();
@@ -745,9 +762,11 @@ impl Controller {
         self.refresh(cx);
         self.media = media.unwrap_or_default();
         // The status bar shows document state and counts; only exceptions get words.
+        let notice = self.errors.borrow_mut().take_notice();
         self.message = [
             copy_notice(&decision),
             history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+            notice.as_deref(),
         ]
         .into_iter()
         .flatten()

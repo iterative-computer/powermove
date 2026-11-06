@@ -161,7 +161,7 @@ impl Properties {
                         json!({"kind":"colour","binding":lease,"value":value,"mixed":state.mixed})
                     }
                     (FieldType::Font, Value::String(_)) => {
-                        json!({"kind":"font","binding":lease,"value":value,"options":[],"disabled":true,"mixed":state.mixed})
+                        json!({"kind":"font","binding":lease,"value":value,"options":[],"mixed":state.mixed})
                     }
                     (FieldType::Choice, _) => {
                         let options = match id {
@@ -425,6 +425,11 @@ impl Properties {
             return Ok(None);
         }
         let handle = self.handles.get(path).ok_or("Unknown property row")?;
+        if intent["type"] == "set-value" {
+            let value =
+                pm_model::json::parse(&intent["value"].to_string()).map_err(|e| e.to_string())?;
+            return self.write(model, caller, handle, value, time).map(Some);
+        }
         let group;
         let handle = if matches!(row, "position" | "scale" | "anchor") {
             let layer = model.primary().ok_or("No selected layer")?.to_owned();

@@ -21,7 +21,11 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 /// What the library needs from whichever editor is in front.
 #[derive(Debug)]
 pub enum Outbound {
-    Opened(Box<ShellReply>),
+    Opened {
+        reply: Box<ShellReply>,
+        name: String,
+        file: Option<std::path::PathBuf>,
+    },
     Focus,
     Message(String),
 }
@@ -128,11 +132,20 @@ impl ProjectLibrary {
                 .detach();
             }
             HostEffect::Reveal(path) => crate::platform::reveal(&path),
-            HostEffect::OpenEditor { reply, .. } => {
+            HostEffect::OpenEditor {
+                reply, name, file, ..
+            } => {
                 if let Some(sheet) = self.sheet.borrow_mut().take() {
                     sheet.close();
                 }
-                (self.sink)(Outbound::Opened(Box::new(reply)), cx);
+                (self.sink)(
+                    Outbound::Opened {
+                        reply: Box::new(reply),
+                        name,
+                        file,
+                    },
+                    cx,
+                );
             }
             HostEffect::FocusProject(_) | HostEffect::SaveAs(_) => (self.sink)(Outbound::Focus, cx),
             HostEffect::Banner(text) => (self.sink)(Outbound::Message(text.into()), cx),
@@ -175,7 +188,7 @@ impl ProjectLibrary {
             form.name = open.text("name");
             form.fps = open.text("fps");
             form.duration = open.text("duration");
-            if let Some(colour) = open.colour("background") {
+            if let Some(colour) = open.changed_colour("background") {
                 form.background = colour;
             }
             let _ = form.edit_size(open.text("width"), open.text("height"));

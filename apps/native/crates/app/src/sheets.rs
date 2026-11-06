@@ -13,6 +13,7 @@ use objc2_app_kit::{
     NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSRect, NSString};
+use std::collections::BTreeMap;
 
 pub struct TargetState {
     tx: async_channel::Sender<String>,
@@ -51,6 +52,8 @@ pub struct OpenSheet {
     pub sheet: Sheet,
     owner: Retained<NSWindow>,
     _target: Retained<Target>,
+    /// What each colour well showed when the sheet opened.
+    seeded: BTreeMap<String, String>,
     pub actions: async_channel::Receiver<String>,
 }
 impl OpenSheet {
@@ -70,10 +73,16 @@ impl OpenSheet {
             unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*target))) };
         }
         sheet.present(owner, first);
+        let seeded = sheet
+            .controls
+            .iter()
+            .filter_map(|(id, control)| Some((id.clone(), well_colour(control)?)))
+            .collect();
         Self {
             sheet,
             owner: owner.into(),
             _target: target,
+            seeded,
             actions,
         }
     }
@@ -92,33 +101,92 @@ impl OpenSheet {
         let popup = control.downcast::<NSPopUpButton>().ok()?;
         usize::try_from(popup.indexOfSelectedItem()).ok()
     }
+    pub fn select(&self, id: &str, index: usize) {
+        if let Some(popup) = self
+            .sheet
+            .controls
+            .get(id)
+            .and_then(|c| c.clone().downcast::<NSPopUpButton>().ok())
+        {
+            popup.selectItemAtIndex(index as isize);
+        }
+    }
+    pub fn set_text(&self, id: &str, value: &str) {
+        if let Some(field) = self.sheet.fields.get(id) {
+            field.setStringValue(&NSString::from_str(value));
+        }
+    }
     pub fn enable(&self, id: &str, enabled: bool) {
         if let Some(button) = self.sheet.buttons.get(id) {
             button.setEnabled(enabled);
         }
     }
-    /// The well's colour as `#RRGGBB`, in sRGB.
-    pub fn colour(&self, id: &str) -> Option<String> {
-        let control = self.sheet.controls.get(id)?.clone();
-        let well = control.downcast::<NSColorWell>().ok()?;
-        crate::colour_panel::hex(&well.color())
+    /// The well's colour as `#RRGGBB`, only once the person has changed it: an
+    /// untouched well never rewrites the authored string it was seeded from.
+    pub fn changed_colour(&self, id: &str) -> Option<String> {
+        let colour = well_colour(self.sheet.controls.get(id)?)?;
+        (self.seeded.get(id) != Some(&colour)).then_some(colour)
     }
     pub fn close(&self) {
         self.owner.endSheet(&self.sheet.window);
         self.sheet.window.orderOut(None);
     }
 }
-fn hex_colour(hex: &str) -> Option<u32> {
-    u32::from_str_radix(hex.strip_prefix('#')?, 16).ok()
+fn well_colour(control: &NSControl) -> Option<String> {
+    let well = control.downcast_ref::<NSColorWell>()?;
+    crate::colour_panel::hex(&well.color())
+}
+/// `#RGB` or `#RRGGBB`. Anything else leaves a well unseeded.
+pub fn hex_colour(hex: &str) -> Option<u32> {
+    let digits = hex.strip_prefix('#')?;
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    match digits.len() {
+        6 => Some(value),
+        3 => {
+            let (r, g, b) = ((value >> 8) & 15, (value >> 4) & 15, value & 15);
+            Some(r * 0x110000 + g * 0x1100 + b * 0x11)
+        }
+        _ => None,
+    }
+}
+/// The token rows a surface takes, so the footer sits below all of them.
+fn rows(surface: &Surface) -> usize {
+    let controls: usize = surface
+        .fields
+        .iter()
+        .map(|f| match f.piece {
+            NativePiece::NumberField => f.values.len().max(1),
+            _ => 1,
+        })
+        .sum();
+    let errors = surface.fields.iter().filter(|f| f.error.is_some()).count();
+    controls
+        + errors
+        + surface.groups.len()
+        + usize::from(surface.line.is_some())
+        + usize::from(surface.warning.is_some())
 }
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
 pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
     let mtm = MainThreadMarker::new().unwrap();
-    let rows = surface.fields.len() + usize::from(surface.warning.is_some());
-    let mut sheet = Sheet::new(&surface.title, rows, tokens, false, mtm);
+    let mut sheet = Sheet::new(&surface.title, rows(surface), tokens, false, mtm);
+    if let Some(line) = &surface.line {
+        sheet.line(line, tokens.typography.body.into(), tokens.colors.secondary);
+    }
     for field in &surface.fields {
         let value = field.values.first().map_or("", String::as_str);
+        if let Some(group) = surface
+            .groups
+            .iter()
+            .find(|g| g.fields.first() == Some(&field.id.as_str()))
+        {
+            sheet.line(
+                group.title,
+                tokens.typography.body.into(),
+                tokens.colors.text,
+            );
+        }
         match field.piece {
             NativePiece::NumberField if field.values.len() > 1 => {
                 for (index, value) in field.values.iter().enumerate() {
@@ -147,10 +215,22 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
                 for item in &field.values {
                     popup.addItemWithTitle(&NSString::from_str(item));
                 }
+                popup.selectItemAtIndex(field.selected as isize);
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
             }
             _ => sheet.text(&field.id, &field.label, value, false, field.enabled),
+        }
+        if let (Some(placeholder), Some(control)) = (field.placeholder, sheet.fields.get(&field.id))
+        {
+            control.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+        }
+        if let Some(error) = field.error {
+            sheet.line(
+                error,
+                tokens.typography.minimum.into(),
+                tokens.colors.danger,
+            );
         }
     }
     if let Some(warning) = &surface.warning {
@@ -173,4 +253,43 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> Sheet {
     }
     sheet.footer(&order, None);
     sheet
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialogs::{CompositionDraft, DialogId, MixedNumber, VelocityDraft, WindowId};
+    #[test]
+    fn hex_seeds_only_what_it_can_read() {
+        assert_eq!(hex_colour("#1a1a2e"), Some(0x1a1a2e));
+        assert_eq!(hex_colour("#fff"), Some(0xffffff));
+        assert_eq!(hex_colour("#FFFFFF00"), None);
+        assert_eq!(hex_colour("red"), None);
+        assert_eq!(hex_colour(""), None);
+    }
+    #[test]
+    fn rows_count_every_line_a_surface_draws() {
+        let draft = CompositionDraft {
+            name: "Comp".into(),
+            width: 1920.,
+            height: 1080.,
+            fps: 30.,
+            duration: 10.,
+            background: "#000000".into(),
+        };
+        let (id, owner) = (DialogId("sheet".into()), WindowId("window".into()));
+        // Six fields, and Size takes two rows.
+        let plain = draft.surface(id.clone(), owner.clone(), false, 0);
+        assert_eq!(rows(&plain), 7);
+        let warned = draft.surface(id.clone(), owner.clone(), true, 2);
+        assert_eq!(rows(&warned), 8);
+        let number = MixedNumber::new(&[1.]);
+        let velocity = VelocityDraft {
+            incoming_speed: number.clone(),
+            incoming_influence: number.clone(),
+            outgoing_speed: number.clone(),
+            outgoing_influence: number,
+        };
+        // Four fields, two headings and the keyframe count.
+        assert_eq!(rows(&velocity.surface(id, owner, 1, "")), 7);
+    }
 }

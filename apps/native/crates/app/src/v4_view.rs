@@ -477,6 +477,24 @@ impl SurfaceView {
                     }
                 });
             }
+            Some(Component::ColourWell) => {
+                let initial = node
+                    .props
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .and_then(crate::sheets::hex_colour);
+                let owner = cx.entity().downgrade();
+                let binding = node.props.get("binding").cloned();
+                crate::colour_panel::menu(window, initial, cx, move |colour, cx| {
+                    let _ = owner.update(cx, |v, cx| {
+                        // The panel can outlive the row: its lease must still be this one.
+                        let current = v.publication.surface.node(id);
+                        if current.and_then(|n| n.props.get("binding")) == binding.as_ref() {
+                            v.change(id, json!(colour), cx);
+                        }
+                    });
+                });
+            }
             _ => self.send(id, "click", EventDetail::default(), cx),
         }
     }
@@ -832,7 +850,12 @@ impl SurfaceView {
         let clickable = node.listeners.contains_key("click")
             || matches!(
                 component,
-                Some(Component::PopUpButton | Component::Checkbox | Component::Toggle)
+                Some(
+                    Component::PopUpButton
+                        | Component::Checkbox
+                        | Component::Toggle
+                        | Component::ColourWell
+                )
             );
         if !disabled && clickable {
             element = element

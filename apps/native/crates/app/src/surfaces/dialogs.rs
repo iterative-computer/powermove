@@ -65,6 +65,8 @@ pub struct Field {
     pub label: String,
     pub piece: NativePiece,
     pub values: Vec<String>,
+    /// The chosen entry of a pop-up's `values`.
+    pub selected: usize,
     pub unit: String,
     pub placeholder: Option<&'static str>,
     pub enabled: bool,
@@ -79,6 +81,7 @@ impl Field {
             label: label.into(),
             piece,
             values,
+            selected: 0,
             unit: String::new(),
             placeholder: None,
             enabled: true,
@@ -270,12 +273,15 @@ impl CompositionDraft {
                 NativePiece::TextField,
                 vec![self.name.clone()],
             ),
-            Field::new(
-                "resolution",
-                "Resolution",
-                NativePiece::PopUpButton,
-                vec![self.resolution().into()],
-            ),
+            Field {
+                selected: self.resolution_index(),
+                ..Field::new(
+                    "resolution",
+                    "Resolution",
+                    NativePiece::PopUpButton,
+                    resolution_labels(),
+                )
+            },
             Field::number(
                 "size",
                 "Size",
@@ -325,6 +331,13 @@ impl CompositionDraft {
             .find(|(_, w, h)| *w == self.width && *h == self.height)
             .map_or("Custom", |r| r.0)
     }
+    /// The resolution pop-up's entry for this size. `Custom` is the last.
+    pub fn resolution_index(&self) -> usize {
+        RESOLUTIONS
+            .iter()
+            .position(|(_, w, h)| *w == self.width && *h == self.height)
+            .unwrap_or(RESOLUTIONS.len())
+    }
     pub fn choose_resolution(&mut self, label: &str) -> bool {
         if let Some((_, w, h)) = RESOLUTIONS.iter().find(|r| r.0 == label) {
             self.width = *w;
@@ -334,6 +347,13 @@ impl CompositionDraft {
             false
         }
     }
+}
+fn resolution_labels() -> Vec<String> {
+    RESOLUTIONS
+        .iter()
+        .map(|r| r.0.to_owned())
+        .chain(["Custom".to_owned()])
+        .collect()
 }
 pub const RESOLUTIONS: &[(&str, f64, f64)] = &[
     ("4K UHD · 3840×2160", 3840., 2160.),

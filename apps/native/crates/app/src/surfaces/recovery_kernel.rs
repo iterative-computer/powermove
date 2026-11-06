@@ -24,7 +24,7 @@ pub struct PreparedRecovery {
     archive_recently_deleted: bool,
 }
 impl PreparedRecovery {
-    /// Archive is false until the kernel/library exposes a confirmed Recently
+    /// Archive stays false until the kernel/library exposes a confirmed Recently
     /// Deleted destination; archive_session alone is insufficient (N4).
     pub fn from_reply(
         reply: &ShellReply,
@@ -63,8 +63,8 @@ impl PreparedRecovery {
             Action::Recover => RecoveryDecision::Recover,
             Action::OpenAsCopy => RecoveryDecision::OpenAsCopy,
             Action::Discard if self.archive_recently_deleted => RecoveryDecision::Discard,
-            // Open Saved Version needs a kernel open-without-replay policy that
-            // keeps the unreadable journal. It must never be mapped to Discard.
+            // Never Discard: this one keeps the unreadable journal, set aside.
+            Action::OpenSavedVersion => RecoveryDecision::OpenSavedVersion,
             _ => return None,
         };
         Some(ShellCall::DecideRecovery {
@@ -138,7 +138,13 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(p.decision(Action::OpenSavedVersion).is_none());
+        assert!(matches!(
+            p.decision(Action::OpenSavedVersion),
+            Some(ShellCall::DecideRecovery {
+                decision: RecoveryDecision::OpenSavedVersion,
+                ..
+            })
+        ));
         assert!(p.decision(Action::Discard).is_none());
         assert!(p.decision(Action::Recover).is_none());
     }
