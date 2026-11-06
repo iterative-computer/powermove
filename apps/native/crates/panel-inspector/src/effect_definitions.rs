@@ -1,6 +1,7 @@
 //! Winning full definitions and contextual defaults for application actions.
 use crate::{EffectDefinition, Inspector, InspectorError, ParamDefinition};
 use pm_fx_defs::{Definition, catalog::EffectCatalog};
+use pm_kernel::QueryError;
 use pm_model::Value;
 
 pub(crate) fn typed(definition: &Definition) -> EffectDefinition {
@@ -62,20 +63,7 @@ impl Inspector {
         let Some(catalog) = &self.effect_catalog else {
             return self.definitions.get(id).cloned();
         };
-        let version = match effect.get("version") {
-            None | Some(Value::Null) => 1,
-            Some(v) => {
-                let n = v.as_f64()?;
-                if !n.is_finite()
-                    || n < 1.
-                    || n.fract() != 0.
-                    || n > pm_fx_defs::catalog::MAX_SAFE_VERSION as f64
-                {
-                    return None;
-                }
-                n as u64
-            }
-        };
+        let version = saved_version(effect)?;
         if catalog.current(id).is_none() {
             return self
                 .definitions
@@ -121,10 +109,22 @@ impl Inspector {
             .root()
             .and_then(|r| pm_kernel::model::find_layer(r, layer))
             .ok_or_else(|| InspectorError::MissingLayer(layer.into()))?;
-        let bounds = self
+        // The mirror has no fonts or models, so those layers have no bounds
+        // here and take the same fallback as an empty layer.
+        let bounds = match self
             .mirror
             .queries()
-            .bounds(location.comp_id.as_deref(), layer, time)?;
+            .bounds(location.comp_id.as_deref(), layer, time)
+        {
+            Err(
+                QueryError::NeedsFonts
+                | QueryError::NeedsInk
+                | QueryError::NeedsModels(_)
+                | QueryError::NeedsHost
+                | QueryError::Unsupported(_),
+            ) => None,
+            bounds => bounds?,
+        };
         let positive = |a: Option<f64>, field: &str| {
             let data = value.get("d").and_then(|d| d.get(field));
             let data = data.and_then(|v| v.get("v").unwrap_or(v).as_f64());
@@ -154,6 +154,21 @@ impl Inspector {
     }
 }
 
+/// A saved effect's revision: none is 1, anything else must be a safe integer.
+fn saved_version(effect: &Value) -> Option<u64> {
+    match effect.get("version") {
+        None | Some(Value::Null) => Some(1),
+        Some(v) => {
+            let n = v.as_f64()?;
+            (n.is_finite()
+                && n >= 1.
+                && n.fract() == 0.
+                && n <= pm_fx_defs::catalog::MAX_SAFE_VERSION as f64)
+                .then_some(n as u64)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ColorAction {
     pub index: usize,
@@ -163,22 +178,9 @@ pub(crate) struct ColorAction {
 impl Inspector {
     fn raw_saved_effect_definition(&self, effect: &Value) -> Option<&Definition> {
         let id = effect.get("type")?.as_str()?;
-        let catalog = self.effect_catalog.as_ref()?;
-        let version = match effect.get("version") {
-            None | Some(Value::Null) => 1,
-            Some(v) => {
-                let n = v.as_f64()?;
-                if !n.is_finite()
-                    || n < 1.
-                    || n.fract() != 0.
-                    || n > pm_fx_defs::catalog::MAX_SAFE_VERSION as f64
-                {
-                    return None;
-                }
-                n as u64
-            }
-        };
-        catalog.get(id, version)
+        self.effect_catalog
+            .as_ref()?
+            .get(id, saved_version(effect)?)
     }
     pub(crate) fn color_actions(&self, effect: &Value) -> Result<Vec<ColorAction>, InspectorError> {
         let Some(def) = self.raw_saved_effect_definition(effect) else {
