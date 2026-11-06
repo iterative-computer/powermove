@@ -599,7 +599,7 @@ impl<'c> Gpu<'c> {
                         resource.owner.size
                     }),
                 ));
-                calls.push((format!("u_{name}Midpoint"), f(&[0.5])));
+                calls.push((format!("u_{name}Midpoint"), f(&[self.effects.map_midpoint])));
                 calls.push((
                     format!("u_{name}UV"),
                     Call::M3(if source_space {

@@ -1231,3 +1231,6 @@ mod producer_policy;
 
 #[path = "advanced/color_family.rs"]
 mod color_family;
+
+#[path = "advanced/layer_consumers.rs"]
+mod layer_consumers;

@@ -1790,6 +1790,11 @@ impl Renderer {
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
+        self.effects.map_midpoint = if color.precision == Precision::Unorm8 {
+            128. / 255.
+        } else {
+            0.5
+        };
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
         let precision = available_precision(
             effective_precision(request.precision, color.precision),
