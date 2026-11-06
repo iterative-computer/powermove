@@ -161,6 +161,41 @@ describe("Preact native host", () => {
       root.dispatch({ ...plan, revision: 0 }, "click"),
     ).rejects.toThrow("Stale");
   });
+  test("an event planned before a commit lands only if its target's subtree is unchanged", async () => {
+    const { root } = recorder();
+    let clicks = 0;
+    const view = (rows: string[], label: string) => (
+      <div>
+        <div>
+          {rows.map((r) => (
+            <text key={r}>{r}</text>
+          ))}
+        </div>
+        <button onClick={() => clicks++}>{label}</button>
+      </div>
+    );
+    await root.render(view(["a"], "Stop"));
+    const button = root.host.root.children[0].children[1];
+    const plan = (revision: number) => ({
+      revision,
+      target: button.id,
+      preventDefault: false,
+      deliveries: [{ id: button.id, capture: false }],
+    });
+    const seen = root.inspect().revision;
+    // A streamed row lands in the list; the button is untouched.
+    await root.render(view(["a", "b"], "Stop"));
+    await root.dispatch(plan(seen), "click");
+    expect(clicks).toBe(1);
+    await expect(root.dispatch(plan(seen + 5), "click")).rejects.toThrow("Stale");
+    // Its label changes: an older click no longer lands.
+    const before = root.inspect().revision;
+    await root.render(view(["a", "b"], "Stopping"));
+    await expect(root.dispatch(plan(before), "click")).rejects.toThrow("Stale");
+    expect(clicks).toBe(1);
+    // Keys follow focus: they reach the element as it is now.
+    await root.dispatch(plan(before), "keydown", { key: "a" });
+  });
   test("native input observation prevents redundant controlled value writes", async () => {
     const { root, commits } = recorder();
     let set!: (s: string) => void;

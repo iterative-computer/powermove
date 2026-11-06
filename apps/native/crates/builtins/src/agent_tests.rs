@@ -98,32 +98,35 @@ impl Agent {
         }
         self.text();
     }
-    /// An event against an older surface revision is dropped, as a user's
-    /// click on a streaming run can be (see Open in agents.md). Press it again.
+    /// Acts on the publication last seen, as a click does: a streaming run may
+    /// publish again before the event arrives.
     fn press(&mut self, id: &str, event: &str, detail: EventDetail) {
-        for _ in 0..50 {
-            self.text();
-            let target = self.node(id);
-            let (generation, revision) = {
-                let p = self.surface();
-                (p.generation, p.surface.revision())
-            };
-            let driven =
-                self.panels
-                    .event("agent", generation, revision, target, event, detail.clone());
-            match driven.map(wait) {
-                Ok(Ok(_)) => {
-                    self.text();
-                    return;
-                }
-                Err(Error::Host(stale)) if stale == "stale native drive" => {}
-                Ok(Err(pm_runtime_v8::Error::JavaScript(stale)))
-                    if stale.contains("Stale surface event") => {}
-                other => panic!("{id}: {other:?}"),
+        self.text();
+        self.press_seen(id, event, detail);
+    }
+    fn press_seen(&mut self, id: &str, event: &str, detail: EventDetail) {
+        let target = self.node(id);
+        let (generation, revision) = {
+            let p = self.latest.as_ref().expect("agent publication");
+            (p.generation, p.surface.revision())
+        };
+        let driven = self
+            .panels
+            .event("agent", generation, revision, target, event, detail);
+        match driven.map(wait) {
+            Ok(Ok(_)) => {
+                self.text();
             }
-            thread::sleep(Duration::from_millis(10));
+            other => panic!("{id}: {other:?}"),
         }
-        panic!("{id} stayed stale");
+    }
+    fn revision(&self) -> u64 {
+        self.panels
+            .status()
+            .iter()
+            .find(|p| p["panel"] == "agent")
+            .and_then(|p| p["surfaceRevision"].as_u64())
+            .unwrap()
     }
     fn change(&mut self, id: &str, value: &str) {
         let value = Some(json!(value));
@@ -263,6 +266,64 @@ fn stop_cancels_a_held_run_through_the_provider() {
         "cancelled"
     );
     drop(state);
+    panel.panels.close();
+}
+#[test]
+fn stop_lands_while_a_stream_republishes_the_panel() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Go");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !panel.text().contains("token") {
+        assert!(Instant::now() < deadline, "no stream");
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The user sees this revision; the stream publishes past it before the click.
+    let seen = panel.latest.as_ref().unwrap().surface.revision();
+    while panel.revision() < seen + 3 {
+        assert!(Instant::now() < deadline, "stream stopped publishing");
+        thread::sleep(Duration::from_millis(5));
+    }
+    panel.press_seen("agent-stop", "click", EventDetail::default());
+    panel.wait(idle);
+    let agent = panel.agent();
+    let state = agent.lock().unwrap();
+    assert_eq!(
+        state.panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    let receipts = &state.panel.raw_archive()["threads"][0]["nativeRunEvents"];
+    assert!(receipts.as_array().unwrap().len() < 10, "{receipts}");
+    drop(state);
+    panel.panels.close();
+}
+#[test]
+fn signing_out_during_a_run_keeps_its_conversation_and_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Wait");
+    let agent = panel.agent();
+    let thread = thread_id(&agent);
+    panel.wait(|state| state.panel.session(&thread).unwrap().run.is_some());
+    let link = panel.panels.broker.agent.clone();
+    link.accounts().unwrap().disconnect(Provider::Chatgpt);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while link.connection(Provider::Chatgpt).0 != "unavailable" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!panel.text().contains("Connect Your Agent"));
+    panel.click("agent-stop");
+    panel.wait(idle);
+    assert_eq!(
+        agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
+        "cancelled"
+    );
+    assert!(panel.text().contains("Connect Your Agent"));
     panel.panels.close();
 }
 #[test]

@@ -93,6 +93,16 @@ export interface RecoveryAdapter {
     transport: Transport;
   }>;
 }
+/** Typing and its composition, which follow focus (events.rs `keyboard`). */
+const keyboard = new Set([
+  "keydown",
+  "keyup",
+  "beforeinput",
+  "input",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+]);
 export class SurfaceRoot {
   readonly host = new Host();
   private revision = 0;
@@ -295,7 +305,16 @@ export class SurfaceRoot {
   async dispatch(plan: EventPlan, type: string, detail: EventDetail = {}) {
     await this.chain;
     this.check();
-    if (plan.revision !== this.revision || !this.host.nodes.has(plan.target))
+    // Commits may land between planning and dispatch. Keys follow focus and
+    // reach their element as it is now; anything else lands only on a target
+    // whose subtree they left alone, never on changed or new content.
+    if (
+      plan.revision > this.revision ||
+      !this.host.nodes.has(plan.target) ||
+      (plan.revision !== this.revision &&
+        !keyboard.has(type.toLowerCase()) &&
+        !this.unchangedSince(plan.target, plan.revision))
+    )
       throw new Error("Stale surface event");
     detail = eventDetail(detail);
     if (
@@ -357,14 +376,36 @@ export class SurfaceRoot {
     number,
     Record<string, import("./protocol").ListenerFlags>
   >();
+  /** The accepted revision that last changed each node or its children. */
+  private changedAt = new Map<number, number>();
+  private unchangedSince(id: number, revision: number) {
+    const nodes = new Map(this.snapshot.map((n) => [n.id, n]));
+    const pending = [id];
+    while (pending.length) {
+      const next = pending.pop()!;
+      const node = nodes.get(next);
+      if (!node || (this.changedAt.get(next) ?? 0) > revision) return false;
+      pending.push(...node.children);
+    }
+    return true;
+  }
   private accept(ops: import("./protocol").Op[]) {
     const nodes = new Map(this.snapshot.map((n) => [n.id, n]));
     const parents = new Map<number, number>();
     for (const node of nodes.values())
       for (const child of node.children) parents.set(child, node.id);
+    const touch = (id: number | undefined) => {
+      if (id !== undefined) this.changedAt.set(id, this.revision);
+    };
     if (!nodes.has(0))
       nodes.set(0, { id: 0, type: "root", children: [], props: {}, text: "" });
     for (const op of ops) {
+      if (op.op === "insertBefore") {
+        touch(parents.get(op.id));
+        touch(op.parent);
+      }
+      if (op.op === "remove") touch(parents.get(op.id));
+      else touch(op.id);
       if (op.op === "create")
         nodes.set(op.id, {
           id: op.id,
@@ -416,6 +457,8 @@ export class SurfaceRoot {
       }
     }
     this.snapshot = [...nodes.values()].sort((a, b) => a.id - b.id);
+    for (const id of this.changedAt.keys())
+      if (!nodes.has(id)) this.changedAt.delete(id);
   }
   dispose(): Promise<void> {
     if (this.disposal) return this.disposal;

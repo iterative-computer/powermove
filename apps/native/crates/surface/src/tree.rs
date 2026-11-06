@@ -150,6 +150,10 @@ pub struct Surface {
     nodes: BTreeMap<Id, Node>,
     // Acknowledged IDs are never recycled: queued events cannot alias a new element (N7).
     high_id: Id,
+    /// The revision that last changed each node's props, text, listeners,
+    /// children or place. An event planned earlier may still land on an
+    /// element whose subtree has not changed since.
+    changed: BTreeMap<Id, u64>,
     pub limits: Limits,
     pub allow_webview: bool,
     styles: crate::style::StyleSheet,
@@ -160,6 +164,7 @@ impl Default for Surface {
             revision: 0,
             nodes: BTreeMap::from([(0, Node::new(0, "root".into()))]),
             high_id: 0,
+            changed: BTreeMap::new(),
             limits: Limits::default(),
             allow_webview: false,
             styles: crate::style::StyleSheet::default(),
@@ -197,17 +202,53 @@ impl Surface {
         }
         let mut next = self.clone();
         let mut diagnostics = vec![];
-        for (index, op) in commit.ops.into_iter().enumerate() {
-            next.apply_op(op, &mut diagnostics)
-                .map_err(|reason| reject(Some(index), &reason))?;
-        }
-        next.validate().map_err(|reason| reject(None, &reason))?;
-        next.revision = self
+        let revision = self
             .revision
             .checked_add(1)
             .ok_or_else(|| reject(None, "revision exhausted"))?;
+        for (index, op) in commit.ops.into_iter().enumerate() {
+            let touched = next.touched(&op);
+            next.apply_op(op, &mut diagnostics)
+                .map_err(|reason| reject(Some(index), &reason))?;
+            for id in touched {
+                next.changed.insert(id, revision);
+            }
+        }
+        next.validate().map_err(|reason| reject(None, &reason))?;
+        let nodes = &next.nodes;
+        next.changed.retain(|id, _| nodes.contains_key(id));
+        next.revision = revision;
         *self = next;
         Ok(diagnostics)
+    }
+    /// Nodes whose own state an op changes: the node, and any parent whose
+    /// children it adds to or takes from.
+    fn touched(&self, op: &Op) -> Vec<Id> {
+        let parent = |id: &Id| self.nodes.get(id).and_then(|n| n.parent);
+        match op {
+            Op::Create { id, .. } => vec![*id],
+            Op::InsertBefore { parent: to, id, .. } => {
+                [Some(*id), Some(*to), parent(id)].into_iter().flatten().collect()
+            }
+            Op::Remove { id } => parent(id).into_iter().collect(),
+            Op::SetProps { id, .. } | Op::SetText { id, .. } | Op::SetListeners { id, .. } => {
+                vec![*id]
+            }
+        }
+    }
+    /// True when `id` exists and nothing in its subtree changed after `revision`.
+    pub fn unchanged_since(&self, id: Id, revision: u64) -> bool {
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                return false;
+            };
+            if self.changed.get(&id).is_some_and(|at| *at > revision) {
+                return false;
+            }
+            pending.extend(&node.children);
+        }
+        true
     }
     fn apply_op(&mut self, op: Op, diagnostics: &mut Vec<Diagnostic>) -> Result<(), String> {
         match op {

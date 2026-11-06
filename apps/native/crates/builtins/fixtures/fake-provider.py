@@ -3,28 +3,47 @@
 import json
 import os
 import sys
+import threading
+import time
+
+LOCK = threading.Lock()
+STREAMING = threading.Event()
 
 
 def emit(value):
-    print(json.dumps(value), flush=True)
+    with LOCK:
+        print(json.dumps(value), flush=True)
 
 
 def signed_in():
-    return os.environ.get('PM_FAKE_PROVIDER') != 'signed-out' or os.path.exists(flag())
+    if os.path.exists(flag('out')):
+        return False
+    return os.environ.get('PM_FAKE_PROVIDER') != 'signed-out' or os.path.exists(flag('in'))
 
 
-def flag():
+def flag(state):
     home = os.environ.get('CODEX_HOME') or os.environ['CLAUDE_CONFIG_DIR']
-    return os.path.join(home, 'fake-signed-in')
+    return os.path.join(home, 'fake-signed-' + state)
 
 
 def sign_in():
-    open(flag(), 'w').close()
+    open(flag('in'), 'w').close()
+    if os.path.exists(flag('out')):
+        os.remove(flag('out'))
 
 
 def sign_out():
-    if os.path.exists(flag()):
-        os.remove(flag())
+    if os.path.exists(flag('in')):
+        os.remove(flag('in'))
+    open(flag('out'), 'w').close()
+
+
+def stream(turn):
+    """A token every few milliseconds until interrupted, as a long reply is."""
+    STREAMING.set()
+    while STREAMING.is_set():
+        emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': 'token '}})
+        time.sleep(0.003)
 
 
 def claude_auth(step):
@@ -88,12 +107,15 @@ def codex():
         elif method == 'turn/start':
             emit({'id': request['id'], 'result': {'turn': {'id': 'turn', 'status': 'inProgress'}}})
             emit({'method': 'turn/started', 'params': {'threadId': 'thread', 'turn': {'id': 'turn'}}})
-            if mode != 'hold':
+            if mode == 'stream':
+                threading.Thread(target=stream, args=(turn,), daemon=True).start()
+            elif mode != 'hold':
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})
                 emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'completed', 'error': None}}})
         elif method == 'turn/interrupt':
+            STREAMING.clear()
             emit({'id': request['id'], 'result': {}})
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'interrupted', 'error': None}}})
 
