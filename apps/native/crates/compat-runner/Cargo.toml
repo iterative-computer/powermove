@@ -22,12 +22,12 @@ png = "0.18"
 base64 = "0.22"
 sha2 = "=0.10.9"
 url = "2"
+ed25519-dalek = "2.2"
 
 [dev-dependencies]
 pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
 tempfile = "3"
 libc = "=0.2.186"
-ed25519-dalek = "2.2"
 tar = "0.4"
 flate2 = "1"
 
@@ -35,10 +35,13 @@ flate2 = "1"
 name = "pm-compat-runner"
 path = "src/main.rs"
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
 objc2 = "0.6.4"
-objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = "0.3.2"
 objc2-web-kit = "0.3.2"
 
 [[test]]

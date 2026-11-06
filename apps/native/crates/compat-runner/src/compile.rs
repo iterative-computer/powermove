@@ -243,8 +243,7 @@ impl Sources<'_> {
     }
 }
 
-fn digest_tree(root: &Path) -> Result<String, String> {
-    let mut hash = Sha256::new();
+fn tree(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
     let mut stack = vec![root.to_path_buf()];
     let mut files = BTreeSet::new();
     while let Some(directory) = stack.pop() {
@@ -262,9 +261,23 @@ fn digest_tree(root: &Path) -> Result<String, String> {
             }
         }
     }
+    Ok(files)
+}
+/// Cheap identity of a tree for change detection: names, sizes and mtimes.
+pub fn fingerprint(root: &Path) -> Result<Vec<(PathBuf, u64, std::time::SystemTime)>, String> {
+    tree(root)?
+        .into_iter()
+        .map(|file| {
+            let meta = fs::metadata(&file).map_err(|e| e.to_string())?;
+            Ok((file, meta.len(), meta.modified().map_err(|e| e.to_string())?))
+        })
+        .collect()
+}
+fn digest_tree(root: &Path) -> Result<String, String> {
+    let mut hash = Sha256::new();
     hash.update(COMPILER);
     hash.update(pm_runtime_v8::SVELTE_VERSION);
-    for file in files {
+    for file in tree(root)? {
         let name = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
         hash.update((name.len() as u64).to_be_bytes());
         hash.update(name.as_bytes());

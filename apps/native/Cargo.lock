@@ -4734,6 +4734,7 @@ name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "block2 0.6.2",
  "ed25519-dalek",
  "flate2",
  "libc",

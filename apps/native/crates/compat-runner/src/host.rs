@@ -236,6 +236,7 @@ impl ExtensionHost {
             router: None,
             records: vec![],
             canvases: BTreeMap::new(),
+            disk: 0,
             config,
         };
         let worker = thread::Builder::new()
@@ -345,6 +346,7 @@ fn forward_kernel(kernel: &KernelHandle, inbox: Sender<Input>) {
                 KernelEvent::Published { .. }
                     | KernelEvent::SelectionChanged { .. }
                     | KernelEvent::WorkspaceChanged { .. }
+                    | KernelEvent::StateChanged { .. }
             );
             if relevant && inbox.send(Input::Kernel).is_err() {
                 break;
@@ -382,14 +384,24 @@ struct Owner {
     router: Option<RemoteDomPanel>,
     records: Vec<Value>,
     canvases: BTreeMap<(u64, String), u64>,
+    disk: u64,
 }
 impl Owner {
     fn run(mut self, input: Receiver<Input>) {
+        self.disk = self.stamp();
         self.boot();
         loop {
-            let message = match input.recv_timeout(Duration::from_millis(250)) {
+            let message = match input.recv_timeout(Duration::from_millis(1000)) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Extensions change on disk: an agent's edit, a manual copy.
+                    let stamp = self.stamp();
+                    if stamp != self.disk {
+                        self.disk = stamp;
+                        self.rescan();
+                    }
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             // A burst of kernel publications is one mirror update.
@@ -404,6 +416,7 @@ impl Owner {
             }
             if kernel {
                 self.eval("__compat.sync()");
+                self.follow_state();
             }
             match next {
                 Some(Input::Close) => break,
@@ -624,16 +637,18 @@ impl Owner {
         }
     }
     fn set_enabled(&mut self, id: &str, enabled: bool) {
-        let _ = self
-            .config
-            .kernel
-            .state_transaction(pm_kernel::state::StateTransaction {
+        let state = self.config.kernel.state();
+        if let Some(entry) = state.extensions.get(id)
+            && entry.enabled != enabled
+        {
+            let _ = self.config.kernel.state_transaction(StateTransaction {
                 expected_revision: None,
-                ops: vec![pm_kernel::state::StateOp::Setting {
-                    key: format!("extension.{id}.enabled"),
-                    value: Some(pm_model::Value::Bool(enabled)),
-                }],
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled,
+                    ..entry.clone()
+                })],
             });
+        }
         for record in &mut self.records {
             if record["id"] == id {
                 record["enabled"] = json!(enabled);
@@ -650,10 +665,67 @@ impl Owner {
     }
     fn enabled(&self, id: &str) -> bool {
         let state = self.config.kernel.state();
-        state
-            .settings
-            .get(&format!("extension.{id}.enabled"))
-            .is_none_or(|value| *value != pm_model::Value::Bool(false))
+        state.extensions.get(id).is_none_or(|entry| entry.enabled)
+    }
+    /// Settings and MCP read extensions from kernel state, as they do built-ins.
+    fn publish_entries(&self) {
+        let state = self.config.kernel.state();
+        let ops: Vec<StateOp> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let id = record["id"].as_str()?;
+                let previous = state.extensions.get(id);
+                let mut source = previous
+                    .and_then(|entry| entry.source.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                let summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
+                    "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
+                source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
+                let next = pm_kernel::state::ExtensionEntry {
+                    id: id.to_owned(),
+                    installed: true,
+                    enabled: previous.is_none_or(|entry| entry.enabled),
+                    version: record["manifest"]["version"].as_str().unwrap_or("").to_owned(),
+                    source: pm_model::Value::Object(source),
+                };
+                (previous != Some(&next)).then_some(StateOp::Extension(next))
+            })
+            .collect();
+        if !ops.is_empty() {
+            let _ = self.config.kernel.state_transaction(StateTransaction {
+                expected_revision: None,
+                ops,
+            });
+        }
+    }
+    /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
+    fn follow_state(&mut self) {
+        let state = self.config.kernel.state();
+        let toggled: Vec<(String, bool)> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let id = record["id"].as_str()?;
+                let enabled = state.extensions.get(id)?.enabled;
+                (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
+            })
+            .collect();
+        for (id, enabled) in toggled {
+            self.set_enabled(&id, enabled);
+        }
+    }
+    fn stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for found in discovery::scan(&self.config.roots) {
+            found.id.hash(&mut hash);
+            if let Ok(tree) = compile::fingerprint(&found.directory) {
+                tree.hash(&mut hash);
+            }
+        }
+        hash.finish()
     }
     fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
         let enabled = self.enabled(&found.id);
@@ -730,6 +802,7 @@ impl Owner {
             p.records = records;
             p.surfaces = surfaces;
         });
+        self.publish_entries();
     }
     fn start_realm(&mut self) -> Result<()> {
         let events = Arc::new(Events {
@@ -1112,6 +1185,69 @@ mod tests {
             graph["edges"]["panel.tsx"]["powermove/hooks"],
             "runtime:powermove/hooks"
         );
+    }
+    #[test]
+    fn settings_toggles_and_disk_edits_reach_the_live_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let write = |label: &str| {
+            extension(
+                &extensions,
+                "synthetic-live",
+                &[(
+                    "index.ts",
+                    &format!(
+                        "export default function(api){{api.commands.register({{id:'synthetic-live.run',label:'{label}',run(){{}}}})}}"
+                    ),
+                )],
+            );
+        };
+        write("First");
+        let fixture = Fixture::start(root);
+        let label = |host: &ExtensionHost| {
+            host.contributions()
+                .and_then(|c| c["commands"][0]["label"].as_str().map(str::to_owned))
+        };
+        fixture.until("activation", |host| label(host).as_deref() == Some("First"));
+        let state = fixture.kernel.state();
+        let entry = state.extensions.get("synthetic-live").unwrap().clone();
+        assert_eq!(entry.version, "1.0.0");
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: false,
+                    ..entry.clone()
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("unload", |host| label(host).is_none());
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: true,
+                    ..entry
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("reload", |host| label(host).as_deref() == Some("First"));
+        std::thread::sleep(Duration::from_millis(1100));
+        extension(
+            &fixture._root.path().join("extensions"),
+            "synthetic-live",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-live.run',label:'Second',run(){}})}",
+            )],
+        );
+        fixture.until("rescan", |host| label(host).as_deref() == Some("Second"));
     }
     #[test]
     fn one_bad_extension_leaves_the_others_running() {

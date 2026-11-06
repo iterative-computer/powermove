@@ -326,18 +326,15 @@ impl KernelHooks for StoreRuntimeHost {
     }
 }
 impl HostProxy for StoreRuntimeHost {
+    /// Admission re-checks the live grant; the helper itself has no network.
     fn fetch(
         &self,
         _: &Generation,
-        _: FetchRequest,
-        _: Cancellation,
+        request: FetchRequest,
+        cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
-        // A granted network permission is not a network implementation. Refuse
-        // until the bounded, same-origin/redirect-aware transport is attached.
         self.admit(&*self.kernel, "fetch")?;
-        Err(Error::Host(
-            "Store network transport is not attached".into(),
-        ))
+        crate::net::fetch(request, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}
 }

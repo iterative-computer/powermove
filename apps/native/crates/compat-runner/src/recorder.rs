@@ -737,16 +737,14 @@ impl KernelHooks for NativeHost {
     fn seal_open_gestures(&self, _: &Generation) {}
 }
 impl HostProxy for NativeHost {
+    /// Local and trusted extensions hold no network restriction, as in the shipped app.
     fn fetch(
         &self,
         _: &Generation,
-        _: FetchRequest,
-        _: Cancellation,
+        request: FetchRequest,
+        cancel: Cancellation,
     ) -> Result<Box<dyn HostRequest>> {
-        self.state.lock().unwrap().missing.insert("fetch".into());
-        Err(Error::Host(
-            "network permission adapter not attached".into(),
-        ))
+        crate::net::fetch(request, cancel)
     }
     fn console(&self, _: &Generation, _: &str, _: &str) {}
 }
