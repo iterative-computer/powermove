@@ -522,9 +522,10 @@ export function AgentView({
             </text>
           </div>
         )}
-        {n.connection === "checking" ? (
+        {/* A live run keeps its conversation, whatever its account says now. */}
+        {!working && n.connection === "checking" ? (
           <UI.ProgressRow label="Checking connection…" />
-        ) : n.connection === "waiting" ? (
+        ) : !working && n.connection === "waiting" ? (
           <>
             <UI.ProgressRow label="Waiting for sign-in…" />
             <Push
@@ -532,7 +533,7 @@ export function AgentView({
               onClick={() => send({ type: "openSettings" })}
             />
           </>
-        ) : n.connection === "unavailable" ? (
+        ) : !working && n.connection === "unavailable" ? (
           <UI.EmptyState
             label="Connect Your Agent"
             explanation={n.reason}

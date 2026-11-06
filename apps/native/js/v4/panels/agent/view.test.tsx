@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import type { ComponentChild } from "preact";
 import { createRoot, type Commit } from "../../src";
 import { AgentPanel, AgentView, composerKey, elapsed } from "./view";
-import { fixture, states, withRows } from "./fixtures";
+import { fixture, state, states, withRows } from "./fixtures";
 import type { Action, AgentModel, Publication } from "./contract";
 
 function mount() {
@@ -200,6 +200,28 @@ test("empty Send and unavailable native actions cannot dispatch through system p
       ),
   ).toBe(true);
   assertWire(commits);
+  root.dispose();
+});
+test("a live run keeps its conversation and Stop after its account signs out", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  await root.render(
+    <AgentView
+      publication={state({ runId: "run" }, { connection: "unavailable" })}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  const nodes = root.inspect().nodes;
+  expect(nodes.some((n) => n.props.label === "Connect Your Agent")).toBe(false);
+  const stop = nodes.find((n) => n.props.id === "agent-stop")!;
+  await root.drive(stop.id, "click");
+  expect(actions).toEqual([{ type: "stop" }]);
+  await root.render(
+    <AgentView publication={states.unavailable()} send={() => {}} />,
+  );
+  expect(
+    root.inspect().nodes.some((n) => n.props.label === "Connect Your Agent"),
+  ).toBe(true);
   root.dispose();
 });
 test("question cards choose, answer and skip through the model; Answer waits for a choice", async () => {
