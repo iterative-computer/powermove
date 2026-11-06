@@ -220,9 +220,8 @@ fn half_resolution_scales_once_to_the_drawable_and_keeps_overlays_on_the_canvas(
         )
         .unwrap();
     assert_eq!(half.len(), full.len());
-    let mean = |v: &[[f64; 3]]| {
-        v.iter().map(|p| p[0] + p[1] + p[2]).sum::<f64>() / (3 * v.len()) as f64
-    };
+    let mean =
+        |v: &[[f64; 3]]| v.iter().map(|p| p[0] + p[1] + p[2]).sum::<f64>() / (3 * v.len()) as f64;
     assert!((mean(&full) - mean(&half)).abs() < 0.01);
     let line = OverlayGeometry::new(vec![OverlayLine {
         ends: [0.5, 0., 0.5, 1.],
@@ -260,7 +259,9 @@ fn playback_frames_take_the_viewer_path_and_a_stop_lands_the_exact_frame() {
     })
     .unwrap();
     let first = wait(&v, "a playing frame", |s| {
-        s.frame.as_ref().is_some_and(|f| f.moment == Moment::Playing)
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.moment == Moment::Playing)
     });
     assert_eq!(first.error, None);
     v.command(C::Pause).unwrap();
@@ -334,15 +335,19 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     let mut media = MediaCatalog::default();
     media.proxies.insert("clip".into(), fixture("h264-aac.mp4"));
     let service = service("media-modes");
-    let v = service
-        .viewer(config(s, media, output(320, 180)))
-        .unwrap();
+    let v = service.viewer(config(s, media, output(320, 180))).unwrap();
     let settled = |v: &Viewer, why: &str| {
         let stamp = v.stamp().unwrap();
-        wait(v, why, |s| s.frame.as_ref().is_some_and(|f| f.stamp == stamp))
+        wait(v, why, |s| {
+            s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
+        })
     };
     let status = settled(&v, "Automatic");
-    assert!(status.layer_failures.is_empty(), "{:?}", status.layer_failures);
+    assert!(
+        status.layer_failures.is_empty(),
+        "{:?}",
+        status.layer_failures
+    );
     assert_eq!(status.proxied, 1);
     v.media_mode(MediaMode::Originals).unwrap();
     let status = settled(&v, "Originals");
@@ -350,20 +355,36 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     assert_eq!(status.proxied, 0);
     v.media_mode(MediaMode::ProxyOnly).unwrap();
     let status = settled(&v, "Proxy Only");
-    assert!(status.layer_failures.is_empty(), "{:?}", status.layer_failures);
+    assert!(
+        status.layer_failures.is_empty(),
+        "{:?}",
+        status.layer_failures
+    );
     assert_eq!(status.proxied, 1);
 
     let mut both = MediaCatalog::default();
     both.originals.insert("a".into(), "/original.mov".into());
     both.proxies.insert("a".into(), "/proxy.mov".into());
     both.originals.insert("b".into(), "/b.mov".into());
-    assert_eq!(both.viewer_paths(MediaMode::Automatic)["a"].to_str(), Some("/original.mov"));
-    assert_eq!(both.viewer_paths(MediaMode::ProxyPreferred)["a"].to_str(), Some("/proxy.mov"));
-    assert_eq!(both.viewer_paths(MediaMode::ProxyPreferred)["b"].to_str(), Some("/b.mov"));
+    assert_eq!(
+        both.viewer_paths(MediaMode::Automatic)["a"].to_str(),
+        Some("/original.mov")
+    );
+    assert_eq!(
+        both.viewer_paths(MediaMode::ProxyPreferred)["a"].to_str(),
+        Some("/proxy.mov")
+    );
+    assert_eq!(
+        both.viewer_paths(MediaMode::ProxyPreferred)["b"].to_str(),
+        Some("/b.mov")
+    );
     assert!(!both.viewer_paths(MediaMode::ProxyOnly).contains_key("b"));
     assert_eq!(both.proxied(MediaMode::Automatic), 0);
     assert_eq!(both.proxied(MediaMode::ProxyPreferred), 1);
-    assert_eq!(both.export_paths(false).paths["a"].to_str(), Some("/original.mov"));
+    assert_eq!(
+        both.export_paths(false).paths["a"].to_str(),
+        Some("/original.mov")
+    );
 }
 
 /// An extension's effect, given by the resource snapshot the compat runtime
@@ -411,7 +432,11 @@ fn extension_effects_from_the_resource_snapshot_render_natively() {
     .unwrap();
     let drawn = settled(&v, "with the extension");
     assert_eq!(drawn.error, None);
-    assert!(drawn.layer_failures.is_empty(), "{:?}", drawn.layer_failures);
+    assert!(
+        drawn.layer_failures.is_empty(),
+        "{:?}",
+        drawn.layer_failures
+    );
     let centre = drawn.frame.unwrap().pixels.unwrap()[90 * 320 + 160];
     // Viewer pixels are linear Display P3: sRGB cyan is (0.18, 0.97, 0.98).
     assert!(

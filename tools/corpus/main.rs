@@ -467,6 +467,7 @@ fn project(
             height: size.height,
             display: 0,
             headroom: 1.,
+            crop: None,
         },
         layer: None,
         rate: frame_rate,

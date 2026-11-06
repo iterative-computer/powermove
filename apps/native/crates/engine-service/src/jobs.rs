@@ -281,7 +281,13 @@ pub fn run_child() -> Result<()> {
     // Low disk: refuse to start, then watch the volume while frames land.
     let reserve = request.disk_reserve;
     if free_bytes(&request.destination)? < reserve {
-        emit(status(&job_id, JobState::Failed, 0., None, Some(LOW_DISK.into())))?;
+        emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(LOW_DISK.into()),
+        ))?;
         return Ok(());
     }
     let low_disk = Arc::new(AtomicBool::new(false));

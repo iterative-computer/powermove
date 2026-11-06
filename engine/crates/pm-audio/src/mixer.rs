@@ -1012,14 +1012,7 @@ impl Mixer {
         let t0 = self.today_playhead.unwrap_or(self.today_range.t0);
         let standard = self.standard_content;
         let shape = root
-            .and_then(|root| {
-                crate::today::Shape::new(
-                    plan,
-                    comps,
-                    root,
-                    Some((&mut self.ev, t0)),
-                )
-            })
+            .and_then(|root| crate::today::Shape::new(plan, comps, root, Some((&mut self.ev, t0))))
             .map(|mut shape| {
                 shape.standard = standard;
                 shape

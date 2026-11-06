@@ -996,7 +996,10 @@ fn viewer_repeated_publications_keep_usable_native_tickets_until_model_changes()
         updated["model"]["ticket"]
     );
     // Auto's measured playing resolution reaches the Preview Resolution menu.
-    assert_eq!(backend.viewer_snapshot().unwrap()["model"]["quality"], "auto");
+    assert_eq!(
+        backend.viewer_snapshot().unwrap()["model"]["quality"],
+        "auto"
+    );
     backend.native.facts["effectiveQuality"] = json!(0.5);
     assert_eq!(
         backend.viewer_snapshot().unwrap()["model"]["effectiveQuality"],

@@ -737,7 +737,14 @@ mod lifetime_tests {
         );
         // Another test may hold both compiler slots: the worker retries that.
         let s = loop {
-            match engine.frame(&scene, spec, None, &Default::default(), false, Arc::default()) {
+            match engine.frame(
+                &scene,
+                spec,
+                None,
+                &Default::default(),
+                false,
+                Arc::default(),
+            ) {
                 Err(e) if transient(&e) => std::thread::sleep(std::time::Duration::from_millis(5)),
                 other => break other.unwrap().unwrap(),
             }

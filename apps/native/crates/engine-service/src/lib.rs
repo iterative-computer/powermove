@@ -148,7 +148,9 @@ impl MediaCatalog {
         let paths = self.viewer_paths(mode);
         self.proxies
             .iter()
-            .filter(|(id, path)| paths.get(*id) == Some(path) && self.originals.get(*id) != Some(path))
+            .filter(|(id, path)| {
+                paths.get(*id) == Some(path) && self.originals.get(*id) != Some(path)
+            })
             .count()
     }
     pub fn audio_paths(&self, mode: MediaMode) -> MediaMap {
@@ -938,8 +940,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     }
                     // Never shown on a layer: the screen may not hold it.
                     None => {
-                        if f.submission.drawable.is_some()
-                            && r.last == Some((f.stamp, f.spec.time))
+                        if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.spec.time))
                         {
                             r.last = None;
                         }
@@ -960,7 +961,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     r.last = None;
                 }
                 if t.gpu_ok && !t.cache_hit && f.spec.moment == Moment::Playing {
-                    r.auto.record((t.completed - t.worker_start) * 1000., f.budget_ms);
+                    r.auto
+                        .record((t.completed - t.worker_start) * 1000., f.budget_ms);
                 }
             }
             if let Some(v) = state.views.get_mut(&f.id) {
@@ -1674,6 +1676,10 @@ mod worker_tests {
         let after = drawn(&v);
         assert_eq!(after.error, None);
         assert_eq!(after.device_losses, 1);
-        assert_eq!(after.frame.unwrap().pixels.unwrap(), before, "same picture on the new device");
+        assert_eq!(
+            after.frame.unwrap().pixels.unwrap(),
+            before,
+            "same picture on the new device"
+        );
     }
 }

@@ -641,8 +641,7 @@ impl Renderer {
     ) -> Result<(), String> {
         let mut set = crate::effects::versions::for_document(document);
         for d in extensions {
-            set.definitions
-                .retain(|b| b.kind != d.kind || b.id != d.id);
+            set.definitions.retain(|b| b.kind != d.kind || b.id != d.id);
             set.missing.retain(|m| *m != d.id);
             set.definitions.push(d.clone());
         }

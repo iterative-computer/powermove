@@ -247,13 +247,11 @@ fn child_exports_prores_422_hevc_10_bit_and_16_bit_png() {
         if format.is_image() {
             settings.range.end = Ticks::new(settings.range.start.get() + 1).unwrap();
         }
-        let status = ExportHandle::start(
-            Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
-            request,
-        )
-        .unwrap()
-        .wait()
-        .unwrap();
+        let status =
+            ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+                .unwrap()
+                .wait()
+                .unwrap();
         assert_eq!(status.state, JobState::Done, "{name}: {status:?}");
         if format.is_image() {
             // IHDR: the bit depth is byte 24 of a PNG.
@@ -293,7 +291,11 @@ fn child_export_renders_extension_effects_from_its_resources() {
             .unwrap()
     };
     let without = run(serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap());
-    assert_eq!(without.state, JobState::Failed, "an unknown effect never exports silently");
+    assert_eq!(
+        without.state,
+        JobState::Failed,
+        "an unknown effect never exports silently"
+    );
     let mut invert = pm_render::all_builtin_definitions()
         .definitions
         .into_iter()

@@ -324,13 +324,7 @@ fn focused(cx: &mut App) -> Option<gpui::Entity<Controller>> {
         .cloned()
 }
 /// Checkmarks follow the focused controller's state.
-pub fn update_checks(
-    output: OutputMode,
-    media: MediaMode,
-    safe: bool,
-    guides: bool,
-    popout: bool,
-) {
+pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: bool, popout: bool) {
     MENU.with(|m| {
         if let Some(m) = &*m.borrow() {
             for (action, item) in &m.items {
