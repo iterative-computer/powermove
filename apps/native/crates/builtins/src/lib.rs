@@ -185,6 +185,8 @@ impl Builtins {
             realm.close();
         }
         self.broker.extensions.lock().unwrap().remove(id);
+        // Its surface and router go too; a late call from it is a stale generation.
+        self.broker.entries.lock().unwrap().remove(id);
     }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
         if let Some(realm) = self.realms.get(panel) {
