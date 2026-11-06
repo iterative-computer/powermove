@@ -725,10 +725,17 @@ for line in sys.stdin:
         accounts.connect(Provider::Chatgpt);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while accounts.status(Provider::Chatgpt).state != State::Connected {
-            assert!(std::time::Instant::now() < deadline, "{:?}", accounts.status(Provider::Chatgpt));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                accounts.status(Provider::Chatgpt)
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(opened.lock().unwrap().as_slice(), ["https://chatgpt.com/auth"]);
+        assert_eq!(
+            opened.lock().unwrap().as_slice(),
+            ["https://chatgpt.com/auth"]
+        );
         assert!(accounts.models(Provider::Chatgpt).is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }

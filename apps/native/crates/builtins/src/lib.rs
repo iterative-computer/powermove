@@ -120,7 +120,14 @@ impl Builtins {
             return None;
         }
         let entries = self.broker.entries.lock().unwrap();
-        let state = entries.get("agent")?.backend.lock().unwrap().native.agent.clone()?;
+        let state = entries
+            .get("agent")?
+            .backend
+            .lock()
+            .unwrap()
+            .native
+            .agent
+            .clone()?;
         let carry = AgentCarry::take(&self.broker.agent, &state)?;
         self.broker
             .agent_released

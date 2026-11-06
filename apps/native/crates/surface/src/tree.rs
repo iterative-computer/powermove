@@ -227,9 +227,10 @@ impl Surface {
         let parent = |id: &Id| self.nodes.get(id).and_then(|n| n.parent);
         match op {
             Op::Create { id, .. } => vec![*id],
-            Op::InsertBefore { parent: to, id, .. } => {
-                [Some(*id), Some(*to), parent(id)].into_iter().flatten().collect()
-            }
+            Op::InsertBefore { parent: to, id, .. } => [Some(*id), Some(*to), parent(id)]
+                .into_iter()
+                .flatten()
+                .collect(),
             Op::Remove { id } => parent(id).into_iter().collect(),
             Op::SetProps { id, .. } | Op::SetText { id, .. } | Op::SetListeners { id, .. } => {
                 vec![*id]

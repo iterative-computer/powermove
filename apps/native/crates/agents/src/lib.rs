@@ -102,7 +102,9 @@ impl Event {
     /// effect lives in the conversation, so hosts checkpoint it, not each one.
     pub fn streamed(&self) -> bool {
         match self {
-            Event::Trace { value, .. } => matches!(value["kind"].as_str(), Some("answer" | "thought")),
+            Event::Trace { value, .. } => {
+                matches!(value["kind"].as_str(), Some("answer" | "thought"))
+            }
             Event::Progress { .. } => true,
             _ => false,
         }

@@ -992,7 +992,8 @@ impl Backend {
                     .map_err(|e| format!("{e:?}"))?;
                     let now = crate::agent_host::now_ms();
                     // Typing reaches the archive at the next checkpoint, not per key.
-                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key")) {
+                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
+                    {
                         state.panel.defer_save(now);
                     } else {
                         state

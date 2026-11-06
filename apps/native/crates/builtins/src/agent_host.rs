@@ -409,9 +409,8 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             if done {
                 state.worker = false;
             }
-            let changed = *polled.as_ref().unwrap_or(&0) > 0
-                || failed
-                || saved != state.panel.save_error;
+            let changed =
+                *polled.as_ref().unwrap_or(&0) > 0 || failed || saved != state.panel.save_error;
             (changed, failed, done)
         };
         if changed {

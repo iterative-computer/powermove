@@ -100,7 +100,11 @@ impl ProviderRuns {
         match &effect.kind {
             EffectKind::Send { steer: false, .. } => {
                 let run = effect.target.run.clone().ok_or(Error::Stale)?;
-                if self.runs.iter().any(|r| r.target.run.as_ref() == Some(&run)) {
+                if self
+                    .runs
+                    .iter()
+                    .any(|r| r.target.run.as_ref() == Some(&run))
+                {
                     return Ok(());
                 }
                 let receipt = Receipt {

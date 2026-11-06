@@ -329,13 +329,20 @@ fn an_application_run_outlives_its_window_and_shows_on_return() {
     let state = carry.0.as_ref().unwrap().1.clone();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !state.lock().unwrap().runs.is_empty() {
-        assert!(Instant::now() < deadline, "the carried run stopped delivering");
+        assert!(
+            Instant::now() < deadline,
+            "the carried run stopped delivering"
+        );
         thread::sleep(Duration::from_millis(5));
     }
     drop(state);
     let mut back = Agent::mount_application(&actor, environment(root.path(), "slow"), Some(carry));
     back.connected(Provider::Chatgpt);
-    assert!(back.text().contains("Saw: Make a project"), "{}", back.text());
+    assert!(
+        back.text().contains("Saw: Make a project"),
+        "{}",
+        back.text()
+    );
     let agent = back.agent();
     assert_eq!(
         agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
@@ -355,7 +362,10 @@ fn dropping_a_carried_run_cancels_it() {
     let carry = home.panels.carry_agent().expect("a live run");
     home.panels.close();
     drop(home);
-    assert!(!state.lock().unwrap().runs.is_empty(), "closing kept the run");
+    assert!(
+        !state.lock().unwrap().runs.is_empty(),
+        "closing kept the run"
+    );
     drop(carry);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !state.lock().unwrap().runs.is_empty() {

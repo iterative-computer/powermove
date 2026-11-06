@@ -80,7 +80,12 @@ pub struct NativeEvent {
 pub fn keyboard(event: &str) -> bool {
     matches!(
         event,
-        "keydown" | "keyup" | "beforeinput" | "input" | "compositionstart" | "compositionupdate"
+        "keydown"
+            | "keyup"
+            | "beforeinput"
+            | "input"
+            | "compositionstart"
+            | "compositionupdate"
             | "compositionend"
     )
 }
@@ -259,23 +264,41 @@ mod tests {
             {"op":"create","id":3,"type":"text"},{"op":"insertBefore","parent":2,"id":3,"before":null}]}"#).unwrap();
         let mut interaction = Interaction::default();
         let mut drive = |surface: &mut Surface, revision, target, event| {
-            interaction.drive(surface, 1, 1, revision, target, event, EventDetail::default())
+            interaction.drive(
+                surface,
+                1,
+                1,
+                revision,
+                target,
+                event,
+                EventDetail::default(),
+            )
         };
         // A streamed row lands in the list; the button is untouched.
         surface.apply_json(r#"{"baseRevision":1,"ops":[
             {"op":"create","id":4,"type":"text"},{"op":"insertBefore","parent":1,"id":4,"before":null}]}"#).unwrap();
         let event = drive(&mut surface, 1, 2, "click").unwrap();
         assert_eq!((event.plan.target, event.plan.revision), (2, 2));
-        assert!(drive(&mut surface, 1, 1, "click").is_err(), "the list changed");
-        assert!(drive(&mut surface, 3, 2, "click").is_err(), "a future revision");
+        assert!(
+            drive(&mut surface, 1, 1, "click").is_err(),
+            "the list changed"
+        );
+        assert!(
+            drive(&mut surface, 3, 2, "click").is_err(),
+            "a future revision"
+        );
         // The button's label changes: what was clicked is no longer what is shown.
-        surface.apply_json(r#"{"baseRevision":2,"ops":[{"op":"setText","id":3,"text":"Stopping"}]}"#).unwrap();
+        surface
+            .apply_json(r#"{"baseRevision":2,"ops":[{"op":"setText","id":3,"text":"Stopping"}]}"#)
+            .unwrap();
         assert!(drive(&mut surface, 2, 2, "click").is_err());
         assert!(drive(&mut surface, 3, 2, "click").is_ok());
         // Keys follow focus: they reach the element as it is now.
         assert!(drive(&mut surface, 2, 2, "keydown").is_ok());
         // Removed: never lands, even on the revision it was seen at.
-        surface.apply_json(r#"{"baseRevision":3,"ops":[{"op":"remove","id":2}]}"#).unwrap();
+        surface
+            .apply_json(r#"{"baseRevision":3,"ops":[{"op":"remove","id":2}]}"#)
+            .unwrap();
         assert!(drive(&mut surface, 3, 2, "click").is_err());
     }
     #[test]

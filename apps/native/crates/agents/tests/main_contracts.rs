@@ -112,4 +112,3 @@ fn main_claude_adapter_permission_modes_and_sandbox_settings_match_actual_source
         );
     }
 }
-

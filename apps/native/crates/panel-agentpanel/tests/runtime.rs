@@ -294,10 +294,18 @@ fn a_long_stream_checkpoints_instead_of_saving_every_fragment() {
             },
         };
         let now = 10 + sequence * 2;
-        assert!(panel.provider_event(&mut store, "t", &receipt, now).unwrap());
+        assert!(
+            panel
+                .provider_event(&mut store, "t", &receipt, now)
+                .unwrap()
+        );
         panel.checkpoint(&mut store, now).unwrap();
     }
-    assert!(store.writes - before <= 4, "{} writes", store.writes - before);
+    assert!(
+        store.writes - before <= 4,
+        "{} writes",
+        store.writes - before
+    );
     let receipt = Receipt {
         source: "run".into(),
         sequence: 2000,
@@ -306,7 +314,9 @@ fn a_long_stream_checkpoints_instead_of_saving_every_fragment() {
             result: RunResult::success("Done".into(), Access::Editor),
         },
     };
-    panel.provider_event(&mut store, "t", &receipt, 4100).unwrap();
+    panel
+        .provider_event(&mut store, "t", &receipt, 4100)
+        .unwrap();
     assert!(!panel.unsaved());
     let receipts = panel.raw_archive()["threads"][0]["nativeRunEvents"]
         .as_array()
@@ -321,18 +331,26 @@ fn effects_the_host_cannot_carry_out_settle_instead_of_stranding_the_thread() {
     let mut runs = ProviderRuns::default();
     // A Stop for a run with no process: acknowledged as refused, Stop again usable.
     let stop = panel.stop("t").unwrap();
-    let error = runs.dispatch(&mut panel, &mut store, &stop, 11).unwrap_err();
-    runs.refuse(&mut panel, &mut store, &stop, 11, &error).unwrap();
+    let error = runs
+        .dispatch(&mut panel, &mut store, &stop, 11)
+        .unwrap_err();
+    runs.refuse(&mut panel, &mut store, &stop, 11, &error)
+        .unwrap();
     let session = panel.session("t").unwrap();
     assert!(!session.run.as_ref().unwrap().stopping);
     assert!(session.stop_error.is_some());
     // A start that never launched fails its run, in words, durably.
     let error = Error::Host("The agent's workspace could not be created.".into());
-    runs.refuse(&mut panel, &mut store, &effect, 12, &error).unwrap();
+    runs.refuse(&mut panel, &mut store, &effect, 12, &error)
+        .unwrap();
     assert!(panel.session("t").unwrap().run.is_none());
     let thread = &store.data["agentThreads.p"]["threads"][0];
     assert_eq!(thread["lastRunStatus"], "failed");
-    assert!(thread.to_string().contains("workspace could not be created"));
+    assert!(
+        thread
+            .to_string()
+            .contains("workspace could not be created")
+    );
     assert!(!thread.to_string().contains("Host("));
 }
 #[test]
