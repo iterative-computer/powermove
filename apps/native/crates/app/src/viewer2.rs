@@ -642,8 +642,9 @@ impl Controller {
         self.apply_viewer_options();
         cx.notify();
     }
-    /// Re-applies output mode and overlays to every viewer of this editor
-    /// (after any viewer is created or an option changes).
+    /// Re-applies output mode, media, Preview Resolution and overlays to
+    /// every viewer of this editor (after any viewer is created or an option
+    /// changes).
     pub fn apply_viewer_options(&mut self) {
         let mtm = MainThreadMarker::new().unwrap();
         let geometry = overlay_geometry(self.safe_areas, self.guides);
@@ -652,6 +653,7 @@ impl Controller {
             if let Err(e) = viewer
                 .mastering(mtm, self.output_mode.mastering())
                 .and_then(|_| viewer.media_mode(self.media_mode))
+                .and_then(|_| viewer.quality(self.quality))
                 .and_then(|_| viewer.safe_areas(geometry.clone()))
             {
                 self.message = format!("Viewer: {e}");

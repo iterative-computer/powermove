@@ -44,6 +44,8 @@ pub struct Controller {
     pub output_mode: crate::viewer2::OutputMode,
     /// View › Viewer Media for this editor's viewers.
     pub media_mode: pm_engine_service::MediaMode,
+    /// Preview Resolution (viewer bar) for this editor's viewers.
+    pub quality: pm_engine_service::Quality,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -245,6 +247,7 @@ impl Controller {
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
             media_mode: Default::default(),
+            quality: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -376,10 +379,9 @@ impl Controller {
                 Chosen::Half => Q::Half,
                 Chosen::Quarter => Q::Quarter,
             };
-            if let Some(viewer) = &self.viewer
-                && let Err(e) = viewer.quality(quality)
-            {
-                self.message = format!("Viewer: {e}");
+            if self.quality != quality {
+                self.quality = quality;
+                self.apply_viewer_options();
             }
         }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
