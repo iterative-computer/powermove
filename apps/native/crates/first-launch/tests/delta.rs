@@ -292,6 +292,138 @@ fn trash_follows_only_while_the_copy_is_untouched_and_nothing_is_ever_purged() {
 }
 
 #[test]
+fn a_native_trash_survives_a_later_edit_in_the_original_app() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    let id = checkpoint(&config).projects["p"].clone();
+    let writer = LibraryWriter::open(&config.native_profile, DiskFormat::V1_2, None).unwrap();
+    assert!(writer.trash(&id).unwrap());
+    drop(writer);
+    edit_source(&config, "Edited in the original app");
+    delta(&config, |_| Ok(())).unwrap();
+    assert_eq!(library(&config).trash().unwrap()[0].id, id);
+    assert!(library(&config).projects().unwrap().is_empty());
+    assert_eq!(name_of(&config, &id), "Edited in the original app");
+}
+
+#[test]
+fn a_project_edited_then_trashed_in_the_original_app_is_trashed_here() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    let id = checkpoint(&config).projects["p"].clone();
+    edit_source(&config, "Edited, then trashed");
+    let rows: Value = read(&store(&config, "projects.json"));
+    write(&store(&config, "projectTrash.json"), &json!(rows));
+    write(&store(&config, "projects.json"), &json!([]));
+    delta(&config, |_| Ok(())).unwrap();
+    assert_eq!(library(&config).trash().unwrap()[0].id, id);
+    assert_eq!(name_of(&config, &id), "Edited, then trashed");
+}
+
+fn local_storage_key(config: &Config, value: &str) {
+    let key = [b"_app://powermove\0".as_slice(), &[1], b"pm.later"].concat();
+    fs::remove_dir_all(config.electron_profile.join("Local Storage/leveldb")).unwrap();
+    database(
+        &config.electron_profile.join("Local Storage/leveldb"),
+        "leveldb.BytewiseComparator",
+        &[(key, [&[1], value.as_bytes()].concat())],
+    );
+}
+fn delta_folders(config: &Config) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(config.native_profile.join("first-launch-deltas")) else {
+        return vec![];
+    };
+    entries
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn chromium_rewriting_its_files_costs_one_capture_and_keeps_nothing() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    let base = state(&config).delta_base;
+    // The original app ran: same content, new files.
+    let log = config
+        .electron_profile
+        .join("Local Storage/leveldb/LOG");
+    fs::write(&log, b"opened").unwrap();
+    assert!(matches!(
+        delta_if_changed(&config, |_| Ok(())).unwrap(),
+        DeltaPrepared::MediaPending
+    ));
+    delta_media(&config, |_| Ok(())).unwrap();
+    assert_eq!(state(&config).delta_base, base);
+    assert_eq!(delta_folders(&config), Vec::<String>::new());
+    assert!(matches!(
+        delta_if_changed(&config, |_| panic!("merged source")).unwrap(),
+        DeltaPrepared::Unchanged
+    ));
+}
+
+#[test]
+fn a_local_storage_change_alone_moves_the_base() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    local_storage_key(&config, "merged");
+    assert!(matches!(
+        delta_if_changed(&config, |_| Ok(())).unwrap(),
+        DeltaPrepared::MediaPending
+    ));
+    delta_media(&config, |_| Ok(())).unwrap();
+    let first = state(&config).delta_base;
+    assert!(first.is_some());
+    assert_eq!(delta_folders(&config).len(), 1);
+
+    // Merged, then edited here. The original's old value is not a conflict.
+    let writer = LibraryWriter::open(&config.native_profile, DiskFormat::V1_2, None).unwrap();
+    let storage = pm_kernel::profile::ProfileStorage::new(&writer);
+    let mut entries = storage.local_storage().unwrap();
+    entries
+        .iter_mut()
+        .find(|e| e.key == "pm.later")
+        .unwrap()
+        .value = "native".into();
+    storage.replace_local_storage(&entries).unwrap();
+    drop(writer);
+    let log = config
+        .electron_profile
+        .join("Local Storage/leveldb/LOG");
+    fs::write(&log, b"opened").unwrap();
+    delta(&config, |_| Ok(())).unwrap();
+    assert_eq!(state(&config).conflicts, Default::default());
+    assert_eq!(state(&config).delta_base, first);
+    assert_eq!(delta_folders(&config).len(), 1);
+}
+
+#[test]
+fn an_interrupted_extension_is_registered_on_resume() {
+    let t = tempdir().unwrap();
+    let config = ready(t.path());
+    write(
+        &config
+            .electron_profile
+            .join("extensions/later/manifest.json"),
+        &json!({"id":"later","version":"2.0.0"}),
+    );
+    let stopped = delta(&config, |event| {
+        anyhow::ensure!(event != Event::Started(Step::Extensions), "interrupted");
+        Ok(())
+    });
+    assert!(stopped.is_err());
+    delta(&config, |_| Ok(())).unwrap();
+    let mut kernel = Kernel::new(KernelConfig::default());
+    kernel
+        .shell(ShellCall::AttachLibrary {
+            profile: config.native_profile.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .unwrap();
+    assert!(kernel.state().extensions["later"].installed);
+}
+
+#[test]
 fn every_interruption_resumes_without_false_conflicts_or_duplicates() {
     let stops: [fn(&Event) -> bool; 6] = [
         |e| *e == Event::Started(Step::Bootstrap),

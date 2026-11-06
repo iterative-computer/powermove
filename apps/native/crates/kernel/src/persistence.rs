@@ -218,7 +218,8 @@ impl LibraryWriter {
     ) -> Result<(), LibraryError> {
         self.save_project_inner(id, project, history, workspace, meta, false)
     }
-    pub(crate) fn compact_project(
+    /// `save_project` that leaves a trashed project in the trash.
+    pub fn compact_project(
         &self,
         id: &str,
         project: Value,

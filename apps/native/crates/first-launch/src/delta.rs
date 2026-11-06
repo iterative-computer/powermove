@@ -128,6 +128,17 @@ impl ProjectCopy {
         )?;
         Ok(())
     }
+    /// A later edit from the original app. A copy trashed here stays trashed.
+    fn update(&self, writer: &LibraryWriter, id: &str) -> Result<()> {
+        writer.compact_project(
+            id,
+            self.project.clone(),
+            self.history.clone(),
+            self.workspace.clone(),
+            self.meta.clone(),
+        )?;
+        Ok(())
+    }
     pub(crate) fn receipt(&self, id: &str) -> ProjectReceipt {
         ProjectReceipt {
             native: id.to_owned(),
@@ -206,8 +217,7 @@ pub fn delta_store(
     let base = Checkpoint::load(&base_dir)?;
     let deltas = native.join("first-launch-deltas");
     disk::private_dir(&deltas)?;
-    // Retain all availability checkpoints, including interrupted passes. Reuse
-    // the unfinished capture on resume; callers finish it before starting fresh.
+    // Reuse the unfinished capture on resume; callers finish it before starting fresh.
     let pending = deltas.join("pending");
     let next = if pending.exists() {
         Checkpoint::load(&pending)?
@@ -274,14 +284,11 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
         &pass.base_hash[..16]
     );
     let destination = deltas.join(&name);
-    let base = Checkpoint::load(&base_root(&native, &state))?;
-    let moved = next.logical_keys != base.logical_keys
-        || next.files != base.files
-        || next.chromium_payloads != base.chromium_payloads;
+    let base_dir = base_root(&native, &state);
+    let moved = !same_content(&Checkpoint::load(&base_dir)?, &base_dir, &next, &pending)?;
+    let retained = moved && !destination.exists();
     let stamp = fs::read_to_string(pending.join("source-stamp")).ok();
-    if destination.exists() {
-        disk::archive(&pending)?;
-    } else {
+    if retained {
         fs::rename(&pending, destination)?;
         File::open(&deltas)?.sync_all()?;
     }
@@ -289,12 +296,47 @@ pub fn delta_media(config: &Config, mut hook: impl FnMut(Event) -> Result<()>) -
         state.delta_base = Some(name);
         state.latest_pass = Some(pass.snapshot.clone());
     }
-    if moved || state.source_stamp.is_none() {
-        state.source_stamp = stamp.or(state.source_stamp.take());
-        publish(&native, &state)?;
+    // Always: this capture is merged, so the next launch owes it nothing.
+    state.source_stamp = stamp.or(state.source_stamp.take());
+    publish(&native, &state)?;
+    // Everything in it is already in the base, so keeping it would only cost disk.
+    if !retained {
+        fs::remove_dir_all(&pending)?;
     }
     hook(Event::Complete)?;
     Ok(summary(&state, &pass))
+}
+/// Whether a capture says what its base says. Chromium rewrites its files whenever
+/// it runs, so the comparison is by what is stored in them, never by the files.
+fn same_content(
+    base: &Checkpoint,
+    base_root: &Path,
+    next: &Checkpoint,
+    next_root: &Path,
+) -> Result<bool> {
+    let media = |checkpoint: &Checkpoint, root: &Path| -> Result<Vec<u8>> {
+        let records: Vec<_> = read_batches(checkpoint, root)?
+            .into_iter()
+            .flat_map(|(_, records)| records)
+            .collect();
+        Ok(serde_json::to_vec(&records)?)
+    };
+    Ok(next.logical_keys == base.logical_keys
+        && next.files == base.files
+        && next.chromium_payloads == base.chromium_payloads
+        && local_entries(next_root, next)? == local_entries(base_root, base)?
+        && media(next, next_root)? == media(base, base_root)?
+        && fs::read(next_root.join("availability.json"))?
+            == fs::read(base_root.join("availability.json"))?)
+}
+fn local_entries(root: &Path, cp: &Checkpoint) -> Result<BTreeMap<(String, String), String>> {
+    let Some(path) = &cp.local_storage else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(local_storage::read(&Snapshot::open(&root.join(path))?)?
+        .into_iter()
+        .map(|e| ((e.origin, e.key), e.value))
+        .collect())
 }
 
 /// One complete delta with the library detached.
@@ -418,6 +460,21 @@ impl Merge<'_> {
         }
         Ok(settings)
     }
+    /// Trash moves only when the original app moved it, and each step is idempotent.
+    fn follow_trash(
+        &self,
+        source: &str,
+        id: &str,
+        trash: &BTreeSet<String>,
+        base_trash: &BTreeSet<String>,
+    ) -> Result<()> {
+        match (trash.contains(source), base_trash.contains(source)) {
+            (true, false) => self.writer.trash(id)?,
+            (false, true) => self.writer.restore(id)?,
+            _ => false,
+        };
+        Ok(())
+    }
     fn stored_fingerprint(&self, id: &str) -> Result<Option<String>> {
         Ok(self
             .writer
@@ -462,14 +519,8 @@ impl Merge<'_> {
                     self.state.receipts.insert(source.clone(), copy.receipt(id));
                 }
                 Some(receipt) if receipt.source == copy.source => {
-                    if trash.contains(source) != base_trash.contains(source)
-                        && self.stored_fingerprint(id)?.as_ref() == Some(&receipt.copy)
-                    {
-                        if trash.contains(source) {
-                            self.writer.trash(id)?;
-                        } else {
-                            self.writer.restore(id)?;
-                        }
+                    if self.stored_fingerprint(id)?.as_ref() == Some(&receipt.copy) {
+                        self.follow_trash(source, id, &trash, &base_trash)?;
                     }
                     continue;
                 }
@@ -479,7 +530,7 @@ impl Merge<'_> {
                         // Interrupted after the write, before the receipt.
                     } else if current.as_ref() == Some(&receipt.copy) {
                         disk::space(self.native, copy.bytes().saturating_mul(3))?;
-                        copy.save(self.writer, id)?;
+                        copy.update(self.writer, id)?;
                     } else {
                         // Library work is additive: both versions stay in the library.
                         let key = blake3::hash(format!("{source}\0{}", copy.source).as_bytes())
@@ -490,6 +541,9 @@ impl Merge<'_> {
                         if self.writer.store().load(&keep)?.is_none() {
                             disk::space(self.native, incoming.bytes().saturating_mul(3))?;
                             incoming.save(self.writer, &keep)?;
+                            if trash.contains(source) {
+                                self.writer.trash(&keep)?;
+                            }
                         }
                         self.state.conflicts.insert(Conflict {
                             kind: ConflictKind::Project,
@@ -504,6 +558,7 @@ impl Merge<'_> {
                         );
                         continue;
                     }
+                    self.follow_trash(source, id, &trash, &base_trash)?;
                     self.state.receipts.insert(source.clone(), copy.receipt(id));
                 }
             }
@@ -537,6 +592,8 @@ impl Merge<'_> {
                 continue;
             }
             let target = self.native.join(checkpoint::file_target(relative)?);
+            // Set before the idempotent skip: a resume still owes the registration.
+            extensions_changed |= target.starts_with(&shared);
             let current = target
                 .is_file()
                 .then(|| disk::hash(&target).map(|h| h.0))
@@ -552,7 +609,6 @@ impl Merge<'_> {
                 continue;
             }
             if target.starts_with(&shared) {
-                extensions_changed = true;
                 unseal(&shared, &target)?;
             }
             match after {
@@ -569,17 +625,8 @@ impl Merge<'_> {
         Ok(extensions_changed)
     }
     fn local_storage(&mut self) -> Result<()> {
-        fn entries(root: &Path, cp: &Checkpoint) -> Result<BTreeMap<(String, String), String>> {
-            let Some(path) = &cp.local_storage else {
-                return Ok(BTreeMap::new());
-            };
-            Ok(local_storage::read(&Snapshot::open(&root.join(path))?)?
-                .into_iter()
-                .map(|e| ((e.origin, e.key), e.value))
-                .collect())
-        }
-        let before = entries(self.base_root, self.base)?;
-        let after = entries(self.next_root, self.next)?;
+        let before = local_entries(self.base_root, self.base)?;
+        let after = local_entries(self.next_root, self.next)?;
         if before == after {
             return Ok(());
         }

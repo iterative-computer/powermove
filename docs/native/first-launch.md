@@ -66,7 +66,8 @@ Rules: `ext.*` objects merge one member at a time. A project edited on both side
 both, as two library projects. Trash follows only while the copy is untouched. A project
 permanently deleted there stays here. Settings go through the kernel, because its durable
 record outranks the store at attach. Extension copies are resealed after a merge.
-No checkpoint is ever rewritten. Conflicts appear in Window ▸ Migration Report.
+No checkpoint is ever rewritten. A capture that adds nothing to its base is dropped, so a
+run of the original app costs one capture at most. Conflicts appear in Window ▸ Migration Report.
 
 ## Decisions
 
