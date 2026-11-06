@@ -501,8 +501,8 @@ impl ExtensionHost {
     pub fn publish_time(&self, time: f64, playing: bool) {
         if let Some(host) = &*self.transport.lock().unwrap() {
             let (time_moved, play_moved) = host.transport().publish(time, playing);
-            let moved =
-                (if time_moved { TIME_MOVED } else { 0 }) | (if play_moved { PLAY_MOVED } else { 0 });
+            let moved = (if time_moved { TIME_MOVED } else { 0 })
+                | (if play_moved { PLAY_MOVED } else { 0 });
             // One message at a time; what it reports accumulates until it runs.
             if moved != 0 && self.moved.fetch_or(moved, Ordering::AcqRel) == 0 {
                 let _ = self.inbox.send(Input::Moved);
@@ -731,9 +731,7 @@ impl Owner {
                     ));
                 }
             }
-            Input::Realm(writer, envelope) if writer == self.writer => {
-                self.realm_message(envelope)
-            }
+            Input::Realm(writer, envelope) if writer == self.writer => self.realm_message(envelope),
             Input::Page(view, message) if view == u64::from(self.writer.generation) => {
                 self.page(message)
             }
@@ -1016,7 +1014,8 @@ impl Owner {
         }
         self.shared.update(|p| {
             for frame in frames {
-                p.canvases.insert((frame.node, frame.surface.clone()), frame);
+                p.canvases
+                    .insert((frame.node, frame.surface.clone()), frame);
             }
         });
     }
@@ -1187,8 +1186,15 @@ impl Owner {
         let wanted: BTreeMap<String, String> = self
             .records
             .iter()
-            .filter(|r| r["confined"] == true && r["enabled"] == true && r["health"]["state"] == "ok")
-            .filter_map(|r| Some((r["id"].as_str()?.to_owned(), r["graph"]["hash"].as_str()?.to_owned())))
+            .filter(|r| {
+                r["confined"] == true && r["enabled"] == true && r["health"]["state"] == "ok"
+            })
+            .filter_map(|r| {
+                Some((
+                    r["id"].as_str()?.to_owned(),
+                    r["graph"]["hash"].as_str()?.to_owned(),
+                ))
+            })
             .filter(|(id, _)| self.confined.contains_key(id))
             .collect();
         let (keep, stop): (Vec<_>, Vec<_>) = std::mem::take(&mut self.stores)
@@ -1884,7 +1890,10 @@ mod tests {
         });
         let state = fixture.kernel.state();
         let owner = state.provider("commands", "synthetic-store.mark").unwrap();
-        assert!(owner.token.starts_with("store:synthetic-store:"), "{owner:?}");
+        assert!(
+            owner.token.starts_with("store:synthetic-store:"),
+            "{owner:?}"
+        );
     }
     #[test]
     fn a_v4_extension_compiles_as_a_surface_and_stays_out_of_the_trusted_realm() {

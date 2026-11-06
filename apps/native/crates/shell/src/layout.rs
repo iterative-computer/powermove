@@ -989,18 +989,20 @@ pub fn empty_state(
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
+/// One window's contributed panels: id and interned title.
+type Contributed = Vec<(String, &'static str)>;
 thread_local! {
     /// Panels contributed at runtime, per window: id and interned title, in menu
     /// order. Layout has no window at hand, so it reads the union; each window's
     /// extension host replaces its own list and no one else's.
-    static CONTRIBUTED: std::cell::RefCell<Vec<(u64, Vec<(String, &'static str)>)>> = const { std::cell::RefCell::new(vec![]) };
+    static CONTRIBUTED: std::cell::RefCell<Vec<(u64, Contributed)>> = const { std::cell::RefCell::new(vec![]) };
 }
 /// Replaces what `window` contributes. Layout, menus and palette read these like
 /// built-ins, so a contributed panel docks, tabs and persists the same way.
 pub fn set_contributed_panels(window: u64, panels: impl IntoIterator<Item = (String, String)>) {
     CONTRIBUTED.with(|list| {
         let mut list = list.borrow_mut();
-        let intern = |list: &[(u64, Vec<(String, &'static str)>)], title: String| {
+        let intern = |list: &[(u64, Contributed)], title: String| {
             list.iter()
                 .flat_map(|(_, panels)| panels)
                 .find(|(_, t)| **t == *title)

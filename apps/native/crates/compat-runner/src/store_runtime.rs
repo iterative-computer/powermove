@@ -198,9 +198,9 @@ impl StoreRuntimeHost {
             match member {
                 "set" => {
                     let invalid = StorageFailure(Error::Invalid("Store storage value"));
-                    let value = params.get(1).ok_or(StorageFailure(Error::Invalid(
-                        "Store storage value",
-                    )))?;
+                    let value = params
+                        .get(1)
+                        .ok_or(StorageFailure(Error::Invalid("Store storage value")))?;
                     values.insert(
                         key,
                         pm_model::json::parse(&value.to_string()).map_err(|_| invalid)?,

@@ -604,7 +604,7 @@ mod lifetime_tests {
             .unwrap();
         let mut engine = Engine::new(Gpu::new("contributed-effect-after").unwrap()).unwrap();
         let after = engine
-            .export(&scene(&value, vec![definition]), Ticks::ZERO, size)
+            .export(&scene(&value, vec![definition.clone()]), Ticks::ZERO, size)
             .unwrap();
         assert_ne!(before, after, "the contributed program drew");
         // A broken contribution fails alone: unused it costs nothing, and the
@@ -639,7 +639,10 @@ mod lifetime_tests {
                 size,
             )
             .unwrap();
-        assert_eq!(after, beside, "a good definition is untouched beside a bad one");
+        assert_eq!(
+            after, beside,
+            "a good definition is untouched beside a bad one"
+        );
     }
     #[test]
     fn encoded_hdr_outputs_match_independent_f64_reference() {

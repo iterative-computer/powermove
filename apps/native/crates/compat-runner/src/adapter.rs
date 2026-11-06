@@ -3,7 +3,7 @@
 //! as operations against the last one sent, or whole when those can't express it.
 use pm_kernel::{
     Ack, Call, Caller, Direction, EditCall, HistoryCall, KernelHandle, Origin, Published,
-    QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, Writer, WriteBody,
+    QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, WriteBody, Writer,
     state::{StateOp, StateTransaction},
 };
 use pm_model::{Op, PathPart, canonical};

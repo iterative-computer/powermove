@@ -105,12 +105,11 @@ mod system {
         runtime::{AnyObject, NSObject, ProtocolObject},
     };
     use objc2_foundation::{
-        NSData, NSError, NSHTTPURLResponse, NSMutableCopying, NSMutableURLRequest, NSObjectProtocol,
-        NSOperationQueue,
-        NSString, NSTimeInterval, NSURL, NSURLRequest, NSURLResponse, NSURLSession,
-        NSURLSessionConfiguration, NSURLSessionDataDelegate, NSURLSessionDataTask,
-        NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
-        NSURLSessionTaskDelegate,
+        NSData, NSError, NSHTTPURLResponse, NSMutableCopying, NSMutableURLRequest,
+        NSObjectProtocol, NSOperationQueue, NSString, NSTimeInterval, NSURL, NSURLRequest,
+        NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSURLSessionDataDelegate,
+        NSURLSessionDataTask, NSURLSessionDelegate, NSURLSessionResponseDisposition,
+        NSURLSessionTask, NSURLSessionTaskDelegate,
     };
 
     pub struct Task(Retained<NSURLSessionDataTask>);

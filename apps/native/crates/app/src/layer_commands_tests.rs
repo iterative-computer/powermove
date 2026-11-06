@@ -339,6 +339,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
             doc: p.snapshot.document.clone(),
             comp: "root".into(),
             media: Default::default(),
+            definitions: Default::default(),
             content: p.revision(),
         };
         headless
