@@ -705,3 +705,106 @@ fn saving_app_effect_provenance_survives_edit_undo_and_native_save_reopen() {
         );
     }
 }
+
+/// `Object.keys(document.proj.assets)` as the shipped reader sees the file.
+fn file_asset_keys(path: &std::path::Path) -> Vec<String> {
+    let file = std::fs::File::open(path).unwrap();
+    read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap()
+    .asset_order
+    .unwrap()
+    .iter()
+    .map(|id| id.as_str().unwrap().to_owned())
+    .collect()
+}
+
+#[test]
+fn authored_media_order_survives_open_edit_undo_save_and_reopen() {
+    let dir = TempDir::new("asset-order");
+    let source = dir.path("authored.pmv");
+    let text = r##"{"v":"1.0.0","proj":{"id":"p","name":"Order","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","layers":[],"comps":{},"assets":{"zebra":{"name":"Zebra","kind":"image"},"apple":{"name":"Apple","kind":"image"},"mango":{"name":"Mango","kind":"image"}}},"history":null,"ws":null}"##;
+    std::fs::write(&source, text).unwrap();
+    let ids = |store: &DocumentStore| -> Vec<String> {
+        pm_kernel::asset_order::node_keys(store.root().unwrap())
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut store = open_store(&source);
+    assert_eq!(ids(&store), ["zebra", "apple", "mango"]);
+    assert!(!store.is_dirty(), "reading the order is not an edit");
+
+    let asset = parse(r#"{"name":"Banana","kind":"image"}"#).unwrap();
+    let add = |id: &str| -> Command {
+        pm_kernel::MediaCommand::AddAsset {
+            asset_id: id.into(),
+            asset: asset.clone(),
+        }
+        .into()
+    };
+    store.execute(add("banana"), Origin::Interface).unwrap();
+    assert_eq!(ids(&store), ["zebra", "apple", "mango", "banana"]);
+    store.undo().unwrap();
+    assert_eq!(ids(&store), ["zebra", "apple", "mango"]);
+    store.redo().unwrap();
+    store
+        .execute(
+            pm_kernel::MediaCommand::RemoveAsset {
+                asset_id: "apple".into(),
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+    assert_eq!(ids(&store), ["zebra", "mango", "banana"]);
+    store.undo().unwrap();
+    assert_eq!(
+        ids(&store),
+        ["zebra", "apple", "mango", "banana"],
+        "Undo keeps its place"
+    );
+
+    let saved = dir.path("saved.pmv");
+    save_as(&mut store, &saved).unwrap();
+    assert_eq!(
+        file_asset_keys(&saved),
+        ["zebra", "apple", "mango", "banana"]
+    );
+    let member = pm_kernel::asset_order::FIELD;
+    let file = std::fs::File::open(&saved).unwrap();
+    let container = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        project_of(&container.document).get(member).is_none(),
+        "files stay readable by the shipped app"
+    );
+
+    // A second generation keeps the order, and sorted projects gain no member.
+    let mut reopened = open_store(&saved);
+    assert_eq!(ids(&reopened), ["zebra", "apple", "mango", "banana"]);
+    let again = dir.path("again.pmv");
+    save_as(&mut reopened, &again).unwrap();
+    assert_eq!(
+        file_asset_keys(&again),
+        ["zebra", "apple", "mango", "banana"]
+    );
+    let sorted = dir.path("sorted.pmv");
+    std::fs::write(
+        &sorted,
+        text.replace("\"zebra\"", "\"a\"")
+            .replace("\"apple\"", "\"b\"")
+            .replace("\"mango\"", "\"c\""),
+    )
+    .unwrap();
+    assert!(open_store(&sorted).root().unwrap().get(member).is_none());
+}

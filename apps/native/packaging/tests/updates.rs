@@ -27,7 +27,7 @@ fn ready() -> Eligibility {
         final_delta_complete: true,
         all_six_owner_domains: true,
         state_and_secrets_complete: true,
-        restore_verified: true,
+        installer_recovery_verified: true,
     }
 }
 struct Gate(VecDeque<Eligibility>);
@@ -72,13 +72,14 @@ impl Fixture {
                 schema: 1,
                 channel: Channel::Cutover,
                 version: "2.0.0".into(),
+                sparkle_version: None,
                 architecture: Architecture::Arm64,
                 bundle_id: PRODUCTION_ID.into(),
                 minimum_macos: 14,
                 archive_url: "https://updates.invalid/native/app.zip".into(),
                 size: archive.len() as u64,
                 sha256: format!("{:x}", Sha256::digest(&archive)),
-                sparkle_signature: STANDARD.encode([5; 64]),
+                sparkle_signature: STANDARD.encode(key.sign(&archive).to_bytes()),
                 expires_unix: NOW + 600,
             },
             key,
@@ -311,7 +312,7 @@ fn every_closed_gate_prevents_contacting_the_native_feed() {
     closed!(final_delta_complete);
     closed!(all_six_owner_domains);
     closed!(state_and_secrets_complete);
-    closed!(restore_verified);
+    closed!(installer_recovery_verified);
     let mut old = ready();
     old.macos_major = 13;
     variants.push(old);
@@ -928,7 +929,7 @@ impl HandoffFake {
                 six_owner_domains: true,
                 state_complete: true,
                 secrets_complete: true,
-                restore_verified: true,
+                installer_recovery_verified: true,
                 source_generation: 42,
                 checkpoint_generation: 42,
             },
@@ -1008,7 +1009,7 @@ fn missing_owner_state_restore_or_stale_delta_blocks_library_open() {
         match field {
             0 => host.delta.six_owner_domains = false,
             1 => host.delta.state_complete = false,
-            2 => host.delta.restore_verified = false,
+            2 => host.delta.installer_recovery_verified = false,
             _ => host.delta.source_generation += 1,
         }
         assert_eq!(
@@ -1168,4 +1169,350 @@ fn policy_expiring_during_network_or_quit_does_not_stage_or_install() {
             .is_err()
     );
     assert_eq!(installer.install_calls, 0);
+}
+
+#[derive(Default)]
+struct AsyncBinding {
+    calls: Vec<&'static str>,
+}
+impl pm_update_policy::sparkle::Binding for AsyncBinding {
+    fn check(&mut self, _: &Release) -> Result<()> {
+        self.calls.push("check");
+        Ok(())
+    }
+    fn download(&mut self) -> Result<()> {
+        self.calls.push("download");
+        Ok(())
+    }
+    fn install(&mut self) -> Result<()> {
+        self.calls.push("install");
+        Ok(())
+    }
+    fn cancel(&mut self) -> Result<()> {
+        self.calls.push("cancel");
+        Ok(())
+    }
+}
+struct Guard(bool);
+impl pm_update_policy::sparkle::TerminationGuard for Guard {
+    fn verify_candidate(&mut self, _: &Path, _: &Release) -> Result<bool> {
+        Ok(true)
+    }
+    fn protect(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn protected(&self) -> bool {
+        self.0
+    }
+}
+struct NoCandidate;
+impl pm_update_policy::sparkle::TerminationGuard for NoCandidate {
+    fn verify_candidate(&mut self, _: &Path, _: &Release) -> Result<bool> {
+        Ok(false)
+    }
+    fn protect(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn protected(&self) -> bool {
+        true
+    }
+}
+struct SignedProof(bool);
+impl pm_update_policy::sparkle::InstalledProof for SignedProof {
+    fn matches(&mut self, _: &Release) -> Result<bool> {
+        Ok(self.0)
+    }
+}
+
+#[test]
+fn asynchronous_sparkle_requires_protected_quit_and_signed_recovery_not_cached_tickets() {
+    use pm_update_policy::sparkle::{Event, Phase, Session, recover};
+    let f = Fixture::new();
+    let archive_key = pm_update_policy::sparkle::ArchiveKey::from_base64(
+        &STANDARD.encode(f.key.verifying_key().as_bytes()),
+    )
+    .unwrap();
+    let offer = f.offer();
+    let t = TempDir::new().unwrap();
+    let store = StagingStore::open(&t.path().canonicalize().unwrap()).unwrap();
+    let mut gate = Gate::open();
+    let mut binding = AsyncBinding::default();
+    let file = store
+        .download_verified(
+            &offer,
+            &mut gate,
+            NOW,
+            &mut LocalFeed::new([f.archive.clone()]),
+            &f.verifier(),
+            u64::MAX,
+        )
+        .unwrap();
+    assert!(
+        Session::begin(
+            &store,
+            &offer,
+            pm_update_policy::sparkle::ReferenceArchive {
+                file: file.clone(),
+                key: &archive_key
+            },
+            Guard(false),
+            &mut gate,
+            &f.verifier(),
+            &mut binding
+        )
+        .is_err()
+    );
+    assert!(
+        Session::begin(
+            &store,
+            &offer,
+            pm_update_policy::sparkle::ReferenceArchive {
+                file: file.clone(),
+                key: &archive_key
+            },
+            NoCandidate,
+            &mut gate,
+            &f.verifier(),
+            &mut binding
+        )
+        .is_err()
+    );
+    assert!(binding.calls.is_empty());
+    let mut session = Session::begin(
+        &store,
+        &offer,
+        pm_update_policy::sparkle::ReferenceArchive {
+            file,
+            key: &archive_key,
+        },
+        Guard(true),
+        &mut gate,
+        &f.verifier(),
+        &mut binding,
+    )
+    .unwrap();
+    assert_eq!(session.phase(), Phase::Checking);
+    session
+        .event(Event::Found, &mut gate, &f.verifier(), &mut binding)
+        .unwrap();
+    session
+        .event(Event::Extracting, &mut gate, &f.verifier(), &mut binding)
+        .unwrap();
+    assert!(
+        !session
+            .allow_termination(&mut gate, &f.verifier(), &mut Barrier(true), &mut binding)
+            .unwrap()
+    );
+    session
+        .event(Event::Ready, &mut gate, &f.verifier(), &mut binding)
+        .unwrap();
+    assert!(
+        !session
+            .allow_termination(&mut gate, &f.verifier(), &mut Barrier(false), &mut binding)
+            .unwrap()
+    );
+    assert_eq!(binding.calls, ["check", "download"]);
+    assert!(
+        session
+            .allow_termination(&mut gate, &f.verifier(), &mut Barrier(true), &mut binding)
+            .unwrap()
+    );
+    session
+        .event(Event::Installed, &mut gate, &f.verifier(), &mut binding)
+        .unwrap();
+    assert!(matches!(
+        store.status().unwrap().unwrap().1,
+        Stage::Sparkle {
+            phase: Phase::InstallRequested,
+            ..
+        }
+    ));
+    drop(session);
+    drop(store);
+    let store = StagingStore::open(&t.path().canonicalize().unwrap()).unwrap();
+    assert_eq!(
+        recover(&store, &offer, &f.verifier(), &mut SignedProof(false)).unwrap(),
+        Recovery::Pending
+    );
+    assert_eq!(
+        recover(&store, &offer, &f.verifier(), &mut SignedProof(true)).unwrap(),
+        Recovery::Installed
+    );
+    assert!(matches!(
+        store.status().unwrap().unwrap().1,
+        Stage::Completed
+    ));
+}
+
+#[test]
+fn async_sparkle_rejects_stale_generations_and_tampering_before_callbacks() {
+    use pm_update_policy::sparkle::{Event, Phase, Session};
+    for tamper in [false, true] {
+        let f = Fixture::new();
+        let archive_key = pm_update_policy::sparkle::ArchiveKey::from_base64(
+            &STANDARD.encode(f.key.verifying_key().as_bytes()),
+        )
+        .unwrap();
+        let offer = f.offer();
+        let t = TempDir::new().unwrap();
+        let store = StagingStore::open(&t.path().canonicalize().unwrap()).unwrap();
+        let mut gate = Gate::open();
+        let mut binding = AsyncBinding::default();
+        let file = store
+            .download_verified(
+                &offer,
+                &mut gate,
+                NOW,
+                &mut LocalFeed::new([f.archive.clone()]),
+                &f.verifier(),
+                u64::MAX,
+            )
+            .unwrap();
+        let mut session = Session::begin(
+            &store,
+            &offer,
+            pm_update_policy::sparkle::ReferenceArchive {
+                file: file.clone(),
+                key: &archive_key,
+            },
+            Guard(true),
+            &mut gate,
+            &f.verifier(),
+            &mut binding,
+        )
+        .unwrap();
+        if tamper {
+            fs::write(store.root().join(file), b"changed").unwrap();
+        } else {
+            let mut changed = ready();
+            changed.source_generation += 1;
+            gate.0 = [changed].into();
+        }
+        assert!(
+            session
+                .event(Event::Found, &mut gate, &f.verifier(), &mut binding)
+                .is_err()
+        );
+        assert!(!binding.calls.contains(&"download"));
+        if !tamper {
+            assert_eq!(session.phase(), Phase::Aborted);
+            assert!(binding.calls.contains(&"cancel"));
+        }
+    }
+}
+
+#[test]
+fn async_policy_hash_cannot_bind_different_archive_bytes_to_a_valid_sparkle_signature() {
+    use pm_update_policy::sparkle::{ArchiveKey, ReferenceArchive, Session};
+    let mut f = Fixture::new();
+    // Valid independent policy signature and SHA-256 for bytes A, but Sparkle's
+    // valid archive signature still covers bytes B. This MUST fail before check.
+    f.archive = b"different synthetic archive bytes".to_vec();
+    f.release.size = f.archive.len() as u64;
+    f.release.sha256 = format!("{:x}", Sha256::digest(&f.archive));
+    let offer = f.offer();
+    let t = TempDir::new().unwrap();
+    let store = StagingStore::open(&t.path().canonicalize().unwrap()).unwrap();
+    let mut gate = Gate::open();
+    let mut binding = AsyncBinding::default();
+    let file = store
+        .download_verified(
+            &offer,
+            &mut gate,
+            NOW,
+            &mut LocalFeed::new([f.archive.clone()]),
+            &f.verifier(),
+            u64::MAX,
+        )
+        .unwrap();
+    let key = ArchiveKey::from_base64(&STANDARD.encode(f.key.verifying_key().as_bytes())).unwrap();
+    assert!(
+        Session::begin(
+            &store,
+            &offer,
+            ReferenceArchive { file, key: &key },
+            Guard(true),
+            &mut gate,
+            &f.verifier(),
+            &mut binding
+        )
+        .is_err()
+    );
+    assert!(binding.calls.is_empty());
+}
+
+#[test]
+fn asynchronous_cancel_keeps_termination_veto_until_native_confirmation() {
+    use pm_update_policy::sparkle::{ArchiveKey, Event, Phase, ReferenceArchive, Session};
+    let f = Fixture::new();
+    let offer = f.offer();
+    let t = TempDir::new().unwrap();
+    let store = StagingStore::open(&t.path().canonicalize().unwrap()).unwrap();
+    let mut gate = Gate::open();
+    let mut binding = AsyncBinding::default();
+    let file = store
+        .download_verified(
+            &offer,
+            &mut gate,
+            NOW,
+            &mut LocalFeed::new([f.archive.clone()]),
+            &f.verifier(),
+            u64::MAX,
+        )
+        .unwrap();
+    let key = ArchiveKey::from_base64(&STANDARD.encode(f.key.verifying_key().as_bytes())).unwrap();
+    let mut session = Session::begin(
+        &store,
+        &offer,
+        ReferenceArchive { file, key: &key },
+        Guard(true),
+        &mut gate,
+        &f.verifier(),
+        &mut binding,
+    )
+    .unwrap();
+    session.cancel(&mut binding).unwrap();
+    assert_eq!(session.phase(), Phase::Aborted);
+    assert!(
+        !session
+            .allow_termination(&mut gate, &f.verifier(), &mut Barrier(true), &mut binding)
+            .unwrap()
+    );
+    session
+        .event(Event::Cancelled, &mut gate, &f.verifier(), &mut binding)
+        .unwrap();
+    assert_eq!(session.phase(), Phase::Cancelled);
+    assert!(
+        session
+            .allow_termination(&mut gate, &f.verifier(), &mut Barrier(true), &mut binding)
+            .unwrap()
+    );
+    assert!(!binding.calls.contains(&"install"));
+}
+
+#[test]
+fn sparkle_build_number_is_independent_of_display_semver_and_legacy_policies_stay_readable() {
+    let mut f = Fixture::new();
+    assert_eq!(f.offer().release().sparkle_version(), "2.0.0");
+    f.release.sparkle_version = Some("42.3".into());
+    let offer = f.offer();
+    assert_eq!(offer.release().version, "2.0.0");
+    assert_eq!(offer.release().sparkle_version(), "42.3");
+    for build in ["", "0", "01", "2.0.0-beta.1", "1.2.3.4", "1..2"] {
+        f.release.sparkle_version = Some(build.into());
+        let mut feed = LocalFeed::new([f.policy()]);
+        assert!(
+            check(
+                &f.config,
+                ready(),
+                "1.2.0",
+                Architecture::Arm64,
+                NOW,
+                &mut feed,
+                &f.verifier()
+            )
+            .is_err(),
+            "{build}"
+        );
+    }
 }

@@ -29,6 +29,7 @@ pub fn fork() -> Check {
             Some(Arc::new(checked(BuiltinSources::new(resources))?));
         let before = f.document()?;
         let revision = f.revision();
+        let registries = f.host.lock().unwrap().kernel().state().registries.clone();
         let started = f.call(
             "start_session",
             json!({"prompt":"Synthetic source copy","context":if commit {"app"} else {"project"}}),
@@ -63,15 +64,9 @@ pub fn fork() -> Check {
         assert_eq!(rewritten["unknown"], manifest["unknown"]);
         assert_eq!(f.document()?, before);
         assert_eq!(f.revision(), revision);
-        assert!(
-            f.host
-                .lock()
-                .unwrap()
-                .kernel()
-                .state()
-                .registries
-                .values()
-                .all(|r| r.is_empty())
+        assert_eq!(
+            f.host.lock().unwrap().kernel().state().registries,
+            registries
         );
         assert_eq!(
             tool_error(

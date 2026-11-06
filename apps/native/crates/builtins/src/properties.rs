@@ -120,6 +120,7 @@ impl Properties {
                         "parent" => ("layer.parent", "Parent", ""),
                         "matteSource" => ("layer.matteSource", "Track Matte", ""),
                         "threeD" => ("layer.threeD", "3D", ""),
+                        "continuousRaster" => ("layer.continuousRaster", "Rasterize", ""),
                         "solo" => ("layer.solo", "Solo", ""),
                         "visible" => ("layer.visible", "Visible", ""),
                         "color" => ("layer.color", "Label Color", ""),
@@ -305,8 +306,25 @@ impl Properties {
                 }
                 sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
             }
+            if target["first"]["type"] == "text" {
+                let animators = model
+                    .text_animators(&layer)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|(id, name)| json!({"id":id,"name":name}))
+                    .collect::<Vec<_>>();
+                let presets = pm_panel_inspector::text_animators::preset_menu()
+                    .into_iter()
+                    .map(|(id, label)| json!({"id":id,"label":label,"disabled":id.is_none()}))
+                    .collect::<Vec<_>>();
+                sections.push(json!({"id":"animators","title":"Text Animators","collapsed":self.collapsed.get("animators").copied().unwrap_or(false),"rows":[],"action":"animator","animators":animators,"presets":presets}));
+            }
             if !layer_rows.is_empty() {
-                sections.push(json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows}));
+                let mut section = json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows});
+                if target["first"]["type"] == "precomp" {
+                    section["action"] = json!("release-precomp");
+                }
+                sections.push(section);
             }
         } else {
             let mut rows = vec![];
@@ -380,9 +398,44 @@ impl Properties {
             }
             let definition = intent["effect"].as_str().ok_or("Effect definition")?;
             return model
-                .add_effect(caller, target, definition)
+                .add_effect_at(caller, target, definition, time)
                 .map(Some)
                 .map_err(|e| e.to_string());
+        }
+        if intent["type"] == "add-animator" || intent["type"] == "remove-animator" {
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            let request = if intent["type"] == "add-animator" {
+                let size = model
+                    .binding_state(
+                        &Binding::Content {
+                            layer: layer.clone(),
+                            field: "size".into(),
+                        },
+                        time,
+                    )
+                    .ok()
+                    .and_then(|state| state.value.as_f64())
+                    .unwrap_or(0.);
+                let preset = intent["preset"].as_str().ok_or("Animator preset")?;
+                model.add_text_animator(caller, &layer, preset, size)
+            } else {
+                let id = intent["animator"].as_str().ok_or("Text animator")?;
+                model.remove_text_animator(caller, &layer, id)
+            };
+            return request.map(Some).map_err(|e| e.to_string());
+        }
+        if intent["type"] == "section-action" && intent["action"] == "release-precomp" {
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Release Pre-comp".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                        pm_kernel::commands::comps::CompCommand::ReleasePrecomp { layer_id },
+                    )]),
+                },
+            )));
         }
         if intent["type"] == "align" {
             use pm_kernel::commands::transform::{AlignMode, TransformCommand};

@@ -24,7 +24,7 @@ pub struct DeltaReport {
     pub six_owner_domains: bool,
     pub state_complete: bool,
     pub secrets_complete: bool,
-    pub restore_verified: bool,
+    pub installer_recovery_verified: bool,
     pub source_generation: u64,
     pub checkpoint_generation: u64,
 }
@@ -59,7 +59,7 @@ pub fn first_run(source: LaunchSource, host: &mut impl HandoffHost) -> Result<Ha
         HandoffStatus::NeedsSecretConsent
     } else if !delta.six_owner_domains
         || !delta.state_complete
-        || !delta.restore_verified
+        || !delta.installer_recovery_verified
         || delta.source_generation != delta.checkpoint_generation
     {
         HandoffStatus::Blocked

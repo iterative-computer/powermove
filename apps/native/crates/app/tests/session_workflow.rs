@@ -80,6 +80,7 @@ fn library_gesture_is_one_undo_step_and_round_trips_through_pmv() {
         ShellCall::SaveAs {
             session: session.clone(),
             path: path.clone(),
+            replace: false,
         },
     );
     answer(&k, ShellCall::Close(session));

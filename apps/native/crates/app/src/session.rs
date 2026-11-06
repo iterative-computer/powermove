@@ -33,6 +33,7 @@ pub struct Controller {
     pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
+    pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
@@ -66,6 +67,10 @@ pub struct Controller {
     pub close_operation: Option<crate::mcp::Operation>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
+    pub(crate) new_project_open: bool,
+    /// Queued batches and the cancel flag of the running one.
+    pub(crate) imports: std::collections::VecDeque<pm_builtins::media_import::ImportRequest>,
+    pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Why a project opened as a copy, in user language (never the enum name).
@@ -131,12 +136,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).status_text()
     }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
-        if let Some(path) = paths
-            .into_iter()
-            .find(|p| matches!(p.extension().and_then(|x| x.to_str()), Some("pmv" | "json")))
-        {
-            self.0.update(cx, |v, cx| v.open_file(path, cx));
-        }
+        self.0.update(cx, |v, cx| v.import_dropped(paths, cx));
     }
 }
 impl Controller {
@@ -240,6 +240,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             media: MediaCatalog::default(),
+            media_refresh: Default::default(),
             opening: false,
             rows: Default::default(),
             saving_note: false,
@@ -269,10 +270,21 @@ impl Controller {
             close_operation: None,
             save_pending: false,
             close_after_save: None,
+            new_project_open: false,
+            imports: Default::default(),
+            importing: None,
         }
     }
     pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
         self.load_recent(cx);
+        let cache = crate::media::cache_root(&self.profile);
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = crate::media::sweep_cache(&cache) {
+                    eprintln!("Media cache cleanup: {error}");
+                }
+            })
+            .detach();
         if let Some(path) = launch {
             self.open_file(path, cx);
         }
@@ -327,6 +339,7 @@ impl Controller {
             self.rebuild_popout_viewer();
             self.seek(time);
         }
+        self.refresh_media(cx);
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
@@ -464,6 +477,43 @@ impl Controller {
         })
         .detach();
     }
+    /// One Undo step, then the selection it leads to.
+    fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
+        let crate::layer_commands::Plan {
+            label,
+            commands,
+            select,
+        } = plan;
+        let Some(session) = &self.session else { return };
+        let revision = self.published.as_ref().map(|p| p.revision());
+        let pending = self.kernel.call(
+            &session.project,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some(label),
+                    expected_revision: revision,
+                    body: WriteBody::Commands(commands),
+                },
+            ),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        v.message = e.to_string();
+                        return;
+                    }
+                    if let Some(ids) = select {
+                        v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
+                    }
+                }
+                other => v.message = format!("Edit failed: {other:?}"),
+            });
+        })
+        .detach();
+    }
     pub fn time(&self) -> f64 {
         self.viewer
             .as_ref()
@@ -534,6 +584,19 @@ impl Controller {
         );
     }
     fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        let id = match &source {
+            SessionSource::Library { project, .. } => project.clone(),
+            SessionSource::File(path) => stable_id(path),
+            SessionSource::New(_) => pm_kernel::new_id("app"),
+        };
+        self.open_as(id, source, cx);
+    }
+    pub(crate) fn open_as(
+        &mut self,
+        open_id: String,
+        source: SessionSource,
+        cx: &mut Context<Self>,
+    ) {
         if self.opening || self.recovery_pending || self.close_pending || self.save_pending {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
@@ -547,19 +610,11 @@ impl Controller {
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
-        let cache = self
-            .profile
-            .join("media-cache")
-            .join(pm_kernel::new_id("app"));
+        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
             let _operation=operation;
-            let open_id = match &source {
-                SessionSource::Library {project,..}=>project.clone(),
-                SessionSource::File(p)=>stable_id(p),
-                SessionSource::New(_)=>pm_kernel::new_id("app"),
-            };
             let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
             if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
                 let ticket = ticket.clone();
@@ -588,8 +643,7 @@ impl Controller {
             let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
                 let published = kernel.published(&session.project).unwrap();
                 cx.background_executor().spawn(async move {
-                    crate::media::for_session(&published.snapshot, &published.media,
-                        published.path.as_deref(), &cache)
+                    crate::media_refresh::resolve(&published, &cache)
                 }).await.map(Some)
             } else { Ok(None) };
             let mut previous_save_failed = false;
@@ -620,7 +674,7 @@ impl Controller {
         session: SessionHandle,
         decision: pm_kernel::locks::OpenDecision,
         history_rejected: bool,
-        media: Option<MediaCatalog>,
+        media: Option<crate::media_refresh::Resolved>,
         cx: &mut Context<Self>,
     ) {
         if let Some(viewer) = self.viewer.take() {
@@ -629,14 +683,29 @@ impl Controller {
         self.host.borrow_mut().close_flowchart();
         self.composition_views.clear();
         self.session = Some(session);
+        self.media_refresh.reset();
+        self.media = MediaCatalog::default();
+        let mut offline = 0;
+        if let Some(resolved) = media
+            && self
+                .session
+                .as_ref()
+                .and_then(|s| self.kernel.published(&s.project))
+                .is_some_and(|p| resolved.inputs.matches(&p))
+        {
+            offline = resolved.resolution.failed.len();
+            self.media = resolved.resolution.catalog;
+            self.media_refresh.adopt(resolved.inputs);
+        }
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);
-        self.media = media.unwrap_or_default();
         // The status bar shows document state and counts; only exceptions get words.
         self.message = [
-            copy_notice(&decision),
-            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+            copy_notice(&decision).map(str::to_owned),
+            history_rejected
+                .then(|| "Undo history from the last session couldn’t be restored.".to_owned()),
+            (offline > 0).then(|| crate::media::failure_note(offline)),
         ]
         .into_iter()
         .flatten()
@@ -712,18 +781,13 @@ impl Controller {
         let Some(p) = self.kernel.published(&session.project) else {
             return;
         };
-        let cache = self
-            .profile
-            .join("media-cache")
-            .join(pm_kernel::new_id("app"));
+        let cache = crate::media::cache_root(&self.profile);
         self.opening = true;
         cx.spawn(async move |this, cx| {
             let history_rejected = false;
             let media = cx
                 .background_executor()
-                .spawn(async move {
-                    crate::media::for_session(&p.snapshot, &p.media, p.path.as_deref(), &cache)
-                })
+                .spawn(async move { crate::media_refresh::resolve(&p, &cache) })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
@@ -781,13 +845,6 @@ impl Controller {
         self.message = SAVING.into();
         cx.notify();
         self.persist_ui();
-        let call = as_path.clone().map_or_else(
-            || ShellCall::Save(session.clone()),
-            |path| ShellCall::SaveAs {
-                session: session.clone(),
-                path,
-            },
-        );
         let kernel = self.kernel.clone();
         let file_save = as_path.is_some()
             || self.published.as_ref().is_some_and(|p| {
@@ -797,7 +854,12 @@ impl Controller {
             });
         cx.spawn(async move |this, cx| {
             let result = if file_save {
-                match kernel.prepare_save(session, as_path.clone()).await {
+                // The save panel already confirmed replacing an existing file.
+                let prepared = match as_path.clone() {
+                    Some(path) => kernel.prepare_save_replacing(session, path),
+                    None => kernel.prepare_save(session, None),
+                };
+                match prepared.await {
                     Some(Ok(save)) => {
                         let completion = cx
                             .background_executor()
@@ -809,7 +871,7 @@ impl Controller {
                     None => None,
                 }
             } else {
-                kernel.shell(call).await
+                kernel.shell(ShellCall::Save(session)).await
             };
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
@@ -869,6 +931,19 @@ impl Controller {
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
+            "cancel" | "deselect" if self.importing.is_some() => {
+                if let Some(cancel) = &self.importing {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            "newProject" => self.show_new_project(cx),
+            "import" => self.pick_media(None, true, cx),
+            "importFolder" => self.pick_media_folder(None, cx),
+            // The engine draws no sequence yet; say so rather than do nothing.
+            "importSequence" => {
+                self.message = "Image sequences can't be imported yet".into();
+                cx.notify();
+            }
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {
@@ -887,6 +962,48 @@ impl Controller {
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
+            "precompose" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                let Some(draft) = crate::layer_commands::precompose_draft(&published) else {
+                    return false;
+                };
+                let time = self.time();
+                let sheet = crate::dialogs::appkit::precompose_sheet(
+                    &self.host.borrow().window,
+                    &draft,
+                    &pm_shell::tokens(),
+                    objc2::MainThreadMarker::new().expect("menu commands run on the main thread"),
+                );
+                cx.spawn(async move |this, cx| {
+                    let answer = sheet.result.recv().await;
+                    drop(sheet.target);
+                    if let Ok(Some(draft)) = answer {
+                        let _ = this.update(cx, |v, cx| {
+                            let plan =
+                                crate::layer_commands::precompose_plan(&published, &draft, time);
+                            v.run_layer_plan(plan, cx);
+                        });
+                    }
+                })
+                .detach();
+            }
+            "releasePrecomp"
+            | "toggleContinuousRaster"
+            | "centerAnchor"
+            | "splitTextWords"
+            | "splitTextCharacters"
+            | "splitTextLines" => {
+                let Some(published) = self.published.as_ref() else {
+                    return false;
+                };
+                let Some(plan) = crate::layer_commands::plan(&cmd.name, published, self.time())
+                else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
+            }
             "composition.flowchart" => {
                 let mut host = self.host.borrow_mut();
                 if cmd.token.is_some()

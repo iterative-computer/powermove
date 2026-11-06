@@ -681,7 +681,8 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
 
 /// Keep the newest active versions within the budgets (at least
 /// `min_versions`). Archive every older generation; retention never deletes
-/// authored bytes. Archiving does not promise reclaimed disk space.
+/// authored bytes. Archiving does not promise reclaimed disk space: that
+/// waits for [`reclaim_archived`].
 pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
     let mut bytes = 0u64;
     for (index, file) in list_backups(policy)?.into_iter().enumerate() {
@@ -727,6 +728,43 @@ pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
         }
     }
     Ok(())
+}
+
+/// A full disk must not cost the user their current work: frees `needed`
+/// bytes from generations retention already archived, across every project,
+/// oldest first. Active versions and anything not named by the app stay.
+/// Returns the bytes freed; a save that failed on space retries only if any.
+pub(crate) fn reclaim_archived(policy: &BackupPolicy, needed: u64) -> u64 {
+    let Some(root) = policy.directory.parent() else {
+        return 0;
+    };
+    let mut archived: Vec<(String, PathBuf, u64)> = vec![];
+    for project in fs::read_dir(root).into_iter().flatten().flatten() {
+        let folder = project.path().join("archived");
+        if !fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        for file in fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            let stamp = name.get(..28).filter(|prefix| is_backup_name(prefix));
+            if let (Some(stamp), Ok(meta)) = (stamp, fs::symlink_metadata(file.path()))
+                && meta.is_file()
+            {
+                archived.push((stamp.to_owned(), file.path(), meta.len()));
+            }
+        }
+    }
+    archived.sort();
+    let mut freed = 0;
+    for (_, file, size) in archived {
+        if freed >= needed {
+            break;
+        }
+        if fs::remove_file(file).is_ok() {
+            freed += size;
+        }
+    }
+    freed
 }
 
 #[cfg(test)]

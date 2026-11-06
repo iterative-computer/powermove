@@ -464,10 +464,16 @@ impl Backend {
                 ));
             }
             if let Some(edit) = outcome.edit.take() {
-                let prepared = catalog.prepare(edit).map_err(|e| format!("{e:?}"))?;
+                let prepared = catalog
+                    .prepare(edit.clone())
+                    .map_err(|e| format!("{e:?}"))?;
                 self.native.project_reply =
                     Some(serde_json::to_value(reply).map_err(|e| e.to_string())?);
-                return Ok(NativeCommand::Kernel(prepared.request(self.caller)));
+                return Ok(NativeCommand::Kernel(project_edit_request(
+                    edit,
+                    &prepared,
+                    self.caller,
+                )));
             }
         }
         Ok(NativeCommand::Value(
@@ -1041,6 +1047,35 @@ impl Backend {
             _ => return Err(format!("Unregistered built-in command {command}")),
         };
         Ok(NativeCommand::Value(value))
+    }
+}
+/// A move of media alone is a plain kernel edit; other Project edits restore
+/// the reviewed whole-project result under its document guard.
+pub(crate) fn project_edit_request(
+    edit: pm_panel_media::Edit,
+    prepared: &pm_panel_media::PreparedEdit,
+    caller: Caller,
+) -> Request {
+    match edit {
+        pm_panel_media::Edit::Move {
+            assets,
+            folders,
+            target,
+        } if folders.is_empty() => Request::new(
+            caller,
+            pm_kernel::Call::Transact {
+                label: Some(prepared.label.clone()),
+                expected_revision: Some(prepared.stamp.revision),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Media(
+                    pm_kernel::MediaCommand::SetAssetFolder {
+                        asset_ids: assets,
+                        folder: target,
+                    },
+                )]),
+            },
+        )
+        .with_document(prepared.stamp.document),
+        _ => prepared.request(caller),
     }
 }
 fn profile_key(key: &str) -> bool {

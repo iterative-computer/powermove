@@ -70,6 +70,53 @@ pub fn paths_named(
     rx
 }
 
+/// Import Media: several items at once, filtered to `extensions` when it has any.
+pub fn import_paths(
+    window: &NSWindow,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSArray;
+    let (tx, rx) = async_channel::bounded(1);
+    let mtm = MainThreadMarker::new().unwrap();
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(!folders);
+    panel.setCanChooseDirectories(folders);
+    panel.setAllowsMultipleSelection(multiple);
+    panel.setPrompt(Some(&NSString::from_str("Import")));
+    let types: Vec<Retained<AnyObject>> = extensions
+        .iter()
+        .filter_map(|extension| unsafe {
+            let extension = NSString::from_str(extension);
+            msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+        })
+        .collect();
+    if !types.is_empty() {
+        let types = NSArray::from_retained_slice(&types);
+        unsafe {
+            let _: () = msg_send![&*panel, setAllowedContentTypes: &*types];
+        }
+    }
+    let retained = panel.clone();
+    let done = block2::RcBlock::new(move |result: NSModalResponse| {
+        let paths = if result == NSModalResponseOK {
+            retained
+                .URLs()
+                .iter()
+                .filter_map(|url| url.path())
+                .map(|path| PathBuf::from(path.to_string()))
+                .collect()
+        } else {
+            vec![]
+        };
+        let _ = tx.try_send(paths);
+    });
+    panel.beginSheetModalForWindow_completionHandler(window, &done);
+    rx
+}
+
 /// Button index, starting at zero. Closing a sheet always chooses cancellation.
 pub fn choice(
     window: &NSWindow,

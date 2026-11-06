@@ -424,6 +424,160 @@ pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     parse(&text)
 }
 
+/// `Object.keys` of the object at `path` in JSON text this module already
+/// accepted, or `None` when there is none. A tree's objects are sorted, so a
+/// caller that needs authored member order reads it here. Skips everything
+/// else without building it: a project's layers cost no allocation.
+pub fn member_order(bytes: &[u8], path: &[&str]) -> Option<Vec<JsString>> {
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let mut scan = Scan { bytes, pos: 0 };
+    for name in path {
+        scan.enter_member(name)?;
+    }
+    let mut keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    scan.members(|scan, key| {
+        // `JSON.parse` keeps a repeated key at its first position.
+        if seen.insert(key.clone()) {
+            keys.push(key);
+        }
+        scan.skip_value().map(|()| true)
+    })?;
+    // Integer keys come first, ascending, whatever the text's order was.
+    let index = |key: &JsString| {
+        let text = key.as_str()?;
+        let plain = !text.is_empty()
+            && text.bytes().all(|b| b.is_ascii_digit())
+            && (text == "0" || !text.starts_with('0'));
+        plain
+            .then(|| text.parse::<u64>().ok())
+            .flatten()
+            .filter(|n| *n < u32::MAX as u64)
+    };
+    let mut integers: Vec<_> = keys
+        .iter()
+        .filter_map(|key| index(key).map(|n| (n, key.clone())))
+        .collect();
+    if integers.is_empty() {
+        return Some(keys);
+    }
+    integers.sort_by_key(|(n, _)| *n);
+    keys.retain(|key| index(key).is_none());
+    let mut ordered: Vec<_> = integers.into_iter().map(|(_, key)| key).collect();
+    ordered.extend(keys);
+    Some(ordered)
+}
+
+struct Scan<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl Scan<'_> {
+    fn whitespace(&mut self) {
+        while matches!(self.bytes.get(self.pos), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+    fn eat(&mut self, byte: u8) -> Option<()> {
+        self.whitespace();
+        (*self.bytes.get(self.pos)? == byte).then(|| self.pos += 1)
+    }
+    fn skip_string(&mut self) -> Option<()> {
+        self.pos += 1;
+        loop {
+            match *self.bytes.get(self.pos)? {
+                b'"' => {
+                    self.pos += 1;
+                    return Some(());
+                }
+                b'\\' => self.pos += 2,
+                _ => self.pos += 1,
+            }
+        }
+    }
+    fn skip_value(&mut self) -> Option<()> {
+        self.whitespace();
+        let mut depth = 0usize;
+        loop {
+            match *self.bytes.get(self.pos)? {
+                b'"' => {
+                    self.skip_string()?;
+                    if depth == 0 {
+                        return Some(());
+                    }
+                }
+                b'{' | b'[' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'}' | b']' => {
+                    // At depth 0 a number or literal just ended.
+                    if depth == 0 {
+                        return Some(());
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                    if depth == 0 {
+                        return Some(());
+                    }
+                }
+                b',' if depth == 0 => return Some(()),
+                _ => self.pos += 1,
+            }
+        }
+    }
+    /// Visits an object's members. `visit` consumes each value, or returns
+    /// false to stop there with the cursor where it left it.
+    fn members(
+        &mut self,
+        mut visit: impl FnMut(&mut Self, JsString) -> Option<bool>,
+    ) -> Option<()> {
+        self.eat(b'{')?;
+        self.whitespace();
+        if *self.bytes.get(self.pos)? == b'}' {
+            self.pos += 1;
+            return Some(());
+        }
+        loop {
+            self.whitespace();
+            let start = self.pos;
+            self.skip_string()?;
+            let token = core::str::from_utf8(&self.bytes[start..self.pos]).ok()?;
+            let key = match parse(token).ok()? {
+                Value::String(key) => key,
+                _ => return None,
+            };
+            self.eat(b':')?;
+            if !visit(self, key)? {
+                return Some(());
+            }
+            self.whitespace();
+            match *self.bytes.get(self.pos)? {
+                b',' => self.pos += 1,
+                b'}' => {
+                    self.pos += 1;
+                    return Some(());
+                }
+                _ => return None,
+            }
+        }
+    }
+    /// Leaves the cursor on the value of the first `name` member. Stops there:
+    /// the writers repeat no key, and the rest of a project need not be read.
+    fn enter_member(&mut self, name: &str) -> Option<()> {
+        let mut found = false;
+        self.members(|scan, key| {
+            found = key.as_str() == Some(name);
+            if found {
+                return Some(false);
+            }
+            scan.skip_value().map(|()| true)
+        })?;
+        found.then_some(())
+    }
+}
+
 struct Parser<'a, O> {
     bytes: &'a [u8],
     pos: usize,
@@ -721,6 +875,26 @@ fn utf8_len(first: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_order_is_object_keys_of_the_named_object() {
+        let text = br#" {"v":"1","proj":{"layers":[{"assets":{"x":1}}],"name":"a\"}","assets":{"z":{"a":[1,"}"]},"m":1, "\u0061":null,"7":true,"m":2,"03":0,"1":-1.5e3}},"assets":{"no":1}} "#;
+        let names = |path: &[&str]| {
+            member_order(text, path).map(|keys| {
+                keys.iter()
+                    .map(|k| k.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            names(&["proj", "assets"]).unwrap(),
+            ["1", "7", "z", "m", "a", "03"]
+        );
+        assert_eq!(names(&["assets"]).unwrap(), ["no"]);
+        assert_eq!(names(&["proj", "missing"]), None);
+        assert_eq!(names(&["v", "assets"]), None);
+        assert_eq!(member_order(b"{}", &[]).unwrap(), Vec::<JsString>::new());
+    }
 
     #[test]
     fn parses_javascript_values() {

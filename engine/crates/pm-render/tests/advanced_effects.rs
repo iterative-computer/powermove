@@ -1471,3 +1471,21 @@ fn metal_lut_spaces_convert_through_the_stated_camera_encoding() {
         }
     }
 }
+
+#[path = "advanced/color_contract.rs"]
+mod color_contract;
+
+#[path = "advanced/shadow_ramp.rs"]
+mod shadow_ramp;
+
+#[path = "advanced/spatial_contract.rs"]
+mod spatial_contract;
+
+#[path = "advanced/producer_policy.rs"]
+mod producer_policy;
+
+#[path = "advanced/color_family.rs"]
+mod color_family;
+
+#[path = "advanced/layer_consumers.rs"]
+mod layer_consumers;

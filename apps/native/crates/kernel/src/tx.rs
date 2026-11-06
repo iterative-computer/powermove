@@ -1051,6 +1051,8 @@ impl Project {
                 &before,
                 applied.scopes,
             );
+        } else {
+            self.store.kernel_outside_write();
         }
         Ok((true, None))
     }
@@ -1132,12 +1134,11 @@ impl Project {
             return false;
         }
         let scopes: Vec<Vec<PathPart>> = ops.iter().flat_map(|o| o.scopes.clone()).collect();
-        let (forward_patches, _) = crate::document::scoped_patches(
+        if !crate::document::scopes_changed(
             before.root(),
             self.store.current().root(),
             scopes.clone(),
-        );
-        if forward_patches.is_empty() {
+        ) {
             return false; // net unchanged: today's commit compares snapshots
         }
         let forward: Vec<Op> = ops.iter().flat_map(|o| o.forward.iter().cloned()).collect();

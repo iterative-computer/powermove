@@ -42,6 +42,23 @@ fn doc_sized_with(
     opacity: u32,
     color_depth: u32,
 ) -> pm_model::Document {
+    parsed(&project(background, size, at, opacity, color_depth))
+}
+
+fn parsed(project: &serde_json::Value) -> pm_model::Document {
+    pm_model::Document::new(
+        Some(pm_model::json::parse(&project.to_string()).unwrap()),
+        1,
+    )
+}
+
+fn project(
+    background: &str,
+    size: (u32, u32),
+    at: (f64, f64),
+    opacity: u32,
+    color_depth: u32,
+) -> serde_json::Value {
     let layer = json!({
         "id": "box", "type": "solid", "name": "box", "from": 0, "dur": 2, "on": true, "lock": false,
         "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
@@ -59,16 +76,12 @@ fn doc_sized_with(
     } else {
         json!({ "type": "solid", "angle": 0, "stops": [{ "id": "s1", "color": background, "position": 0 }] })
     };
-    let project = json!({
+    json!({
         "id": "P", "name": "p", "w": size.0, "h": size.1, "fps": 30, "dur": 2, "bg": "#000000", "colorDepth": color_depth,
         "backgroundFill": fill, "compId": "P-root", "compName": "p", "markers": [], "work": [0, 2],
         "params": {}, "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": [layer],
         "assets": {}, "comps": {}
-    });
-    pm_model::Document::new(
-        Some(pm_model::json::parse(&project.to_string()).unwrap()),
-        1,
-    )
+    })
 }
 
 fn state(resolution: PreviewResolution) -> ViewerState {
@@ -133,6 +146,10 @@ fn draw_doc(
     )
     .unwrap();
     let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    composer
+        .renderer()
+        .set_definitions(&pm_render::builtin_definitions())
+        .unwrap();
     let composed = composer
         .compose(
             document,
@@ -313,4 +330,21 @@ fn sixteen_bit_viewer_keeps_sub_byte_values_until_display() {
             );
         }
     }
+}
+
+/// A view beyond the largest output draws its effects with the pixels outside
+/// the view: the blur of a solid just past the right edge reaches into it.
+#[test]
+fn a_view_beyond_the_largest_output_keeps_effect_sampling() {
+    let mut value = project("#000000", (1920, 1080), (1000.0, 530.0), 100, 8);
+    value["layers"][0]["fx"] =
+        json!([{"id":"soft","type":"blur","on":true,"p":{"amount":ch(json!(24))}}]);
+    let mut s = state(PreviewResolution::Full);
+    s.zoom = 5.0;
+    s.pan = [0.0, 0.0];
+    let (bytes, bpr, place) = draw_doc(&parsed(&value), (1920.0, 1080.0), &s, false);
+    assert!(place.origin.is_some());
+    assert_eq!(bgra(&bytes, bpr, 0, 300), [0, 0, 0, 255]);
+    let tail = bgra(&bytes, bpr, W - 1, 300);
+    assert!(tail[2] > 8 && tail[0] == 0, "{tail:?}");
 }

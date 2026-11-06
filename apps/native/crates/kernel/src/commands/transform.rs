@@ -45,22 +45,23 @@ pub enum TransformCommand {
         dy: f64,
         time: f64,
     },
-    /// Center Anchor Point in layer content without moving the picture.
-    /// Not ported (needs bounds: `pm_edit::anchor`).
+    /// Center Anchor Point in layer content without moving the picture
+    /// (`centerAnchor`). Locked layers and layers without bounds are
+    /// skipped. Label "Center Anchor Point".
     CenterAnchor { layer_ids: Vec<String>, time: f64 },
     /// The alignment strip's Align (`pm_edit::align::align`): the layers'
     /// common box meets the composition frame's edge or center, every layer
     /// moving by the same world delta, written as `set_property` on
-    /// position (keyed when animated; hand-edit markers refuse). Text layers
-    /// are not supported yet (the core has no fonts). Label "Align Layers".
+    /// position (keyed when animated, overriding hand-edit markers as the strip
+    /// does). Text needs the host's fonts. Label "Align Layers".
     Align {
         layer_ids: Vec<String>,
         mode: AlignMode,
         time: f64,
     },
     /// Distribute (`pm_edit::align::distribute`): at least three layers;
-    /// the outermost stay. Text layers are not supported yet. Label
-    /// "Distribute Layers".
+    /// the outermost stay. Text needs the host's fonts. Label "Distribute
+    /// Layers".
     Distribute {
         layer_ids: Vec<String>,
         spread: Spread,
@@ -87,8 +88,8 @@ impl TransformCommand {
                 dy,
                 time,
             } => nudge(cx, layer_ids, *dx, *dy, *time),
-            TransformCommand::CenterAnchor { .. } => {
-                Err(CommandError::NotImplemented("center_anchor"))
+            TransformCommand::CenterAnchor { layer_ids, time } => {
+                center_anchor(cx, layer_ids, *time)
             }
             TransformCommand::Align {
                 layer_ids,
@@ -177,25 +178,56 @@ fn kernel_mode(m: AlignMode) -> pm_edit::align::Mode {
     }
 }
 
-/// A text measure for kernels run on layers without text.
-struct NoFonts;
-
-impl pm_eval::text_geom::TextMeasure for NoFonts {
-    fn measure_lines(
-        &mut self,
-        _: &pm_text::compat::TextContent,
-    ) -> Vec<pm_eval::text_geom::MeasuredLine> {
-        Vec::new()
+/// `centerAnchor`: the anchor moves to the center of the layer's bounds and
+/// the position compensates through the layer matrix, so the picture stays.
+fn center_anchor(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
+    for id in layer_ids {
+        let loc = cx.find(id)?;
+        if cx.check_lock(&loc, id).is_err() {
+            continue;
+        }
+        let is_text = cx
+            .layer_node(&loc)?
+            .get("type")
+            .and_then(crate::model::str_of)
+            == Some("text");
+        let mut measure = cx.measure(is_text)?;
+        let index = loc.index;
+        let centered = cx.kernel(loc.comp_id.as_deref(), |edit| {
+            edit.read(|s| {
+                let l = &s.layers()[index];
+                let Some(b) = s.bounds(l, time, &mut *measure, &mut pm_eval::bounds::NoHost)?
+                else {
+                    return Ok(None);
+                };
+                let (next_x, next_y) = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
+                let dx = next_x - s.channel(l, "anchor.x", time)?.to_number();
+                let dy = next_y - s.channel(l, "anchor.y", time)?.to_number();
+                let m = s.local_matrix(l, time)?;
+                let x = s.channel(l, "position.x", time)?.to_number();
+                let y = s.channel(l, "position.y", time)?.to_number();
+                Ok(Some([
+                    next_x,
+                    next_y,
+                    x + m[0] * dx + m[2] * dy,
+                    y + m[1] * dx + m[3] * dy,
+                ]))
+            })
+        })?;
+        cx.check_fonts()?;
+        let Some(values) = centered else { continue };
+        for (channel, value) in ["anchor.x", "anchor.y", "position.x", "position.y"]
+            .into_iter()
+            .zip(values)
+        {
+            let mut c = SetProperty::new(id.clone(), channel, value, time);
+            c.preserve_hand_edits = false;
+            c.mark_intent = true;
+            properties::set_property(cx, &c)?;
+        }
     }
-    fn plain_width(&mut self, _: &pm_text::compat::TextContent, _: &str) -> f64 {
-        0.0
-    }
-    fn glyph_layout(&mut self, _: &pm_text::compat::TextContent) -> pm_text::compat::GlyphLayout {
-        pm_text::compat::GlyphLayout::default()
-    }
-    fn spaced_width(&mut self, _: &pm_text::compat::TextContent, _: &str) -> f64 {
-        0.0
-    }
+    Ok(())
 }
 
 /// Align or distribute through the engine's kernel, then the moves as
@@ -213,6 +245,7 @@ fn align(
     };
     let comp = cx.find(first)?.comp_id;
     let mut indexes = Vec::new();
+    let mut has_text = false;
     for id in layer_ids {
         let loc = cx.find(id)?;
         cx.check_lock(&loc, id)?;
@@ -220,21 +253,18 @@ fn align(
             continue;
         }
         let layer = cx.layer_node(&loc)?;
-        if layer.get("type").and_then(crate::model::str_of) == Some("text") {
-            return Err(CommandError::NotImplemented(
-                "align (text layers need fonts in the core)",
-            ));
-        }
+        has_text |= layer.get("type").and_then(crate::model::str_of) == Some("text");
         indexes.push(loc.index);
     }
     let ids = cx.layer_ids(comp.as_deref());
+    let mut measure = cx.measure(has_text)?;
     let moves = cx.kernel(comp.as_deref(), |edit| match (mode, spread) {
         (Some(m), _) => pm_edit::align::align(
             edit,
             &indexes,
             m,
             time,
-            &mut NoFonts,
+            &mut *measure,
             &mut pm_eval::bounds::NoHost,
         ),
         (_, Some(s)) => pm_edit::align::distribute(
@@ -242,14 +272,16 @@ fn align(
             &indexes,
             s,
             time,
-            &mut NoFonts,
+            &mut *measure,
             &mut pm_eval::bounds::NoHost,
         ),
         _ => Ok(Vec::new()),
     })?;
+    cx.check_fonts()?;
     for m in moves {
         let Some(id) = ids.get(m.layer) else { continue };
-        let c = SetProperty::new(id.clone(), m.channel, m.value, time);
+        let mut c = SetProperty::new(id.clone(), m.channel, m.value, time);
+        c.preserve_hand_edits = false;
         properties::set_property(cx, &c)?;
     }
     Ok(())

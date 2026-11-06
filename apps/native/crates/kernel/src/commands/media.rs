@@ -120,11 +120,45 @@ impl MediaCommand {
                     None => Ok(()),
                 }
             }
-            MediaCommand::SetAssetFolder { .. } => {
-                Err(CommandError::NotImplemented("set_asset_folder"))
+            MediaCommand::SetAssetFolder { asset_ids, folder } => {
+                set_asset_folder(cx, asset_ids, folder.as_deref())
             }
         }
     }
+}
+
+/// `moveItems` for media: an unknown folder means the top level, and assets
+/// already there or missing are left alone.
+fn set_asset_folder(
+    cx: &mut Cx<'_>,
+    asset_ids: &[String],
+    folder: Option<&str>,
+) -> Result<(), CommandError> {
+    let to = folder.filter(|id| {
+        cx.lookup(&["assetFolders".into(), (*id).into()])
+            .is_some_and(|f| f.to_value().as_object().is_some())
+    });
+    for id in asset_ids {
+        let path = vec!["assets".into(), id.as_str().into(), "folder".into()];
+        let Some(asset) = cx.lookup(&path[..2]).map(pm_model::Node::to_value) else {
+            continue;
+        };
+        if asset.as_object().is_none() {
+            continue;
+        }
+        let current = values::text(&asset, "folder").filter(|id| {
+            cx.lookup(&["assetFolders".into(), (*id).into()])
+                .is_some_and(|f| f.to_value().as_object().is_some())
+        });
+        if current == to {
+            continue;
+        }
+        match to {
+            Some(to) => cx.set(path, values::s(to))?,
+            None => cx.remove(path)?,
+        }
+    }
+    Ok(())
 }
 
 /// `layerAssetId(layer)`: the asset a media layer shows.
