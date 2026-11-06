@@ -5,10 +5,9 @@ use crate::surface_backing::{
     copy,
     generated::*,
     maintenance::*,
-    native::{colour::*, tasks::*, *},
+    native::{colour::*, tasks::*},
     projects::*,
 };
-use pm_first_launch::{Event, Outcome, Step};
 use pm_promedia::{
     scopes::ScopeConfig,
     tasks::{BackgroundTasks, ProgressUnit, TaskFailureCode, TaskKind, TaskSpec},
@@ -123,30 +122,6 @@ fn generated_apply_accepts_only_its_published_revision_and_preview_cannot_mutate
         .is_err()
     );
     assert!(p.preview.is_none());
-}
-#[test]
-fn migration_decline_stays_visible_as_unavailable_until_firstlaunch_api_exists() {
-    let mut m = Migration::default();
-    let r = m.begin().unwrap();
-    m.settle(&r, Ok(Outcome::NeedsSecretConsent { interrupted: false }))
-        .unwrap();
-    assert_eq!(
-        m.decline_secrets().unwrap_err().code,
-        ServiceErrorCode::Unavailable
-    );
-    assert!(!m.library_may_attach());
-    assert!(matches!(m.state, MigrationState::NeedsSecretConsent { .. }));
-}
-#[test]
-fn migration_cannot_ack_pause_before_durable_publication_and_delta_does_not_gate_library() {
-    let mut m = Migration::for_completed_profile();
-    let r = m.begin().unwrap();
-    assert!(m.library_may_attach());
-    m.request_pause().unwrap();
-    assert!(m.paused(&r).is_err());
-    m.event(&r, Event::Published(Step::Media)).unwrap();
-    m.paused(&r).unwrap();
-    assert!(m.library_may_attach());
 }
 #[test]
 fn scopes_keep_previous_result_waiting_and_limit_playback_sampling_to_10_hz() {
@@ -498,37 +473,6 @@ fn main_reference_3d_context_is_empty_only_and_studio_upgrade_cannot_fake_succes
     let area = studio_fields(&json!({"light":{"type":"area"}})).unwrap();
     assert!(area.iter().any(|f| f.path == "light.width"));
     assert!(!area.iter().any(|f| f.path == "light.decay"));
-}
-
-#[test]
-fn migration_disk_profile_and_secret_outcomes_are_distinct_and_never_attach_library() {
-    let mut m = Migration::default();
-    let r = m.begin().unwrap();
-    m.settle_fault(
-        &r,
-        MigrationFault::LowDisk {
-            needed: 100,
-            available: 99,
-        },
-    )
-    .unwrap();
-    assert_eq!(copy::migration_title(&m.state), "Not Enough Space");
-    assert!(!m.library_may_attach());
-    let r = m.begin().unwrap();
-    m.settle_fault(&r, MigrationFault::ProfileRefused).unwrap();
-    assert_eq!(
-        copy::migration_title(&m.state),
-        "Powermove Native Can’t Start"
-    );
-    let r = m.begin().unwrap();
-    m.settle(&r, Ok(Outcome::NeedsSecretConsent { interrupted: false }))
-        .unwrap();
-    let r = m.consent().unwrap();
-    assert_eq!(m.state, MigrationState::WaitingForSecrets);
-    m.settle_fault(&r, MigrationFault::SecretDenied).unwrap();
-    assert!(m.decline_secrets().is_err());
-    assert!(!m.library_may_attach());
-    assert!(m.consent().is_ok());
 }
 
 #[test]

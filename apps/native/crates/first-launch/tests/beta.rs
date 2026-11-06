@@ -344,17 +344,18 @@ fn interrupted_restore_save_retains_attempt_and_publishes_current_history() {
     );
 }
 #[test]
-fn repeated_delta_and_failed_capture_archive_every_attempt() {
+fn a_repeated_delta_keeps_no_copy_and_a_failed_capture_is_archived() {
     let temp = tempfile::tempdir().unwrap();
     let config = profile(&temp.path().canonicalize().unwrap());
     pm_first_launch::run(&config, |_| Ok(())).unwrap();
     pm_first_launch::run(&config, |_| Ok(())).unwrap();
     pm_first_launch::run(&config, |_| Ok(())).unwrap();
-    assert!(
-        config
-            .native_profile
-            .join("first-launch-deltas/pending.archive-0000000000000000/checkpoint.json")
-            .is_file()
+    // Nothing changed, so nothing is owed: a capture that adds nothing can't pile up.
+    assert_eq!(
+        fs::read_dir(config.native_profile.join("first-launch-deltas"))
+            .unwrap()
+            .count(),
+        0
     );
     let capture = config.native_profile.join("retained.capture");
     fs::create_dir(&capture).unwrap();

@@ -77,7 +77,7 @@ impl Checkpoint {
         ensure!(!root.exists(), "checkpoint already exists");
         let stage = root.with_extension("capture");
         // Only our fixed private staging directory, while the coordinator lock
-        // is held. A completed checkpoint is never removed or rewritten.
+        // is held. An adopted checkpoint is never removed or rewritten.
         if stage.exists() {
             disk::archive(&stage)?;
         }
@@ -232,6 +232,17 @@ impl Checkpoint {
         })()
         // Leave failed captures intact. A retry archives them before starting.
     }
+}
+/// Metadata-only stamp of everything a checkpoint would copy. An unchanged
+/// source costs a directory walk at launch, never a capture.
+pub(crate) fn source_stamp(source: &Path) -> Result<String> {
+    let text = format!(
+        "{:?}\n{:?}\n{:?}",
+        inventory(source)?,
+        disk::walk(&source.join("IndexedDB"))?,
+        disk::walk(&source.join("Local Storage"))?,
+    );
+    Ok(blake3::hash(text.as_bytes()).to_hex().to_string())
 }
 fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
     let mut out = BTreeMap::new();

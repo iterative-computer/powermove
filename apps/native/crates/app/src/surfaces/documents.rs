@@ -4,7 +4,7 @@
 //! N4: discard uses the kernel archive operation; no source is removed.
 //! N7: requests carry stable window/session IDs and monotonically unique tickets.
 //! N8: hosts enqueue work; only workers may execute or wait for kernel/file IO.
-//! No existing lifecycle caller is replaced until integration consumes this API.
+//! `lifecycle.rs` owns the close and quit sequence; alerts and notices come from here.
 use pm_kernel::{
     Published,
     locks::{CopyReason, OpenDecision},
@@ -19,8 +19,6 @@ use std::{
 #[cfg(target_os = "macos")]
 #[path = "documents_appkit.rs"]
 pub mod appkit;
-#[path = "documents_close.rs"]
-pub mod close;
 #[cfg(test)]
 #[path = "documents_tests.rs"]
 mod tests;

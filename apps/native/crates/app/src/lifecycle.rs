@@ -32,6 +32,8 @@ struct QuitCoordinator {
     controllers: Vec<gpui::WeakEntity<Controller>>,
     queue: Vec<gpui::WeakEntity<Controller>>,
     quitting: bool,
+    /// The person chose Discard Changes for every project at once.
+    discard: bool,
     host: std::sync::Arc<crate::mcp::Host>,
 }
 impl gpui::Global for QuitCoordinator {}
@@ -42,6 +44,7 @@ fn cancel_quit(cx: &mut App) {
     {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
+        q.discard = false;
         q.queue.clear();
         q.host.closing.store(false, Ordering::Release);
     }
@@ -54,7 +57,37 @@ pub fn begin_quit(cx: &mut App) {
     q.quitting = true;
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
-    next_quit(cx);
+    let controllers = q.controllers.clone();
+    let dirty: Vec<_> = controllers
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .filter(|entity| entity.read(cx).dirty())
+        .collect();
+    let [first, _, ..] = &dirty[..] else {
+        return next_quit(cx);
+    };
+    // S002: two or more dirty projects get one question before any per-project sheet.
+    use crate::surfaces::documents::{Action, review_quit};
+    let alert = review_quit(dirty.len());
+    let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
+    let rx = crate::platform::choice(
+        &first.read(cx).host.borrow().window,
+        &alert.message,
+        &alert.informative,
+        &labels,
+    );
+    cx.spawn(async move |cx| {
+        let choice = rx.recv().await.ok();
+        cx.update(|cx| match alert.action_at(choice) {
+            Some(Action::ReviewChanges) => next_quit(cx),
+            Some(Action::DiscardChanges) => {
+                cx.global_mut::<QuitCoordinator>().discard = true;
+                next_quit(cx);
+            }
+            _ => cancel_quit(cx),
+        });
+    })
+    .detach();
 }
 fn next_quit(cx: &mut App) {
     while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
@@ -100,6 +133,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             controllers: Vec::new(),
             queue: Vec::new(),
             quitting: false,
+            discard: false,
             host,
         });
         cx.spawn(async move |cx| {
@@ -148,6 +182,12 @@ fn expect_closed(
     }
 }
 impl Controller {
+    fn dirty(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(|s| self.kernel.published(&s.project))
+            .is_some_and(|p| p.dirty)
+    }
     pub fn cancel_close(&mut self, cx: &mut Context<Self>) {
         self.close_pending = false;
         self.close_operation.take();
@@ -219,20 +259,37 @@ impl Controller {
             self.complete_close(intent, cx);
             return;
         }
+        if intent == Intent::Quit && cx.global::<QuitCoordinator>().discard {
+            self.discard_and_close(intent, cx);
+            return;
+        }
+        use crate::surfaces::documents::{Action, unsaved};
+        let name = p
+            .as_ref()
+            .and_then(|p| {
+                p.snapshot
+                    .root()?
+                    .get("name")
+                    .and_then(crate::node_string)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "Untitled".into());
+        let alert = unsaved(&name);
+        let labels: Vec<_> = alert.buttons.iter().map(|b| b.label).collect();
         let rx = crate::platform::choice(
             &self.host.borrow().window,
-            "Do you want to save your changes?",
-            "If you don’t save, your changes won’t be kept in this project.",
-            &["Save", "Don’t Save", "Cancel"],
+            &alert.message,
+            &alert.informative,
+            &labels,
         );
         cx.spawn(async move |this, cx| {
             let choice = rx.recv().await.ok();
-            let _ = this.update(cx, |v, cx| match choice {
-                Some(0) => {
+            let _ = this.update(cx, |v, cx| match alert.action_at(choice) {
+                Some(Action::Save) => {
                     v.close_after_save = Some(intent);
                     v.save(None, cx);
                 }
-                Some(1) => v.discard_and_close(intent, cx),
+                Some(Action::DontSave) => v.discard_and_close(intent, cx),
                 _ => v.cancel_close(cx),
             });
         })

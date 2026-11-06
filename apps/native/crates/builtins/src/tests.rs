@@ -383,6 +383,81 @@ fn properties_publish_applicable_content_and_mixed_type_without_rewriting_data()
 }
 
 #[test]
+fn a_chosen_font_and_a_chosen_colour_reach_the_layer_through_their_rows() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"text","name":"Title","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"Title","font":"Helvetica","color":"#112233"},"fx":[]}]}"##).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+    let rows: Vec<_> = publication["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["rows"].as_array().unwrap())
+        .collect();
+    let font = rows
+        .iter()
+        .find(|r| r["control"]["kind"] == "font")
+        .expect("font row");
+    assert_ne!(font["control"]["disabled"], true);
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"set-value","row":font["id"],"value":"Avenir"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let colour = rows
+        .iter()
+        .find(|r| r["control"]["kind"] == "colour")
+        .expect("colour row");
+    model.sync(kernel.published("synthetic").unwrap());
+    let request = presenter
+        .write(
+            &mut model,
+            Caller::native(),
+            colour["control"]["binding"]["handle"].as_str().unwrap(),
+            "#ABCDEF".into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+    let written = model.layer("a").unwrap().to_owned();
+    let text = pm_model::json::to_canonical_string(&written);
+    assert!(text.contains("Avenir"), "{text}");
+    assert!(text.contains("#ABCDEF"), "{text}");
+}
+
+#[test]
 fn unsupported_agent_submission_keeps_the_draft_and_does_not_start_a_run() {
     let actor = actor();
     let identity = pm_surface::host_api::Identity {

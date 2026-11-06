@@ -263,29 +263,49 @@ pub fn is_read_only(path: &Path) -> bool {
         .map(|m| m.permissions().mode() & 0o222 == 0)
         .unwrap_or(true)
 }
+/// Who holds the original app's profile, from its SingletonLock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElectronOwner {
+    None,
+    /// A live process on this Mac: it can be quit, and the gate waits for that.
+    Local,
+    /// Another Mac, or an unreadable lock. Nothing tells us when it goes away.
+    Unknown,
+}
 /// Chromium SingletonLock is normally a symlink `<hostname>-<pid>`.
 /// Unknown/remote owners are conservative; an explicitly dead local owner is safe.
-pub fn older_electron_running(profile: &Path) -> bool {
+pub fn electron_owner(profile: &Path) -> ElectronOwner {
     let lock = profile.join("SingletonLock");
     let value = match fs::read_link(&lock) {
         Ok(p) => p.to_string_lossy().into_owned(),
         Err(_) => match fs::read_to_string(&lock) {
             Ok(s) => s,
-            Err(e) => return e.kind() != io::ErrorKind::NotFound,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return ElectronOwner::None,
+            Err(_) => return ElectronOwner::Unknown,
         },
     };
     let Some((host, pid)) = value.trim().rsplit_once('-') else {
-        return true;
+        return ElectronOwner::Unknown;
     };
     let mut hostname = [0i8; 256];
     // SAFETY: writable hostname buffer; NUL ensured by final initialized byte.
     unsafe {
         if libc::gethostname(hostname.as_mut_ptr(), 255) != 0 {
-            return true;
+            return ElectronOwner::Unknown;
         }
     }
     let local = unsafe { std::ffi::CStr::from_ptr(hostname.as_ptr()) }.to_string_lossy();
-    host != local || pid.parse::<u32>().map(pid_alive).unwrap_or(true)
+    if host != local {
+        return ElectronOwner::Unknown;
+    }
+    match pid.parse::<u32>() {
+        Ok(pid) if pid_alive(pid) => ElectronOwner::Local,
+        Ok(_) => ElectronOwner::None,
+        Err(_) => ElectronOwner::Unknown,
+    }
+}
+pub fn older_electron_running(profile: &Path) -> bool {
+    electron_owner(profile) != ElectronOwner::None
 }
 pub fn open_decision(path: &Path, electron_profile: Option<&Path>) -> OpenDecision {
     if is_cloud_path(path) {

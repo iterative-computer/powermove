@@ -1,10 +1,14 @@
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
+mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
+mod error_log;
 mod export_coordinator;
+mod first_run;
+mod keyframe_sheets;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
@@ -16,14 +20,17 @@ mod mcp;
 mod media;
 mod media_import;
 mod media_refresh;
-mod new_project;
+mod migration_report;
 mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod project_library;
 mod rows;
 mod session;
+mod sheets;
 mod smoke;
+mod surface_routes;
 mod surfaces;
 mod text_host;
 mod v4_control;
@@ -42,14 +49,6 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-
-fn native_profile(profile: Option<PathBuf>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    // N4: the native library is durable and isolated from Electron and test lanes.
-    profile.or_else(|| {
-        home.filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join("Library/Application Support/Powermove Native"))
-    })
-}
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -85,8 +84,13 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
-    let profile = native_profile(profile, std::env::var_os("HOME"))
-        .context("HOME is required when no native profile override is provided")?;
+    let plan = first_run::Plan::resolve(
+        profile,
+        std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
+        std::env::var_os("HOME"),
+    )
+    .context("HOME is required when no native profile override is provided")?;
+    let profile = plan.profile.clone();
     anyhow::ensure!(
         profile.is_absolute(),
         "Use an absolute isolated native profile"
@@ -102,6 +106,11 @@ fn main() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
                 .map_err(Into::into);
         }
+        // A library made here would stop the first launch copy from ever running.
+        anyhow::ensure!(
+            plan.launch != pm_first_launch::Launch::Migrate,
+            "Open Powermove once to finish copying your library"
+        );
         return mcp::headless(profile, launch);
     }
     std::fs::create_dir_all(&profile)?;
@@ -117,34 +126,33 @@ fn main() -> Result<()> {
     let fonts = RenderFonts::new(broker.clone());
     let text_fonts = fonts.clone();
     let worker_profile = profile.clone();
-    let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
+    let (actor, engine, mcp_host) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
             ..Default::default()
         });
-        mcp::attach(&actor.handle(), &worker_profile)?;
         let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
-        let host = mcp_host.clone();
-        let server = pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || {
-            mcp::Connection::new(host.clone())
-        })?;
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu, fonts,
         )?);
-        Ok((actor, engine, mcp_host, server))
+        Ok((actor, engine, mcp_host))
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
+    // Filled once the library is attached; the MCP server waits for that too.
+    let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
     let device = engine.metal_device().to_owned();
     let service = Rc::new(RefCell::new(
         FontService::new().map_err(anyhow::Error::msg)?,
     ));
     let started = Rc::new(Cell::new(false));
-    let result = pm_shell::run_integrated(
+    let electron = plan.electron();
+    let gate = first_run::gate(plan, handle.clone(), mcp_host.clone(), server.clone());
+    let result = pm_shell::run_gated(
         device,
         Rc::new({
             let engine = engine.clone();
@@ -170,6 +178,7 @@ fn main() -> Result<()> {
                         handle.clone(),
                         engine.clone(),
                         profile.clone(),
+                        electron.clone(),
                         mcp_host.clone(),
                         host,
                         cx,
@@ -193,10 +202,11 @@ fn main() -> Result<()> {
                 Rc::new(session::Bridge(entity))
             }
         }),
+        gate,
     );
     broker.close();
     std::thread::spawn(move || {
-        drop(server);
+        drop(server.lock().map(|mut s| s.take()));
         drop(engine);
         actor.shutdown();
     })
@@ -215,52 +225,5 @@ fn node_string(node: &pm_model::Node) -> Option<&str> {
     match node.kind() {
         pm_model::NodeKind::String(s) => s.as_str(),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod profile_tests {
-    use super::native_profile;
-    use std::path::PathBuf;
-
-    #[test]
-    fn default_is_durable_and_separate_from_electron() {
-        let home = std::env::temp_dir().join("synthetic-home");
-        let profile = native_profile(None, Some(home.clone().into_os_string())).unwrap();
-        assert_eq!(
-            profile,
-            home.join("Library/Application Support/Powermove Native")
-        );
-        assert_ne!(profile, home.join("Library/Application Support/Powermove"));
-        assert_ne!(
-            profile,
-            std::env::temp_dir().join("powermove-native-integration")
-        );
-    }
-
-    #[test]
-    fn profile_override_takes_precedence() {
-        let profile = std::env::temp_dir().join("synthetic-profile-override");
-        assert_eq!(
-            native_profile(Some(profile.clone()), Some("synthetic-home".into())),
-            Some(profile)
-        );
-    }
-
-    #[test]
-    fn override_does_not_require_home() {
-        let profile = std::env::temp_dir().join("synthetic-profile-without-home");
-        assert_eq!(native_profile(Some(profile.clone()), None), Some(profile));
-    }
-
-    #[test]
-    fn missing_home_never_falls_back_to_shared_temp() {
-        assert_eq!(native_profile(None, None), None);
-        assert_eq!(native_profile(None, Some("".into())), None);
-        // Keep the override's existing absolute-path validation at the caller.
-        assert_eq!(
-            native_profile(Some(PathBuf::from("relative")), None),
-            Some(PathBuf::from("relative"))
-        );
     }
 }

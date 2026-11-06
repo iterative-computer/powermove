@@ -549,8 +549,14 @@ impl Controller {
                                 pm_panel_media::Effect::OpenComposition(id) => {
                                     self.open_builtin_composition(&id, cx)
                                 }
-                                pm_panel_media::Effect::CompositionSettings(_) => {
-                                    self.show_builtin("settings", window, cx)
+                                pm_panel_media::Effect::CompositionSettings(id) => {
+                                    self.composition_sheet(true, Some(id), cx)
+                                }
+                                pm_panel_media::Effect::NewComposition => {
+                                    self.composition_sheet(false, None, cx)
+                                }
+                                pm_panel_media::Effect::Reveal { path, .. } => {
+                                    crate::platform::reveal(std::path::Path::new(&path))
                                 }
                                 pm_panel_media::Effect::PickFiles { replace } => {
                                     let place = replace.is_none();
@@ -711,6 +717,16 @@ impl Controller {
                                 .cloned()
                                 .unwrap_or(Value::Null)),
                         );
+                    });
+                    continue;
+                }
+                "fontMenu" => {
+                    let families = crate::colour_panel::font_families();
+                    let options: Vec<_> = families.iter().map(|f| json!({"label": f})).collect();
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                        let family = index.and_then(|i| families.get(i)).cloned();
+                        runtime.platform_reply(request.id, Ok(json!(family)));
                     });
                     continue;
                 }

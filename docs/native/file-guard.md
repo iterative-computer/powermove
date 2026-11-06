@@ -1,5 +1,9 @@
 # Native project file guard
 
+The transition patch below is implemented on `feat/na-w13-tr-refusal`, from
+`feat/tr-prep`, unmerged. Already shipped builds stay unguarded: refusal reaches users
+only with a transition release that carries it.
+
 ## Source audit and decision — 2026-11-04
 
 The owner's going-back decision replaces the earlier reverse-migration/Restore

@@ -485,6 +485,21 @@ fn sheet_token_references_and_full_keyboard_labels() {
 }
 
 #[test]
+fn composition_settings_edit_the_composition_they_opened_on_not_the_open_one() {
+    let (_actor, h, mut c) = fixture();
+    let open = c.composition.clone();
+    c.composition = "OTHER".into();
+    let mut draft = c.composition_draft(true).unwrap();
+    assert_eq!(draft.name, "Other");
+    draft.name = "Renamed".into();
+    apply(c.composition_edit(&draft, None).unwrap(), &h, 1);
+    let comps = root(&h).get("comps").unwrap().clone();
+    let name = |id: &str| comps.get(id).unwrap().get("name").unwrap().clone();
+    assert_eq!(name("OTHER").as_str(), Some("Renamed"));
+    assert_eq!(name(&open).as_str(), Some("Main"));
+}
+
+#[test]
 fn kernel_composition_settings_one_undo_keeps_coordinates_and_opaque_data() {
     let (_actor, h, c) = fixture();
     let before = root(&h);

@@ -4,10 +4,7 @@
 //! actions carry stable target IDs plus document lifetime/revision. N8: hosts
 //! enqueue work; neither rendering nor a callback waits for JS or kernel IO.
 //! N4: cancellation retains admitted media; this module never deletes bytes.
-// Each surface also builds as an independent portable verification target.
-#[allow(clippy::duplicate_mod)]
-#[path = "sheet_layout.rs"]
-pub mod sheet_layout;
+pub use crate::surfaces::sheet_layout;
 
 use std::collections::{BTreeMap, VecDeque};
 

@@ -108,6 +108,9 @@ pub enum HostEffect {
     OpenEditor {
         reply: pm_kernel::session::ShellReply,
         new_window: bool,
+        /// For the alerts that open may need.
+        name: String,
+        file: Option<std::path::PathBuf>,
     },
     SaveAs(String),
     /// Host owns per-window subtitle; no extra copy is generated.
@@ -687,9 +690,22 @@ impl<P: LibraryPort> LibraryController<P> {
                     }
                     match outcome {
                         Outcome::Duplicated(id) => self.pending_duplicate = Some(id),
-                        Outcome::Opened { reply, new_window } => self
-                            .effects
-                            .push_back(HostEffect::OpenEditor { reply, new_window }),
+                        Outcome::Opened { reply, new_window } => {
+                            let row = match &request.command {
+                                Command::Open { id, .. } => self.rows.iter().find(|r| &r.id == id),
+                                _ => None,
+                            };
+                            let (name, file) = row.map_or_else(
+                                || ("Untitled".into(), None),
+                                |r| (r.name.clone(), r.file.clone()),
+                            );
+                            self.effects.push_back(HostEffect::OpenEditor {
+                                reply,
+                                new_window,
+                                name,
+                                file,
+                            });
+                        }
                         Outcome::Focus(id) => self.effects.push_back(HostEffect::FocusProject(id)),
                         _ => {}
                     }

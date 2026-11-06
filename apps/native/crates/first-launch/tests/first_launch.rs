@@ -71,7 +71,7 @@ fn generated_profile_migrates_copies_history_agents_gzip_local_storage_and_media
     let copied = store.load(&cp.projects["p"]).unwrap().unwrap();
     assert_eq!(
         copied.project.get("name").unwrap().as_str(),
-        Some("Synthetic project — Native")
+        Some("Synthetic project")
     );
     assert!(copied.session.as_ref().unwrap().get("file").is_none());
     let imported = store.read("ext.synthetic").unwrap().unwrap();
@@ -251,13 +251,19 @@ fn each_step_resumes_and_published_checkpoint_never_follows_source_changes() {
         )
         .unwrap();
         run(&config, |_| Ok(())).unwrap();
+        // A resumed bootstrap stays on its checkpoint. Once bootstrap is whole,
+        // the same launch is a delta and brings the later change in.
         assert_eq!(
             LibraryStore::open(&config.native_profile)
                 .read("theme")
                 .unwrap()
                 .unwrap()
                 .as_str(),
-            Some("dark")
+            Some(if stop == Step::Secrets {
+                "changed later"
+            } else {
+                "dark"
+            })
         );
         assert_eq!(
             LibraryStore::open(&config.native_profile)
@@ -423,11 +429,14 @@ fn kill_child() {
         native_profile: pm_first_launch::beta_profile(&root.join("Native")),
     };
     run(&config, |e| {
-        if e == (Event::Progress {
-            step: Step::Media,
-            done: 1,
-            total: 0,
-        }) {
+        if matches!(
+            e,
+            Event::Progress {
+                step: Step::Media,
+                done: 1,
+                ..
+            }
+        ) {
             fs::write(root.join("ready"), b"ready")?;
             loop {
                 std::thread::sleep(Duration::from_millis(10));
