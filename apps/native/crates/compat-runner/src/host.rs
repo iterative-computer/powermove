@@ -8,6 +8,7 @@ use crate::{
     recorder::{NativeHost, RealmEvents},
     transport::{Transport, TransportOwner},
 };
+use crate::store_host::StoreExtension;
 use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
 use pm_kernel::{
     KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
@@ -62,6 +63,20 @@ enum Input {
     Close,
 }
 
+/// A contribution list is the realm's plus every confined helper's.
+fn merge_store(value: &mut Value, store: &Value) {
+    for (kind, items) in store.as_object().into_iter().flatten() {
+        if let (Some(list), Some(items)) = (
+            value[kind.as_str()].as_array_mut(),
+            items.as_array(),
+        ) {
+            list.extend(items.iter().cloned());
+        } else if value[kind.as_str()].is_null() {
+            value[kind.as_str()] = items.clone();
+        }
+    }
+}
+
 #[derive(Default)]
 struct Published {
     contributions: Option<Arc<Value>>,
@@ -75,6 +90,8 @@ struct Published {
 
 struct Shared {
     published: Mutex<Published>,
+    /// What the confined helpers registered, in contribution-list form.
+    store: Mutex<Value>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 impl Shared {
@@ -145,11 +162,12 @@ impl RealmEvents for Arc<Events> {
         let text = text.to_owned();
         self.shared.update(|p| p.toasts.push(text));
     }
-    fn contributions(&self, value: Value) {
+    fn contributions(&self, mut value: Value) {
         let _ = self.kernel.state_transaction(StateTransaction {
             expected_revision: None,
             ops: registrations(&value, self.writer),
         });
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
         self.shared
             .update(|p| p.contributions = Some(Arc::new(value)));
     }
@@ -194,6 +212,7 @@ impl ExtensionHost {
         let (inbox, input) = mpsc::channel();
         let shared = Arc::new(Shared {
             published: Mutex::default(),
+            store: Mutex::new(json!({})),
             wake: config.wake.clone(),
         });
         let transport = Arc::new(Mutex::new(None));
@@ -206,6 +225,7 @@ impl ExtensionHost {
         forward_mailbox(&config.kernel, writer, inbox.clone());
         let owner = Owner {
             writer,
+            stores: vec![],
             shared: shared.clone(),
             inbox: inbox.clone(),
             transport: transport.clone(),
@@ -346,6 +366,7 @@ struct Live {
 }
 struct Owner {
     writer: Writer,
+    stores: Vec<(Writer, StoreExtension)>,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -417,8 +438,10 @@ impl Owner {
     fn handle(&mut self, message: Input) {
         match message {
             Input::Run(id, args) => {
-                let source = format!("__compat.run({},{args})", json!(id));
-                self.eval(&source);
+                if !self.run_store(&id, &args) {
+                    let source = format!("__compat.run({},{args})", json!(id));
+                    self.eval(&source);
+                }
             }
             Input::Panel(id, open) => {
                 let source = format!(
@@ -446,6 +469,72 @@ impl Owner {
             Input::Failed => self.restart(),
             Input::Kernel | Input::Close => (),
         }
+    }
+    /// A confined helper owns this command: its callback is a handle in there.
+    fn run_store(&self, id: &str, args: &Value) -> bool {
+        let state = self.config.kernel.state();
+        let Some(entry) = state.provider("commands", id) else {
+            return false;
+        };
+        let Some((_, extension)) = self.stores.iter().find(|(owner, _)| *owner == entry.owner)
+        else {
+            return false;
+        };
+        if let Some(handle) = entry.definition.get("run").and_then(|run| run.as_f64()) {
+            extension.run(handle as u64, args);
+        }
+        true
+    }
+    /// Publishes what a helper registered through the same path the realm uses.
+    fn publish_store(&self) {
+        let state = self.config.kernel.state();
+        let mut store = json!({});
+        let mut definitions = vec![];
+        for (owner, extension) in &self.stores {
+            let mut own = json!({"effects":[],"transitions":[],"layers":[]});
+            for (kind, registry) in [
+                ("commands", "commands"),
+                ("effects", "effects"),
+                ("transitions", "transitions"),
+                ("layers", "layerTypes"),
+            ] {
+                let items: Vec<Value> = state
+                    .registries
+                    .get(registry)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| entry.owner == *owner)
+                    .filter_map(|entry| {
+                        serde_json::from_str(&pm_model::json::to_canonical_string(
+                            &entry.definition,
+                        ))
+                        .ok()
+                    })
+                    .collect();
+                own[kind] = json!(items);
+                let list = store[kind].as_array().cloned().unwrap_or_default();
+                store[kind] = json!(list.into_iter().chain(items).collect::<Vec<_>>());
+            }
+            definitions.extend(extension.definitions(&own));
+        }
+        store["definitions"] = Value::Array(definitions);
+        let mut published = self.shared.published.lock().unwrap();
+        if let Some(current) = published.contributions.take() {
+            let mut next = (*current).clone();
+            let previous = self.shared.store.lock().unwrap().clone();
+            for (kind, items) in previous.as_object().into_iter().flatten() {
+                if let (Some(list), Some(items)) =
+                    (next[kind.as_str()].as_array_mut(), items.as_array())
+                {
+                    list.retain(|item| !items.contains(item));
+                }
+            }
+            merge_store(&mut next, &store);
+            published.contributions = Some(Arc::new(next));
+        }
+        drop(published);
+        *self.shared.store.lock().unwrap() = store;
+        self.shared.update(|_| ());
     }
     fn realm_message(&mut self, envelope: RealmEnvelope) {
         if envelope.project != self.config.project {
@@ -548,7 +637,7 @@ impl Owner {
                 }
             }
         }
-        let records = Value::Array(self.records.clone());
+        let records = self.trusted_records();
         self.eval(&format!(
             "__compat.update({records},{},\"enable\")",
             json!([id])
@@ -561,7 +650,7 @@ impl Owner {
             .get(&format!("extension.{id}.enabled"))
             .is_none_or(|value| *value != pm_model::Value::Bool(false))
     }
-    fn compile(&self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
+    fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
         let enabled = self.enabled(&found.id);
         let graph = match &found.manifest {
             Ok(manifest) => compile::compile(
@@ -569,11 +658,44 @@ impl Owner {
                 manifest["entry"].as_str().unwrap_or("index.ts"),
                 compiler,
                 Some(&self.config.cache),
-            )
-            .map(|graph| graph.to_json()),
+            ),
             Err(error) => Err(error.clone()),
         };
-        discovery::record(found, enabled, graph)
+        let mut record = discovery::record(found, enabled, graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone));
+        if record["trust"] != "store" || record["health"]["state"] != "ok" || !enabled {
+            return record;
+        }
+        // Someone else's code: confined, and never in the plan of the trusted realm.
+        record["confined"] = json!(true);
+        let wants_full_access = record["manifest"]["permissions"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p == "full-access"));
+        if wants_full_access {
+            record["health"] = json!({"state":"needs-trust"});
+            return record;
+        }
+        let owner = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
+        let started = graph.map_err(Error::Host).and_then(|graph| {
+            StoreExtension::start(
+                Arc::new(self.config.kernel.clone()),
+                &self.config.project,
+                "native",
+                found,
+                &graph,
+                found.store.as_ref().unwrap_or(&Value::Null),
+                owner,
+            )
+        });
+        match started {
+            Ok(extension) => self.stores.push((owner, extension)),
+            Err(error) => {
+                record["health"] = json!({"state":"activation-error","error":error.to_string()});
+            }
+        }
+        record
     }
     fn publish_records(&self) {
         let records: BTreeMap<_, _> = self
@@ -652,8 +774,19 @@ impl Owner {
         self.records = found.iter().map(|f| self.compile(&compiler, f)).collect();
         compiler.realm().close();
         self.publish_records();
-        let records = Value::Array(self.records.clone());
+        self.publish_store();
+        let records = self.trusted_records();
         self.eval(&format!("__compat.boot({records})"));
+    }
+    /// The plan of the trusted realm. Confined records never enter it.
+    fn trusted_records(&self) -> Value {
+        Value::Array(
+            self.records
+                .iter()
+                .filter(|record| record["confined"] != true)
+                .cloned()
+                .collect(),
+        )
     }
     fn rescan(&mut self) {
         if self.realm.is_none() {
@@ -666,6 +799,7 @@ impl Owner {
         else {
             return;
         };
+        self.stores.clear();
         let records: Vec<_> = found.iter().map(|f| self.compile(&compiler, f)).collect();
         compiler.realm().close();
         let changed: Vec<_> = records
@@ -680,7 +814,8 @@ impl Owner {
             .collect();
         self.records = records;
         self.publish_records();
-        let records = Value::Array(self.records.clone());
+        self.publish_store();
+        let records = self.trusted_records();
         self.eval(&format!(
             "__compat.update({records},{},\"rescan\")",
             Value::Array(changed)
@@ -714,7 +849,7 @@ impl Owner {
         }
         if self.start_realm().is_ok() {
             self.publish_records();
-            let records = Value::Array(self.records.clone());
+            let records = self.trusted_records();
             self.eval(&format!("__compat.boot({records})"));
         }
     }
@@ -897,6 +1032,38 @@ mod tests {
             glsl.source.lines().nth(glsl.body_line_offset as usize),
             Some("o = src(v_uv) * u_amount;")
         );
+    }
+    #[test]
+    fn a_store_install_runs_confined_and_contributes_like_a_local_one() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-store",
+            &[
+                (
+                    "index.ts",
+                    "export default function(api: any){
+                       api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:1}],frag:'o = src(v_uv) * u_amount;'});
+                       api.commands.register({id:'mark',label:'Mark',run(){globalThis.ran=(typeof document)+':'+(typeof PM)}});
+                     }",
+                ),
+                (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+            ],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        assert_eq!(fixture.health("synthetic-store"), "ok", "{:?}", fixture.host.records());
+        let state = fixture.kernel.state();
+        assert!(state.provider("effects", "synthetic-store.tint").is_some());
+        assert!(state.provider("commands", "synthetic-store.mark").is_some());
+        let contributions = fixture.host.contributions().unwrap();
+        let definitions = contributions["definitions"].as_array().unwrap();
+        assert_eq!(definitions[0]["origin"], "store");
+        assert_eq!(definitions[0]["id"], "synthetic-store.tint");
+        assert!(command(&fixture, "synthetic-store.mark"));
     }
     #[test]
     fn one_bad_extension_leaves_the_others_running() {

@@ -1,10 +1,7 @@
 //! Permissioned IPC boundary for the confined Store helper. Invoke on workers;
 //! AppKit never waits for this runtime or for the kernel owner.
-use crate::KernelStoreAdapter;
-use pm_kernel::{
-    Kernel,
-    state::{StateOp, StateTransaction},
-};
+use crate::{KernelStoreAdapter, StoreAuthority};
+use pm_kernel::state::{StateOp, StateTransaction};
 use pm_runtime_v8::*;
 use pm_store_host::{
     adapter::StoreSession,
@@ -26,7 +23,7 @@ use std::{
 pub trait StoreDispatch: Send + Sync + 'static {
     fn call(
         &self,
-        kernel: &mut Kernel,
+        kernel: &dyn StoreAuthority,
         session: &StoreSession,
         method: &str,
         args: &Value,
@@ -34,12 +31,12 @@ pub trait StoreDispatch: Send + Sync + 'static {
     ) -> Result<Value>;
     /// Cleanup is admission-independent: revocation must still remove owned
     /// registrations/callback leases and seal acknowledged gestures.
-    fn revoke(&self, kernel: &mut Kernel, session: &StoreSession, generation: &Generation);
-    fn seal(&self, kernel: &mut Kernel, session: &StoreSession, generation: &Generation);
+    fn revoke(&self, kernel: &dyn StoreAuthority, session: &StoreSession, generation: &Generation);
+    fn seal(&self, kernel: &dyn StoreAuthority, session: &StoreSession, generation: &Generation);
 }
 
 pub struct StoreRuntimeHost {
-    kernel: Arc<Mutex<Kernel>>,
+    kernel: Arc<dyn StoreAuthority>,
     session: StoreSession,
     policy: MethodPolicy,
     dispatch: Arc<dyn StoreDispatch>,
@@ -48,7 +45,7 @@ pub struct StoreRuntimeHost {
 }
 impl StoreRuntimeHost {
     pub fn new(
-        kernel: Arc<Mutex<Kernel>>,
+        kernel: Arc<dyn StoreAuthority>,
         project: String,
         session: StoreSession,
         policy: MethodPolicy,
@@ -63,7 +60,7 @@ impl StoreRuntimeHost {
             reports: Mutex::new((vec![], 0)),
         }
     }
-    fn admit(&self, kernel: &mut Kernel, method: &str) -> Result<()> {
+    fn admit(&self, kernel: &dyn StoreAuthority, method: &str) -> Result<()> {
         let id = self.session.data_store.extension.as_str();
         if !kernel
             .state()
@@ -77,7 +74,7 @@ impl StoreRuntimeHost {
             .authorize(&KernelStoreAdapter::new(kernel), &self.policy, method)
             .map_err(|_| Error::Host("Store permission or revision refused".into()))
     }
-    fn storage(&self, kernel: &mut Kernel) -> Result<Value> {
+    fn storage(&self, kernel: &dyn StoreAuthority) -> Result<Value> {
         self.admit(kernel, "storage.get")?;
         let source = &kernel.state().extensions[self.session.data_store.extension.as_str()].source;
         source
@@ -87,7 +84,12 @@ impl StoreRuntimeHost {
             .map(|value| value.unwrap_or_else(|| json!({})))
             .map_err(|_| Error::Invalid("Store runtime storage"))
     }
-    fn core_call(&self, kernel: &mut Kernel, method: &str, args: &Value) -> Result<Option<Value>> {
+    fn core_call(
+        &self,
+        kernel: &dyn StoreAuthority,
+        method: &str,
+        args: &Value,
+    ) -> Result<Option<Value>> {
         if ["runtime-error", "sandbox-report", "log"].contains(&method) {
             let mut reports = self.reports.lock().unwrap();
             let report = json!({"method":method,"args":args});
@@ -102,16 +104,11 @@ impl StoreRuntimeHost {
             return Ok(Some(json!({})));
         }
         if method == "project-snapshot" {
-            let project = kernel
+            let (generation, document) = kernel
                 .project(&self.project)
                 .ok_or(Error::Invalid("Store project is not open"))?;
-            let snapshot = project.store().snapshot();
-            let document =
-                pm_model::canonical::realize_project(snapshot.document.to_value().unwrap());
-            return Ok(Some(
-                json!({"value":{"generation":project.store().revision()+1,
-                "json":pm_model::json::to_canonical_string(&document)}}),
-            ));
+            return Ok(Some(json!({"value":{"generation":generation,
+                "json":pm_model::json::to_canonical_string(&document)}})));
         }
         if method != "invoke" || args[0] != "storage" {
             return Ok(None);
@@ -186,11 +183,11 @@ impl StoreRuntimeHost {
         entry.source = pm_model::Value::Object(source);
         let revision = snapshot.revision;
         kernel
-            .state_transaction(StateTransaction {
+            .transact(StateTransaction {
                 expected_revision: Some(revision),
                 ops: vec![StateOp::Extension(entry)],
             })
-            .map_err(|error| Error::Host(error.to_string()))?;
+            .map_err(Error::Host)?;
         Ok(Some(json!({})))
     }
     /// Private diagnostics only; callers must not publish source strings.
@@ -208,7 +205,7 @@ impl EngineProxy for StoreRuntimeHost {
     ) -> Result<Value> {
         budget.check()?;
         if operation == "store.uuid" {
-            self.admit(&mut self.kernel.lock().unwrap(), "storage.get")?;
+            self.admit(&*self.kernel, "storage.get")?;
             let mut bytes = [0u8; 16];
             std::fs::File::open("/dev/urandom")
                 .and_then(|mut file| file.read_exact(&mut bytes))
@@ -252,14 +249,13 @@ impl EngineProxy for StoreRuntimeHost {
         } else {
             method.to_owned()
         };
-        let mut kernel = self.kernel.lock().unwrap();
-        self.admit(&mut kernel, &policy_method)?;
-        let reply = match self.core_call(&mut kernel, method, &input["args"])? {
+        let kernel = &*self.kernel;
+        self.admit(kernel, &policy_method)?;
+        let reply = match self.core_call(kernel, method, &input["args"])? {
             Some(reply) => reply,
-            None => {
-                self.dispatch
-                    .call(&mut kernel, &self.session, method, &input["args"], &budget)?
-            }
+            None => self
+                .dispatch
+                .call(kernel, &self.session, method, &input["args"], &budget)?,
         };
         budget.check()?;
         if serde_json::to_vec(&reply)
@@ -274,7 +270,7 @@ impl EngineProxy for StoreRuntimeHost {
 }
 impl KernelHooks for StoreRuntimeHost {
     fn load_storage(&self, _: &str) -> Result<Value> {
-        self.storage(&mut self.kernel.lock().unwrap())
+        self.storage(&*self.kernel)
     }
     fn commit_activation(
         &self,
@@ -294,8 +290,8 @@ impl KernelHooks for StoreRuntimeHost {
         {
             return Err(Error::Quota("Store storage"));
         }
-        let mut kernel = self.kernel.lock().unwrap();
-        self.admit(&mut kernel, "storage.set")?;
+        let kernel = &*self.kernel;
+        self.admit(kernel, "storage.set")?;
         let snapshot = kernel.state();
         let mut entry = snapshot.extensions[self.session.data_store.extension.as_str()].clone();
         let mut source = entry
@@ -311,12 +307,11 @@ impl KernelHooks for StoreRuntimeHost {
         entry.source = pm_model::Value::Object(source);
         let revision = snapshot.revision;
         kernel
-            .state_transaction(StateTransaction {
+            .transact(StateTransaction {
                 expected_revision: Some(revision),
                 ops: vec![StateOp::Extension(entry)],
             })
-            .map_err(|error| Error::Host(error.to_string()))?;
-        Ok(())
+            .map_err(Error::Host)
     }
     fn commit_retained(&self, _: &Generation, _: &[Value]) -> Result<()> {
         Err(Error::Invalid(
@@ -324,12 +319,10 @@ impl KernelHooks for StoreRuntimeHost {
         ))
     }
     fn revoke_generation(&self, generation: &Generation) {
-        self.dispatch
-            .revoke(&mut self.kernel.lock().unwrap(), &self.session, generation);
+        self.dispatch.revoke(&*self.kernel, &self.session, generation);
     }
     fn seal_open_gestures(&self, generation: &Generation) {
-        self.dispatch
-            .seal(&mut self.kernel.lock().unwrap(), &self.session, generation);
+        self.dispatch.seal(&*self.kernel, &self.session, generation);
     }
 }
 impl HostProxy for StoreRuntimeHost {
@@ -341,7 +334,7 @@ impl HostProxy for StoreRuntimeHost {
     ) -> Result<Box<dyn HostRequest>> {
         // A granted network permission is not a network implementation. Refuse
         // until the bounded, same-origin/redirect-aware transport is attached.
-        self.admit(&mut self.kernel.lock().unwrap(), "fetch")?;
+        self.admit(&*self.kernel, "fetch")?;
         Err(Error::Host(
             "Store network transport is not attached".into(),
         ))
@@ -384,9 +377,8 @@ impl StoreCompatRunner {
             return Err(Error::Invalid("Store facade identity"));
         }
         {
-            let mut kernel = host.kernel.lock().unwrap();
-            host.admit(&mut kernel, "storage.get")?;
-            let state = KernelStoreAdapter::new(&mut kernel)
+            host.admit(&*host.kernel, "storage.get")?;
+            let state = KernelStoreAdapter::new(&*host.kernel)
                 .load(&host.session.data_store.extension)
                 .map_err(|_| Error::Invalid("Store installation"))?
                 .ok_or(Error::Invalid("Store installation"))?;
@@ -426,6 +418,7 @@ impl StoreCompatRunner {
         if !prelude.is_empty() {
             runner.eval(prelude)?;
         }
+        runner.eval(include_str!("globals.js"))?;
         runner.eval(bundle)?;
         runner.eval(include_str!("store-bootstrap.js"))?;
         runner.json(&format!("__storeCheck.create({init})"))?;
@@ -517,7 +510,7 @@ pub fn store_method_policy() -> pm_store_host::Result<MethodPolicy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_kernel::{KernelConfig, OpenSource};
+    use pm_kernel::{Kernel, KernelConfig, OpenSource};
     use pm_store_host::{
         artifact::{PublisherIdentity, ReleaseStatement, SignedRelease},
         identity::{DataStoreIdentity, ExtensionId},
@@ -537,7 +530,7 @@ mod tests {
     impl StoreDispatch for Dispatch {
         fn call(
             &self,
-            _: &mut Kernel,
+            _: &dyn StoreAuthority,
             _: &StoreSession,
             _: &str,
             _: &Value,
@@ -548,10 +541,10 @@ mod tests {
                 "Synthetic platform capability is not attached".into(),
             ))
         }
-        fn revoke(&self, _: &mut Kernel, _: &StoreSession, _: &Generation) {
+        fn revoke(&self, _: &dyn StoreAuthority, _: &StoreSession, _: &Generation) {
             self.revoked.fetch_add(1, Ordering::Relaxed);
         }
-        fn seal(&self, _: &mut Kernel, _: &StoreSession, _: &Generation) {}
+        fn seal(&self, _: &dyn StoreAuthority, _: &StoreSession, _: &Generation) {}
     }
     fn fixture() -> (
         Arc<Mutex<Kernel>>,
@@ -609,11 +602,11 @@ mod tests {
                 },
             )]),
         };
-        KernelStoreAdapter::new(&mut kernel)
+        let kernel = Arc::new(Mutex::new(kernel));
+        KernelStoreAdapter::new(&*kernel)
             .compare_exchange(&id, None, &state)
             .unwrap();
-        let session = StoreSession::admit(&KernelStoreAdapter::new(&mut kernel), &id).unwrap();
-        let kernel = Arc::new(Mutex::new(kernel));
+        let session = StoreSession::admit(&KernelStoreAdapter::new(&*kernel), &id).unwrap();
         let dispatch = Arc::new(Dispatch::default());
         let host = Arc::new(StoreRuntimeHost::new(
             kernel.clone(),
@@ -653,8 +646,7 @@ mod tests {
         );
         assert_eq!(dispatch.calls.load(Ordering::Relaxed), 1);
         {
-            let mut kernel = kernel.lock().unwrap();
-            let mut store = KernelStoreAdapter::new(&mut kernel);
+            let mut store = KernelStoreAdapter::new(&*kernel);
             let mut state = store
                 .load(&host.session.data_store.extension)
                 .unwrap()

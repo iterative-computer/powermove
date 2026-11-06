@@ -86,6 +86,40 @@ globalThis.__storeCheck = {
       };
     }
   },
+  /** The native compiler's graph, linked inside this confined realm. */
+  async activateGraph(text) {
+    const graph = JSON.parse(text);
+    const url = (id) =>
+      id.startsWith("runtime:") ? `pmruntime://${id.slice(8)}` : `pmext://${id}`;
+    const sources = {},
+      edges = {};
+    for (const [id, source] of Object.entries(graph.sources))
+      sources[url(id)] = source;
+    const runtimeSource = (name) => {
+      if (name === "svelte/internal/disclose-version") return "export {}";
+      const keys = Object.keys(globalThis.__powermove_runtime[name] ?? {});
+      return [
+        `const m = globalThis.__powermove_runtime[${JSON.stringify(name)}];`,
+        "export default m;",
+        ...keys
+          .filter((key) => key !== "default" && /^[A-Za-z_$][\w$]*$/.test(key))
+          .map((key) => `export const ${key} = m.${key};`),
+      ].join("\n");
+    };
+    for (const [id, table] of Object.entries(graph.edges)) {
+      edges[url(id)] = {};
+      for (const [specifier, target] of Object.entries(table)) {
+        edges[url(id)][specifier] = url(target);
+        if (target.startsWith("runtime:"))
+          sources[url(target)] ??= runtimeSource(target.slice(8));
+      }
+    }
+    const [done, namespace] = __linkModules(
+      JSON.stringify({ sources, edges, entry: url("powermove:bundle") }),
+    );
+    await done;
+    return this.activate(namespace);
+  },
   dispose() {
     if (this.disposed) return true;
     this.disposed = true;

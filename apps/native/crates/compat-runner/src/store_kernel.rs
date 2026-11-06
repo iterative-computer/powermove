@@ -1,14 +1,16 @@
 //! Store install/permission CAS on the existing kernel writer and durable state
 //! transaction. No second profile writer, renderer state, or home discovery.
 use pm_kernel::{
-    Kernel,
-    state::{ExtensionEntry, StateOp, StateTransaction},
+    Kernel, KernelHandle,
+    state::{ExtensionEntry, StateOp, StateSnapshot, StateTransaction},
 };
 use pm_store_host::{
     Error, Result,
     identity::ExtensionId,
     install::{ExtensionState, StoreKernel},
 };
+
+use std::sync::{Arc, Mutex};
 
 const SLOT: &str = "storeHostV1";
 
@@ -20,11 +22,61 @@ pub struct StoreArchive<'a> {
     pub expected: Option<u64>,
 }
 
+/// What Store code needs from the single writer. The app hands in its actor
+/// handle; every call runs on a worker, so waiting on the actor here is allowed.
+pub trait StoreAuthority: Send + Sync + 'static {
+    fn state(&self) -> Arc<StateSnapshot>;
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String>;
+    /// `(generation, realized project)` of an open project.
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)>;
+}
+impl StoreAuthority for KernelHandle {
+    fn state(&self) -> Arc<StateSnapshot> {
+        KernelHandle::state(self)
+    }
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+        self.state_transaction(tx)
+            .wait()
+            .ok_or("kernel stopped")?
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+        let published = self.published(project)?;
+        let document = published.snapshot.document.to_value()?;
+        Some((
+            published.revision() + 1,
+            pm_model::canonical::realize_project(document),
+        ))
+    }
+}
+impl StoreAuthority for Mutex<Kernel> {
+    fn state(&self) -> Arc<StateSnapshot> {
+        Arc::new(self.lock().unwrap().state().clone())
+    }
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+        self.lock()
+            .unwrap()
+            .state_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+        let kernel = self.lock().unwrap();
+        let project = kernel.project(project)?;
+        let snapshot = project.store().snapshot();
+        Some((
+            project.store().revision() + 1,
+            pm_model::canonical::realize_project(snapshot.document.to_value()?),
+        ))
+    }
+}
+
 pub struct KernelStoreAdapter<'a> {
-    kernel: &'a mut Kernel,
+    kernel: &'a dyn StoreAuthority,
 }
 impl<'a> KernelStoreAdapter<'a> {
-    pub fn new(kernel: &'a mut Kernel) -> Self {
+    pub fn new(kernel: &'a dyn StoreAuthority) -> Self {
         Self { kernel }
     }
     /// Worker-only release admission. Pins come from the native Store registry;
@@ -57,7 +109,8 @@ impl<'a> KernelStoreAdapter<'a> {
 }
 impl StoreKernel for KernelStoreAdapter<'_> {
     fn load(&self, id: &ExtensionId) -> Result<Option<ExtensionState>> {
-        let Some(entry) = self.kernel.state().extensions.get(id.as_str()) else {
+        let state = self.kernel.state();
+        let Some(entry) = state.extensions.get(id.as_str()) else {
             return Ok(None);
         };
         let Some(value) = entry.source.get(SLOT) else {
@@ -121,11 +174,11 @@ impl StoreKernel for KernelStoreAdapter<'_> {
             source: pm_model::Value::Object(source),
         };
         self.kernel
-            .state_transaction(StateTransaction {
+            .transact(StateTransaction {
                 expected_revision: Some(snapshot.revision),
                 ops: vec![StateOp::Extension(entry)],
             })
-            .map_err(|error| Error::Io(error.to_string()))?;
+            .map_err(Error::Io)?;
         Ok(())
     }
 }
@@ -178,8 +231,8 @@ mod tests {
         let id = ExtensionId::new("synthetic-store").unwrap();
         let initial = state(&id, "synthetic-profile");
         {
-            let mut kernel = kernel(profile.path(), "initial");
-            let mut store = KernelStoreAdapter::new(&mut kernel);
+            let kernel = Mutex::new(kernel(profile.path(), "initial"));
+            let mut store = KernelStoreAdapter::new(&kernel);
             store.compare_exchange(&id, None, &initial).unwrap();
             assert_eq!(
                 store.compare_exchange(&id, None, &initial),
@@ -192,8 +245,8 @@ mod tests {
                 Err(Error::Invalid("Store state identity/revision"))
             );
         }
-        let mut kernel = kernel(profile.path(), "reopen");
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(kernel(profile.path(), "reopen"));
+        let mut store = KernelStoreAdapter::new(&kernel);
         assert_eq!(store.load(&id).unwrap(), Some(initial.clone()));
         let mut next = initial;
         next.revision = 2;
@@ -216,7 +269,8 @@ mod tests {
                 })],
             })
             .unwrap();
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(kernel);
+        let mut store = KernelStoreAdapter::new(&kernel);
         assert_eq!(
             store.compare_exchange(&id, None, &state(&id, "synthetic-profile")),
             Err(Error::Conflict)
@@ -287,8 +341,8 @@ mod tests {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut artifacts = FileArtifacts::new(root.path().canonicalize().unwrap()).unwrap();
-        let mut kernel = Kernel::new(KernelConfig::default());
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(Kernel::new(KernelConfig::default()));
+        let mut store = KernelStoreAdapter::new(&kernel);
         release.signature[0] ^= 1;
         assert!(
             store

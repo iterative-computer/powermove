@@ -177,13 +177,16 @@ const pure = [
 const store = `import {createSandboxAPI,sandboxControl,sandboxReporter} from ${JSON.stringify(join(root, "src/frozen/host/store-api.js"))};
 import * as helpers from ${JSON.stringify(join(root, "src/frozen/kernel/editor-helpers.ts"))};
 ${moduleImports}
+import {definitionSnapshots} from ${JSON.stringify(join(root, "src/definitions.ts"))};
 const pure=new Set(${JSON.stringify(pure)});
 const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has(name)?helpers[name]:(...args)=>{
   StoreCompat.report?.('permission','powermove.'+name);
   const error=new Error(name+' requires full access. Use project.apply or commands in a sandboxed extension.');
   error.name='PermissionError';error.code='full-access';throw error;
 }]));
-globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,runtimeModules:{powermove,${moduleTable}}};`;
+const registry=list=>({entries:()=>(list??[]).map(item=>({id:item.id,ownerId:"store",item}))});
+const definitions=({effects,transitions,layers})=>definitionSnapshots({effects:registry(effects),transitions:registry(transitions),layerTypes:registry(layers),ownerOrigin:()=>"store"});
+globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,runtimeModules:{powermove,${moduleTable}}};`;
 await write(
   "store.js",
   await Bun.build({

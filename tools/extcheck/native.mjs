@@ -70,7 +70,7 @@ try {
                 ),
                 "__extcheckDriver.finish()",
               ]
-            : ["__compat.loader.dispose()"],
+            : ["__compat.loader.dispose().then(()=>true)"],
         }),
         encoding: "utf8",
         timeout: 60000,

@@ -537,10 +537,8 @@ impl Vm {
                     v8::Function::new(cs, crate::modules::link).unwrap(),
                 ),
             ] {
-                // Confined Store realms and the compiler never load module graphs.
-                if name == "__linkModules"
-                    && matches!(kind, SnapshotKind::Store | SnapshotKind::Compiler)
-                {
+                // The compiler handles untrusted source as data and never links it.
+                if name == "__linkModules" && kind == SnapshotKind::Compiler {
                     continue;
                 }
                 let key = v8::String::new(cs, name).unwrap();

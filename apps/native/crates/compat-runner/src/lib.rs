@@ -17,12 +17,13 @@ pub mod host;
 pub mod manifest;
 mod recorder;
 mod store_dispatch;
+pub mod store_host;
 mod store_kernel;
 mod store_runtime;
 pub use store_dispatch::KernelStoreDispatch;
 pub mod transport;
 pub use recorder::{NativeHost, NoEvents, RealmEvents};
-pub use store_kernel::{KernelStoreAdapter, StoreArchive};
+pub use store_kernel::{KernelStoreAdapter, StoreArchive, StoreAuthority};
 pub use store_runtime::{StoreCompatRunner, StoreDispatch, StoreRuntimeHost, store_method_policy};
 
 pub const COMPAT_BUNDLE: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.js"));
@@ -252,7 +253,7 @@ mod tests {
                     .unwrap(),
                 42
             );
-            runner.json("__compat.loader.dispose()").unwrap();
+            runner.json("__compat.loader.dispose().then(()=>true)").unwrap();
             assert_eq!(
                 runner
                     .json("__compat.realm.kernel.commands.list().length")

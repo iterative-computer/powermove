@@ -14,7 +14,7 @@ EXPRESSIONS = [
     '__extcheckClock.snapshot()',
     '(async()=>{await __extcheckClock.settle(3);return {clock:__extcheckClock.snapshot(),project:PM.proj,time:PM.time,playing:PM.playing,errors:__compat.errors}})()',
     '(()=>{PM.pause();PM.setTime(.5);return [PM.time,PM.playing]})()',
-    '__compat.loader.dispose()',
+    '__compat.loader.dispose().then(()=>true)',
 ]
 
 

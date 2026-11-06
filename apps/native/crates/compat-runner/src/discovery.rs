@@ -13,6 +13,8 @@ pub struct Discovered {
     pub directory: PathBuf,
     /// `Err` holds the frozen parser's reason; the record shows it in Settings.
     pub manifest: Result<Value, String>,
+    /// The Store marker of an install the shipped app made.
+    pub store: Option<Value>,
 }
 
 fn scan_candidate(directory: &Path, name: &str) -> Option<Discovered> {
@@ -40,6 +42,7 @@ fn scan_candidate(directory: &Path, name: &str) -> Option<Discovered> {
         id: name.to_owned(),
         directory: directory.to_owned(),
         manifest: parsed,
+        store: crate::store_host::marker(directory),
     })
 }
 
@@ -62,9 +65,29 @@ pub fn scan(roots: &[PathBuf]) -> Vec<Discovered> {
     found.into_values().collect()
 }
 
+/// Who wrote it, from the shipped app's provenance file beside the extensions
+/// folder. An unreadable file must not promote someone else's code.
+fn trust(found: &Discovered) -> &'static str {
+    if found.store.is_none() {
+        return "local";
+    }
+    let provenance = found
+        .directory
+        .parent()
+        .and_then(|root| root.parent())
+        .map(|profile| profile.join("extensions-provenance.json"))
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    match provenance {
+        Some(value) if value[&found.id]["trusted"] == true => "store-trusted",
+        _ => "store",
+    }
+}
+
 /// The record the realm's loader plans from.
 pub fn record(found: &Discovered, enabled: bool, graph: Result<Value, String>) -> Value {
-    let mut record = json!({"id":found.id,"scope":"user","enabled":enabled,"trust":"local"});
+    let trust = trust(found);
+    let mut record = json!({"id":found.id,"scope":"user","enabled":enabled,"trust":trust});
     match (&found.manifest, graph) {
         (Err(error), _) => {
             record["manifest"] = Value::Null;

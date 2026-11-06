@@ -1,8 +1,7 @@
 //! Store contributions go to the kernel's real provider stacks. Callback
 //! continuations return to the confined owner after releasing the kernel lock.
-use crate::StoreDispatch;
+use crate::{StoreAuthority, StoreDispatch};
 use pm_kernel::{
-    Kernel,
     state::{Registration, StateOp, StateTransaction},
     tx::Writer,
 };
@@ -49,14 +48,13 @@ impl KernelStoreDispatch {
             format!("{owner}.{id}")
         }
     }
-    fn apply(&self, kernel: &mut Kernel, ops: Vec<StateOp>) -> Result<()> {
+    fn apply(&self, kernel: &dyn StoreAuthority, ops: Vec<StateOp>) -> Result<()> {
         kernel
-            .state_transaction(StateTransaction {
+            .transact(StateTransaction {
                 expected_revision: Some(kernel.state().revision),
                 ops,
             })
-            .map_err(|error| Error::Host(error.to_string()))?;
-        Ok(())
+            .map_err(Error::Host)
     }
     fn check(&self, session: &StoreSession) -> Result<()> {
         if session.data_store != self.session.data_store
@@ -73,6 +71,19 @@ fn text<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
         .as_str()
         .filter(|text| !text.is_empty() && text.encode_utf16().count() <= max)
         .ok_or(Error::Invalid("Store registration string"))
+}
+/// Native registry of a Store contribution kind. Each is declarative data; the
+/// callbacks a definition names stay handles into the confined helper.
+fn registry(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "commands" => "commands",
+        "effects" => "effects",
+        "transitions" => "transitions",
+        "layers" => "layerTypes",
+        "theme" => "themes",
+        "status" => "status",
+        _ => return None,
+    })
 }
 fn handle(value: &Value) -> bool {
     value.as_u64().is_some_and(|id| id < (1 << 53))
@@ -100,7 +111,7 @@ fn command(value: &Value) -> Result<()> {
 impl StoreDispatch for KernelStoreDispatch {
     fn call(
         &self,
-        kernel: &mut Kernel,
+        kernel: &dyn StoreAuthority,
         session: &StoreSession,
         method: &str,
         args: &Value,
@@ -113,14 +124,21 @@ impl StoreDispatch for KernelStoreDispatch {
             .ok_or(Error::Invalid("Store dispatch arguments"))?;
         match method {
             "register" => {
-                if args.len() != 3 || args[0] != "commands" {
-                    return Err(Error::Host(
-                        "Store registration backend not attached for this kind".into(),
-                    ));
-                }
+                let registry = args
+                    .first()
+                    .and_then(Value::as_str)
+                    .filter(|_| args.len() == 3)
+                    .and_then(registry)
+                    .ok_or_else(|| {
+                        Error::Host("Store registration backend not attached for this kind".into())
+                    })?;
                 let token = self.token(args[1].as_str().ok_or(Error::Invalid("Store token"))?)?;
                 let mut definition = args[2].clone();
-                command(&definition)?;
+                if registry == "commands" {
+                    command(&definition)?;
+                } else {
+                    text(&definition, "id", 128)?;
+                }
                 let id = self.qualify(definition["id"].as_str().unwrap());
                 definition["id"] = json!(id);
                 let state = kernel.state();
@@ -135,7 +153,7 @@ impl StoreDispatch for KernelStoreDispatch {
                     return Err(Error::Quota("Store registrations"));
                 }
                 if state
-                    .provider("commands", &id)
+                    .provider(registry, &id)
                     .is_some_and(|entry| entry.owner != self.owner)
                 {
                     return Err(Error::Invalid("Store registration collision"));
@@ -143,7 +161,7 @@ impl StoreDispatch for KernelStoreDispatch {
                 self.apply(
                     kernel,
                     vec![StateOp::Register {
-                        registry: "commands".into(),
+                        registry: registry.into(),
                         entry: Registration {
                             token,
                             owner: self.owner,
@@ -188,7 +206,7 @@ impl StoreDispatch for KernelStoreDispatch {
             _ => Err(Error::Host("Store operation backend not attached".into())),
         }
     }
-    fn revoke(&self, kernel: &mut Kernel, session: &StoreSession, _: &Generation) {
+    fn revoke(&self, kernel: &dyn StoreAuthority, session: &StoreSession, _: &Generation) {
         let result = self
             .check(session)
             .and_then(|()| self.apply(kernel, vec![StateOp::DisposeOwner { owner: self.owner }]));
@@ -199,5 +217,5 @@ impl StoreDispatch for KernelStoreDispatch {
             }
         }
     }
-    fn seal(&self, _: &mut Kernel, _: &StoreSession, _: &Generation) {}
+    fn seal(&self, _: &dyn StoreAuthority, _: &StoreSession, _: &Generation) {}
 }

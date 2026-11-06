@@ -51,7 +51,7 @@ try {
             "(()=>{PM.play();return [PM.time,PM.playing]})()",
             "__extcheckClock.advance(16).then(()=>[PM.time,PM.playing])",
             "(()=>{PM.pause();return [PM.time,PM.playing]})()",
-            "__compat.loader.dispose()",
+            "__compat.loader.dispose().then(()=>true)",
           ],
         }),
         timeout: 30000,
