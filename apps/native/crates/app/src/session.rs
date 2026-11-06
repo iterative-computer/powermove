@@ -33,6 +33,7 @@ pub struct Controller {
     pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
+    pub(crate) media_refresh: crate::media_refresh::Refresh,
     pub opening: bool,
     pub rows: crate::rows::LayerRows,
     /// The last refresh saw a save in flight (drives the status note).
@@ -231,6 +232,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             media: MediaCatalog::default(),
+            media_refresh: Default::default(),
             opening: false,
             rows: Default::default(),
             saving_note: false,
@@ -316,6 +318,7 @@ impl Controller {
             self.rebuild_popout_viewer();
             self.seek(time);
         }
+        self.refresh_media(cx);
         if let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
@@ -576,8 +579,7 @@ impl Controller {
             let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
                 let published = kernel.published(&session.project).unwrap();
                 cx.background_executor().spawn(async move {
-                    crate::media::for_session(&published.snapshot, &published.media,
-                        published.path.as_deref(), &cache)
+                    crate::media_refresh::resolve(&published, &cache)
                 }).await.map(Some)
             } else { Ok(None) };
             let mut previous_save_failed = false;
@@ -608,7 +610,7 @@ impl Controller {
         session: SessionHandle,
         decision: pm_kernel::locks::OpenDecision,
         history_rejected: bool,
-        media: Option<MediaCatalog>,
+        media: Option<crate::media_refresh::Resolved>,
         cx: &mut Context<Self>,
     ) {
         if let Some(viewer) = self.viewer.take() {
@@ -617,10 +619,18 @@ impl Controller {
         self.host.borrow_mut().close_flowchart();
         self.composition_views.clear();
         self.session = Some(session);
+        self.media_refresh.reset();
+        self.media = MediaCatalog::default();
+        if let Some(resolved) = media
+            && self.session.as_ref().and_then(|s| self.kernel.published(&s.project))
+                .is_some_and(|p| resolved.inputs.matches(&p))
+        {
+            self.media = resolved.catalog;
+            self.media_refresh.adopt(resolved.inputs);
+        }
         self.mirror = None;
         self.selected = None;
         self.refresh(cx);
-        self.media = media.unwrap_or_default();
         // The status bar shows document state and counts; only exceptions get words.
         self.message = [
             copy_notice(&decision),
@@ -710,7 +720,7 @@ impl Controller {
             let media = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::media::for_session(&p.snapshot, &p.media, p.path.as_deref(), &cache)
+                    crate::media_refresh::resolve(&p, &cache)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {

@@ -415,7 +415,9 @@ pub(crate) fn retarget(root: &Node, media: &mut MediaTable) {
             .cloned();
         if let Some(mut source) = source {
             source.id = id.as_str().into();
-            media.insert(source);
+            if !media.get(&id).is_some_and(|current| same_capability(current, &source)) {
+                media.insert(source);
+            }
         } else {
             media.remove(&id);
         }

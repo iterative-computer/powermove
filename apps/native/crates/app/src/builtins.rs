@@ -11,6 +11,7 @@ use std::{
 #[derive(Default)]
 pub struct Host {
     project: Option<String>,
+    document: Option<u64>,
     application: bool,
     pub runtime: Option<Arc<Builtins>>,
     pending: BTreeMap<String, Publication>,
@@ -40,7 +41,9 @@ impl Controller {
             .as_ref()
             .map(|s| s.project.clone())
             .unwrap_or_else(|| "builtin-application".into());
+        let document = self.published.as_ref().map(|p| p.snapshot.doc_id);
         if self.builtins.project.as_ref() == Some(&project)
+            && self.builtins.document == document
             && self.builtins.application == application
         {
             return;
@@ -55,6 +58,7 @@ impl Controller {
         self.builtins = Host::default();
         self.builtins.windows = windows;
         self.builtins.project = Some(project.clone());
+        self.builtins.document = document;
         self.builtins.application = application;
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
@@ -619,6 +623,7 @@ impl Controller {
                         let title = match request.input.as_str() {
                             Some("project") => "Project",
                             Some("general") => "General",
+                            Some("memory") => "Memory",
                             Some("accounts") => "Accounts",
                             Some("transcription") => "Transcription",
                             Some("extensions") => "Extensions",

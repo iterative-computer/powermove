@@ -204,6 +204,11 @@ pub struct MediaTable {
 }
 
 impl MediaTable {
+    /// O(1) identity of immutable entry storage held by a publication/worker.
+    pub fn shares_entries_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &MediaEntry> {
         self.entries.iter()
     }
