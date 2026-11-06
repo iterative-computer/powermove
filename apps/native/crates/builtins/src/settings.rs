@@ -96,14 +96,16 @@ impl Backend {
             "label":"HDR","control":"switch","value":hdr,
             "detail":"Keeps PQ and HLG light in the project for HDR delivery. Off, HDR footage is tone mapped to SDR white as it comes in.",
             "binding":fields["project.hdr"],"disabled":false}));
-        rows.push(json!({"id":"project.masteringPeak","section":"project","group":"Color",
+        rows.push(
+            json!({"id":"project.masteringPeak","section":"project","group":"Color",
             "label":"Mastering Peak","control":"choice","value":color
                 .and_then(|c| c.get("masteringPeak"))
                 .map(|n| wire(&n.to_value())).unwrap_or(json!(1000)),
             "options":[{"v":600,"label":"600 nits"},{"v":1000,"label":"1000 nits"},
                 {"v":2000,"label":"2000 nits"},{"v":4000,"label":"4000 nits"}],
             "detail":"The brightest light HDR delivery keeps. Brighter sources roll off to it.",
-            "binding":fields["project.masteringPeak"],"disabled":!hdr}));
+            "binding":fields["project.masteringPeak"],"disabled":!hdr}),
+        );
         let memory = self.fields(&json!(["memory.enabled"]))?;
         rows.push(json!({"id":"memory.enabled","section":"memory","group":"Project Memory",
             "label":"Use Project Memory","control":"switch", "disabled":false,

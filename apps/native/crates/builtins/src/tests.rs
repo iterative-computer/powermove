@@ -596,7 +596,10 @@ fn the_hdr_setting_reaches_the_kernel_and_unlocks_its_peak() {
     };
     let publication = backend.settings_snapshot().unwrap();
     assert_eq!(row(&publication, "project.hdr")["value"], json!(false));
-    assert_eq!(row(&publication, "project.masteringPeak")["disabled"], json!(true));
+    assert_eq!(
+        row(&publication, "project.masteringPeak")["disabled"],
+        json!(true)
+    );
     let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.hdr","value":true}})).unwrap() else { panic!("actor request") };
     let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
@@ -608,7 +611,10 @@ fn the_hdr_setting_reaches_the_kernel_and_unlocks_its_peak() {
     );
     let publication = backend.settings_snapshot().unwrap();
     assert_eq!(row(&publication, "project.hdr")["value"], json!(true));
-    assert_eq!(row(&publication, "project.masteringPeak")["disabled"], json!(false));
+    assert_eq!(
+        row(&publication, "project.masteringPeak")["disabled"],
+        json!(false)
+    );
     assert_eq!(row(&publication, "project.colorDepth")["value"], json!(32));
 }
 

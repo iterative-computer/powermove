@@ -971,7 +971,10 @@ fn hdr_moves_the_project_to_float_and_records_its_mastering_peak_in_one_undo() {
         color.get("masteringPeak").unwrap().to_value().as_f64(),
         Some(2000.)
     );
-    assert_eq!(root.get("colorDepth").unwrap().to_value().as_f64(), Some(32.));
+    assert_eq!(
+        root.get("colorDepth").unwrap().to_value().as_f64(),
+        Some(32.)
+    );
     assert!(
         set(
             &mut store,

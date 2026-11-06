@@ -327,7 +327,10 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
         }
         let color = |key: &str| vec!["color".into(), key.into()];
         if let Some(hdr) = p.hdr {
-            cx.set(color("mode"), values::s(if hdr { "hdr" } else { "standard" }))?;
+            cx.set(
+                color("mode"),
+                values::s(if hdr { "hdr" } else { "standard" }),
+            )?;
             if hdr && p.color_depth.is_none() {
                 cx.set(vec!["colorDepth".into()], n(32.0))?;
             }
