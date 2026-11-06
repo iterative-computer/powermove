@@ -679,13 +679,15 @@ impl DocumentStore {
             .iter()
             .chain(staged.inverse.iter())
             .any(|op| !matches!(op, Op::Leaf(_)));
-        let saved = structural.then(|| {
-            scoped_patches(
-                self.current.root(),
-                staged.document.root(),
-                staged.scopes.clone(),
-            )
-        });
+        let saved = structural
+            .then(|| {
+                saved_form(
+                    self.current.root(),
+                    staged.document.root(),
+                    staged.scopes.clone(),
+                )
+            })
+            .flatten();
         let revision = staged.document.revision();
         let forward: Arc<[Op]> = staged.forward.clone().into();
         let record = self.history.push(
@@ -727,11 +729,11 @@ impl DocumentStore {
         if !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_ops(&record.inverse, false)?;
+        let staged = self.stage_history_ops(&record.inverse)?;
         let revision = staged.document.revision();
         self.publish(
             staged.document,
-            record.inverse.clone(),
+            staged.forward.into(),
             ChangeCause::Undo {
                 label: record.label.clone(),
             },
@@ -761,11 +763,11 @@ impl DocumentStore {
         if !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
-        let staged = self.stage_ops(&record.forward, false)?;
+        let staged = self.stage_history_ops(&record.forward)?;
         let revision = staged.document.revision();
         self.publish(
             staged.document,
-            record.forward.clone(),
+            staged.forward.into(),
             ChangeCause::Redo {
                 label: record.label.clone(),
             },
@@ -913,14 +915,21 @@ impl DocumentStore {
     pub fn commit_gesture(&mut self, id: GestureId) -> Result<Option<u64>, TransactionError> {
         self.gesture_mut(id)?;
         let gesture = self.gesture.take().expect("checked");
-        let (forward, backward) =
-            scoped_patches(gesture.base.root(), self.current.root(), gesture.scopes);
-        if forward == backward {
+        let (forward, inverse) =
+            match saved_form(gesture.base.root(), self.current.root(), gesture.scopes) {
+                Some((forward, backward)) => (
+                    forward.into_iter().map(Op::Leaf).collect::<Vec<_>>(),
+                    backward.into_iter().map(Op::Leaf).collect::<Vec<_>>(),
+                ),
+                None => (
+                    diff_node_ops(gesture.base.root(), self.current.root()),
+                    diff_node_ops(self.current.root(), gesture.base.root()),
+                ),
+            };
+        if forward == inverse || forward.is_empty() {
             self.set_state_token(gesture.base_token);
             return Ok(None);
         }
-        let forward: Vec<Op> = forward.into_iter().map(Op::Leaf).collect();
-        let inverse: Vec<Op> = backward.into_iter().map(Op::Leaf).collect();
         let record = self.history.push(
             gesture.label,
             gesture.origin,
@@ -944,14 +953,9 @@ impl DocumentStore {
             Some(g) if g.id == id => g,
             _ => return Err(TransactionError::NoSuchGesture),
         };
-        let (forward, backward) = scoped_patches(
-            gesture.base.root(),
-            self.current.root(),
-            gesture.scopes.clone(),
-        );
+        let ops = diff_node_ops(self.current.root(), gesture.base.root());
         let base_token = gesture.base_token;
-        if forward != backward {
-            let ops: Vec<Op> = backward.into_iter().map(Op::Leaf).collect();
+        if !ops.is_empty() {
             let staged = self.stage_ops(&ops, false)?;
             self.publish(
                 staged.document,
@@ -1115,6 +1119,38 @@ impl DocumentStore {
         })
     }
 
+    /// Undo and Redo: applies what still matches. A write outside history can
+    /// remove what an id-keyed operation names; that operation is skipped, as
+    /// a leaf patch without its parent is, and the entry stays usable. Only
+    /// what applied is published, so the journal replays the same result.
+    fn stage_history_ops(&self, ops: &[Op]) -> Result<Staged, TransactionError> {
+        match self.stage_ops(ops, false) {
+            Err(TransactionError::Patch(_)) => {}
+            staged => return staged,
+        }
+        let revision = self.revision() + 1;
+        let mut root = self.current.root().cloned();
+        let mut applied = Vec::with_capacity(ops.len());
+        let mut changed = false;
+        for op in ops {
+            if let Ok((next, did)) = apply_one(root.clone(), op, revision) {
+                root = next;
+                changed |= did;
+                applied.push(op.clone());
+            }
+        }
+        let document = Document::from_root(root, revision);
+        validate(&document, &applied)?;
+        Ok(Staged {
+            media: vec![],
+            document,
+            forward: applied,
+            inverse: vec![],
+            scopes: vec![],
+            changed,
+        })
+    }
+
     /// Stages raw operations (undo, redo, cancel, restore). `capture`
     /// records inverses (only `restore_project` needs them).
     fn stage_ops(&self, ops: &[Op], capture: bool) -> Result<Staged, TransactionError> {
@@ -1184,6 +1220,17 @@ impl DocumentStore {
                 forward.push(op);
             }
             inverse.reverse();
+            // An entry holds what the edit changed, not the values it replaced:
+            // a member written whole for one new layer costs that layer.
+            if forward.iter().any(writes_large_value) {
+                forward = diff_node_ops(start.as_ref(), root.as_ref());
+                inverse = diff_node_ops(root.as_ref(), start.as_ref());
+                scopes = forward
+                    .iter()
+                    .chain(&inverse)
+                    .map(|op| op.path().to_vec())
+                    .collect();
+            }
         } else {
             let mut scratch = Document::from_root(root, revision - 1);
             changed = scratch
@@ -1481,15 +1528,21 @@ impl DocumentStore {
             }
         };
         for record in self.history.records() {
-            if record.saved.is_some() {
-                let (f, b) = record.saved_patches();
+            if let Some((f, b)) = record.saved_form().filter(|_| record.saved.is_some()) {
                 for p in f.iter().chain(b.iter()) {
                     project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
                 }
             } else {
                 for op in record.forward.iter().chain(record.inverse.iter()) {
-                    if let Op::Leaf(p) = op {
-                        project_io::collect_patch_assets(p, &mut ids, &mut add_keys);
+                    match op {
+                        Op::Leaf(p) => project_io::collect_patch_assets(p, &mut ids, &mut add_keys),
+                        // A deleted layer's value is what Undo would reinsert.
+                        Op::Insert { path, value, .. } => project_io::collect_patch_assets(
+                            &Patch::set(path.clone(), value.clone()),
+                            &mut ids,
+                            &mut add_keys,
+                        ),
+                        _ => {}
                     }
                 }
             }
@@ -1830,7 +1883,9 @@ impl DocumentStore {
             .iter()
             .chain(inverse.iter())
             .any(|op| !matches!(op, Op::Leaf(_)));
-        let saved = structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
+        let saved = structural
+            .then(|| saved_form(before.root(), self.current.root(), scopes))
+            .flatten();
         let record = self
             .history
             .push(label, origin, forward, inverse, saved, self.revision());
@@ -1901,7 +1956,7 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_ops(&record.inverse, false)?;
+        let staged = self.stage_history_ops(&record.inverse)?;
         self.publish(
             staged.document,
             record.inverse.clone(),
@@ -1946,7 +2001,7 @@ impl DocumentStore {
                 label: record.label,
             });
         }
-        let staged = self.stage_ops(&record.forward, false)?;
+        let staged = self.stage_history_ops(&record.forward)?;
         self.publish(
             staged.document,
             record.forward.clone(),
@@ -2130,13 +2185,96 @@ fn same_part(a: &PathPart, b: &PathPart) -> bool {
     a.property_key() == b.property_key()
 }
 
-/// The old app's scoped history entries (`scopedPatches`): for each touched
-/// path not already covered by a shorter one, its value before and after.
-pub(crate) fn scoped_patches(
+/// The most an entry's whole-value form may hold. Past it the entry keeps its
+/// operations only: on a 180 MB project, adding a layer must cost that layer.
+pub(crate) const SAVED_FORM_BYTES: usize = 1 << 20;
+
+/// Whether `node`'s serialized size passes `budget`, which it spends. Stops as
+/// soon as it does, so the check is bounded however large the value is.
+fn spends(node: &Node, budget: &mut usize) -> bool {
+    let cost = match node.kind() {
+        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) => 8,
+        NodeKind::String(s) => s.as_bytes().len() + 2,
+        NodeKind::Array(items) => {
+            *budget = budget.saturating_sub(items.len());
+            return *budget == 0 || items.iter().any(|item| spends(item, budget));
+        }
+        NodeKind::Object(map) => {
+            for (key, value) in map.iter() {
+                *budget = budget.saturating_sub(key.as_bytes().len() + 3);
+                if *budget == 0 || spends(value, budget) {
+                    return true;
+                }
+            }
+            return *budget == 0;
+        }
+    };
+    *budget = budget.saturating_sub(cost);
+    *budget == 0
+}
+
+/// A raw write that replaces a member with a value past the same limit.
+fn writes_large_value(op: &Op) -> bool {
+    let Op::Leaf(patch) = op else { return false };
+    if patch.path.is_empty() {
+        return false;
+    }
+    fn size(value: &Value, budget: &mut usize) -> bool {
+        match value {
+            Value::Array(items) => {
+                *budget = budget.saturating_sub(items.len());
+                *budget == 0 || items.iter().any(|item| size(item, budget))
+            }
+            Value::Object(map) => map.iter().any(|(key, value)| {
+                *budget = budget.saturating_sub(key.as_bytes().len() + 3);
+                *budget == 0 || size(value, budget)
+            }),
+            Value::String(s) => {
+                *budget = budget.saturating_sub(s.as_bytes().len() + 2);
+                *budget == 0
+            }
+            _ => {
+                *budget = budget.saturating_sub(8);
+                *budget == 0
+            }
+        }
+    }
+    let mut budget = SAVED_FORM_BYTES;
+    patch.value.as_ref().is_some_and(|v| size(v, &mut budget))
+}
+
+/// [`scoped_patches`] for what a file stores, or `None` when the values are
+/// too large to keep whole; the entry then saves as operations.
+pub(crate) fn saved_form(
     before: Option<&Node>,
     after: Option<&Node>,
-    mut scopes: Vec<Vec<PathPart>>,
-) -> (Vec<Patch>, Vec<Patch>) {
+    scopes: Vec<Vec<PathPart>>,
+) -> Option<(Vec<Patch>, Vec<Patch>)> {
+    let kept = kept_scopes(scopes);
+    let mut budget = SAVED_FORM_BYTES;
+    for root in [before, after].into_iter().flatten() {
+        for path in &kept {
+            if root.lookup(path).is_some_and(|n| spends(n, &mut budget)) {
+                return None;
+            }
+        }
+    }
+    Some(scoped_patches(before, after, kept))
+}
+
+/// Whether anything changed under `scopes`, without copying what they cover.
+pub(crate) fn scopes_changed(
+    before: Option<&Node>,
+    after: Option<&Node>,
+    scopes: Vec<Vec<PathPart>>,
+) -> bool {
+    kept_scopes(scopes).iter().any(|path| {
+        let at = |root: Option<&Node>| root.and_then(|r| r.lookup(path)).cloned();
+        !diff_node_ops(at(before).as_ref(), at(after).as_ref()).is_empty()
+    })
+}
+
+fn kept_scopes(mut scopes: Vec<Vec<PathPart>>) -> Vec<Vec<PathPart>> {
     scopes.sort_by_key(Vec::len);
     let mut kept: Vec<Vec<PathPart>> = Vec::new();
     for path in scopes {
@@ -2147,6 +2285,17 @@ pub(crate) fn scoped_patches(
             kept.push(path);
         }
     }
+    kept
+}
+
+/// The old app's scoped history entries (`scopedPatches`): for each touched
+/// path not already covered by a shorter one, its value before and after.
+pub(crate) fn scoped_patches(
+    before: Option<&Node>,
+    after: Option<&Node>,
+    scopes: Vec<Vec<PathPart>>,
+) -> (Vec<Patch>, Vec<Patch>) {
+    let kept = kept_scopes(scopes);
     let mut forward = Vec::new();
     let mut backward = Vec::new();
     for path in kept {

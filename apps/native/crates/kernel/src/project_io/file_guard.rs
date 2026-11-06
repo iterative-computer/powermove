@@ -228,12 +228,17 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
             Box::new(records[history.applied()..].iter())
         };
         for record in steps {
-            let (forward, backward) = record.saved_patches();
-            if state
-                .apply_patches(if undo { &backward } else { &forward }, root.rev())
-                .is_err()
-                || project_needs_native(&state)
-            {
+            let ops = if undo {
+                &record.inverse
+            } else {
+                &record.forward
+            };
+            let mut replay = pm_model::Document::from_root(Some(state), root.rev());
+            if replay.apply_ops_at(ops, root.rev() + 1).is_err() {
+                return true;
+            }
+            state = replay.root().expect("replayed project").clone();
+            if project_needs_native(&state) {
                 return true;
             }
         }
