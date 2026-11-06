@@ -81,6 +81,17 @@ seen.set(
   "legacy/core/pure-util.ts",
   `/* Pure math and time helpers of legacy/core/util.ts. */\nexport function install(PM: any): void {\n${slice("/* ── math", "PM.uid =")}${slice("/* Colours are", "/* ── event bus")}}\n`,
 );
+const shaders = (await read("legacy/gl/shaders.ts"))!;
+const literal = (from: string) => {
+  const start = shaders.indexOf("`", shaders.indexOf(from)) + 1;
+  const end = shaders.indexOf("`", start);
+  if (!start || end < 0) throw Error(`Unsupported shader source: ${from}`);
+  return JSON.stringify(shaders.slice(start, end));
+};
+seen.set(
+  "legacy/gl/shader-prelude.ts",
+  `/* The effect and shader-layer preambles of legacy/gl/shaders.ts. */\nexport const GLSL_PRE = ${literal("const PRE = `")};\nexport const SHADER_HEADER = ${literal("PM.SHADER_HEADER = `")};\n`,
+);
 await Bun.$`rm -rf ${target}`;
 for (const [file, text] of seen)
   await Bun.write(join(target, file), text);

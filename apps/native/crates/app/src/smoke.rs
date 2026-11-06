@@ -105,6 +105,7 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                 comp,
                 media: media.export_paths(false),
                 content: p.snapshot.doc_id,
+                definitions: Default::default(),
             };
             let size = Size::new(320, 180);
             for seconds in [0., duration / 2.] {

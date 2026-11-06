@@ -4,6 +4,7 @@
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2::MainThreadMarker;
+use pm_engine_service::resources::ResourceSnapshot;
 use pm_compat_host::{
     DomPanelHost, Error as PageError, HostEvent, MacDomHost, PanelSlot, PanelSpec, Rect,
     RequestContext, Result as PageResult, StoreDataStores, SyncHandler, Trust,
@@ -77,6 +78,8 @@ pub struct Extensions {
     placed: BTreeMap<String, layout::Rect>,
     seen: u64,
     commands: BTreeSet<String>,
+    /// Contributed definitions, pinned per generation for viewers and exports.
+    pub resources: Arc<ResourceSnapshot>,
 }
 impl Extensions {
     pub fn owns_panel(&self, id: &str) -> bool {
@@ -222,7 +225,30 @@ impl Controller {
         shell.contributed_choices = choices;
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
+        let definitions: Vec<_> = value["definitions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
+            .collect();
+        if definitions != self.extensions.resources.definitions {
+            self.extensions.resources = Arc::new(ResourceSnapshot {
+                generation: self.extensions.resources.generation + 1,
+                definitions,
+                ..Default::default()
+            });
+            self.apply_extension_resources();
+        }
+        self.update_builtins(cx);
         cx.notify();
+    }
+    /// Every live viewer renders the same contributed definitions.
+    pub fn apply_extension_resources(&mut self) {
+        if let Some(viewer) = &self.viewer
+            && let Err(error) = viewer.resources(self.extensions.resources.clone())
+        {
+            self.message = error.to_string();
+        }
     }
     pub fn extension_command(&mut self, cmd: &ShellCommand) -> bool {
         let Some(id) = cmd.name.strip_prefix(COMMAND) else {

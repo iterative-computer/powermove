@@ -1020,6 +1020,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 comp: v.config.composition.clone(),
                 media: v.config.media.export_paths(false),
                 content: v.content,
+                definitions: v.resources.clone(),
             };
             cursor = id;
             work = Some((

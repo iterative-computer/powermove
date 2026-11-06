@@ -123,6 +123,10 @@ impl Effects {
         let current = self
             .get(DefinitionKind::Effect, id)
             .ok_or_else(|| format!("missing effect provider {id}"))?;
+        // Contributions carry their own program; the frozen history is the built-ins'.
+        if current.origin != DefinitionOrigin::BuiltIn {
+            return Ok(id.into());
+        }
         let registered = main_catalog()
             .current(id)
             .ok_or_else(|| format!("unversioned provider history unavailable for {id}"))?;

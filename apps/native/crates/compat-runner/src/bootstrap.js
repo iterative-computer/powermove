@@ -344,7 +344,17 @@ globalThis.__compat = {
           side: item.side,
         })),
       theme: kernel.theme.activeId,
+      definitions: this.definitions(),
     };
+  },
+  /** A definition the generators refuse never stops the others publishing. */
+  definitions() {
+    try {
+      return PowermoveCompat.definitionSnapshots(this.realm.kernel);
+    } catch (error) {
+      this.errors.push({ name: error?.name, message: error?.message });
+      return [];
+    }
   },
   publishContributions() {
     runtime.engine("contributions.publish", { value: this.contributions() });

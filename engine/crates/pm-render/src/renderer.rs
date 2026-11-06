@@ -519,7 +519,22 @@ impl Renderer {
     /// Install the pinned native current and historical built-in programs.
     /// File provenance is carried outside authored JSON and frozen per job.
     pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
-        let set = crate::effects::versions::for_document(document);
+        self.set_document_effects(document, &[])
+    }
+
+    /// The pinned programs plus contributed definitions. A contribution with a
+    /// built-in id replaces it, as an extension override does in the registry.
+    pub fn set_document_effects(
+        &mut self,
+        document: &Document,
+        contributed: &[pm_protocol::definitions::DefinitionSnapshot],
+    ) -> Result<(), String> {
+        let mut set = crate::effects::versions::for_document(document);
+        for definition in contributed {
+            set.definitions
+                .retain(|d| (d.kind, &d.id) != (definition.kind, &definition.id));
+            set.definitions.push(definition.clone());
+        }
         let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
         if !failures.is_empty() {
             return Err(format!("effect definition failures: {failures:?}"));

@@ -6,6 +6,10 @@ pub struct ResourceSnapshot {
     pub generation: u64,
     pub extension_generations: std::collections::BTreeMap<String, u64>,
     pub project_fonts: Vec<String>,
+    /// Effects, transitions and layers contributed by extensions, frozen with
+    /// this generation so a frame or export job never sees a later registration.
+    #[serde(default)]
+    pub definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
 }
 impl ResourceSnapshot {
     pub fn validate(&self) -> anyhow::Result<()> {

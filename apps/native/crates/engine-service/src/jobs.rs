@@ -259,6 +259,7 @@ pub fn run_child() -> Result<()> {
     let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
     let worker_cancel = cancel.clone();
+    let definitions = request.resources.definitions.clone();
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
         let cancel = worker_cancel;
         let gate = ChildGate(Mutex::new(permits));
@@ -295,7 +296,7 @@ pub fn run_child() -> Result<()> {
         }
         let mut renderer = pm_render::Renderer::headless()?;
         renderer
-            .set_main_effects_for_document(&doc)
+            .set_document_effects(&doc, &definitions)
             .map_err(anyhow::Error::msg)?;
         #[cfg(feature = "kernel")]
         crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);

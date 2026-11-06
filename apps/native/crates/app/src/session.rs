@@ -698,6 +698,7 @@ impl Controller {
             Ok(viewer) => self.viewer = Some(viewer),
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
+        self.apply_extension_resources();
     }
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
         let current = self.mcp.current();

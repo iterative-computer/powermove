@@ -2,6 +2,7 @@
 export { CompatRealm, EditGesture } from "./realm";
 export { CompatPanels } from "./panels";
 export { connectControlState } from "./control-state";
+export { definitionSnapshots } from "./definitions";
 export type { RealmOptions } from "./realm";
 export type { ExtensionOptions, ExtensionHandle } from "./extensions";
 export { HostChannel, HostError } from "./channel";

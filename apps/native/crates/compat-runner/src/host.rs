@@ -9,7 +9,10 @@ use crate::{
     transport::{Transport, TransportOwner},
 };
 use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
-use pm_kernel::{KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer};
+use pm_kernel::{
+    KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
+    state::{Registration, StateOp, StateTransaction},
+};
 use pm_remote_dom::{TrySink, protocol::Session};
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
@@ -18,14 +21,15 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread,
     time::{Duration, Instant},
 };
 
-const REALM_ID: u32 = 2;
+/// Every host gets its own kernel writer; one window's retirement is its own.
+static NEXT_REALM: AtomicU32 = AtomicU32::new(1000);
 const PANEL: u64 = 1;
 const GENERATION: u32 = 1;
 /// A realm that fails this often in one session stays off until reopened.
@@ -84,8 +88,45 @@ impl Shared {
     }
 }
 
+/// Native surfaces read these registries: Effects, Properties, MCP and the kernel's
+/// layer commands see a contribution exactly as they see a built-in.
+fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
+    let mut ops = vec![StateOp::DisposeOwner { owner }];
+    for (kind, registry) in [
+        ("effects", "effects"),
+        ("transitions", "transitions"),
+        ("layers", "layerTypes"),
+        ("panels", "panels"),
+        ("commands", "commands"),
+        ("inspector", "inspectorSections"),
+        ("themes", "themes"),
+        ("status", "status"),
+    ] {
+        for item in value[kind].as_array().into_iter().flatten() {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let Ok(definition) = pm_model::json::parse(&item.to_string()) else {
+                continue;
+            };
+            ops.push(StateOp::Register {
+                registry: registry.into(),
+                entry: Registration {
+                    token: format!("{}.{}.{registry}.{id}", owner.realm, owner.generation),
+                    owner,
+                    id: id.into(),
+                    definition,
+                },
+            });
+        }
+    }
+    ops
+}
+
 struct Events {
     shared: Arc<Shared>,
+    kernel: KernelHandle,
+    writer: Writer,
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
     activating: Mutex<Option<String>>,
@@ -105,7 +146,12 @@ impl RealmEvents for Arc<Events> {
         self.shared.update(|p| p.toasts.push(text));
     }
     fn contributions(&self, value: Value) {
-        self.shared.update(|p| p.contributions = Some(Arc::new(value)));
+        let _ = self.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: registrations(&value, self.writer),
+        });
+        self.shared
+            .update(|p| p.contributions = Some(Arc::new(value)));
     }
     fn dom_ready(&self) {
         if !self.dom_pending.swap(true, Ordering::AcqRel) {
@@ -152,9 +198,14 @@ impl ExtensionHost {
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicBool::new(false));
+        let writer = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
         forward_kernel(&config.kernel, inbox.clone());
-        forward_mailbox(&config.kernel, inbox.clone());
+        forward_mailbox(&config.kernel, writer, inbox.clone());
         let owner = Owner {
+            writer,
             shared: shared.clone(),
             inbox: inbox.clone(),
             transport: transport.clone(),
@@ -276,11 +327,8 @@ fn forward_kernel(kernel: &KernelHandle, inbox: Sender<Input>) {
         }
     });
 }
-fn forward_mailbox(kernel: &KernelHandle, inbox: Sender<Input>) {
-    let mailbox = kernel.register_realm(Writer {
-        realm: REALM_ID,
-        generation: GENERATION,
-    });
+fn forward_mailbox(kernel: &KernelHandle, writer: Writer, inbox: Sender<Input>) {
+    let mailbox = kernel.register_realm(writer);
     thread::spawn(move || {
         while let Ok(envelope) = mailbox.recv() {
             if inbox.send(Input::Realm(envelope)).is_err() {
@@ -297,6 +345,7 @@ struct Live {
     events: Arc<Events>,
 }
 struct Owner {
+    writer: Writer,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -340,6 +389,10 @@ impl Owner {
             live.realm.close();
         }
         *self.transport.lock().unwrap() = None;
+        let _ = self.config.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::DisposeOwner { owner: self.writer }],
+        });
     }
     fn eval(&mut self, source: &str) {
         let Some(live) = &self.realm else { return };
@@ -539,6 +592,8 @@ impl Owner {
     fn start_realm(&mut self) -> Result<()> {
         let events = Arc::new(Events {
             shared: self.shared.clone(),
+            kernel: self.config.kernel.clone(),
+            writer: self.writer,
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
             dom_pending: AtomicBool::new(false),
@@ -547,7 +602,7 @@ impl Owner {
             self.config.kernel.clone(),
             &self.config.project,
             crate::PROJECT,
-            REALM_ID,
+            self.writer.realm,
         );
         let transport = Transport::new(self.config.owner.take());
         let host = Arc::new(NativeHost::new(adapter, transport, Box::new(events.clone())));
@@ -814,6 +869,34 @@ mod tests {
             .unwrap();
         assert!(matches!(ack.reply, Reply::Bool(true)));
         assert_eq!(fixture.name(), "Synthetic extension check");
+    }
+    #[test]
+    fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'synthetic.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:2,def:1},{k:'color',label:'Color',type:'color',def:'#ff0000'}],frag:'o = src(v_uv) * u_amount;'})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let state = fixture.kernel.state();
+        let provider = state.provider("effects", "synthetic.tint").unwrap();
+        assert_eq!(provider.definition.get("label").unwrap().as_str(), Some("Tint"));
+        let contributions = fixture.host.contributions().unwrap();
+        let definition: pm_protocol::definitions::DefinitionSnapshot =
+            serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
+        let glsl = definition.glsl.unwrap();
+        assert!(glsl.source.starts_with("#version 300 es"));
+        assert!(glsl.source.contains("uniform float u_amount;"));
+        assert!(glsl.source.contains("uniform vec3 u_color;"));
+        assert_eq!(
+            glsl.source.lines().nth(glsl.body_line_offset as usize),
+            Some("o = src(v_uv) * u_amount;")
+        );
     }
     #[test]
     fn one_bad_extension_leaves_the_others_running() {

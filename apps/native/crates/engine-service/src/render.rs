@@ -23,6 +23,7 @@ pub struct Scene {
     pub comp: String,
     pub media: pm_export::render::MediaPaths,
     pub content: u64,
+    pub definitions: Arc<crate::resources::ResourceSnapshot>,
 }
 pub fn metal_device(gpu: &Gpu) -> metal::Device {
     // HAL owns +1; to_owned retains a separate +1 for metal 0.33 and GPUI.
@@ -127,7 +128,7 @@ impl Engine {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
         if self.studio_content != Some(key) {
             self.renderer
-                .set_main_effects_for_document(&scene.doc)
+                .set_document_effects(&scene.doc, &scene.definitions.definitions)
                 .map_err(anyhow::Error::msg)?;
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), &scene.media);
@@ -484,6 +485,7 @@ mod lifetime_tests {
             comp: "C001".into(),
             media: Default::default(),
             content: 1,
+            definitions: Default::default(),
         };
         // Use the fixture's real composition id, independent of its display name.
         let value = scene.doc.to_value().unwrap();
@@ -533,6 +535,73 @@ mod lifetime_tests {
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
     }
     #[test]
+    fn a_contributed_effect_changes_rendered_pixels_through_its_snapshot() {
+        use pm_protocol::definitions::{
+            DefinitionFlags, DefinitionKind, DefinitionOrigin, DefinitionSnapshot, ParamSpec,
+            WrappedGlsl,
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        value["layers"][0]["fx"] = serde_json::json!([{
+            "id":"fx1","type":"synthetic.black","version":1,"on":true,
+            "p":{"amount":{"v":1,"kf":[],"expr":null}}
+        }]);
+        let body = "o = vec4(0.0, 0.0, 0.0, src(v_uv).a * u_amount);";
+        let source = format!(
+            "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvec4 src(vec2 uv){{return texture(u_tex,uv);}}\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"
+        );
+        let definition = DefinitionSnapshot {
+            id: "synthetic.black".into(),
+            kind: DefinitionKind::Effect,
+            version: 0,
+            origin: DefinitionOrigin::Local,
+            renderer: None,
+            glsl: Some(WrappedGlsl {
+                body_line_offset: 8,
+                body_utf16_len: body.len() as u32,
+                body_utf8_len: body.len() as u32,
+                source,
+            }),
+            params: vec![ParamSpec::Number {
+                key: "amount".into(),
+                default: 1.,
+                min: 0.,
+                max: 1.,
+                step: None,
+            }],
+            flags: DefinitionFlags::default(),
+        };
+        let scene = |value: &serde_json::Value, definitions| {
+            let parsed = pm_model::json::parse(&value.to_string()).unwrap();
+            let comp = parsed.get("compId").unwrap().as_str().unwrap().to_owned();
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(parsed)),
+                    1,
+                )),
+                comp,
+                media: Default::default(),
+                content: 1,
+                definitions: Arc::new(crate::resources::ResourceSnapshot {
+                    definitions,
+                    ..Default::default()
+                }),
+            }
+        };
+        let size = Size::new(160, 90);
+        let mut plain: serde_json::Value = value.clone();
+        plain["layers"][0]["fx"] = serde_json::json!([]);
+        let mut engine = Engine::new(Gpu::new("contributed-effect").unwrap()).unwrap();
+        let before = engine
+            .export(&scene(&plain, vec![]), Ticks::ZERO, size)
+            .unwrap();
+        let mut engine = Engine::new(Gpu::new("contributed-effect-after").unwrap()).unwrap();
+        let after = engine
+            .export(&scene(&value, vec![definition]), Ticks::ZERO, size)
+            .unwrap();
+        assert_ne!(before, after, "the contributed program drew");
+    }
+    #[test]
     fn encoded_hdr_outputs_match_independent_f64_reference() {
         use crate::color::{self, Mastering};
         use pm_color::tonemap::{hlg_oetf, pq_eotf, pq_inverse_eotf};
@@ -547,6 +616,7 @@ mod lifetime_tests {
             comp,
             media: Default::default(),
             content: 1,
+            definitions: Default::default(),
         };
         let size = Size::new(160, 90);
         let reference = engine.export(&scene, Ticks::ZERO, size).unwrap();
