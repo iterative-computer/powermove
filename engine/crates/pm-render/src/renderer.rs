@@ -627,7 +627,25 @@ impl Renderer {
     /// Install the pinned native current and historical built-in programs.
     /// File provenance is carried outside authored JSON and frozen per job.
     pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
-        let set = crate::effects::versions::for_document(document);
+        self.set_main_effects_with(document, &[])
+    }
+
+    /// [`Renderer::set_main_effects_for_document`] plus the effect,
+    /// transition and layer definitions extensions registered: each replaces
+    /// any definition of its kind and id (the kernel's registry already chose
+    /// the winner), so a fork of a built-in renders as the fork.
+    pub fn set_main_effects_with(
+        &mut self,
+        document: &Document,
+        extensions: &[pm_protocol::definitions::DefinitionSnapshot],
+    ) -> Result<(), String> {
+        let mut set = crate::effects::versions::for_document(document);
+        for d in extensions {
+            set.definitions
+                .retain(|b| b.kind != d.kind || b.id != d.id);
+            set.missing.retain(|m| *m != d.id);
+            set.definitions.push(d.clone());
+        }
         let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
         if !failures.is_empty() {
             return Err(format!("effect definition failures: {failures:?}"));

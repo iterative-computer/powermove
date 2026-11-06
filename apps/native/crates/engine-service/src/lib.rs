@@ -825,6 +825,7 @@ struct Work {
     capture: bool,
     due: Option<f64>,
     mastering: color::Mastering,
+    resources: Arc<resources::ResourceSnapshot>,
     input: Option<f64>,
     pipeline: trace::Pipeline,
     audio_host: Option<f64>,
@@ -1278,6 +1279,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 capture: std::mem::take(&mut v.capture),
                 due,
                 mastering: v.mastering,
+                resources: v.resources.clone(),
                 input: v.input.take(),
                 pipeline: v.pipeline,
                 audio_host: r
@@ -1313,6 +1315,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             capture,
             due,
             mastering,
+            resources,
             input,
             pipeline,
             audio_host,
@@ -1328,6 +1331,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 ..Default::default()
             }));
             engine.mastering = mastering;
+            engine.set_resources(resources);
             let landed_before = engine.media_landed();
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))

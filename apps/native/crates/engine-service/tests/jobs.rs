@@ -267,3 +267,43 @@ fn child_exports_prores_422_hevc_10_bit_and_16_bit_png() {
         assert!(source.info.bit_depth >= depth, "{name}: {:?}", source.info);
     }
 }
+
+/// The export child installs the extension definitions its request pins.
+#[test]
+fn child_export_renders_extension_effects_from_its_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("ext.png");
+    let mut request = request(destination.clone(), 1);
+    let mut document: serde_json::Value = serde_json::from_str(&request.document).unwrap();
+    for comp in document["comps"].as_object_mut().unwrap().values_mut() {
+        for layer in comp["layers"].as_array_mut().unwrap() {
+            layer["fx"] = serde_json::json!([{"id":"e1","type":"ext.invert","on":true,"p":{}}]);
+        }
+    }
+    request.document = document.to_string();
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::PngStill { sixteen_bit: false };
+    settings.range.end = Ticks::new(settings.range.start.get() + 1).unwrap();
+    let run = |request: ExportRequest| {
+        ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+            .unwrap()
+            .wait()
+            .unwrap()
+    };
+    let without = run(serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap());
+    assert_eq!(without.state, JobState::Failed, "an unknown effect never exports silently");
+    let mut invert = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    invert.id = "ext.invert".into();
+    invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    request.resources.generation = 1;
+    request.resources.definitions = vec![invert];
+    let status = run(request);
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    assert!(destination.is_file());
+}

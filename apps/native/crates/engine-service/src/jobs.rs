@@ -337,7 +337,7 @@ pub fn run_child() -> Result<()> {
         }
         let mut renderer = pm_render::Renderer::headless()?;
         renderer
-            .set_main_effects_for_document(&doc)
+            .set_main_effects_with(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
         #[cfg(feature = "kernel")]
         crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);

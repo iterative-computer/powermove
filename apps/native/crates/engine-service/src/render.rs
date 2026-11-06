@@ -149,6 +149,7 @@ pub struct Engine {
     lost: Arc<AtomicBool>,
     /// Wakes an idle worker when the device is lost ([`Engine::set_waker`]).
     waker: Waker,
+    resources: Arc<crate::resources::ResourceSnapshot>,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -176,6 +177,7 @@ impl Engine {
     pub fn rebuild(&self) -> Result<Self> {
         let mut next = Self::new(Gpu::new("pm-engine-service").map_err(|e| anyhow!("{e}"))?)?;
         next.set_waker(self.waker.lock().unwrap().clone());
+        next.resources = self.resources.clone();
         next.mastering = self.mastering;
         next.cache_enabled = self.cache_enabled;
         if let Some(fonts) = &self.fonts {
@@ -264,6 +266,7 @@ impl Engine {
             studio_content: None,
             lost,
             waker,
+            resources: Arc::default(),
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -303,11 +306,20 @@ impl Engine {
             scene.media.as_ref(),
         );
     }
+    /// The extension definitions the next frames render with (the viewer's
+    /// pinned resource snapshot). A new snapshot installs them again.
+    pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
+        if !Arc::ptr_eq(&self.resources, &resources) {
+            self.resources = resources;
+            self.studio_content = None;
+            self.cache.clear();
+        }
+    }
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
         if self.studio_content != Some(key) {
             self.renderer
-                .set_main_effects_for_document(&scene.doc)
+                .set_main_effects_with(&scene.doc, &self.resources.definitions)
                 .map_err(|e| {
                     if e.contains("compiler-busy") {
                         anyhow::Error::new(CompilerBusy)

@@ -365,3 +365,57 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     assert_eq!(both.proxied(MediaMode::ProxyPreferred), 1);
     assert_eq!(both.export_paths(false).paths["a"].to_str(), Some("/original.mov"));
 }
+
+/// An extension's effect, given by the resource snapshot the compat runtime
+/// publishes, renders natively; without the snapshot the layer is reported.
+#[test]
+fn extension_effects_from_the_resource_snapshot_render_natively() {
+    let tinted = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("extension-effects");
+    let v = service
+        .viewer(config(tinted, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    let settled = |v: &Viewer, why: &str| {
+        v.capture_next().unwrap();
+        let stamp = v.stamp().unwrap();
+        wait(v, why, |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+        })
+    };
+    let missing = settled(&v, "without the extension");
+    assert!(
+        missing.layer_failures.iter().any(|f| f.layer == "top") || missing.error.is_some(),
+        "an unknown effect is reported, never skipped: {missing:?}"
+    );
+    let mut invert = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    invert.id = "ext.invert".into();
+    invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    v.resources(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+        generation: 1,
+        definitions: vec![invert],
+        ..Default::default()
+    }))
+    .unwrap();
+    let drawn = settled(&v, "with the extension");
+    assert_eq!(drawn.error, None);
+    assert!(drawn.layer_failures.is_empty(), "{:?}", drawn.layer_failures);
+    let centre = drawn.frame.unwrap().pixels.unwrap()[90 * 320 + 160];
+    // Viewer pixels are linear Display P3: sRGB cyan is (0.18, 0.97, 0.98).
+    assert!(
+        centre[0] < 0.25 && centre[1] > 0.9 && centre[2] > 0.9,
+        "inverted red is cyan: {centre:?}"
+    );
+}
