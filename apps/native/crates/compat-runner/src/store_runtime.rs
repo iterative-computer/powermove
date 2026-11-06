@@ -781,21 +781,6 @@ mod tests {
             store_method_policy().unwrap(),
             dispatch.clone(),
         ));
-        let entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/store-bundle.ts");
-        let built = std::process::Command::new("bun")
-            .args([
-                "build",
-                entry.to_str().unwrap(),
-                "--target=browser",
-                "--format=iife",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "{}",
-            String::from_utf8_lossy(&built.stderr)
-        );
         let executable = std::env::var_os("PM_STORE_HELPER_BIN")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -810,7 +795,7 @@ mod tests {
         let runner = StoreCompatRunner::new(
             &executable,
             host.clone(),
-            std::str::from_utf8(&built.stdout).unwrap(),
+            crate::STORE_BUNDLE,
             &init,
         )
         .unwrap();
@@ -860,22 +845,7 @@ mod tests {
     fn frozen_store_facade_runs_in_confined_helper_and_private_storage_survives_helper_replacement()
     {
         let (_kernel, host, _dispatch, init) = fixture();
-        let entry = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/store-bundle.ts");
-        let built = std::process::Command::new("bun")
-            .args([
-                "build",
-                entry.to_str().unwrap(),
-                "--target=browser",
-                "--format=iife",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "frozen Store facade must build: {}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-        let bundle = String::from_utf8(built.stdout).unwrap();
+        let bundle = crate::STORE_BUNDLE;
         let executable = std::env::var_os("PM_STORE_HELPER_BIN")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {

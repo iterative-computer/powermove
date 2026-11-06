@@ -51,13 +51,40 @@ that was activating; two restarts in one session stop the realm until the projec
 reopens. Kernel edits were sealed by then. A fatal V8 process abort is not contained:
 the trusted realm is in-process, by decision 5.
 
+## Native answers
+
+Menus, sheets and links belong to AppKit, so the realm asks and carries on. A
+request reaches `Controller::extension_request` on the main thread and its answer
+returns through the host's inbox, resolving the realm's promise or running the menu
+item's closure. `ui.confirm`, `ui.menu`, `ui.openExternal`, `panels.open` and
+`panel:context` contributions take this path. A tab menu waits 150 ms for
+contributions, then opens without them.
+
+`api.storage` is the kernel's `ext.<id>` settings, the keys the shipped app wrote,
+so values survive a restart and are read by a later window.
+
+A panel whose definition disappears leaves the layout and returns if the id is
+registered again, as in the shipped app. The kernel's workspace record is not
+touched: native layout lives in the shell.
+
+## Store
+
+Each Store extension gets a confined helper and its own WebKit document. Panels are
+built in the helper against a remote DOM; only batches reach the page. The palette's
+Install Extension from Store lists the first catalog page, and choosing a release
+runs `store_install` off the main thread. No release verifies until the Store signs
+them: see [store-host.md](store-host.md).
+
 ## Known limits
 
-- Raster overrides do not reach the viewer: `render.raster`, `renderFrameTo` and
-  `snapshot` have no engine backend, so `services.get('raster')` wrappers run
-  only when called directly.
+- `render.raster`, `renderFrameTo` and `snapshot` have no engine backend, and raster
+  overrides do not reach the viewer.
 - `api.services` holds only what extensions register; the built-in `viewer`,
   `timeline`, `inspector`, `tool` and `shaderHooks` services do not exist natively.
+- `ui.modal` and `PM.Fonts` throw `Unavailable`.
+- `layer:context`, `timeline:context` and `viewer:context` have nowhere to appear,
+  because those native surfaces have no context menus. `titlebar:right` has no host.
+- Contributed layer types render and label their timeline row, but their parameters
+  have no Properties rows until per-kind controls are designed.
 - Layout reads in the realm are cached from the last page report (`remote-dom.md`).
-- Menu contributions are collected but no native context menu shows them.
-- Store views have no WebKit host.
+- Store panels have no recorder canvases, and `ui.*` from a helper is not attached.

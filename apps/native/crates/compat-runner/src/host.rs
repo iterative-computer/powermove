@@ -1445,14 +1445,22 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         // A native undo reaches the same mirror.
-        let ack = fixture
-            .kernel
-            .call_blocking(
-                "window",
-                Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
-            )
-            .unwrap();
-        assert!(matches!(ack.reply, Reply::Bool(true)));
+        // The name publishes before the extension's history entry closes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+                )
+                .unwrap();
+            if matches!(ack.reply, Reply::Bool(true)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "undo stayed refused");
+            thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(fixture.name(), "Synthetic extension check");
     }
     #[test]

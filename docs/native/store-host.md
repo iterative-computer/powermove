@@ -98,9 +98,10 @@ pretending a new publisher signature existed.
 `pm-compat-runner` runs this design: `store_host` adopts an install the shipped app
 made (the `.powermove-store.json` marker) as a release with legacy provenance, and
 starts it in its own confined helper. Its effects, transitions, layers, themes,
-status items and commands land in the kernel registries; effects reach the engine
-with `origin: store`. `store_install` is the new-install client. Views are not
-hosted yet: `panels.register` from a Store helper has no WebKit host.
+status items, panels and commands land in the kernel registries; effects reach the
+engine with `origin: store`. Panels build in the helper's remote DOM and draw in a
+dedicated `MacDomHost::new_store_remote_dom` page. `store_install` is the new-install
+client.
 
 ### What the Store server has to publish
 
