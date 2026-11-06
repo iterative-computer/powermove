@@ -51,6 +51,9 @@ globalThis.__compat = {
       : undefined;
     const capabilities = {
       ui: { controls: PowermoveCompat.controls },
+      assets: {
+        get: (id) => this.realm.PM.proj.assets?.[id],
+      },
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
           (name) => [
@@ -73,6 +76,30 @@ globalThis.__compat = {
           this.controls?.sync();
           this.dom?.flush();
           call("presentation.invalidate");
+        },
+        GL: {
+          bounds: (layer, time) =>
+            host.query("engine.bounds", {
+              layer: layer?.id,
+              time: time ?? this.realm.PM.time,
+            }),
+          pick: (x, y, time) =>
+            host.query("engine.pick", {
+              x,
+              y,
+              time: time ?? this.realm.PM.time,
+            }),
+          compileError: () => null,
+          previewViewport: null,
+          canvas: null,
+          init: () => null,
+          resize: () => undefined,
+        },
+        assets: {
+          get: (id) => this.realm.PM.proj.assets?.[id],
+          add: () => {
+            throw Error("Import media from the Project panel");
+          },
         },
         store: {
           get: (key, fallback) => storage[key] ?? fallback,

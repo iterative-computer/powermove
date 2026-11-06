@@ -45,7 +45,7 @@ const candidates = (file: string) =>
     ? [file, `${file}.ts`]
     : [`${file}.ts`, `${file}.svelte.ts`, `${file}/index.ts`];
 const imports =
-  /(?:^|\n)\s*(?:import|export)\s+(type\s+)?[^'"\n;]*?from\s+['"]([^'"]+)['"]|(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g;
+  /(?:^|\n)\s*(?:import|export)\s+(type\s+)?[^'";]*?from\s+['"]([^'"]+)['"]|(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g;
 const seen = new Map<string, string>();
 const queue = [...entries];
 while (queue.length) {
@@ -68,6 +68,39 @@ while (queue.length) {
         break;
       }
     if (!found) throw Error(`Cannot resolve ${specifier} from ${file}`);
+  }
+}
+const model = (await read("legacy/core/model.ts"))!;
+const media = (await read("legacy/core/media.ts"))!;
+const blockOf = (text: string, from: string) => {
+  const start = text.indexOf(from);
+  if (start < 0) throw Error(`Unsupported source: ${from}`);
+  let depth = 0;
+  for (let at = text.indexOf("{", start); at < text.length; at++) {
+    if (text[at] === "{") depth++;
+    else if (text[at] === "}" && --depth === 0) return text.slice(start, at + 1);
+  }
+  throw Error(`Unterminated source: ${from}`);
+};
+seen.set(
+  "legacy/core/pure-model.ts",
+  `/* Selection and media timing of legacy/core/model.ts and media.ts. */\nimport { resolveContent } from "./content-properties";\nimport { clipCuesToEnd, rebaseCuesForStart } from "../../captions/model";\nimport { timelineService } from "./services";\nimport type { PMRegistry } from "../registry";\n${blockOf(model, "export function selectLayers")}\nexport function installMediaTiming(PM: any): void {\n${blockOf(media, "PM.MediaTiming = {")};\n}\n`,
+);
+queue.push("captions/model.ts", "legacy/core/services.ts", "legacy/registry.ts");
+while (queue.length) {
+  const file = queue.pop()!;
+  if (seen.has(file)) continue;
+  const text = await read(file);
+  if (text === null) throw Error(`Cannot read frozen ${file}`);
+  seen.set(file, text);
+  for (const match of text.matchAll(imports)) {
+    if (match[1] || !(match[2] ?? match[3])!.startsWith(".")) continue;
+    const resolved = normalize(join(dirname(file), (match[2] ?? match[3])!));
+    for (const candidate of candidates(resolved))
+      if (seen.has(candidate) || (await read(candidate)) !== null) {
+        queue.push(candidate);
+        break;
+      }
   }
 }
 const util = (await read("legacy/core/util.ts"))!;

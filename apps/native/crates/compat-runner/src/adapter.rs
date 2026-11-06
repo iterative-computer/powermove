@@ -2,8 +2,8 @@
 //! document: a reply carries a document only when its revision moved, and then
 //! as operations against the last one sent, or whole when those can't express it.
 use pm_kernel::{
-    Ack, Call, Caller, Direction, EditCall, HistoryCall, KernelHandle, Origin, Published, Reply,
-    Request, SelectionCall, WorkspaceCall, WriteBody,
+    Ack, Call, Caller, Direction, EditCall, HistoryCall, KernelHandle, Origin, Published,
+    QueryMirror, Reply, Request, SelectionCall, WorkspaceCall, WriteBody,
 };
 use pm_model::{Op, PathPart, canonical};
 use pm_runtime_v8::{Error, Result};
@@ -102,6 +102,7 @@ pub struct KernelAdapter {
     pins: BTreeSet<String>,
     replies: BTreeMap<u64, (Value, Value)>,
     mutations: u64,
+    mirror: Option<(u64, QueryMirror)>,
 }
 impl KernelAdapter {
     pub fn new(kernel: KernelHandle, project: &str, realm: &str, realm_id: u32) -> Self {
@@ -116,6 +117,7 @@ impl KernelAdapter {
             pins: BTreeSet::new(),
             replies: BTreeMap::new(),
             mutations: 0,
+            mirror: None,
         }
     }
     fn published(&self) -> Result<Arc<Published>> {
@@ -406,6 +408,28 @@ impl KernelAdapter {
             .into(),
             "history.cancel" => HistoryCall::Cancel.into(),
             "history.rollback" => HistoryCall::Rollback.into(),
+            "history.selection" => {
+                let side = |key: &str| {
+                    let strings = |field: &str| {
+                        args[key][field]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    };
+                    pm_kernel::Selection::from_parts(
+                        strings("layers"),
+                        strings("keys"),
+                        args[key]["chan"].as_str().map(str::to_owned),
+                    )
+                };
+                HistoryCall::Selection {
+                    before: side("before"),
+                    after: side("after"),
+                }
+                .into()
+            }
             "history.undo" => HistoryCall::Undo.into(),
             "history.redo" => HistoryCall::Redo.into(),
             "history.clear" => HistoryCall::Clear.into(),
@@ -516,11 +540,44 @@ impl KernelAdapter {
         };
         self.execute(txid, call)
     }
+    /// Geometry answers from a query mirror at the published revision.
     pub fn query(&mut self, input: &Value) -> Result<Value> {
-        Err(Error::Host(format!(
-            "{} is not attached",
-            input["method"].as_str().unwrap_or("query")
-        )))
+        let p = self.published()?;
+        let mirror = match &mut self.mirror {
+            Some(mirror) if mirror.0 == p.snapshot.doc_id => {
+                mirror.1.sync(&p);
+                &mut mirror.1
+            }
+            slot => &mut slot.insert((p.snapshot.doc_id, QueryMirror::new(&p))).1,
+        };
+        let args = &input["args"];
+        let time = args["time"].as_f64().unwrap_or(0.);
+        let open = p.snapshot.open_comp();
+        match input["method"].as_str() {
+            Some("engine.bounds") => {
+                let layer = args["layer"]
+                    .as_str()
+                    .ok_or(Error::Invalid("layer id"))?;
+                let bounds = mirror.queries().bounds(open.as_deref(), layer, time);
+                Ok(bounds.ok().flatten().map_or(Value::Null, |b| {
+                    json!({"x0":b.x0,"y0":b.y0,"x1":b.x1,"y1":b.y1,"w":b.w,"h":b.h,"ax":b.ax,"ay":b.ay})
+                }))
+            }
+            Some("engine.pick") => {
+                let hit = mirror.queries().pick(
+                    open.as_deref(),
+                    args["x"].as_f64().ok_or(Error::Invalid("pick x"))?,
+                    args["y"].as_f64().ok_or(Error::Invalid("pick y"))?,
+                    time,
+                    &Default::default(),
+                );
+                Ok(hit.map_or(Value::Null, |hit| json!(hit.layer_id)))
+            }
+            method => Err(Error::Host(format!(
+                "{} is not attached",
+                method.unwrap_or("query")
+            ))),
+        }
     }
 }
 

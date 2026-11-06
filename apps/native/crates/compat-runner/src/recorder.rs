@@ -1,5 +1,9 @@
 use base64::Engine;
-use pm_recorder::{Affine, Canvas, Cap, FillRule, ImageData, Join, Point, Rect, Source, Vec2};
+use pm_recorder::{
+    Affine, Canvas, Cap, Direction, FillRule, Gradient, GradientKind, ImageData, Join, Paint,
+    Pattern, Point, Rect, Repetition, Source, TextAlign, TextBaseline, TextLayout, TextProvider,
+    Vec2,
+};
 use pm_runtime_v8::*;
 use serde_json::{Value, json};
 use std::{
@@ -11,6 +15,7 @@ use std::{
 struct State {
     storage: Value,
     next: u64,
+    paints: BTreeMap<String, Paint>,
     surfaces: BTreeMap<String, Canvas>,
     pins: BTreeMap<(String, u64), (Source, usize)>,
     missing: BTreeSet<String>,
@@ -35,11 +40,25 @@ pub trait RealmEvents: Send + Sync + 'static {
 }
 pub struct NoEvents;
 impl RealmEvents for NoEvents {}
+/// Canvas text shapes against the app's font service.
+pub type CanvasText = Box<dyn TextProvider + Send>;
+struct Text<'a>(&'a mut dyn TextProvider);
+impl TextProvider for Text<'_> {
+    fn layout(
+        &mut self,
+        font: &pm_recorder::Font,
+        text: &[u16],
+        direction: Direction,
+    ) -> std::result::Result<TextLayout, pm_recorder::Error> {
+        self.0.layout(font, text, direction)
+    }
+}
 pub struct NativeHost {
     state: Mutex<State>,
     kernel: Mutex<crate::adapter::KernelAdapter>,
     transport: crate::transport::Transport,
     events: Box<dyn RealmEvents>,
+    text: Mutex<Option<CanvasText>>,
 }
 fn host_error(error: pm_recorder::Error) -> Error {
     Error::Host(format!("recorder: {error}"))
@@ -114,7 +133,11 @@ impl NativeHost {
             kernel: Mutex::new(kernel),
             transport,
             events,
+            text: Mutex::new(None),
         }
+    }
+    pub fn set_text(&self, text: CanvasText) {
+        *self.text.lock().unwrap() = Some(text);
     }
     pub fn snapshot(&self) -> Result<Value> {
         self.kernel.lock().unwrap().snapshot()
@@ -272,8 +295,31 @@ impl NativeHost {
         } else {
             None
         };
-        let canvas = state
-            .surfaces
+        let pattern = if name == "createPattern" {
+            let key = values.first().ok_or(Error::Invalid("pattern source"))?;
+            state
+                .pins
+                .get(&(
+                    key["surface"].as_str().unwrap_or_default().into(),
+                    key["version"].as_u64().unwrap_or(0),
+                ))
+                .map(|pin| pin.0.clone())
+        } else {
+            None
+        };
+        let State {
+            surfaces,
+            paints,
+            next,
+            ..
+        } = &mut *state;
+        let handle = |paints: &mut BTreeMap<String, Paint>, next: &mut u64, paint: Paint| {
+            *next += 1;
+            let key = format!("paint-{next}");
+            paints.insert(key.clone(), paint);
+            json!(key)
+        };
+        let canvas = surfaces
             .get_mut(&id)
             .ok_or(Error::Invalid("unknown surface"))?;
         let mut supported = true;
@@ -311,23 +357,75 @@ impl NativeHost {
                     .first()
                     .and_then(Value::as_str)
                     .ok_or(Error::Invalid("canvas property"))?;
+                let paint = values
+                    .get(1)
+                    .and_then(|v| v["paint"].as_str())
+                    .map(|handle| {
+                        paints
+                            .get(handle)
+                            .cloned()
+                            .ok_or(Error::Invalid("unknown canvas paint"))
+                    })
+                    .transpose()?;
                 match property {
-                    "fillStyle" => canvas
-                        .set_fill_color(
+                    "fillStyle" => {
+                        if let Some(paint) = paint {
+                            canvas.set_fill(paint);
+                        } else {
+                            canvas
+                                .set_fill_color(
+                                    values
+                                        .get(1)
+                                        .and_then(Value::as_str)
+                                        .ok_or(Error::Invalid("fill color"))?,
+                                )
+                                .map_err(host_error)?
+                        }
+                    }
+                    "strokeStyle" => {
+                        if let Some(paint) = paint {
+                            canvas.set_stroke(paint);
+                        } else {
+                            canvas
+                                .set_stroke_color(
+                                    values
+                                        .get(1)
+                                        .and_then(Value::as_str)
+                                        .ok_or(Error::Invalid("stroke color"))?,
+                                )
+                                .map_err(host_error)?
+                        }
+                    }
+                    "font" => canvas
+                        .set_font(
                             values
                                 .get(1)
                                 .and_then(Value::as_str)
-                                .ok_or(Error::Invalid("fill color"))?,
+                                .ok_or(Error::Invalid("canvas font"))?,
                         )
                         .map_err(host_error)?,
-                    "strokeStyle" => canvas
-                        .set_stroke_color(
-                            values
-                                .get(1)
-                                .and_then(Value::as_str)
-                                .ok_or(Error::Invalid("stroke color"))?,
-                        )
-                        .map_err(host_error)?,
+                    "textAlign" => match values.get(1).and_then(Value::as_str) {
+                        Some("start") => canvas.set_text_align(TextAlign::Start),
+                        Some("end") => canvas.set_text_align(TextAlign::End),
+                        Some("left") => canvas.set_text_align(TextAlign::Left),
+                        Some("right") => canvas.set_text_align(TextAlign::Right),
+                        Some("center") => canvas.set_text_align(TextAlign::Center),
+                        _ => (),
+                    },
+                    "textBaseline" => match values.get(1).and_then(Value::as_str) {
+                        Some("top") => canvas.set_text_baseline(TextBaseline::Top),
+                        Some("hanging") => canvas.set_text_baseline(TextBaseline::Hanging),
+                        Some("middle") => canvas.set_text_baseline(TextBaseline::Middle),
+                        Some("alphabetic") => canvas.set_text_baseline(TextBaseline::Alphabetic),
+                        Some("ideographic") => canvas.set_text_baseline(TextBaseline::Ideographic),
+                        Some("bottom") => canvas.set_text_baseline(TextBaseline::Bottom),
+                        _ => (),
+                    },
+                    "direction" => match values.get(1).and_then(Value::as_str) {
+                        Some("ltr") => canvas.set_direction(Direction::Ltr),
+                        Some("rtl") => canvas.set_direction(Direction::Rtl),
+                        _ => (),
+                    },
                     "globalAlpha" => canvas.set_global_alpha(num(values, 1)?),
                     "lineWidth" => canvas.set_line_width(num(values, 1)?),
                     "miterLimit" => canvas.set_miter_limit(num(values, 1)?),
@@ -571,6 +669,128 @@ impl NativeHost {
                     _ => return Err(Error::Invalid("drawImage arity")),
                 };
                 canvas.draw_image(source, src, dst).map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.read", "createLinearGradient") => {
+                let gradient = Gradient::new(GradientKind::Linear(
+                    Point::new(num(values, 0)?, num(values, 1)?),
+                    Point::new(num(values, 2)?, num(values, 3)?),
+                ))
+                .map_err(host_error)?;
+                handle(paints, next, Paint::Gradient(gradient))
+            }
+            ("recorder.read", "createRadialGradient") => {
+                let gradient = Gradient::new(GradientKind::Radial {
+                    start: Point::new(num(values, 0)?, num(values, 1)?),
+                    r0: num(values, 2)?,
+                    end: Point::new(num(values, 3)?, num(values, 4)?),
+                    r1: num(values, 5)?,
+                })
+                .map_err(host_error)?;
+                handle(paints, next, Paint::Gradient(gradient))
+            }
+            ("recorder.read", "createConicGradient") => {
+                let gradient = Gradient::new(GradientKind::Conic {
+                    angle: num(values, 0)?,
+                    center: Point::new(num(values, 1)?, num(values, 2)?),
+                })
+                .map_err(host_error)?;
+                handle(paints, next, Paint::Gradient(gradient))
+            }
+            ("recorder.read", "createPattern") => {
+                let source = pattern.ok_or(Error::Invalid("pattern source"))?;
+                let repetition = match values.get(1).and_then(Value::as_str) {
+                    Some("repeat-x") => Repetition::RepeatX,
+                    Some("repeat-y") => Repetition::RepeatY,
+                    Some("no-repeat") => Repetition::NoRepeat,
+                    _ => Repetition::Repeat,
+                };
+                handle(paints, next, Paint::Pattern(Pattern::new(source, repetition)))
+            }
+            ("recorder.command", "paint.addColorStop") => {
+                let Some(Paint::Gradient(gradient)) =
+                    values.first().and_then(Value::as_str).and_then(|h| paints.get(h))
+                else {
+                    return Err(Error::Invalid("gradient handle"));
+                };
+                gradient
+                    .add_color_stop(
+                        num(values, 1)?,
+                        values
+                            .get(2)
+                            .and_then(Value::as_str)
+                            .ok_or(Error::Invalid("stop color"))?,
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.command", "putImageData") => {
+                let data = &values[0];
+                let (width, height) = (dimension(data.get("width"))?, dimension(data.get("height"))?);
+                let bytes: Vec<u8> = data["data"]
+                    .as_array()
+                    .ok_or(Error::Invalid("image data"))?
+                    .iter()
+                    .map(|v| v.as_u64().unwrap_or(0).min(255) as u8)
+                    .collect();
+                let image = ImageData::from_rgba(width, height, bytes).map_err(host_error)?;
+                let dirty = (values.len() == 7).then(|| {
+                    [3, 4, 5, 6].map(|i| values[i].as_i64().unwrap_or(0) as i32)
+                });
+                canvas
+                    .put_image_data(
+                        image,
+                        num(values, 1)? as i32,
+                        num(values, 2)? as i32,
+                        dirty,
+                    )
+                    .map_err(host_error)?;
+                Value::Null
+            }
+            ("recorder.read", "createImageData") => {
+                let (width, height) = (num(values, 0)? as u32, num(values, 1)? as u32);
+                json!({"width":width,"height":height,"data":vec![0; width as usize * height as usize * 4]})
+            }
+            ("recorder.read", "measureText") => {
+                let text: Vec<u16> = values
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .encode_utf16()
+                    .collect();
+                let mut provider = self.text.lock().unwrap();
+                let provider = provider
+                    .as_mut()
+                    .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
+                let metrics = canvas
+                    .measure_text(&text, &mut Text(&mut **provider))
+                    .map_err(host_error)?;
+                json!({"width":metrics.width,"actualBoundingBoxLeft":metrics.actual_bounding_box_left,
+                    "actualBoundingBoxRight":metrics.actual_bounding_box_right,
+                    "actualBoundingBoxAscent":metrics.actual_bounding_box_ascent,
+                    "actualBoundingBoxDescent":metrics.actual_bounding_box_descent,
+                    "fontBoundingBoxAscent":metrics.font_bounding_box_ascent,
+                    "fontBoundingBoxDescent":metrics.font_bounding_box_descent})
+            }
+            ("recorder.command", "fillText" | "strokeText") => {
+                let text: Vec<u16> = values
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .encode_utf16()
+                    .collect();
+                let (x, y) = (num(values, 1)?, num(values, 2)?);
+                let width = values.get(3).and_then(Value::as_f64);
+                let mut provider = self.text.lock().unwrap();
+                let provider = provider
+                    .as_mut()
+                    .ok_or_else(|| Error::Host("canvas text backend not attached".into()))?;
+                if name == "fillText" {
+                    canvas.fill_text(&text, x, y, width, &mut Text(&mut **provider))
+                } else {
+                    canvas.stroke_text(&text, x, y, width, &mut Text(&mut **provider))
+                }
+                .map_err(host_error)?;
                 Value::Null
             }
             ("recorder.read", "getImageData") => {
