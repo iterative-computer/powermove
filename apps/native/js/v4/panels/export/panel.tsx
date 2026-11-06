@@ -4,15 +4,18 @@ import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
+  codecs,
   colorNote,
+  depths,
   descriptions,
-  fields,
   formats,
   kinds,
   kindOf,
+  profiles,
   qualities,
   rates,
   rows,
+  shows,
   sidecars,
 } from "./spec";
 const { token } = UI;
@@ -336,7 +339,10 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       disabled: !s.capabilities[f.v].available,
                     })),
                 )}
-                {fields[o.format].includes("scale")
+                {shows(o, "profile") ? select("profile", profiles) : null}
+                {shows(o, "codec") ? select("codec", codecs) : null}
+                {shows(o, "depth") ? select("depth", depths) : null}
+                {shows(o, "scale")
                   ? select("scale", [
                       ...([0.5, 1, 2] as const).map((scale, i) => ({
                         v: scale,
@@ -379,8 +385,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     ) : null}
                   </FormRow>
                 ) : null}
-                {fields[o.format].includes("fps") ? select("fps", rates) : null}
-                {fields[o.format].includes("range")
+                {shows(o, "fps") ? select("fps", rates) : null}
+                {shows(o, "range")
                   ? select("range", [
                       {
                         v: "work",
@@ -391,14 +397,14 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       { v: "all", label: "Full composition" },
                     ])
                   : null}
-                {fields[o.format].includes("quality")
+                {shows(o, "quality")
                   ? select("quality", qualities)
                   : null}
               </Group>
               <Group label="Rendering">
-                {fields[o.format].includes("mblur") ? toggle("mblur") : null}
-                {fields[o.format].includes("audio") ? toggle("audio") : null}
-                {fields[o.format].includes("alpha") ? toggle("alpha") : null}
+                {shows(o, "mblur") ? toggle("mblur") : null}
+                {shows(o, "audio") ? toggle("audio") : null}
+                {shows(o, "alpha") ? toggle("alpha") : null}
               </Group>
               {p.captionLayers ? (
                 <Group label="Captions">

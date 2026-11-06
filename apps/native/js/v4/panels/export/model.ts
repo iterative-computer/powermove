@@ -1,12 +1,17 @@
 import { HostClient, json, type Json } from "../../src";
 import {
   actions,
+  codecs,
   extensions,
+  fieldDefaults,
   formats,
   kindOf,
+  profiles,
   sizeError,
+  type Codec,
   type Format,
   type Kind,
+  type Profile,
 } from "./spec";
 
 /** A projection of pm-promedia + engine facts, never a writable project mirror.
@@ -25,7 +30,12 @@ export interface Options {
   alpha: boolean;
   captionsBurn: boolean;
   captionsSidecar: "none" | "srt" | "vtt";
+  profile: Profile;
+  codec: Codec;
+  depth: 8 | 16;
 }
+/** Presets saved before profile, codec and depth existed keep today's output. */
+const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
 export type Run =
   | {
       phase:
@@ -84,7 +94,10 @@ function validOptions(x: unknown): x is Options {
     ["none", "srt", "vtt"].includes(x.captionsSidecar as string) &&
     [x.mblur, x.audio, x.alpha, x.captionsBurn].every(
       (v) => typeof v === "boolean",
-    )
+    ) &&
+    (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
+    (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
+    (x.depth === undefined || x.depth === 8 || x.depth === 16)
   );
 }
 export function snapshot(value: unknown): ExportSnapshot {
@@ -109,6 +122,9 @@ export function snapshot(value: unknown): ExportSnapshot {
       "alpha",
       "captionsBurn",
       "captionsSidecar",
+      "profile",
+      "codec",
+      "depth",
       "preset",
       "presetName",
     ].every(
@@ -255,7 +271,7 @@ export class ExportModel {
     initial: ExportSnapshot,
   ) {
     this.current = snapshot(initial);
-    this.options = structuredClone(initial.options);
+    this.options = withDefaults(structuredClone(initial.options));
     this.remembered[kindOf(this.options.format)] = this.options.format;
     this.validateSize();
   }
@@ -312,7 +328,7 @@ export class ExportModel {
     }
     this.current = next;
     if (replaceDraft) {
-      this.options = structuredClone(next.options);
+      this.options = withDefaults(structuredClone(next.options));
       this.sizeDraft = undefined;
       this.remembered[kindOf(this.options.format)] = this.options.format;
       this.validateSize();
@@ -463,7 +479,7 @@ export class ExportModel {
     const preset = this.current.presets.find((p) => p.id === id);
     if (!preset || !this.current.capabilities[preset.options.format].available)
       return;
-    this.options = structuredClone(preset.options);
+    this.options = withDefaults(structuredClone(preset.options));
     this.sizeDraft = undefined;
     this.remembered[this.kind] = this.options.format;
     this.chosenPreset = id;

@@ -23,6 +23,7 @@ pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
+pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-export = { path = "../../../../engine/crates/pm-export" }
 pm-time = { path = "../../../../engine/crates/pm-time" }

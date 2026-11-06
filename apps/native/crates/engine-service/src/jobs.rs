@@ -31,7 +31,26 @@ pub struct ExportRequest {
     pub saving_app_version: Option<String>,
     #[serde(default)]
     pub resources: crate::resources::ResourceSnapshot,
+    /// An export stops, and removes its partial output, before the
+    /// destination volume has less free space than this.
+    #[serde(default = "disk_reserve")]
+    pub disk_reserve: u64,
 }
+/// Room left for macOS and a project save when a long export fills a disk.
+pub const DISK_RESERVE: u64 = 2 << 30;
+fn disk_reserve() -> u64 {
+    DISK_RESERVE
+}
+/// Free bytes on the volume that will hold `destination` (its nearest
+/// existing ancestor: a PNG folder does not exist yet).
+fn free_bytes(destination: &Path) -> Result<u64> {
+    let volume = destination
+        .ancestors()
+        .find(|p| p.exists())
+        .ok_or_else(|| anyhow::anyhow!("export destination has no existing folder"))?;
+    Ok(pm_proxy::free_bytes(volume)?.0)
+}
+const LOW_DISK: &str = "The export stopped because the destination disk is almost full. Free some space and export again.";
 impl ExportRequest {
     pub fn new(
         job: JobId,
@@ -54,6 +73,7 @@ impl ExportRequest {
             destination,
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
+            disk_reserve: DISK_RESERVE,
         })
     }
 }
@@ -258,6 +278,28 @@ pub fn run_child() -> Result<()> {
     broker.set_generation(font_service.generation());
     let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
+    // Low disk: refuse to start, then watch the volume while frames land.
+    let reserve = request.disk_reserve;
+    if free_bytes(&request.destination)? < reserve {
+        emit(status(&job_id, JobState::Failed, 0., None, Some(LOW_DISK.into())))?;
+        return Ok(());
+    }
+    let low_disk = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    {
+        let (low_disk, finished, cancel) = (low_disk.clone(), finished.clone(), cancel.clone());
+        let destination = request.destination.clone();
+        std::thread::spawn(move || {
+            while !finished.load(Ordering::Acquire) {
+                if free_bytes(&destination).is_ok_and(|free| free < reserve) {
+                    low_disk.store(true, Ordering::Release);
+                    cancel.store(true, Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+    }
     let worker_cancel = cancel.clone();
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
         let cancel = worker_cancel;
@@ -338,7 +380,16 @@ pub fn run_child() -> Result<()> {
     let result = worker
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("export worker panicked")));
+    finished.store(true, Ordering::Release);
     match result {
+        // The worker's output was dropped unpublished: its temporary is gone.
+        Err(_) if low_disk.load(Ordering::Acquire) => emit(status(
+            &job_id,
+            JobState::Failed,
+            0.,
+            None,
+            Some(LOW_DISK.into()),
+        ))?,
         Ok(path) => emit(status(
             &job_id,
             JobState::Done,

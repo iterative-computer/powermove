@@ -174,3 +174,96 @@ fn child_export_services_font_requests_for_visible_text() {
     );
     assert_eq!(std::fs::read_dir(destination).unwrap().count(), 30);
 }
+
+#[test]
+fn an_export_that_would_fill_the_disk_fails_without_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("full");
+    let mut request = request(destination.clone(), 1);
+    request.disk_reserve = u64::MAX;
+    let status = ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    assert!(
+        status.error.unwrap().message.contains("almost full"),
+        "the reason is the disk"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// The formats the Export sheet now offers, encoded by the real child and read
+/// back: ProRes 422 HQ, HEVC Main 10, and a 16-bit PNG.
+#[test]
+fn child_exports_prores_422_hevc_10_bit_and_16_bit_png() {
+    use pm_protocol::{
+        color::QuickTimeTag,
+        priority::{Container, ProResProfile},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let video = OutputColor::Rec709QuickTime {
+        candidate: QuickTimeTag::Cicp1_13_1,
+    };
+    for (name, format, color, alpha, codec, depth) in [
+        (
+            "hq.mov",
+            ExportFormat::ProRes {
+                profile: ProResProfile::Hq,
+            },
+            video,
+            AlphaOutput::None,
+            "prores",
+            10,
+        ),
+        (
+            "main10.mp4",
+            ExportFormat::Hevc {
+                ten_bit: true,
+                container: Container::Mp4,
+            },
+            video,
+            AlphaOutput::None,
+            "hevc",
+            10,
+        ),
+        (
+            "still.png",
+            ExportFormat::PngStill { sixteen_bit: true },
+            OutputColor::SrgbImage,
+            AlphaOutput::Straight,
+            "png",
+            16,
+        ),
+    ] {
+        let destination = dir.path().join(name);
+        let mut request = request(destination.clone(), 1);
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = format;
+        settings.color = color;
+        settings.alpha = alpha;
+        if format.is_image() {
+            settings.range.end = Ticks::new(settings.range.start.get() + 1).unwrap();
+        }
+        let status = ExportHandle::start(
+            Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+            request,
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert_eq!(status.state, JobState::Done, "{name}: {status:?}");
+        if format.is_image() {
+            // IHDR: the bit depth is byte 24 of a PNG.
+            let png = std::fs::read(&destination).unwrap();
+            assert_eq!(&png[1..4], b"PNG");
+            assert_eq!(png[24], depth, "{name}");
+            continue;
+        }
+        let source = pm_media::decode::service::MediaSource::open(&destination).unwrap();
+        assert_eq!(source.info.codec, codec, "{name}");
+        assert!(source.info.bit_depth >= depth, "{name}: {:?}", source.info);
+    }
+}

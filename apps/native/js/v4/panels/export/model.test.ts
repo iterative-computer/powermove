@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { HostClient, json } from "../../src";
 import { fixture, initial } from "./fixtures";
 import { ExportModel, progress, snapshot } from "./model";
-import { fields, formats, rates, sizeError } from "./spec";
+import { fields, formats, rates, shows, sizeError } from "./spec";
 const commands = (f: ReturnType<typeof fixture>) =>
   f.requests.flatMap((r) =>
     r.operation.type === "command" ? [r.operation.command] : [],
@@ -18,6 +18,7 @@ test("format support matches tagged contract and no web export is offered", () =
     "json",
   ]);
   expect(fields.prores).toEqual([
+    "profile",
     "scale",
     "fps",
     "range",
@@ -25,8 +26,8 @@ test("format support matches tagged contract and no web export is offered", () =
     "audio",
     "alpha",
   ]);
-  expect(fields.mp4).toEqual(fields.webm);
-  expect(fields.still).toEqual(["scale", "mblur", "alpha"]);
+  expect(fields.mp4).toEqual(["codec", ...fields.webm]);
+  expect(fields.still).toEqual(["depth", "scale", "mblur", "alpha"]);
   expect(fields.json).toEqual([]);
   expect(rates[0].v).toBe(24000 / 1001);
   expect(rates[3].v).toBe(30000 / 1001);
@@ -409,4 +410,31 @@ test("planning and preset failures retain authored drafts and recover on actual 
   f.rejection = undefined;
   await f.model.savePreset();
   expect(f.model.presetError).toBe(false);
+});
+
+test("ProRes 422 has no alpha; settings saved before profiles keep ProRes 4444", async () => {
+  const seed = initial();
+  delete (seed.options as Record<string, unknown>).profile;
+  delete (seed.options as Record<string, unknown>).codec;
+  delete (seed.options as Record<string, unknown>).depth;
+  const f = fixture(seed);
+  expect(f.model.options.profile).toBe("4444");
+  expect(f.model.options.codec).toBe("h264");
+  expect(f.model.options.depth).toBe(8);
+  f.model.set("format", "prores");
+  expect(shows(f.model.options, "alpha")).toBe(true);
+  f.model.set("profile", "422hq");
+  expect(shows(f.model.options, "alpha")).toBe(false);
+  f.model.set("format", "mp4");
+  f.model.set("codec", "hevc");
+  expect(() => f.model.set("depth", 10 as 8)).toThrow();
+  await f.model.refreshPlan();
+  await f.model.start();
+  const begin = f.requests.find(
+    (r) => r.operation.type === "command" && r.operation.command === "export.begin",
+  )!;
+  const options = (begin.operation as { args: { options: Record<string, unknown> } })
+    .args.options;
+  expect(options.codec).toBe("hevc");
+  expect(options.profile).toBe("422hq");
 });

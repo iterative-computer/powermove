@@ -326,12 +326,12 @@ exports[`wire snapshot: selected video 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -345,12 +345,12 @@ exports[`wire snapshot: selected video 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -400,6 +400,150 @@ exports[`wire snapshot: selected video 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -2592,12 +2736,12 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": true,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -2611,12 +2755,12 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": true,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -2666,6 +2810,150 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -4856,12 +5144,12 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -4875,12 +5163,12 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -4930,6 +5218,150 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -7120,12 +7552,12 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -7139,12 +7571,12 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -7194,6 +7626,182 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Profile",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "422 HQ for editing and delivery, 4444 to keep transparency.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:profile",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.profile",
+                            "label": "Profile",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "ProRes 422 Proxy",
+                                    "v": "422proxy",
+                                  },
+                                  {
+                                    "label": "ProRes 422 LT",
+                                    "v": "422lt",
+                                  },
+                                  {
+                                    "label": "ProRes 422",
+                                    "v": "422",
+                                  },
+                                  {
+                                    "label": "ProRes 422 HQ",
+                                    "v": "422hq",
+                                  },
+                                  {
+                                    "label": "ProRes 4444",
+                                    "v": "4444",
+                                  },
+                                  {
+                                    "label": "ProRes 4444 XQ",
+                                    "v": "4444xq",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "ProRes 422 Proxy",
+                                "v": "422proxy",
+                              },
+                              {
+                                "label": "ProRes 422 LT",
+                                "v": "422lt",
+                              },
+                              {
+                                "label": "ProRes 422",
+                                "v": "422",
+                              },
+                              {
+                                "label": "ProRes 422 HQ",
+                                "v": "422hq",
+                              },
+                              {
+                                "label": "ProRes 4444",
+                                "v": "4444",
+                              },
+                              {
+                                "label": "ProRes 4444 XQ",
+                                "v": "4444xq",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "422 HQ for editing and delivery, 4444 to keep transparency.",
+                            "value": "4444",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.profile",
+                    "label": "Profile",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -9431,6 +10039,150 @@ exports[`wire snapshot: PNG sequence 1`] = `
                             {
                               "children": [],
                               "props": {},
+                              "text": "Depth",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "16-bit keeps smooth gradients for grading and compositing.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:depth",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.depth",
+                            "label": "Depth",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "8-bit",
+                                    "v": 8,
+                                  },
+                                  {
+                                    "label": "16-bit",
+                                    "v": 16,
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "8-bit",
+                                "v": 8,
+                              },
+                              {
+                                "label": "16-bit",
+                                "v": 16,
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "16-bit keeps smooth gradients for grading and compositing.",
+                            "value": 8,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.depth",
+                    "label": "Depth",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
                               "text": "Resolution",
                               "type": "text",
                             },
@@ -11359,6 +12111,150 @@ exports[`wire snapshot: still 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Depth",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "16-bit keeps smooth gradients for grading and compositing.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:depth",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.depth",
+                            "label": "Depth",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "8-bit",
+                                    "v": 8,
+                                  },
+                                  {
+                                    "label": "16-bit",
+                                    "v": 16,
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "8-bit",
+                                "v": 8,
+                              },
+                              {
+                                "label": "16-bit",
+                                "v": 16,
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "16-bit keeps smooth gradients for grading and compositing.",
+                            "value": 8,
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.depth",
+                    "label": "Depth",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -13516,12 +14412,12 @@ exports[`wire snapshot: no captions 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -13535,12 +14431,12 @@ exports[`wire snapshot: no captions 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -13590,6 +14486,150 @@ exports[`wire snapshot: no captions 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -15464,12 +16504,12 @@ exports[`wire snapshot: multiple captions 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -15483,12 +16523,12 @@ exports[`wire snapshot: multiple captions 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -15538,6 +16578,150 @@ exports[`wire snapshot: multiple captions 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -17728,12 +18912,12 @@ exports[`wire snapshot: custom size 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -17747,12 +18931,12 @@ exports[`wire snapshot: custom size 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -17802,6 +18986,150 @@ exports[`wire snapshot: custom size 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -20226,12 +21554,12 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -20245,12 +21573,12 @@ exports[`wire snapshot: inline invalid size 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -20300,6 +21628,150 @@ exports[`wire snapshot: inline invalid size 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -22749,12 +24221,12 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -22768,12 +24240,12 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -22823,6 +24295,150 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": true,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",
@@ -26138,12 +27754,12 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                 "menu": [
                                   {
                                     "disabled": false,
-                                    "label": "QuickTime · ProRes 4444",
+                                    "label": "QuickTime · ProRes",
                                     "v": "prores",
                                   },
                                   {
                                     "disabled": false,
-                                    "label": "MP4 · H.264",
+                                    "label": "MP4 · H.264 or HEVC",
                                     "v": "mp4",
                                   },
                                   {
@@ -26157,12 +27773,12 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                             "options": [
                               {
                                 "disabled": false,
-                                "label": "QuickTime · ProRes 4444",
+                                "label": "QuickTime · ProRes",
                                 "v": "prores",
                               },
                               {
                                 "disabled": false,
-                                "label": "MP4 · H.264",
+                                "label": "MP4 · H.264 or HEVC",
                                 "v": "mp4",
                               },
                               {
@@ -26212,6 +27828,150 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                     "data-pm-component": "form-row",
                     "id": "export.row.format",
                     "label": "Format",
+                    "role": "group",
+                    "style": {
+                      "display": "flex",
+                      "flexDirection": "row",
+                      "justifyContent": "space-between",
+                      "padding": {
+                        "token": "metrics.inset",
+                      },
+                    },
+                  },
+                  "text": "",
+                  "type": "div",
+                },
+                {
+                  "children": [
+                    {
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "Codec",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "props": {},
+                              "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                              "type": "text",
+                            },
+                          ],
+                          "props": {
+                            "style": {
+                              "color": {
+                                "token": "colors.muted",
+                              },
+                              "fontSize": {
+                                "token": "typography.minimum",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "text",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "label",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "props": {
+                            "binding": "fixture:export:codec",
+                            "control": "select",
+                            "data-pm-component": "pop-up-button",
+                            "disabled": false,
+                            "id": "export.codec",
+                            "label": "Codec",
+                            "metadata": {
+                              "pmKit": {
+                                "menu": [
+                                  {
+                                    "label": "H.264",
+                                    "v": "h264",
+                                  },
+                                  {
+                                    "label": "HEVC · 10-bit",
+                                    "v": "hevc",
+                                  },
+                                ],
+                              },
+                            },
+                            "options": [
+                              {
+                                "label": "H.264",
+                                "v": "h264",
+                              },
+                              {
+                                "label": "HEVC · 10-bit",
+                                "v": "hevc",
+                              },
+                            ],
+                            "style": {
+                              "background": {
+                                "token": "colors.field",
+                              },
+                              "borderRadius": {
+                                "token": "metrics.control_radius",
+                              },
+                              "color": {
+                                "token": "colors.text",
+                              },
+                              "fontSize": {
+                                "token": "typography.body",
+                              },
+                              "height": {
+                                "token": "metrics.control",
+                              },
+                              "minHeight": {
+                                "token": "metrics.hit",
+                              },
+                              "minWidth": {
+                                "token": "metrics.hit",
+                              },
+                            },
+                            "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                            "value": "h264",
+                          },
+                          "text": "",
+                          "type": "button",
+                        },
+                      ],
+                      "props": {
+                        "data-pm-slot": "control",
+                      },
+                      "text": "",
+                      "type": "div",
+                    },
+                  ],
+                  "props": {
+                    "data-pm-component": "form-row",
+                    "id": "export.row.codec",
+                    "label": "Codec",
                     "role": "group",
                     "style": {
                       "display": "flex",

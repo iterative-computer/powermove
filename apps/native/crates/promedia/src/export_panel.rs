@@ -26,6 +26,47 @@ impl Format {
         }
     }
 }
+/// The ProRes flavour of a QuickTime export. Older settings have none: 4444.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Profile {
+    #[serde(rename = "422proxy")]
+    Proxy,
+    #[serde(rename = "422lt")]
+    Lt,
+    #[serde(rename = "422")]
+    Standard,
+    #[serde(rename = "422hq")]
+    Hq,
+    #[default]
+    #[serde(rename = "4444")]
+    P4444,
+    #[serde(rename = "4444xq")]
+    P4444Xq,
+}
+impl Profile {
+    fn engine(self) -> pm_protocol::priority::ProResProfile {
+        use pm_protocol::priority::ProResProfile as P;
+        match self {
+            Self::Proxy => P::Proxy,
+            Self::Lt => P::Lt,
+            Self::Standard => P::Standard,
+            Self::Hq => P::Hq,
+            Self::P4444 => P::P4444,
+            Self::P4444Xq => P::P4444Xq,
+        }
+    }
+}
+/// The codec of an MP4 export. HEVC is always Main 10.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Codec {
+    #[default]
+    H264,
+    Hevc,
+}
+fn eight() -> u8 {
+    8
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scale {
@@ -47,6 +88,13 @@ pub struct Options {
     pub alpha: bool,
     pub captions_burn: bool,
     pub captions_sidecar: String,
+    #[serde(default)]
+    pub profile: Profile,
+    #[serde(default)]
+    pub codec: Codec,
+    /// PNG bits per channel, 8 or 16.
+    #[serde(default = "eight")]
+    pub depth: u8,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -70,14 +118,15 @@ impl Options {
             || !["work", "all"].contains(&self.range.as_str())
             || !["draft", "high", "max"].contains(&self.quality.as_str())
             || !["none", "srt", "vtt"].contains(&self.captions_sidecar.as_str())
+            || ![8, 16].contains(&self.depth)
         {
             return Err("invalid export settings".into());
         }
         Ok(())
     }
     /// Effective field support, without modifying dormant authored options.
-    /// Engine JobSpec mapping must use this intent (ProRes 4444, H.264, VP9,
-    /// PNG8; straight alpha; original media only). PMV uses save_project instead.
+    /// Engine JobSpec mapping must use this intent (straight alpha, original
+    /// media only). PMV uses save_project instead.
     pub fn intent(&self, has_audio: bool, caption_layers: usize) -> Result<Intent, String> {
         self.validate()?;
         let video = matches!(self.format, Format::Prores | Format::Mp4 | Format::Webm);
@@ -85,8 +134,11 @@ impl Options {
         Ok(Intent {
             options: self.clone(),
             audio: video && has_audio && self.audio,
-            straight_alpha: matches!(self.format, Format::Prores | Format::Png | Format::Still)
-                && self.alpha,
+            straight_alpha: match self.format {
+                Format::Prores => self.profile.engine().supports_alpha(),
+                Format::Png | Format::Still => true,
+                _ => false,
+            } && self.alpha,
             motion_blur: rendered && self.mblur,
             burn_captions: rendered && caption_layers > 0 && self.captions_burn,
             sidecar: if video && caption_layers > 0 {
@@ -115,22 +167,27 @@ impl Intent {
         &self,
         mut planned: pm_protocol::priority::ExportSettings,
     ) -> Result<Option<pm_protocol::priority::ExportSettings>, String> {
-        use pm_protocol::priority::{
-            AlphaOutput, ExportFormat, ProResProfile, QualityTier, WebmCodec,
-        };
+        use pm_protocol::priority::{AlphaOutput, Container, ExportFormat, QualityTier, WebmCodec};
         use pm_protocol::validate::Validate;
         self.options.validate()?;
+        let sixteen_bit = self.options.depth == 16;
         planned.format = match self.options.format {
             Format::Json => return Ok(None),
             Format::Prores => ExportFormat::ProRes {
-                profile: ProResProfile::P4444,
+                profile: self.options.profile.engine(),
             },
-            Format::Mp4 => ExportFormat::H264,
+            Format::Mp4 => match self.options.codec {
+                Codec::H264 => ExportFormat::H264,
+                Codec::Hevc => ExportFormat::Hevc {
+                    ten_bit: true,
+                    container: Container::Mp4,
+                },
+            },
             Format::Webm => ExportFormat::Webm {
                 codec: WebmCodec::Vp9,
             },
-            Format::Png => ExportFormat::PngSequence { sixteen_bit: false },
-            Format::Still => ExportFormat::PngStill { sixteen_bit: false },
+            Format::Png => ExportFormat::PngSequence { sixteen_bit },
+            Format::Still => ExportFormat::PngStill { sixteen_bit },
         };
         planned.alpha = if self.straight_alpha {
             AlphaOutput::Straight

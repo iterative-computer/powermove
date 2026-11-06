@@ -4840,6 +4840,7 @@ dependencies = [
  "pm-node",
  "pm-perf",
  "pm-protocol",
+ "pm-proxy",
  "pm-render",
  "pm-scene3d",
  "pm-studio",
@@ -5358,6 +5359,22 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-proxy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pm-color",
+ "pm-media",
+ "pm-protocol",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

@@ -19,8 +19,9 @@ types are Video, Images and Project.
 | State | Values |
 |---|---|
 | `ExportKind` | `Video` · `Images` · `Project` (remembered format per kind, v1.2.0 `remembered`) |
-| `ExportFormat` | Video: `ProRes` (`QuickTime · ProRes 4444`), `Mp4` (`MP4 · H.264`), `WebM` (`WebM · VP9`); Images: `PngSequence` (`PNG sequence`), `Still` (`Still frame (PNG)`); Project: `Pmv` (`Project file (.pmv)`) |
-| `FieldSupport` | per format, exactly `exportFieldSupport` (v1.2.0): ProRes {size, fps, range, mblur, audio, alpha}; MP4/WebM {size, fps, range, quality, mblur, audio}; PNG sequence {size, fps, range, mblur, alpha}; Still {size, mblur, alpha}; Project {} |
+| `ExportFormat` | Video: `ProRes` (`QuickTime · ProRes`), `Mp4` (`MP4 · H.264 or HEVC`), `WebM` (`WebM · VP9`); Images: `PngSequence` (`PNG sequence`), `Still` (`Still frame (PNG)`); Project: `Pmv` (`Project file (.pmv)`) |
+| Sub-format | ProRes `profile`: 422 Proxy, 422 LT, 422, 422 HQ, 4444 (default), 4444 XQ. MP4 `codec`: H.264 (default), HEVC · 10-bit. PNG and still `depth`: 8-bit (default), 16-bit. Settings saved without these fields mean the default. |
+| `FieldSupport` | per format, v1.2.0's `exportFieldSupport` plus the sub-format row first: ProRes {profile, size, fps, range, mblur, audio, alpha; alpha only for 4444 and 4444 XQ}; MP4 {codec, size, fps, range, quality, mblur, audio}; WebM {size, fps, range, quality, mblur, audio}; PNG sequence {depth, size, fps, range, mblur, alpha}; Still {depth, size, mblur, alpha}; Project {} |
 | `scale` | `0.5` · `1` · `2` · `Custom{w, h}` (aspect kept; 16…8192 px) |
 | `fps` | 23.976, 24, 25, 29.97, 30, 50, 59.94, 60 |
 | `range` | `WorkArea` · `Full` |

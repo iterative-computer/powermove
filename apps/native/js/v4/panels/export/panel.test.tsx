@@ -222,6 +222,7 @@ test("hover/focus use system controls; op tree stays stable, with one selected k
   const order = after.focusOrder.map((id: number) => after.nodes[id].props.id);
   expect(order.slice(1)).toEqual([
     "export.format",
+    "export.codec",
     "export.scale",
     "export.fps",
     "export.range",
