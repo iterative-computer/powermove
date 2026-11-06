@@ -26,7 +26,8 @@ impl Format {
         }
     }
 }
-/// How a delivery carries light. HDR needs an HDR project and a 10-bit codec.
+/// How a delivery carries light. HDR needs an HDR project and a 10-bit codec;
+/// elsewhere the choice stays dormant, like every other format-only field.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DynamicRange {
@@ -89,9 +90,6 @@ impl Options {
         {
             return Err("invalid export settings".into());
         }
-        if !self.dynamic_range.is_sdr() && !matches!(self.format, Format::Prores | Format::Mp4) {
-            return Err("HDR delivery needs ProRes or MP4".into());
-        }
         Ok(())
     }
     /// Effective field support, without modifying dormant authored options.
@@ -104,6 +102,11 @@ impl Options {
         Ok(Intent {
             options: self.clone(),
             audio: video && has_audio && self.audio,
+            dynamic_range: if matches!(self.format, Format::Prores | Format::Mp4) {
+                self.dynamic_range
+            } else {
+                DynamicRange::Sdr
+            },
             straight_alpha: matches!(self.format, Format::Prores | Format::Png | Format::Still)
                 && self.alpha,
             motion_blur: rendered && self.mblur,
@@ -120,6 +123,7 @@ impl Options {
 pub struct Intent {
     pub options: Options,
     pub audio: bool,
+    pub dynamic_range: DynamicRange,
     pub straight_alpha: bool,
     pub motion_blur: bool,
     pub burn_captions: bool,
@@ -145,7 +149,7 @@ impl Intent {
                 profile: ProResProfile::P4444,
             },
             // H.264 has no HDR profile on VideoToolbox.
-            Format::Mp4 if !self.options.dynamic_range.is_sdr() => ExportFormat::Hevc {
+            Format::Mp4 if !self.dynamic_range.is_sdr() => ExportFormat::Hevc {
                 ten_bit: true,
                 container: pm_protocol::priority::Container::Mp4,
             },
@@ -156,7 +160,7 @@ impl Intent {
             Format::Png => ExportFormat::PngSequence { sixteen_bit: false },
             Format::Still => ExportFormat::PngStill { sixteen_bit: false },
         };
-        planned.color = match self.options.dynamic_range {
+        planned.color = match self.dynamic_range {
             DynamicRange::Sdr => planned.color,
             DynamicRange::Pq => pm_protocol::color::OutputColor::Rec2100Pq,
             DynamicRange::Hlg => pm_protocol::color::OutputColor::Rec2100Hlg,

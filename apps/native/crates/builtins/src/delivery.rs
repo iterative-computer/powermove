@@ -433,6 +433,35 @@ mod tests {
             hdr.format,
             ExportFormat::Hevc { ten_bit: true, .. }
         ));
+        // Formats that hold no HDR leave the choice dormant.
+        o.format = Format::Webm;
+        let webm = plan(&hdr_project, &o, 0.).unwrap().settings.unwrap();
+        assert_ne!(webm.color, OutputColor::Rec2100Pq);
+        o.format = Format::Prores;
+        let prores = plan(&hdr_project, &o, 0.).unwrap().settings.unwrap();
+        assert_eq!(prores.color, OutputColor::Rec2100Pq);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_remembered_hdr_choice_leaves_every_format_available() {
+        let mut o = options();
+        o.dynamic_range = pm_promedia::export_panel::DynamicRange::Pq;
+        for project in [
+            fixture(""),
+            fixture(r#","color":{"mode":"hdr"},"colorDepth":32"#),
+        ] {
+            let found = capabilities(&project, &o, 0., &BTreeMap::new());
+            for format in ["prores", "mp4", "webm", "png", "still"] {
+                assert_eq!(found[format]["available"], true, "{format}: {found}");
+            }
+        }
+        // What `export.plan` runs on the panel's options.
+        for format in [Format::Webm, Format::Png, Format::Still] {
+            o.format = format;
+            let wire = serde_json::to_value(&o).unwrap();
+            assert_eq!(wire["dynamicRange"], "pq");
+            assert_eq!(super::options(&wire).unwrap(), o);
+        }
     }
     #[test]
     fn rational_work_range_and_frame_count_match_engine_half_up_rule() {
