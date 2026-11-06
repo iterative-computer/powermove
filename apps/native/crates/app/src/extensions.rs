@@ -29,6 +29,8 @@ use std::{
 const PAGE_PANEL: u64 = 1;
 const COMMAND: &str = "extension.command:";
 const MENU: &str = "extension.menu:";
+const STORE: &str = "extension.store";
+const INSTALL: &str = "extension.install:";
 /// Longer than the realm's own deadline; a hung realm never holds a menu back.
 const MENU_DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 const OWNER: &str = "extension:";
@@ -96,6 +98,18 @@ fn menu_entries(items: &[Value], token: u64) -> Vec<MenuEntry> {
             let mut entry = MenuEntry::item(label, command).checked(item["on"] == true);
             entry.enabled = item["disabled"] != true && item["run"].is_u64();
             entry
+        })
+        .collect()
+}
+
+/// One Store listing per row; choosing it installs that release.
+fn store_entries(items: &[Value]) -> Vec<MenuEntry> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let (release, repo) = (item["release"].as_str()?, item["repo"].as_str()?);
+            let label = item["label"].as_str().unwrap_or(repo);
+            Some(MenuEntry::item(label, format!("{INSTALL}{release}:{repo}")))
         })
         .collect()
 }
@@ -266,6 +280,12 @@ impl Controller {
                     host.answer(token, opened.into());
                 }
             }
+            Some("store") => {
+                let entries = store_entries(request["items"].as_array().unwrap_or(&vec![]));
+                let shell = self.host.borrow();
+                let size = shell.gpui.bounds().size;
+                shell.context_menu(&entries, size.width as f32 / 2., size.height as f32 / 2.);
+            }
             Some("menu") => {
                 let items = menu_entries(request["items"].as_array().unwrap_or(&vec![]), token);
                 let open = self
@@ -399,6 +419,10 @@ impl Controller {
         self.extensions.known_panels = known;
         let surfaces = self.extensions.surfaces.clone().into_iter();
         layout::set_contributed_panels(panels.into_iter().chain(surfaces));
+        let store = Choice {
+            label: "Install Extension from Store…".into(),
+            command: STORE.into(),
+        };
         let choices: Vec<Choice> = value["commands"]
             .as_array()
             .into_iter()
@@ -414,10 +438,11 @@ impl Controller {
                     command: format!("{COMMAND}{id}"),
                 })
             })
+            .chain(std::iter::once(store))
             .collect();
         self.extensions.commands = choices
             .iter()
-            .map(|c| c.command[COMMAND.len()..].to_owned())
+            .filter_map(|c| c.command.strip_prefix(COMMAND).map(str::to_owned))
             .collect();
         let bindings: Vec<Binding> = value["keybindings"]
             .as_array()
@@ -467,6 +492,20 @@ impl Controller {
         }
     }
     pub fn extension_command(&mut self, cmd: &ShellCommand) -> bool {
+        if cmd.name == STORE {
+            if let Some(host) = &self.extensions.host {
+                host.browse_store();
+            }
+            return true;
+        }
+        if let Some(install) = cmd.name.strip_prefix(INSTALL) {
+            if let (Some(host), Some((release, repo))) =
+                (&self.extensions.host, install.split_once(':'))
+            {
+                host.install_store(release, repo);
+            }
+            return true;
+        }
         if let Some(choice) = cmd.name.strip_prefix(MENU) {
             if let (Some(host), Some((token, run))) = (&self.extensions.host, choice.split_once(':'))
                 && let (Ok(token), Ok(run)) = (token.parse(), run.parse::<u64>())
@@ -750,5 +789,7 @@ mod tests {
         assert_eq!(items[3].children[0].command, "extension.menu:9:4");
         assert!(external_link("https://example.com/a"));
         assert!(!external_link("file:///etc/passwd") && !external_link("powermove://x"));
+        let store = store_entries(&[json!({"label":"First","release":"one","repo":"r"})]);
+        assert_eq!(store[0].command, "extension.install:one:r");
     }
 }

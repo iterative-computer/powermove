@@ -4,7 +4,7 @@
 use crate::{KernelStoreAdapter, StoreArchive, StoreAuthority, net, store_host::STORE_MARKER};
 use pm_runtime_v8::{Error, Result};
 use pm_store_host::artifact::{FileArtifacts, SignedRelease, TrustStore};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{fs, path::Path};
 
 pub const ORIGIN: &str = "https://cloud.trypowermove.com";
@@ -77,6 +77,34 @@ pub fn install_verified(
     Ok(id)
 }
 
+/// Name, release and repository of each listing, for the one page a menu shows.
+pub fn catalog() -> Result<Vec<Value>> {
+    let page = net::get(
+        &format!("{ORIGIN}/v1/store/extensions?sort=name&limit=50"),
+        MAX_ENVELOPE,
+        30,
+    )?;
+    if page.status != 200 {
+        return Err(Error::Host("The Store is unavailable.".into()));
+    }
+    let page: Value =
+        serde_json::from_slice(&page.body).map_err(|_| Error::Invalid("Store catalog"))?;
+    Ok(listings(&page))
+}
+fn listings(page: &Value) -> Vec<Value> {
+    page["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let release = item["latest"]["id"].as_str()?;
+            let repo = item["repoId"].as_str()?;
+            let label = item["name"].as_str().unwrap_or(repo);
+            Some(json!({"label":label,"release":release,"repo":repo}))
+        })
+        .collect()
+}
+
 /// Downloads a release and its signed envelope, verifies, installs.
 pub fn install(
     kernel: &dyn StoreAuthority,
@@ -85,6 +113,11 @@ pub fn install(
     release_id: &str,
     repo: &str,
 ) -> Result<String> {
+    if PINNED_KEYS.is_empty() {
+        return Err(Error::Host(
+            "Store installs need a signed release, and the Store doesn't sign releases yet.".into(),
+        ));
+    }
     let trust = pinned()?;
     let envelope = net::get(
         &format!("{ORIGIN}/v1/store/releases/{release_id}/signature"),
@@ -120,6 +153,16 @@ pub fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn listings_need_a_release_and_a_build_without_keys_refuses_before_any_download() {
+        let rows = listings(&json!({"items":[
+            {"repoId":"r","name":"First","latest":{"id":"one"}},
+            {"repoId":"unreleased","name":"Second"}]}));
+        assert_eq!(rows, [json!({"label":"First","release":"one","repo":"r"})]);
+        let kernel = Mutex::new(Kernel::new(KernelConfig::default()));
+        let error = install(&kernel, Path::new("/nonexistent"), "native", "one", "r").unwrap_err();
+        assert!(error.to_string().contains("signed release"));
+    }
     use ed25519_dalek::{Signer, SigningKey};
     use pm_kernel::{Kernel, KernelConfig};
     use pm_store_host::{
