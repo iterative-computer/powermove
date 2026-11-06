@@ -1,6 +1,6 @@
 # Rust agents
 
-## Current state (2026-11-05)
+## Current state (2026-11-06)
 
 A panel run is real, from keystroke to durable reply:
 
@@ -21,12 +21,25 @@ A panel run is real, from keystroke to durable reply:
    stream-json. Providers reach tools through `--powermove-mcp`.
 5. The `pm-agent-runs` worker polls events into the panel and publishes. A Backend
    lock is not held while it does. A failed save keeps the event for retry.
-6. Window close sets `AgentLink::close`; the worker cancels runs and exits.
+   Reply and reasoning fragments (`Event::streamed`) and composer typing are
+   kept in memory and saved at most `CHECKPOINT_MS` (1 s) later, or with the
+   next event that saves; they keep no receipt. Everything else saves at once.
+   A crash can lose up to a second of streamed text or typing.
+6. Anything that keeps an effect from its process settles in the conversation
+   (`ProviderRuns::refuse`): a start fails its run with a readable reason, a
+   refused Stop or answer is acknowledged as refused.
+7. Window close sets `AgentLink::close`; the worker cancels runs, saves and
+   exits. The application panel is the exception: when its window goes because
+   a run opened a project, `Builtins::carry_agent` keeps the runs, the `Host`
+   holds them, and the next application window shows them
+   (`Builtins::application(.., carry)`). Dropping the carry cancels them.
 
 Sign-in is `pm_agents::account`, on `pm-agent-account` workers. ChatGPT uses App
 Server's `account/*` and `model/list`; Claude uses `auth status|login|logout` and
 an `initialize` control request. Status drives the panel's connection and the live
 rows in Settings › Accounts. Each provider's runtime owns its credentials.
+Stop always reaches a live run and answers do while it lives, whatever the
+account says now; the panel keeps a live run's conversation after sign-out.
 
 The composer has Access, provider, model and effort pop-ups, filled from the same
 workers. Access has no Full choice, because no consent alert exists. Question and
@@ -36,9 +49,16 @@ Composition-only runs differ from main on purpose. Main returns a structured pla
 that the renderer applies. Here the run edits through its MCP session, limited to
 `catalog::composition_names()`: `enabled_tools` on Codex, `--allowedTools` on Claude.
 
+A click planned against an older surface revision lands if its target's subtree
+is unchanged since (`Surface::unchanged_since`, mirrored in `renderer.ts`); keys
+follow focus and land on their element as it is now. So Stop works while a run
+streams, with no retry.
+
 Proof is `builtins/src/agent_tests.rs`: real V8 panel, real kernel actor and a fake
-provider over real pipes, for reply and reopen, Stop, question and approval cards,
-pickers reaching the argv, and sign-in and sign-out. Sign-in is proven from the
+provider over real pipes, for reply and reopen, Stop during a stream, question and
+approval cards, pickers reaching the argv, sign-in, sign-out mid-run, and an
+application run outliving its window. Its executable is `/bin/false`, so no test
+connects a panel run to the app's MCP tools. Sign-in is proven from the
 `panel.settings` command and, separately, from `SettingsModel.perform`; nobody has
 clicked the rendered Settings button. No real provider has
 run: `live-provider-check` is unexecuted, and the Claude model request is unproven
@@ -46,14 +66,10 @@ against the real binary.
 
 Open:
 
-- A click or key planned against an older surface revision fails with "Stale
-  surface event" (`js/v4/src/renderer.ts:298`, `surface/src/events.rs:92`), and
-  `v4_view.rs` shows it as a panel error. A streaming run republishes often enough
-  to hit this, so Stop can need a second click. The fix belongs in the shared v4
-  input path, which the editor lane owns.
 - Provider `model` efforts aren't per model; the pop-up shows the provider's union.
-- `Compatible` refuses at launch: `compatible` and `completion` have no HTTP or
-  Keychain host. Computer access stays refused because no consent alert exists.
+- `Compatible` refuses at launch: no HTTP or Keychain host. Its parser and presets
+  are in history (see agents-main.md). Computer access stays refused because no
+  consent alert exists.
 - Attachments refuse with an explanation.
 - `INSTRUCTIONS` in `launch.rs` is a short stand-in for main's generated workspace
   instructions, and user MCP servers and skills aren't shared into the homes.
