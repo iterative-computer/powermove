@@ -13,9 +13,48 @@ use std::{collections::VecDeque, rc::Rc, sync::Arc};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
+    Hand,
+    Zoom,
     Rotate,
     Anchor,
     Other,
+}
+/// Viewer navigation the pointer asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Navigate {
+    Pan(Point<Pixels>),
+    Zoom { factor: f64, at: Point<Pixels> },
+}
+/// The zoom and pan after a change: zooming keeps the point under the pointer.
+pub fn navigated(
+    change: Navigate,
+    zoom: f64,
+    pan: [f64; 2],
+    center: Point<Pixels>,
+) -> (f64, [f64; 2]) {
+    match change {
+        Navigate::Pan(by) => (
+            zoom,
+            [
+                pan[0] + f32::from(by.x) as f64,
+                pan[1] + f32::from(by.y) as f64,
+            ],
+        ),
+        Navigate::Zoom { factor, at } => {
+            let next = (zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+            let kept = 1. - next / zoom;
+            let offset = |at: Pixels, center: Pixels, pan: f64| {
+                pan + (f32::from(at) as f64 - f32::from(center) as f64 - pan) * kept
+            };
+            (
+                next,
+                [
+                    offset(at.x, center.x, pan[0]),
+                    offset(at.y, center.y, pan[1]),
+                ],
+            )
+        }
+    }
 }
 /// The composition's placement inside the viewer, in window points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +70,7 @@ pub trait Host: 'static {
     fn tool(&self, cx: &App) -> Tool;
     /// Publish engine-drawn lines, normalized to the composition frame.
     fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
+    fn navigate(&self, change: Navigate, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
 }
 /// One selected layer's pose at the current time, in composition pixels.
@@ -98,6 +138,8 @@ pub struct GizmoSurface {
     /// Press waiting on a pick; the drag starts on its answer if still held.
     picking: Option<Point<Pixels>>,
     picks: usize,
+    controls: bool,
+    panning: Option<Point<Pixels>>,
 }
 const HANDLES: [(f64, f64); 8] = [
     (0., 0.),
@@ -115,6 +157,8 @@ const STEM: f64 = 18.;
 const ANCHOR_REACH: f64 = 12.;
 /// Smallest scale a handle drag reaches, percent (viewer.ts calculateResize).
 const MIN_SCALE: f64 = 0.1;
+const MIN_ZOOM: f64 = 0.05;
+const MAX_ZOOM: f64 = 16.;
 fn transform(m: &[f64; 6], p: [f64; 2]) -> [f64; 2] {
     [
         m[0] * p[0] + m[2] * p[1] + m[4],
@@ -128,6 +172,21 @@ fn inverse_linear(m: [f64; 4]) -> Option<[f64; 4]> {
 fn inverse_point(m: &[f64; 6], p: [f64; 2]) -> Option<[f64; 2]> {
     let inverse = inverse_linear([m[0], m[1], m[2], m[3]])?;
     Some(apply(inverse, [p[0] - m[4], p[1] - m[5]]))
+}
+/// A composition-space step as the layer's parent sees it.
+pub fn parent_delta(world: &[f64; 6], local: &[f64; 6], delta: [f64; 2]) -> Option<[f64; 2]> {
+    Some(apply(parent_inverse(world, local)?, delta))
+}
+/// parent = world · local⁻¹; deltas go through its inverse.
+fn parent_inverse(world: &[f64; 6], local: &[f64; 6]) -> Option<[f64; 4]> {
+    let inverse_local = inverse_linear([local[0], local[1], local[2], local[3]])?;
+    let w = [world[0], world[1], world[2], world[3]];
+    inverse_linear([
+        w[0] * inverse_local[0] + w[2] * inverse_local[1],
+        w[1] * inverse_local[0] + w[3] * inverse_local[1],
+        w[0] * inverse_local[2] + w[2] * inverse_local[3],
+        w[1] * inverse_local[2] + w[3] * inverse_local[3],
+    ])
 }
 fn round(value: f64, digits: i32) -> f64 {
     let unit = 10f64.powi(digits);
@@ -179,26 +238,15 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             continue;
         };
         // A layer collapsed to nothing has no box to grab; the others keep theirs.
-        let Some(inverse_local) = inverse_linear([local[0], local[1], local[2], local[3]]) else {
+        let Some(to_parent) = parent_inverse(&world, &local) else {
             continue;
         };
-        // parent = world * local⁻¹; deltas go through its inverse.
-        let world_linear = [world[0], world[1], world[2], world[3]];
-        let parent = [
-            world_linear[0] * inverse_local[0] + world_linear[2] * inverse_local[1],
-            world_linear[1] * inverse_local[0] + world_linear[3] * inverse_local[1],
-            world_linear[0] * inverse_local[2] + world_linear[2] * inverse_local[3],
-            world_linear[1] * inverse_local[2] + world_linear[3] * inverse_local[3],
-        ];
         let mut number = |channel: &str| {
             mirror
                 .queries()
                 .evaluate(None, id, channel, time)
                 .ok()
                 .and_then(|v| v.as_f64())
-        };
-        let Some(to_parent) = inverse_linear(parent) else {
-            continue;
         };
         let (Some(px), Some(py), Some(sx), Some(sy)) = (
             number("position.x"),
@@ -257,6 +305,8 @@ impl GizmoSurface {
             latest: 0,
             picking: None,
             picks: 0,
+            controls: true,
+            panning: None,
         }
     }
     /// Selection, document or playhead moved: reread the pose off the main
@@ -295,8 +345,8 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
-        self.host
-            .overlay(overlay(&self.poses, frame, &self.tokens), cx);
+        let poses: &[Pose] = if self.controls { &self.poses } else { &[] };
+        self.host.overlay(overlay(poses, frame, &self.tokens), cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
         let at = position - frame.origin;
@@ -313,7 +363,7 @@ impl GizmoSurface {
         let [pose] = self.poses.as_slice() else {
             return None;
         };
-        if pose.locked {
+        if pose.locked || !self.controls {
             return None;
         }
         let distance = |p: [f64; 2]| (p[0] - at[0]).hypot(p[1] - at[1]);
@@ -351,6 +401,19 @@ impl GizmoSurface {
         };
         let drag = match self.host.tool(cx) {
             Tool::Other => return,
+            Tool::Hand => {
+                self.panning = Some(event.position);
+                cx.stop_propagation();
+                return;
+            }
+            Tool::Zoom => {
+                let factor = if event.modifiers.alt { 0.8 } else { 1.25 };
+                let at = event.position;
+                self.host.navigate(Navigate::Zoom { factor, at }, cx);
+                self.draw(cx);
+                cx.stop_propagation();
+                return;
+            }
             Tool::Rotate => {
                 (self.poses.len() == 1 && self.transformable()).then(|| start(Hit::Rotate, None))
             }
@@ -433,7 +496,33 @@ impl GizmoSurface {
         })
         .detach();
     }
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(line);
+        let m = event.modifiers;
+        let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
+        if m.control || m.platform || matches!(event.delta, ScrollDelta::Lines(_)) {
+            // Responsive, reversible, bounded for coarse wheels (viewer.ts).
+            let factor = (dy * 0.006).exp().clamp(0.5, 2.);
+            let at = event.position;
+            self.host.navigate(Navigate::Zoom { factor, at }, cx);
+            self.draw(cx);
+        } else if m.shift {
+            // A plain two-finger scroll leaves the view where it is.
+            let by = if dx == 0. {
+                point(dy, 0.)
+            } else {
+                point(dx, dy)
+            };
+            let by = point(px(by.x as f32), px(by.y as f32));
+            self.host.navigate(Navigate::Pan(by), cx);
+        }
+    }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if let Some(last) = self.panning {
+            self.panning = Some(event.position);
+            self.host.navigate(Navigate::Pan(event.position - last), cx);
+            return;
+        }
         let threshold = self.tokens.metrics.drag_threshold;
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
@@ -467,6 +556,7 @@ impl GizmoSurface {
     }
     fn on_up(&mut self, commit: bool, cx: &mut Context<Self>) {
         self.picking = None;
+        self.panning = None;
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -484,6 +574,12 @@ impl GizmoSurface {
         self.on_up(false, cx);
         true
     }
+    /// View ▸ Show/Hide Layer Controls: boxes off, handles disarmed.
+    pub fn toggle_controls(&mut self, cx: &mut Context<Self>) {
+        self.controls = !self.controls;
+        self.draw(cx);
+    }
+    #[cfg(test)]
     pub fn gesture_active(&self) -> bool {
         self.drag.as_ref().is_some_and(|d| d.active)
     }
@@ -859,6 +955,14 @@ impl Render for GizmoSurface {
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
             )
+            .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
+                s.on_wheel(event, window.line_height(), cx);
+            }))
+            .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
+                let (factor, at) = (1. + event.delta as f64, event.position);
+                s.host.navigate(Navigate::Zoom { factor, at }, cx);
+                s.draw(cx);
+            }))
             .child(
                 canvas(
                     {

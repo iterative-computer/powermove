@@ -22,6 +22,22 @@ pub fn set_view(pps: f64, scroll_time: f64, column: f64) {
     VIEW.with(|v| v.set((pps, scroll_time, column)));
 }
 
+/// When panels hear about the transport: every paused time change, and only
+/// the start and end of playback (S3: no GPUI repaint while playing).
+#[derive(Default)]
+pub struct PanelClock {
+    time: f64,
+    playing: bool,
+}
+impl PanelClock {
+    pub fn due(&mut self, time: f64, playing: bool) -> bool {
+        let due = playing != self.playing || (!playing && time != self.time);
+        self.time = time;
+        self.playing = playing;
+        due
+    }
+}
+
 /// Playhead head size, points (language §11).
 pub const HEAD: f32 = 11.;
 
@@ -176,6 +192,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let scale=v.host.borrow().window.backingScaleFactor();
                 if let Some(clock)=status.clock { v.sync_popout(&clock); }
                 if let Some(clock)=status.clock {
+                    let playing=clock.state==pm_protocol::clock::TransportState::Playing;
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
                     let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();
@@ -195,7 +212,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let (pps,scroll_time,column)=VIEW.with(Cell::get);
                         let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
-                        let _:()=msg_send![&*layers.timecode,setHidden:true];
+                        // Opaque on the header's colour: it covers the panel's paused text
+                        // while playing, so that text never repaints.
+                        let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*cg!(colors.panel)];
+                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_,_)|offset<column||offset>r.w as f64)];
                         if let Some((r,_,y))=geometry {
                             // Timecode sits in the timeline header (the shell's) after the play button.

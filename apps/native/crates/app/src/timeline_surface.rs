@@ -65,7 +65,9 @@ enum Job {
         id: String,
         time: f64,
         frames: Option<i32>,
+        shift: bool,
     },
+    PasteKeys(Vec<pm_panel_timeline::ClipboardTrack>, f64),
     Menu {
         context: MenuContext,
         action: String,
@@ -232,16 +234,35 @@ impl TimelineSurface {
         }
     }
     /// Keymap and menu entry: the same model command the panel used to reach.
-    pub fn command(&mut self, id: &str, time: f64, frames: Option<i32>, cx: &mut Context<Self>) {
+    pub fn command(
+        &mut self,
+        id: &str,
+        time: f64,
+        frames: Option<i32>,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.queue.push_back(Job::Command {
             id: id.into(),
             time,
             frames,
+            shift,
         });
         self.pump(cx);
     }
-    pub fn gesture_active(&self) -> bool {
-        !matches!(self.gesture, Gesture::Idle)
+    /// The keyframe clipboard payload, or nothing with no keys selected.
+    pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {
+        self.model.copy_keys(self.model.selection.keys())
+    }
+    /// Pastes each copied track back on its own channel at the playhead.
+    pub fn paste_keys(
+        &mut self,
+        tracks: Vec<pm_panel_timeline::ClipboardTrack>,
+        time: f64,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::PasteKeys(tracks, time));
+        self.pump(cx);
     }
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
@@ -264,11 +285,6 @@ impl TimelineSurface {
             self.view.scroll_time = 0.;
             self.changed(true, cx);
         }
-    }
-    pub fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
-        let x = self.view.layer_column
-            + (self.delegate.time(cx) - self.view.scroll_time) * self.view.pps;
-        self.zoom_at(x, factor, cx);
     }
     fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
@@ -942,12 +958,9 @@ impl TimelineSurface {
             }
         };
         let mut items = self.model.menu(&context);
-        // Clipboard paste and the value dialogs have no host yet: never offer them live.
+        // The value dialogs have no host yet: never offer them live.
         for item in &mut items {
-            item.enabled &= !matches!(
-                item.id,
-                "track.paste" | "keys.value" | "keys.velocity" | "keys.scale"
-            );
+            item.enabled &= !matches!(item.id, "keys.value" | "keys.velocity" | "keys.scale");
         }
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let rows = items
@@ -1163,7 +1176,23 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             Ok(vec![])
         }
         Job::Apply(plan) => client.dispatch(plan).await.map_err(text),
-        Job::Command { id, time, frames } => {
+        Job::PasteKeys(tracks, time) => {
+            let mut effects = vec![];
+            for track in tracks {
+                let plan = client
+                    .model
+                    .paste_keys(&track.layer_id, &track.channel, time, &track.keys)
+                    .map_err(|e| e.to_string())?;
+                effects.extend(client.dispatch(plan).await.map_err(text)?);
+            }
+            Ok(effects)
+        }
+        Job::Command {
+            id,
+            time,
+            frames,
+            shift,
+        } => {
             let persist =
                 id.starts_with("timeline.") || id.starts_with("graph") || id == "toggleLayerStrips";
             let plan = client
@@ -1172,7 +1201,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                     &id,
                     time,
                     frames,
-                    false,
+                    shift,
                     millis(),
                     &PropertyFacts::default(),
                 )

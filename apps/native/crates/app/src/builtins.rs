@@ -25,6 +25,7 @@ pub struct Host {
     pub natives: crate::v4_view::Natives,
     pub timeline: Option<Entity<crate::timeline_surface::TimelineSurface>>,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
+    clock: crate::playback::PanelClock,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -34,9 +35,6 @@ pub struct Host {
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
-    pub last_tick: Option<std::time::Instant>,
-    pub last_time: f64,
-    pub last_playing: bool,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,
     /// The media inputs behind `media_runtime`, and the worker observing them.
@@ -252,24 +250,13 @@ impl Controller {
         });
         json!({"time":self.time(),"playing":playing,"stage":[self.dimensions[0],self.dimensions[1]],"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light})
     }
+    /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
+    /// the playhead and timecode are CALayers fed from the display link.
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
-        let playing = self.playing();
-        let time = self.time();
-        if time == self.builtins.last_time && playing == self.builtins.last_playing {
+        let (playing, time) = (self.playing(), self.time());
+        if !self.builtins.clock.due(time, playing) {
             return;
         }
-        if playing == self.builtins.last_playing
-            && playing
-            && self
-                .builtins
-                .last_tick
-                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(50))
-        {
-            return;
-        }
-        self.builtins.last_time = time;
-        self.builtins.last_playing = playing;
-        self.builtins.last_tick = Some(std::time::Instant::now());
         if let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
@@ -395,6 +382,9 @@ impl Controller {
             }
         });
         if id == "timeline" {
+            if let Some(timeline) = self.builtins.timeline.clone() {
+                timeline.update(cx, |timeline, cx| timeline.set_tokens(t.clone(), cx));
+            }
             crate::playback::set_timeline(
                 cx.entity_id(),
                 bounds,
@@ -409,7 +399,7 @@ impl Controller {
             self.viewer_scale.set(scale);
             self.host
                 .borrow_mut()
-                .viewer_transform(self.dimensions, Some(scale));
+                .viewer_transform(self.dimensions, Some(scale), self.pan);
             crate::playback::frame_outline(
                 &self.host.borrow(),
                 crate::panels::needs_frame_outline(self.background, t.colors.viewer),
@@ -806,6 +796,18 @@ impl Controller {
         }
     }
 }
+impl Controller {
+    /// The viewer slot's centre, window points.
+    fn viewer_center(&self) -> Point<Pixels> {
+        self.host
+            .borrow()
+            .viewer_rect
+            .get()
+            .map_or(Point::default(), |r| {
+                point(px(r.x + r.w / 2.), px(r.y + r.h / 2.))
+            })
+    }
+}
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
@@ -824,6 +826,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
+            E::CopyKeys(tracks) => {
+                v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
+                v.update_disabled();
+            }
             other => v.message = format!("Not available yet: {other:?}"),
         });
     }
@@ -863,8 +869,8 @@ impl crate::gizmo::Host for ControllerDelegate {
         let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
         Some(crate::gizmo::ViewFrame {
             origin: point(
-                px(slot.x + (slot.w - w as f32) / 2.),
-                px(slot.y + (slot.h - h as f32) / 2.),
+                px(slot.x + (slot.w - w as f32) / 2. + v.pan[0] as f32),
+                px(slot.y + (slot.h - h as f32) / 2. + v.pan[1] as f32),
             ),
             scale,
             size: v.dimensions,
@@ -877,6 +883,8 @@ impl crate::gizmo::Host for ControllerDelegate {
         };
         match controller.read(cx).tool.as_str() {
             "toolSelect" => Tool::Select,
+            "toolHand" => Tool::Hand,
+            "toolZoom" => Tool::Zoom,
             "toolRotate" => Tool::Rotate,
             "toolAnchor" => Tool::Anchor,
             _ => Tool::Other,
@@ -884,6 +892,16 @@ impl crate::gizmo::Host for ControllerDelegate {
     }
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
+    }
+    fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            let (zoom, pan) =
+                crate::gizmo::navigated(change, v.viewer_scale.get(), v.pan, v.viewer_center());
+            v.zoom = Some(zoom);
+            v.pan = pan;
+            v.persist_ui();
+            cx.notify();
+        });
     }
     fn report(&self, message: String, cx: &mut App) {
         crate::timeline_surface::Delegate::report(self, message, cx);

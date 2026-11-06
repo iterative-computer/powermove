@@ -285,6 +285,112 @@ pub fn precompose_sheet(
     PrecomposeSheet { target, result }
 }
 
+pub struct CompositionState {
+    sheet: RefCell<Option<Sheet>>,
+    owner: Retained<NSWindow>,
+    done: async_channel::Sender<Option<CompositionDraft>>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMCompositionTarget"]
+    #[ivars = CompositionState]
+    pub struct CompositionTarget;
+    unsafe impl NSObjectProtocol for CompositionTarget {}
+    impl CompositionTarget {
+        #[unsafe(method(control:))]
+        fn control(&self, sender: &NSControl) {
+            self.respond(&sender.identifier().map(|id| id.to_string()).unwrap_or_default());
+        }
+    }
+);
+impl CompositionTarget {
+    fn respond(&self, id: &str) {
+        let state = self.ivars();
+        let sheet = state.sheet.borrow();
+        let Some(sheet) = sheet.as_ref() else { return };
+        let text = |id: &str| sheet.fields[id].stringValue().to_string();
+        let number = |id: &str| text(id).trim().parse::<f64>().unwrap_or(f64::NAN);
+        let result = match id {
+            "confirm" => {
+                let draft = CompositionDraft {
+                    name: text("name"),
+                    width: number("width"),
+                    height: number("height"),
+                    fps: number("fps"),
+                    duration: number("duration"),
+                    background: text("background"),
+                };
+                // An invalid value keeps the sheet open on that field.
+                if let Some(field) = draft.errors().keys().next() {
+                    let id = if *field == "size" { "width" } else { *field };
+                    sheet.window.makeFirstResponder(Some(&sheet.fields[id]));
+                    return;
+                }
+                Some(draft)
+            }
+            "cancel" => None,
+            _ => return,
+        };
+        state.owner.endSheet(&sheet.window);
+        let _ = state.done.try_send(result);
+    }
+}
+/// A live sheet; hold it until `result` answers, since controls keep no target.
+pub struct CompositionSheet {
+    pub target: Retained<CompositionTarget>,
+    pub result: async_channel::Receiver<Option<CompositionDraft>>,
+}
+/// New Composition and Composition Settings as an owner-window sheet.
+pub fn composition_sheet(
+    owner: &NSWindow,
+    draft: &CompositionDraft,
+    settings: bool,
+    tokens: &pm_design::Tokens,
+    mtm: MainThreadMarker,
+) -> CompositionSheet {
+    let surface = draft.surface(
+        DialogId("composition".into()),
+        WindowId("editor".into()),
+        settings,
+        0,
+    );
+    let mut sheet = Sheet::new(&surface.title, 6, tokens, true, mtm);
+    sheet.text("name", "Name", &draft.name, false, true);
+    sheet.number("width", "Width", &draft.width.to_string(), "px", true);
+    sheet.number("height", "Height", &draft.height.to_string(), "px", true);
+    sheet.number("fps", "Frame Rate", &draft.fps.to_string(), "fps", true);
+    sheet.number(
+        "duration",
+        "Duration",
+        &draft.duration.to_string(),
+        "s",
+        true,
+    );
+    sheet.text("background", "Background", &draft.background, false, true);
+    sheet.button("cancel", "Cancel", true, false, true);
+    let confirm = if settings { "Apply" } else { "Create" };
+    sheet.button("confirm", confirm, true, true, false);
+    sheet.footer(&["cancel", "confirm"], None);
+    let (done, result) = async_channel::bounded(1);
+    let target: Retained<CompositionTarget> = unsafe {
+        msg_send![
+            super(CompositionTarget::alloc(mtm).set_ivars(CompositionState {
+                sheet: RefCell::new(None),
+                owner: Retained::from(owner),
+                done,
+            })),
+            init
+        ]
+    };
+    // SAFETY: `control:` is implemented and the caller holds the target until
+    // the result arrives, which is after the sheet ends.
+    unsafe { sheet.bind(&target, sel!(control:)) };
+    sheet.present(owner, Some("name"));
+    *target.ivars().sheet.borrow_mut() = Some(sheet);
+    CompositionSheet { target, result }
+}
+
 /// Actual system-alert presenter. The integration owner supplies its window
 /// registry and consumes completion IDs from the native input queue.
 pub struct AppKitAlertHost<'a, W> {

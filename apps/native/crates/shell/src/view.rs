@@ -276,7 +276,7 @@ impl Editor {
         })
         .detach();
     }
-    fn menu_state(&self) -> MenuState {
+    fn menu_state(&self, cx: &App) -> MenuState {
         MenuState {
             open: self
                 .layout
@@ -289,6 +289,11 @@ impl Editor {
             sidebar: self.dock_visible("left"),
             inspector: self.dock_visible("right"),
             tool: self.tool.clone(),
+            disabled: self
+                .integration
+                .as_ref()
+                .map(|i| i.disabled(cx))
+                .unwrap_or_default(),
         }
     }
     fn dock_visible(&self, id: &str) -> bool {
@@ -495,6 +500,18 @@ impl Editor {
             "shell command={} args={:?} token={:?}",
             cmd.name, cmd.args, cmd.token
         );
+        // A command that cannot run declines, so its key reaches the focused
+        // control and no route ever does nothing silently.
+        if self
+            .integration
+            .as_ref()
+            .is_some_and(|i| i.disabled(cx).contains(&cmd.name))
+        {
+            if let (Some(token), Some(host)) = (cmd.token, &self.host) {
+                host.borrow_mut().resolve(token, false);
+            }
+            return;
+        }
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             // Keep the toolbar's tool group in step with keyboard/menu selection.
             self.tool = cmd.name.clone();
@@ -528,7 +545,8 @@ impl Editor {
         match cmd.name.as_str() {
             "palette" => {
                 if let Some(h) = &self.host {
-                    h.borrow_mut().open_palette(&self.menu_state());
+                    let state = self.menu_state(cx);
+                    h.borrow_mut().open_palette(&state);
                 }
             }
             "fieldMenu" => {
@@ -968,7 +986,7 @@ impl Render for Editor {
                         f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
                     }),
             );
-            h.publish_menu_state(&self.menu_state());
+            h.publish_menu_state(&self.menu_state(cx));
             h.keyboard_control_focus.set(
                 w.focused(cx).is_some_and(|f| {
                     f != self.focus && !self.panel_focus.values().any(|p| *p == f)

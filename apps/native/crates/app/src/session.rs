@@ -67,6 +67,11 @@ pub struct Controller {
     pub tool: String,
     /// The composition's scale in the viewer, as last placed.
     pub viewer_scale: std::cell::Cell<f64>,
+    /// Viewer offset from centred, points.
+    pub pan: [f64; 2],
+    pub clipboard: crate::layer_commands::Clipboard,
+    /// Commands that cannot run now; menus and the palette show them off.
+    pub disabled: std::collections::BTreeSet<String>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     pub(crate) new_project_open: bool,
@@ -103,6 +108,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
+    }
+    fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        self.0.read(cx).disabled.clone()
     }
     fn panel(
         &self,
@@ -265,6 +273,9 @@ impl Controller {
             gizmo_lines: vec![],
             tool: "toolSelect".into(),
             viewer_scale: std::cell::Cell::new(1.),
+            pan: [0., 0.],
+            clipboard: Default::default(),
+            disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
             save_pending: false,
             close_after_save: None,
             new_project_open: false,
@@ -366,6 +377,7 @@ impl Controller {
         self.selected = p.selection.primary().map(str::to_owned);
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.zoom = (!chrome.navigation.fit).then_some(chrome.navigation.zoom);
+            self.pan = [chrome.navigation.pan.x, chrome.navigation.pan.y];
         }
         self.host
             .borrow_mut()
@@ -406,6 +418,7 @@ impl Controller {
         if let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
+        self.update_disabled();
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {
@@ -482,26 +495,167 @@ impl Controller {
         })
         .detach();
     }
+    /// Plans off the main thread: nudging reads layer matrices. `false` lets a
+    /// key with nothing to act on fall through to the focused control.
+    fn run_plan(&mut self, name: &str, args: &[serde_json::Value], cx: &mut Context<Self>) -> bool {
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
+        cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::layer_commands::command_plan(&name, &args, &published, time)
+                })
+                .await;
+            if let Some(plan) = plan {
+                let _ = this.update(cx, |v, cx| v.run_layer_plan(plan, cx));
+            }
+        })
+        .detach();
+        true
+    }
+    /// Selected keyframes take precedence over their layers, as Delete does.
+    fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::Clipboard;
+        let Some(published) = self.published.clone() else {
+            return false;
+        };
+        let keys = self
+            .builtins
+            .timeline
+            .as_ref()
+            .map(|t| t.read(cx).copied_keys())
+            .unwrap_or_default();
+        let (clipboard, text) = if !keys.is_empty() {
+            (Clipboard::Keys(keys), "Powermove keyframes".to_owned())
+        } else {
+            let selected = published.selection.layers();
+            let root = published.snapshot.root();
+            let layers: Vec<pm_model::Value> = selected
+                .iter()
+                .filter_map(|id| {
+                    let root = root?;
+                    let at = pm_kernel::model::find_layer(root, id)?;
+                    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
+                })
+                .collect();
+            if layers.is_empty() {
+                return false;
+            }
+            let names: Vec<&str> = layers
+                .iter()
+                .filter_map(|l| l.get("name").and_then(pm_model::Value::as_str))
+                .collect();
+            let text = names.join("\n");
+            (Clipboard::Layers(layers), text)
+        };
+        self.clipboard = clipboard;
+        // Replaces any older system media, as a text copy does.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.update_disabled();
+        if cut && let Some(timeline) = self.builtins.timeline.clone() {
+            let time = self.time();
+            timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+        }
+        true
+    }
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::Clipboard;
+        let time = self.time();
+        match self.clipboard.clone() {
+            Clipboard::Empty => false,
+            Clipboard::Keys(tracks) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                timeline.update(cx, |t, cx| t.paste_keys(tracks, time, cx));
+                true
+            }
+            Clipboard::Layers(layers) => {
+                self.run_layer_plan(crate::layer_commands::paste_plan(layers, time), cx);
+                true
+            }
+        }
+    }
+    /// Reads the sheet's starting state off the main thread, then asks.
+    fn composition_sheet(&mut self, settings: bool, cx: &mut Context<Self>) {
+        use crate::dialogs::kernel::Context as Dialogs;
+        let Some(session) = &self.session else { return };
+        let (kernel, project) = (self.kernel.clone(), session.project.clone());
+        cx.spawn(async move |this, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    let dialogs = Dialogs::capture(&kernel, &project).ok()?;
+                    let draft = dialogs.composition_draft(settings).ok()?;
+                    Some((kernel, dialogs, draft))
+                })
+                .await;
+            let Some((kernel, dialogs, draft)) = prepared else {
+                return;
+            };
+            let Ok(sheet) = this.update(cx, |v, _| {
+                crate::dialogs::appkit::composition_sheet(
+                    &v.host.borrow().window,
+                    &draft,
+                    settings,
+                    &pm_shell::tokens(),
+                    objc2::MainThreadMarker::new().expect("commands run on the main thread"),
+                )
+            }) else {
+                return;
+            };
+            let answer = sheet.result.recv().await;
+            drop(sheet.target);
+            let Ok(Some(draft)) = answer else { return };
+            let id = pm_kernel::new_id("C");
+            let error = cx
+                .background_executor()
+                .spawn(async move {
+                    let edit = dialogs
+                        .composition_edit(&draft, (!settings).then_some(id.as_str()))
+                        .map_err(|e| format!("{e:?}"))?;
+                    edit.submit(&kernel, 0)
+                        .await
+                        .ok_or_else(|| "Kernel closed".to_owned())?
+                        .map_err(|e| format!("{e:?}"))?;
+                    Ok::<(), String>(())
+                })
+                .await
+                .err();
+            if let Some(error) = error {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = error;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+    /// Menus, palette and toolbar enablement for the current document state.
+    pub fn update_disabled(&mut self) {
+        self.disabled = crate::layer_commands::disabled(
+            self.published.as_deref(),
+            self.layers(),
+            &self.clipboard,
+        );
+    }
     /// One Undo step, then the selection it leads to.
     fn run_layer_plan(&mut self, plan: crate::layer_commands::Plan, cx: &mut Context<Self>) {
-        let crate::layer_commands::Plan {
-            label,
-            commands,
-            select,
-        } = plan;
-        let Some(session) = &self.session else { return };
         let revision = self.published.as_ref().map(|p| p.revision());
-        let pending = self.kernel.call(
-            &session.project,
-            Request::new(
-                Caller::native(),
-                Call::Transact {
-                    label: Some(label),
-                    expected_revision: revision,
-                    body: WriteBody::Commands(commands),
-                },
-            ),
-        );
+        let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
+            if let Some(ids) = plan.select {
+                self.call(SelectionCall::Layers { ids, add: false }.into(), cx);
+            }
+            return;
+        };
+        let select = plan.select;
+        let Some(session) = &self.session else { return };
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
         cx.spawn(async move |this, cx| {
             let result = pending.await;
             let _ = this.update(cx, |v, cx| match result {
@@ -566,6 +720,10 @@ impl Controller {
             if let pm_model::Value::Object(m) = &mut ui.viewer {
                 m.insert("zoom", pm_model::Value::from(self.zoom.unwrap_or(1.)));
                 m.insert("fit", pm_model::Value::from(self.zoom.is_none()));
+                m.insert(
+                    "pan",
+                    pm_model::Value::Array(vec![self.pan[0].into(), self.pan[1].into()]),
+                );
             }
             let _pending = self.kernel.state_transaction(StateTransaction {
                 ops: vec![StateOp::Ui {
@@ -935,9 +1093,38 @@ impl Controller {
             self.tool = cmd.name.clone();
             return false;
         }
+        // Edit menu items reach a focused text field before the document.
+        if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {
+            return true;
+        }
+        if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
+            return true;
+        }
+        use crate::layer_commands::Route;
+        match crate::layer_commands::route(&cmd.name, &cmd.args) {
+            Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
+            Some(Route::Copy { cut }) => return self.copy_selection(cut, cx),
+            Some(Route::Paste) => return self.paste_clipboard(cx),
+            Some(Route::Timeline { frames, shift }) => {
+                let Some(timeline) = self.builtins.timeline.clone() else {
+                    return false;
+                };
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
+                return true;
+            }
+            None => {}
+        }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
-            "deselect" | "cancel" if self.cancel_gesture(cx) => {}
+            "newComposition" | "compositionSettings" => {
+                self.composition_sheet(cmd.name == "compositionSettings", cx);
+            }
+            "toggleLayerControls" => {
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    gizmos.update(cx, |g, cx| g.toggle_controls(cx));
+                }
+            }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
@@ -998,21 +1185,6 @@ impl Controller {
                     }
                 })
                 .detach();
-            }
-            "releasePrecomp"
-            | "toggleContinuousRaster"
-            | "centerAnchor"
-            | "splitTextWords"
-            | "splitTextCharacters"
-            | "splitTextLines" => {
-                let Some(published) = self.published.as_ref() else {
-                    return false;
-                };
-                let Some(plan) = crate::layer_commands::plan(&cmd.name, published, self.time())
-                else {
-                    return false;
-                };
-                self.run_layer_plan(plan, cx);
             }
             "composition.flowchart" => {
                 let mut host = self.host.borrow_mut();
@@ -1122,8 +1294,13 @@ impl Controller {
                 })
                 .detach();
             }
-            "fit" | "fitComp" | "viewer.fit" => {
+            "fit" | "fitComp" | "fitComposition" | "viewer.fit" => {
                 self.zoom = None;
+                self.pan = [0., 0.];
+                self.persist_ui();
+            }
+            "actualSize" => {
+                self.zoom = Some(1.);
                 self.persist_ui();
             }
             "zoomIn" => {
@@ -1135,8 +1312,8 @@ impl Controller {
                 self.persist_ui();
             }
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
-            | "gotoWorkIn" | "gotoWorkOut" | "shuttleJ" | "shuttleK" | "shuttleL"
-            | "shuttleReverse" | "prevVisibleEvent" | "nextVisibleEvent" => {
+            | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
+            | "nextVisibleEvent" => {
                 let Some(v) = &self.viewer else { return false };
                 let command = match cmd.name.as_str() {
                     "play" => {
@@ -1156,11 +1333,11 @@ impl Controller {
                     "stepFrames" => TransportCommand::Step {
                         frames: cmd.args.first().and_then(|v| v.as_i64()).unwrap_or(1) as i32,
                     },
-                    "gotoStart" | "gotoWorkIn" => {
+                    "gotoStart" => {
                         self.seek(0.);
                         return true;
                     }
-                    "gotoEnd" | "gotoWorkOut" => {
+                    "gotoEnd" => {
                         self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }

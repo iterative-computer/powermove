@@ -507,3 +507,43 @@ fn false_after(ms: u64) -> bool {
     std::thread::sleep(Duration::from_millis(ms));
     true
 }
+/// S3: a real panel and its real V8 worker under the production gate.
+#[gpui::test]
+fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppContext) {
+    let rig = rig("timeline", 2);
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let baseline = view.read_with(&vcx, |v, _| v.renders);
+    let mut clock = crate::playback::PanelClock::default();
+    let mut deliveries = 0;
+    let mut tick = |time: f64, playing: bool, vcx: &mut VisualTestContext| {
+        if !clock.due(time, playing) {
+            return;
+        }
+        deliveries += 1;
+        rig.runtime
+            .update_facts(json!({"time":time,"playing":playing}));
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            while ticket.try_take().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        for p in rig.runtime.take_publications() {
+            view.update(vcx, |v, cx| v.publish(p, cx));
+        }
+        vcx.run_until_parked();
+    };
+    tick(0., true, &mut vcx);
+    let playing = view.read_with(&vcx, |v, _| v.renders);
+    for frame in 1..600 {
+        tick(frame as f64 / 120., true, &mut vcx);
+    }
+    assert_eq!(view.read_with(&vcx, |v, _| v.renders), playing);
+    tick(5., false, &mut vcx);
+    assert!(view.read_with(&vcx, |v, _| v.renders) > playing);
+    tick(5.5, false, &mut vcx);
+    assert_eq!(deliveries, 3);
+    assert!(playing > baseline, "the play button changes once");
+}

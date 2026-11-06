@@ -27,6 +27,10 @@ pub trait Integration {
     ) -> Option<AnyElement> {
         None
     }
+    /// Commands that cannot run now, so menus never offer a silent no-op.
+    fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
+        Default::default()
+    }
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);

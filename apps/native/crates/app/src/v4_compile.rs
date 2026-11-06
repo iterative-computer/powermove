@@ -106,12 +106,6 @@ pub struct Ax {
     pub selected: Option<bool>,
     pub expanded: Option<bool>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Slot {
-    None,
-    Label,
-    Value,
-}
 /// Facts that vary by kit component and have no generic style expression.
 #[derive(Clone, Debug, Default)]
 pub enum Kit {
@@ -156,9 +150,7 @@ pub struct NodeView {
     pub text: Option<SharedString>,
     pub symbol: Option<SharedString>,
     pub symbol_size: f32,
-    pub slot: Slot,
     pub disabled: bool,
-    pub selected: bool,
     pub events: Events,
     pub ax: Option<Ax>,
     pub tab_index: Option<isize>,
@@ -186,7 +178,6 @@ pub struct NumberFacts {
     pub precision: Option<u32>,
 }
 pub struct Prepared {
-    pub panel: Panel,
     pub nodes: HashMap<Id, NodeView>,
     pub semantics: HashMap<String, Id>,
     pub header: Option<Id>,
@@ -255,7 +246,6 @@ impl Prepared {
         }
         let header = header(panel_id, &surface);
         Self {
-            panel,
             nodes,
             semantics,
             header,
@@ -396,21 +386,17 @@ fn compile(
         };
     }
     let mut compiled = apply(sheet, &style, table);
-    let slot = match node.props.get("data-pm-slot").and_then(Value::as_str) {
-        Some("label") => {
-            compiled.sheet = compiled.sheet.flex_1();
-            Slot::Label
-        }
+    match node.props.get("data-pm-slot").and_then(Value::as_str) {
+        Some("label") => compiled.sheet = compiled.sheet.flex_1(),
         Some("value") => {
             compiled.sheet = compiled
                 .sheet
                 .flex_row()
                 .items_center()
                 .gap(px(t.metrics.gap));
-            Slot::Value
         }
-        _ => Slot::None,
-    };
+        _ => {}
+    }
     let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
         || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
     if selected {
@@ -488,9 +474,7 @@ fn compile(
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
         symbol,
         symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
-        slot,
         disabled,
-        selected,
         events: Events::of(node),
         ax,
         tab_index: node

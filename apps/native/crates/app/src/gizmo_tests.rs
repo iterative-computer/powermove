@@ -1,6 +1,6 @@
 //! Viewer gizmos: real pointer input through the mounted viewer panel into kernel
 //! gestures. The scene is real; the engine overlay is observed at its entry point.
-use crate::gizmo::{GizmoSurface, Host, Tool, ViewFrame};
+use crate::gizmo::{GizmoSurface, Host, Navigate, Tool, ViewFrame};
 use crate::v4_view::{Natives, SurfaceView};
 use crate::v4_view_tests::{
     PROJECT, Rig, bounds, publication, rig, rig_project, settle, tokens, window,
@@ -21,6 +21,7 @@ struct Recorder {
     lines: RefCell<Vec<OverlayLine>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
+    navigation: RefCell<Vec<Navigate>>,
 }
 struct Recording(Rc<Recorder>);
 impl Host for Recording {
@@ -43,6 +44,9 @@ impl Host for Recording {
     fn overlay(&self, lines: Vec<OverlayLine>, _: &mut App) {
         *self.0.lines.borrow_mut() = lines;
     }
+    fn navigate(&self, change: Navigate, _: &mut App) {
+        self.0.navigation.borrow_mut().push(change);
+    }
     fn report(&self, message: String, _: &mut App) {
         self.0.reports.borrow_mut().push(message);
     }
@@ -55,7 +59,7 @@ struct Stage {
     _view: Entity<SurfaceView>,
 }
 /// One visible square with a real transform at its anchor.
-fn project() -> String {
+pub(crate) fn project() -> String {
     let channel = |key: &str, v: f64| format!(r#""{key}":{{"v":{v},"kf":[]}}"#);
     let channels = [
         ("opacity", 100.),
@@ -355,6 +359,45 @@ fn escape_during_a_move_restores_through_the_kernel(cx: &mut TestAppContext) {
     settle(cx, move |cx| idle.read_with(cx, |g, _| g.idle()));
     s.refresh(cx);
     assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn the_hand_tool_drags_the_view_without_editing(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Hand));
+    let before = s.pose();
+    let at = s.point_of([210., 160.]);
+    s.drag(cx, at, point(px(30.), px(-12.)), Modifiers::none());
+    let moved: Vec<_> = s.recorder.navigation.borrow().clone();
+    assert_eq!(moved.len(), 3);
+    let total = moved
+        .iter()
+        .fold(point(px(0.), px(0.)), |sum, change| match change {
+            Navigate::Pan(by) => sum + *by,
+            other => panic!("{other:?}"),
+        });
+    assert_eq!(total, point(px(30.), px(-12.)));
+    assert_eq!(s.pose().position, before.position);
+}
+#[gpui::test]
+fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Zoom));
+    let at = s.point_of([300., 100.]);
+    s.vcx.simulate_click(at, Modifiers::alt());
+    let [Navigate::Zoom { factor, .. }] = s.recorder.navigation.borrow().clone()[..] else {
+        panic!("one zoom step");
+    };
+    assert_eq!(factor, 0.8);
+    let center = point(px(500.), px(300.));
+    let pointer = point(px(700.), px(400.));
+    let change = Navigate::Zoom {
+        factor: 2.,
+        at: pointer,
+    };
+    let (zoom, pan) = crate::gizmo::navigated(change, 1., [0., 0.], center);
+    assert_eq!(zoom, 2.);
+    // 200, 100 from centre now lands 400, 200 out: the view moves back by that.
+    assert_eq!(pan, [-200., -100.]);
 }
 /// The Resolution pop-up reaches the value that sizes the engine's drawable.
 #[gpui::test]

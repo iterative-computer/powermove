@@ -87,6 +87,8 @@ pub struct MenuState {
     pub sidebar: bool,
     pub inspector: bool,
     pub tool: String,
+    /// Commands that cannot run now: menu rows dim, the palette omits them.
+    pub disabled: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
 /// (a key palette/field-menu child panel is not an editor window).
@@ -300,8 +302,9 @@ define_class!(
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                     _ => {}
                 }
+                return (!state.disabled.contains(name)).into();
             }
-            true
+            true.into()
         }
 
         #[unsafe(method(replayEvent:))]
@@ -833,7 +836,7 @@ pub struct Host {
     pub canvas_focus: Cell<bool>,
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
-    viewer_transform: Option<([f64; 2], Option<f64>)>,
+    viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
     preview_scale: f64,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
@@ -1451,7 +1454,7 @@ impl Host {
     }
     /// Retained below-slot layer; the app configures the service presenter.
     /// Opt in to a clipped content layer. Standalone shell keeps its placeholder.
-    pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>) {
+    pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>, pan: [f64; 2]) {
         if self.viewer_transform.is_none() {
             let root = objc2_quartz_core::CALayer::new();
             root.setMasksToBounds(true);
@@ -1461,11 +1464,11 @@ impl Host {
                 let _: () = msg_send![&*root,addSublayer:self.layer.as_ptr() as *mut AnyObject];
             }
         }
-        if self.viewer_transform != Some((dimensions, zoom)) {
+        if self.viewer_transform != Some((dimensions, zoom, pan)) {
             // Re-place the content layer on the next composition frame.
             self.last_geometry = None;
         }
-        self.viewer_transform = Some((dimensions, zoom));
+        self.viewer_transform = Some((dimensions, zoom, pan));
     }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
         self.resolver.bindings.extend(bindings);
@@ -1500,19 +1503,23 @@ impl Host {
         let h = self.content.bounds().size.height;
         let geometry = self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
-            let (width, height) = if let Some((dimensions, zoom)) = self.viewer_transform {
+            let (width, height, pan) = if let Some((dimensions, zoom, pan)) = self.viewer_transform
+            {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
                 let zoom = zoom
                     .unwrap_or(fit)
                     .min(8192. / dimensions[0].max(dimensions[1]) / scale);
-                (dimensions[0] * zoom, dimensions[1] * zoom)
+                (dimensions[0] * zoom, dimensions[1] * zoom, pan)
             } else {
-                (r.w as f64, r.h as f64)
+                (r.w as f64, r.h as f64, [0., 0.])
             };
             SlotGeometry {
                 frame: rect(r, h),
                 layer: NSRect::new(
-                    NSPoint::new((r.w as f64 - width) / 2., (r.h as f64 - height) / 2.),
+                    NSPoint::new(
+                        (r.w as f64 - width) / 2. + pan[0],
+                        (r.h as f64 - height) / 2. - pan[1],
+                    ),
                     NSSize::new(width, height),
                 ),
                 scale,
@@ -1641,9 +1648,25 @@ impl Host {
             let tip = format!("{} {label}", if on { "Hide" } else { "Show" });
             item.setToolTip(Some(&NSString::from_str(&tip)));
         }
+        self.enable_tools(&state.disabled);
         *self.menu_state.borrow_mut() = Some(state.clone());
     }
     /// Selects the toolbar tool for a `tool*` command (keyboard/menu/palette).
+    /// A tool with no gesture yet dims in the toolbar like its menu row.
+    fn enable_tools(&self, disabled: &std::collections::BTreeSet<String>) {
+        for item in self._toolbar.items().to_vec() {
+            if item.itemIdentifier().to_string() == "tools"
+                && let Some(view) = item.view()
+            {
+                for (index, (command, _, _)) in TOOLS.iter().enumerate() {
+                    let on = !disabled.contains(*command);
+                    unsafe {
+                        let _: () = msg_send![&*view,setEnabled:on,forSegment:index as isize];
+                    }
+                }
+            }
+        }
+    }
     pub fn select_tool(&self, command: &str) {
         let Some(index) = TOOLS.iter().position(|(c, _, _)| *c == command) else {
             return;
@@ -1661,6 +1684,7 @@ impl Host {
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
+        choices.retain(|c| !state.disabled.contains(&c.command));
         for id in crate::layout::PANELS {
             let open = state.open.iter().any(|o| o == id);
             if open && id == "viewer" {

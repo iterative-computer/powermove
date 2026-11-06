@@ -280,7 +280,7 @@ fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext)
     s.vcx.simulate_click(from, Modifiers::none());
     s.idle(cx);
     s.surface
-        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, cx));
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
     s.idle(cx);
     let graph = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
     let key = graph
@@ -407,7 +407,7 @@ fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) 
 fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
     s.surface.update(&mut s.vcx, |t, cx| {
-        t.command("timeline.mode:tracks", 0., None, cx)
+        t.command("timeline.mode:tracks", 0., None, false, cx)
     });
     s.idle(cx);
     let alt = Modifiers {
