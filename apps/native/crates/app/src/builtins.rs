@@ -904,7 +904,11 @@ impl crate::gizmo::Host for ControllerDelegate {
                 if let (Some((command, _)), Some(controller)) =
                     (index.and_then(|i| rows.get(i)), host.upgrade())
                 {
-                    controller.read(cx).host.borrow().send_command(command, vec![]);
+                    controller
+                        .read(cx)
+                        .host
+                        .borrow()
+                        .send_command(command, vec![]);
                 }
             },
         );

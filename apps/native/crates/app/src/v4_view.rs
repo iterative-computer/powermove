@@ -446,7 +446,11 @@ impl SurfaceView {
                         };
                         this.change(id, value, cx);
                     }
-                    TextEvent::Cancelled => {}
+                    TextEvent::Cancelled => {
+                        if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
+                            this.change(id, json!(""), cx);
+                        }
+                    }
                 }
             },
         ));
@@ -492,6 +496,37 @@ impl SurfaceView {
     pub fn change_semantic(&mut self, semantic: &str, value: Value, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];
         self.change(id, value, cx);
+    }
+    #[cfg(test)]
+    pub fn id_of_text(&self, text: &str) -> Option<Id> {
+        let surface = &self.publication.surface;
+        let parent = |n: &NodeView| n.parent;
+        self.prepared
+            .nodes
+            .values()
+            .find(|n| n.text.as_deref() == Some(text))
+            .map(|n| {
+                parent(n)
+                    .filter(|p| surface.node(*p).is_some())
+                    .unwrap_or(n.id)
+            })
+    }
+    #[cfg(test)]
+    pub fn semantic_ids(&self) -> Vec<String> {
+        self.prepared.semantics.keys().cloned().collect()
+    }
+    #[cfg(test)]
+    pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        let id = self.prepared.semantics[semantic];
+        self.send(id, "click", EventDetail::default(), cx);
+    }
+    #[cfg(test)]
+    pub fn cancellable_field(&self) -> Option<Id> {
+        self.prepared
+            .nodes
+            .values()
+            .find(|n| n.cancel_change)
+            .map(|n| n.id)
     }
     #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {

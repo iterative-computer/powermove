@@ -28,9 +28,11 @@ pub trait Delegate: 'static {
         items: Vec<serde_json::Value>,
         window: &mut Window,
         cx: &mut App,
-        choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
+        choose: Choose,
     );
 }
+/// Runs with the picked row index once a native menu closes.
+pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
 enum Spec {
     Layers,
@@ -960,12 +962,15 @@ impl TimelineSurface {
         let mut items = self.model.menu(&context);
         // The value dialogs have no host yet: never offer them live.
         for item in &mut items {
-            item.enabled &= !matches!(item.id, "keys.value" | "keys.velocity" | "keys.scale");
+            item.enabled &= !matches!(
+                item.id,
+                "keys.value" | "keys.velocity" | "keys.scale" | "graph.fit" | "graph.merge"
+            );
         }
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let rows = items
             .iter()
-            .map(|i| serde_json::json!({"id":i.id,"label":menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
+            .map(|i| serde_json::json!({"id":i.id,"label":pm_panel_timeline::menu_label(i.id),"disabled":!i.enabled,"checked":i.checked}))
             .collect();
         let weak = cx.entity().downgrade();
         self.delegate.clone().menu(
@@ -1060,42 +1065,6 @@ impl TimelineSurface {
 }
 fn frame_time(model: &TimelineModel, time: f64) -> f64 {
     frame(time, model.index.fps)
-}
-fn menu_label(id: &str) -> &'static str {
-    match id {
-        "marker.add" => "Add Marker",
-        "marker.remove" => "Remove Marker",
-        "work.start" => "Set Work Area Start",
-        "work.end" => "Set Work Area End",
-        "work.reset" => "Reset Work Area",
-        "mode.toggle" => "Toggle Layers and Tracks",
-        "keys.value" => "Edit Value…",
-        "keys.velocity" => "Keyframe Velocity…",
-        "keys.scale" => "Scale Keyframes…",
-        "keys.hold" => "Toggle Hold Keyframe",
-        "keys.delete" => "Delete Keyframes",
-        "keys.copy" => "Copy Keyframes",
-        "ease.linear" => "Linear",
-        "ease.easeIn" => "Ease In",
-        "ease.easeOut" => "Ease Out",
-        "ease.easeInOut" => "Ease In and Out",
-        "ease.swish" => "Swish",
-        "ease.power" => "Power",
-        "ease.expoOut" => "Expo Out",
-        "ease.backOut" => "Back Out",
-        "ease.snap" => "Snap",
-        "ease.glide" => "Glide",
-        "track.add" => "Add Keyframe",
-        "track.paste" => "Paste Keyframes",
-        "track.clear" => "Remove All Keyframes",
-        "layer.shared-menu" => "Layer Options…",
-        "graph.value" => "Value Graph",
-        "graph.speed" => "Speed Graph",
-        "graph.fit" => "Fit Curves",
-        "graph.merge" => "Merge Curves",
-        "graph.combined" => "Show Dope Sheet",
-        _ => "",
-    }
 }
 async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, String> {
     let text = |e: pm_panel_timeline::ClientError| e.to_string();
@@ -1461,11 +1430,11 @@ impl Render for TimelineSurface {
                             paint(op, bounds.origin, &tokens, window, cx);
                         }
                         if let Some(area) = marquee {
-                            window.paint_quad(outline(
-                                area,
-                                rgb(tokens.colors.secondary),
-                                BorderStyle::Solid,
-                            ));
+                            window.paint_quad(
+                                PaintQuad::new(area)
+                                    .border_widths(1f32)
+                                    .border_color(rgb(tokens.colors.secondary)),
+                            );
                         }
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
@@ -1504,7 +1473,11 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         .map(|c| Bounds::new(at(c.x, c.y), size(px(c.width as f32), px(c.height as f32))));
     let draw = |window: &mut Window, cx: &mut App| match op.shape {
         "rect" | "rounded-rect" | "stripes-45" | "work-area-handle" | "square" => {
-            window.paint_quad(fill(area, color).corner_radii(px(op.radius as f32)));
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(px(op.radius as f32)),
+            );
         }
         "ring" | "outside-ring" => {
             let grown = if op.shape == "ring" {
@@ -1513,13 +1486,18 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 area.dilate(px(op.stroke as f32))
             };
             window.paint_quad(
-                outline(grown, color, BorderStyle::Solid)
+                PaintQuad::new(grown)
+                    .border_color(color)
                     .border_widths(px(op.stroke as f32))
                     .corner_radii(px(op.radius as f32)),
             );
         }
         "circle" => {
-            window.paint_quad(fill(area, color).corner_radii(area.size.width / 2.));
+            window.paint_quad(
+                PaintQuad::new(area)
+                    .background(color)
+                    .corner_radii(area.size.width / 2.),
+            );
         }
         "diamond"
         | "diamond.fill"

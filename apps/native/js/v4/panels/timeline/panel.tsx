@@ -104,6 +104,8 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 label="Current time"
                 value={f.timeEditor.value}
                 binding={f.timeEditor.binding}
+                metadata={{ cancelChange: true }}
+                onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
                 style={{
                   color: t("colors.text"),
                   fontSize: t("typography.timecode"),
@@ -286,7 +288,7 @@ export function kindSymbol(kind: string): string | null {
   );
 }
 function Layer({ row, send }: { row: LayerRow; send: Send }) {
-  const show = row.hovered || row.focused;
+  const show = row.hovered || row.focused || row.selected;
   return (
     <>
       <div style={{ ...line, gap: t("metrics.gap") }}>
@@ -337,6 +339,8 @@ function Layer({ row, send }: { row: LayerRow; send: Send }) {
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
             tabIndex={-1}
+            metadata={{ cancelChange: true }}
+            onChange={(e) => send({ type: "editDone", value: String(e.value ?? "") })}
           />
         ) : (
           <text

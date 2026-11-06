@@ -302,9 +302,10 @@ define_class!(
                         NSControlStateValueOn } else { NSControlStateValueOff }),
                     _ => {}
                 }
-                return (!state.disabled.contains(name)).into();
+                !state.disabled.contains(name)
+            } else {
+                true
             }
-            true.into()
         }
 
         #[unsafe(method(replayEvent:))]

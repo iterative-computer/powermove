@@ -334,10 +334,9 @@ fn copied_keys_paste_at_the_playhead_and_undo_removes_them(cx: &mut TestAppConte
     delivered(&mut s, cx);
     let count = |s: &Stage| {
         s.surface.read_with(&s.vcx, |t, _| {
-            t.model()
-                .index
-                .layer("l0")
-                .map_or(0, |l| l.channels.iter().map(|c| c.keys.len()).sum::<usize>())
+            t.model().index.layer("l0").map_or(0, |l| {
+                l.channels.iter().map(|c| c.keys.len()).sum::<usize>()
+            })
         })
     };
     assert_eq!(count(&s), 1);

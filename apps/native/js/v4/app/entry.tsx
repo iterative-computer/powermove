@@ -25,6 +25,11 @@ interface Mount {
   root: SurfaceRoot;
   dispose(): Promise<void> | void;
 }
+interface MenuRow {
+  id: string;
+  label: string;
+  intent: unknown;
+}
 let mounted: Mount | undefined;
 let host: HostClient;
 let settleModel: () => Promise<unknown> = async () => {};
@@ -148,7 +153,17 @@ async function mount(panel: string) {
       model: {
         inspect: async (window) => native("timeline.frame", window),
         act: async (intent) => {
-          await command("panel.timeline", intent);
+          if (intent.type === "open") {
+            await platform("timeline.effect", { kind: "command", name: "open" });
+          } else if (
+            intent.type === "graphOptions" ||
+            (intent.type === "switch" && intent.name === "parent")
+          ) {
+            const rows = await command<MenuRow[]>("panel.timeline.menu", intent);
+            const choice = await platform("contextMenu", rows);
+            const row = rows.find((r) => r.id === choice);
+            if (row) await command("panel.timeline", row.intent);
+          } else await command("panel.timeline", intent);
         },
         dispose: async () => {
           await command("panel.timeline.dispose");

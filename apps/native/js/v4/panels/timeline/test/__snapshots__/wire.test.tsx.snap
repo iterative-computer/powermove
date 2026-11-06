@@ -2477,6 +2477,121 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "type": "div",
                             },
                             {
+                              "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:parent:layer:headline",
+                                    "label": "Parent: None · Drag to a layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "link",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:lock:layer:headline",
+                                    "label": "Toggle Lock",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "lock.open",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Lock",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:visibility:layer:headline",
+                                    "label": "Toggle Visibility",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "eye",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Visibility",
+                                  },
+                                  "type": "button",
+                                },
+                              ],
                               "props": {
                                 "style": {
                                   "alignItems": "center",
@@ -8194,6 +8309,121 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "type": "div",
                             },
                             {
+                              "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:parent:layer:headline",
+                                    "label": "Parent: None · Drag to a layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "link",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:headline",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:lock:layer:headline",
+                                    "label": "Toggle Lock",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "lock.open",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Lock",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:visibility:layer:headline",
+                                    "label": "Toggle Visibility",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "eye",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Visibility",
+                                  },
+                                  "type": "button",
+                                },
+                              ],
                               "props": {
                                 "style": {
                                   "alignItems": "center",
@@ -8377,6 +8607,121 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "type": "div",
                             },
                             {
+                              "children": [
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:parent:layer:kicker",
+                                    "label": "Parent: None · Drag to a layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "link",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:solo:layer:kicker",
+                                    "label": "Toggle Solo",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "s.circle",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Solo",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:lock:layer:kicker",
+                                    "label": "Toggle Lock",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "lock.open",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Lock",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:visibility:layer:kicker",
+                                    "label": "Toggle Visibility",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "eye",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Visibility",
+                                  },
+                                  "type": "button",
+                                },
+                              ],
                               "props": {
                                 "style": {
                                   "alignItems": "center",
@@ -18104,6 +18449,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "data-pm-component": "text-field",
                     "id": "timeline:time",
                     "label": "Current time",
+                    "metadata": {
+                      "cancelChange": true,
+                    },
                     "style": {
                       "background": {
                         "token": "colors.field",
@@ -19638,6 +19986,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "control": "text",
                                     "data-pm-component": "text-field",
                                     "label": "Headline",
+                                    "metadata": {
+                                      "cancelChange": true,
+                                    },
                                     "style": {
                                       "background": {
                                         "token": "colors.field",

@@ -110,7 +110,8 @@ impl Stage {
             self.view.update(&mut self.vcx, |v, cx| v.publish(p, cx));
         }
         self.vcx.run_until_parked();
-        assert!(self.rig.runtime.take_errors().is_empty());
+        let errors = self.rig.runtime.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
         self.surface.update(&mut self.vcx, |_, cx| cx.notify());
         self.vcx.run_until_parked();
     }
@@ -138,7 +139,7 @@ impl Stage {
         self.vcx.simulate_mouse_up(to, MouseButton::Left, modifiers);
         self.idle(cx);
     }
-    pub fn from_of(&self, id: &str) -> f64 {
+    pub fn start_of(&self, id: &str) -> f64 {
         let p = self.rig.kernel.published(PROJECT).unwrap();
         pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
             .into_iter()
@@ -419,7 +420,7 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
         ..Default::default()
     };
     // Ripple: Option-drag A's out edge shifts B and C with it.
-    let (a_out, b_in) = (s.out_of("a"), s.from_of("b"));
+    let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
     let from = s.at(0, a_out) - point(px(2.), px(0.));
     s.drag(cx, from, from - point(px(30.), px(0.)), alt);
     assert!(
@@ -427,13 +428,13 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
         "{:?}",
         s.recorder.reports.borrow()
     );
-    let shifted = b_in - s.from_of("b");
+    let shifted = b_in - s.start_of("b");
     assert!(shifted > 0., "ripple must move the suffix");
     assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
     s.undo(cx);
-    assert_eq!(s.from_of("b"), b_in);
+    assert_eq!(s.start_of("b"), b_in);
     // Roll: Control-drag the A/B cut moves both edges and neither outer bound.
-    let (b_in, b_out) = (s.from_of("b"), s.out_of("b"));
+    let (b_in, b_out) = (s.start_of("b"), s.out_of("b"));
     let from = s.at(0, s.out_of("a")) - point(px(2.), px(0.));
     s.drag(cx, from, from - point(px(30.), px(0.)), control);
     assert!(
@@ -441,25 +442,25 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
         "{:?}",
         s.recorder.reports.borrow()
     );
-    assert!(s.from_of("b") < b_in);
-    assert_eq!(s.out_of("a"), s.from_of("b"));
+    assert!(s.start_of("b") < b_in);
+    assert_eq!(s.out_of("a"), s.start_of("b"));
     assert_eq!(s.out_of("b"), b_out);
     s.undo(cx);
-    assert_eq!(s.from_of("b"), b_in);
+    assert_eq!(s.start_of("b"), b_in);
     // Slide: Option-drag B's body keeps its length and the outer bounds.
-    let (length, c_out) = (s.out_of("b") - s.from_of("b"), s.out_of("c"));
-    let from = s.at(0, s.from_of("b") + length / 2.);
+    let (length, c_out) = (s.out_of("b") - s.start_of("b"), s.out_of("c"));
+    let from = s.at(0, s.start_of("b") + length / 2.);
     s.drag(cx, from, from + point(px(30.), px(0.)), alt);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
         s.recorder.reports.borrow()
     );
-    assert!(s.from_of("b") > b_in);
-    assert!((s.out_of("b") - s.from_of("b") - length).abs() < 1e-9);
+    assert!(s.start_of("b") > b_in);
+    assert!((s.out_of("b") - s.start_of("b") - length).abs() < 1e-9);
     assert_eq!(s.out_of("c"), c_out);
     s.undo(cx);
-    assert_eq!(s.from_of("b"), b_in);
+    assert_eq!(s.start_of("b"), b_in);
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
@@ -503,12 +504,12 @@ fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
 #[gpui::test]
 fn dragging_a_clip_moves_it_through_the_kernel_and_undo_restores_it(cx: &mut TestAppContext) {
     let mut s = stage(cx, 3);
-    let before = s.from_of("l1");
+    let before = s.start_of("l1");
     let from = s.at(1, before + 1.);
     let to = from + point(px(120.), px(0.));
     s.drag(cx, from, to, Modifiers::none());
     let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
-    let moved = s.from_of("l1");
+    let moved = s.start_of("l1");
     assert!(
         (moved - (before + 120. / pps)).abs() <= 1. / 30.,
         "clip at {moved}, was {before}, pps {pps}"
@@ -519,7 +520,156 @@ fn dragging_a_clip_moves_it_through_the_kernel_and_undo_restores_it(cx: &mut Tes
         s.recorder.reports.borrow()
     );
     s.undo(cx);
-    assert_eq!(s.from_of("l1"), before);
+    assert_eq!(s.start_of("l1"), before);
+}
+#[gpui::test]
+fn a_shift_drag_crossing_another_clips_edge_holds_on_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let target = s.out_of("l0");
+    let before = s.start_of("l1");
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let from = s.at(1, before + 1.);
+    // Snapping latches on crossing, then holds through the release radius.
+    let travel = ((target - before) * pps) as f32 + 3.;
+    s.drag(
+        cx,
+        from,
+        from + point(px(travel), px(0.)),
+        Modifiers::shift(),
+    );
+    assert_eq!(s.start_of("l1"), target);
+    s.undo(cx);
+    assert_eq!(s.start_of("l1"), before);
+}
+#[gpui::test]
+fn double_clicking_a_name_renames_through_the_kernel_and_escape_cancels(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let name = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)[0]
+            .name
+            .clone()
+    };
+    let edit = |s: &mut Stage, cx: &mut TestAppContext, value: serde_json::Value| {
+        let row = s
+            .view
+            .read_with(&s.vcx, |v, _| v.id_of_text("Layer 0"))
+            .unwrap();
+        s.view.update(&mut s.vcx, |v, cx| {
+            v.send(row, "doubleclick", Default::default(), cx);
+        });
+        s.idle(cx);
+        s.idle(cx);
+        let field = s
+            .view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .expect("name field");
+        s.view
+            .update(&mut s.vcx, |v, cx| v.change(field, value, cx));
+        s.idle(cx);
+        s.idle(cx);
+        assert!(
+            s.view
+                .read_with(&s.vcx, |v, _| v.cancellable_field())
+                .is_none()
+        );
+    };
+    edit(&mut s, cx, serde_json::json!(""));
+    assert_eq!(name(&s), "Layer 0");
+    edit(&mut s, cx, serde_json::json!("Headline"));
+    assert_eq!(name(&s), "Headline");
+    s.undo(cx);
+    assert_eq!(name(&s), "Layer 0");
+}
+/// A platform request the panel sent, answered as the app would.
+fn answer(
+    s: &Stage,
+    operation: &str,
+    value: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let requests = s.rig.runtime.take_platform_requests();
+        if let Some(request) = requests.into_iter().find(|r| r.operation == operation) {
+            s.rig
+                .runtime
+                .platform_reply(request.id, Ok(value(&request.input)));
+            return request.input;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {operation} request"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+#[gpui::test]
+fn the_time_field_seeks_to_typed_timecode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let time = s
+        .view
+        .read_with(&s.vcx, |v, _| v.semantic_id_starting("timeline:time"))
+        .unwrap();
+    s.view
+        .update(&mut s.vcx, |v, cx| v.click_semantic(&time, cx));
+    s.idle(cx);
+    s.idle(cx);
+    let field = s
+        .view
+        .read_with(&s.vcx, |v, _| v.cancellable_field())
+        .expect("time field");
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.change(field, serde_json::json!("2:15"), cx)
+    });
+    cx.run_until_parked();
+    let input = answer(&s, "timeline.effect", |_| serde_json::Value::Null);
+    assert_eq!(input["kind"], "seek");
+    assert_eq!(input["time"], 2.5);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_none()
+    );
+}
+#[gpui::test]
+fn the_parent_button_opens_a_menu_and_parents_through_the_kernel(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let select = pm_kernel::SelectionCall::Layers {
+        ids: vec!["l0".into()],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.idle(cx);
+    let row = s.view.read_with(&s.vcx, |v, _| {
+        v.semantic_ids()
+            .into_iter()
+            .find(|id| id.starts_with("timeline:parent:") && id.contains("l0"))
+    });
+    let row = row.expect("parent switch");
+    s.view
+        .update(&mut s.vcx, |v, cx| v.click_semantic(&row, cx));
+    cx.run_until_parked();
+    let rows = answer(&s, "contextMenu", |_| serde_json::json!("l1"));
+    assert_eq!(rows[0]["label"], "None");
+    s.idle(cx);
+    s.idle(cx);
+    let parent = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .into_iter()
+            .find(|l| l.id == "l0")
+            .unwrap()
+            .parent
+    };
+    assert_eq!(parent(&s).as_deref(), Some("l1"));
+    s.undo(cx);
+    assert_eq!(parent(&s), None);
 }
 #[gpui::test]
 fn trimming_a_clip_edge_changes_its_out_point_and_undo_restores_it(cx: &mut TestAppContext) {
@@ -546,14 +696,8 @@ fn ruler_press_and_drag_scrubs_frame_exact_without_editing(cx: &mut TestAppConte
     let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
     let last = *seeks.last().unwrap();
     assert!((last - 150. / pps).abs() <= 1. / 30.);
-    assert_eq!(
-        (last * 30.)
-            .fract()
-            .abs()
-            .min(1. - (last * 30.).fract().abs())
-            < 1e-6,
-        true
-    );
+    let off_frame = (last * 30.).fract().abs();
+    assert!(off_frame.min(1. - off_frame) < 1e-6);
     assert_eq!(
         s.rig.kernel.published(PROJECT).unwrap().revision(),
         revision

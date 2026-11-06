@@ -94,7 +94,10 @@ fn a_corner_resizes_a_shape_instead_of_scaling_it(cx: &mut TestAppContext) {
     let after = s.pose();
     assert_eq!(after.scale, before.scale);
     assert_eq!(after.corners[0], before.corners[0]);
-    assert_eq!(after.corners[2], [before.corners[2][0] + 50., before.corners[2][1] + 20.]);
+    assert_eq!(
+        after.corners[2],
+        [before.corners[2][0] + 50., before.corners[2][1] + 20.]
+    );
     s.undo(cx);
     assert_eq!(s.pose().corners, before.corners);
 }
@@ -281,7 +284,12 @@ fn a_solid_scales_each_axis_freely(cx: &mut TestAppContext) {
     let width = s.pose().corners[1][0] - s.pose().corners[0][0];
     let height = s.pose().corners[3][1] - s.pose().corners[0][1];
     let at = s.point_of([corner[0] - 2., corner[1] - 2.]);
-    s.drag(cx, at, point(px(width as f32 / 2.), px(height as f32 / 4.)), Modifiers::none());
+    s.drag(
+        cx,
+        at,
+        point(px(width as f32 / 2.), px(height as f32 / 4.)),
+        Modifiers::none(),
+    );
     assert_eq!(s.pose().scale, [150., 125.]);
 }
 #[gpui::test]
@@ -440,7 +448,12 @@ fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestApp
     s.vcx
         .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
     settle(cx, move |_| recorder.menus.get() == 1);
-    let selected = kernel.published(PROJECT).unwrap().selection.layers().to_vec();
+    let selected = kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec();
     assert_eq!(selected, ["l1"]);
 }
 /// The Resolution pop-up reaches the value that sizes the engine's drawable.

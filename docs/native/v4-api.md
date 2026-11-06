@@ -98,6 +98,10 @@ tie it to the native surface: `nativeColumn` (width follows the resizable column
 the structural keywords `position`, `inset: "fill"`, and numeric `flexGrow` and
 `flexShrink`. No existing shape, event or prop changed.
 
+The viewer mounts `surface="viewer.gizmos"` the same way. Its transform handles
+are drawn by the engine in the frame's own pass, and pointer drags run as kernel
+gestures on a worker.
+
 All primitives have native tree representations: `div`, `text`, `img`, `input`,
 `textarea`, `button`, `scroll`, `virtual-list`, `anchored`, `path`, `canvas`,
 `frame`, `markdown`, `code`, `Glass`, `material`, `webview`. Resource IDs/data stay

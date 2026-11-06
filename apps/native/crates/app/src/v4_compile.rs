@@ -163,6 +163,8 @@ pub struct NodeView {
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
     pub local_change: bool,
+    /// Escape reports an empty change, so a transient editor can close.
+    pub cancel_change: bool,
     pub timeline_scrub: Option<(SharedString, SharedString)>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
@@ -443,6 +445,10 @@ fn compile(
     let meta = node.props.get("metadata");
     NodeView {
         local_change: node.listeners.contains_key("change"),
+        cancel_change: meta
+            .and_then(|m| m.get("cancelChange"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         timeline_scrub: meta.and_then(|m| m.get("timelineScrub")).and_then(|t| {
             Some((
                 SharedString::from(t.get("layer")?.as_str()?.to_owned()),

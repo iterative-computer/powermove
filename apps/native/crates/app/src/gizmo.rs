@@ -288,11 +288,13 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 .and_then(|d| d.get("paths"))
                 .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
         let shape = if parametric {
-            number("c.w").zip(number("c.h")).map(|(width, height)| ShapeSize {
-                width,
-                height,
-                stroke: number("c.stroke").unwrap_or(0.).max(0.),
-            })
+            number("c.w")
+                .zip(number("c.h"))
+                .map(|(width, height)| ShapeSize {
+                    width,
+                    height,
+                    stroke: number("c.stroke").unwrap_or(0.).max(0.),
+                })
         } else {
             None
         };
@@ -526,7 +528,9 @@ impl GizmoSurface {
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
-                    let options = pm_kernel::PickOptions { include_locked: true };
+                    let options = pm_kernel::PickOptions {
+                        include_locked: true,
+                    };
                     let hit = QueryMirror::new(&p)
                         .queries()
                         .pick(None, press.at[0], press.at[1], press.time, &options)
@@ -982,7 +986,13 @@ fn resize(
 }
 /// Selection bounds carry half the stroke on each side, and a shape's box grows
 /// about its own centre, so the fixed point follows its place inside that box.
-fn resize_shape(pose: &Pose, shape: ShapeSize, pivot: [f64; 2], f: [f64; 2], t: f64) -> Vec<Command> {
+fn resize_shape(
+    pose: &Pose,
+    shape: ShapeSize,
+    pivot: [f64; 2],
+    f: [f64; 2],
+    t: f64,
+) -> Vec<Command> {
     let [x0, y0, x1, y1] = pose.bounds;
     let (span_x, span_y) = (x1 - x0, y1 - y0);
     let width = (span_x * f[0] - shape.stroke).max(1.);
@@ -996,8 +1006,18 @@ fn resize_shape(pose: &Pose, shape: ShapeSize, pivot: [f64; 2], f: [f64; 2], t: 
     vec![
         set(&pose.id, "c.w", round(width, 3), t),
         set(&pose.id, "c.h", round(height, 3), t),
-        set(&pose.id, "position.x", round(pose.position[0] + correction[0], 3), t),
-        set(&pose.id, "position.y", round(pose.position[1] + correction[1], 3), t),
+        set(
+            &pose.id,
+            "position.x",
+            round(pose.position[0] + correction[0], 3),
+            t,
+        ),
+        set(
+            &pose.id,
+            "position.y",
+            round(pose.position[1] + correction[1], 3),
+            t,
+        ),
     ]
 }
 /// The top layer under a press. Groups the selection has not entered answer

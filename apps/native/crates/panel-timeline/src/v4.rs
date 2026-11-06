@@ -43,6 +43,18 @@ pub struct Context<'a> {
     pub property_facts: &'a PropertyFacts,
 }
 
+/// Timecode typed in the timeline header: `HH:MM:SS:FF` with any leading fields
+/// omitted, or a bare frame count.
+pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
+    let fields: Vec<f64> = text
+        .trim()
+        .split([':', ';', '.'])
+        .map(|field| field.parse::<u32>().ok().map(f64::from))
+        .collect::<Option<_>>()?;
+    let (frames, seconds) = fields.split_last()?;
+    let seconds = seconds.iter().fold(0., |sum, field| sum * 60. + field);
+    (fps > 0.).then(|| seconds + frames / fps)
+}
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {
     match row {
@@ -226,10 +238,38 @@ pub async fn dispatch(
                 "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
                 "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
                 "mute" => client.model.mute(&id, context.time)?,
-                "parent" => return Err(Error::MissingHost("native parent menu")),
                 _ => return Err(Error::InvalidIntent("switch")),
             }
         }
+        "setName" => {
+            let draft = crate::Draft::Name {
+                layer_id: layer_row(intent)?,
+                text: string(intent, "name")?.to_owned(),
+            };
+            draft.finish(true, client.model.index.revision)
+        }
+        "seek" => {
+            let time = intent
+                .get("time")
+                .and_then(Value::as_f64)
+                .filter(|t| t.is_finite())
+                .ok_or(Error::InvalidIntent("time"))?;
+            Plan::seek(time.clamp(0., client.model.index.duration))
+        }
+        "graphMenu" => {
+            persist = true;
+            client.model.menu_action(
+                &crate::Context::Graph { series: 0 },
+                string(intent, "action")?,
+                context.time,
+            )?
+        }
+        "tab" if !boolean(intent, "close")? => Plan {
+            effects: vec![HostEffect::OpenComposition(
+                string(intent, "id")?.to_owned(),
+            )],
+            ..Plan::default()
+        },
         "keyToggle" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;
@@ -319,9 +359,7 @@ pub async fn dispatch(
             effects: vec![client.model.import_drop(context.time, None, false)?],
             ..Plan::default()
         },
-        "graphOptions" => return Err(Error::MissingHost("native graph menu")),
-        "open" | "tab" => return Err(Error::MissingHost("composition/project services")),
-        "timeEdit" | "rename" => return Err(Error::MissingHost("native field bindings")),
+        "tab" => return Err(Error::MissingHost("composition tab closing")),
         // Pointer gestures on tracks run in the native surface, never through V8.
         _ => return Err(Error::InvalidIntent("action")),
     };

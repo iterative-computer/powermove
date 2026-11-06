@@ -475,10 +475,10 @@ impl Builtins {
         } else {
             pm_kernel::GestureCall::Cancel { gesture }
         };
-        Ok(self.broker.kernel.call(
-            &self.broker.project,
-            pm_kernel::Request::new(caller, call),
-        ))
+        Ok(self
+            .broker
+            .kernel
+            .call(&self.broker.project, pm_kernel::Request::new(caller, call)))
     }
     fn backend(&self, panel: &str) -> Result<Arc<Mutex<Backend>>> {
         self.broker

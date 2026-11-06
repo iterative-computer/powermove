@@ -154,6 +154,8 @@ export type Intent =
   | { type: "selectRow"; id: string; modifiers: Modifiers }
   | { type: "disclosure"; id: string; open: boolean }
   | { type: "rename"; id: string }
+  /** A name or time field closed: its text, or empty when cancelled. */
+  | { type: "editDone"; value: string }
   | {
       type: "switch";
       id: string;

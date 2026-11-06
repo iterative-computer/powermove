@@ -125,9 +125,6 @@ pub fn overlay_lines(safe: bool, guides: bool) -> Vec<OverlayLine> {
 pub fn preview_scale(ui: &pm_kernel::state::UiState) -> f64 {
     pm_panel_viewerchrome::Chrome::read(ui).map_or(1., |c| c.quality.scale())
 }
-pub fn overlay_geometry(safe: bool, guides: bool) -> OverlayGeometry {
-    OverlayGeometry::new(overlay_lines(safe, guides)).expect("fixed overlay geometry is valid")
-}
 
 /// Menu tags. Stable: automation names the same actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -748,12 +745,12 @@ mod tests {
         }
         let all = overlay_lines(true, true);
         assert_eq!(all.len(), 8 + 4 + 2);
-        assert!(all.len() <= 64);
+        assert!(all.len() <= OverlayGeometry::MAX_LINES);
         assert!(
             all.iter()
                 .all(|l| l.ends.iter().all(|v| (0. ..=1.).contains(v)))
         );
-        overlay_geometry(true, true);
+        OverlayGeometry::new(all).unwrap();
     }
     #[test]
     fn menu_tags_round_trip() {
