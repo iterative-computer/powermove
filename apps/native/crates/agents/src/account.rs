@@ -61,7 +61,8 @@ struct Slot {
     status: Status,
     models: Vec<Model>,
     worker: bool,
-    sign_out: bool,
+    /// What runs when the current worker finishes. A sign-out outranks a sign-in.
+    next: Option<Job>,
     cancel: Arc<AtomicBool>,
 }
 pub type Opener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
@@ -83,6 +84,7 @@ pub struct Accounts {
     revision: AtomicU64,
     closed: AtomicBool,
 }
+#[derive(Clone, Copy, PartialEq)]
 enum Job {
     Refresh,
     Connect,
@@ -98,7 +100,7 @@ impl Accounts {
             status: Status::of(State::Checking, None),
             models: vec![],
             worker: false,
-            sign_out: false,
+            next: None,
             cancel: Arc::default(),
         };
         Arc::new(Self {
@@ -157,8 +159,10 @@ impl Accounts {
                 return;
             }
             if slot.worker {
-                // Runs once the current worker finishes; nothing else may be lost.
-                slot.sign_out |= matches!(job, Job::Disconnect);
+                // Runs once the current worker finishes; a refresh then is redundant.
+                if job != Job::Refresh && slot.next != Some(Job::Disconnect) {
+                    slot.next = Some(job);
+                }
                 return;
             }
             slot.worker = true;
@@ -173,15 +177,15 @@ impl Accounts {
             .name("pm-agent-account".into())
             .spawn(move || {
                 let status = this.run(provider, job, &cancel);
-                let sign_out = {
+                let next = {
                     let mut slots = this.slots.lock().unwrap();
                     let slot = slots.get_mut(provider.name()).unwrap();
                     slot.worker = false;
-                    std::mem::take(&mut slot.sign_out)
+                    slot.next.take()
                 };
                 this.publish(provider, status);
-                if sign_out {
-                    this.start(provider, Job::Disconnect);
+                if let Some(next) = next {
+                    this.start(provider, next);
                 }
             });
         if let Err(error) = spawned {
@@ -279,7 +283,9 @@ impl Accounts {
         }
         let status = chatgpt_status(&mut peer)?;
         if status.state == State::Connected {
-            self.set_models(Provider::Chatgpt, chatgpt_models(&mut peer)?);
+            // A model list is a nicety. The provider's default still runs without it.
+            let models = chatgpt_models(&mut peer).unwrap_or_default();
+            self.set_models(Provider::Chatgpt, models);
         }
         Ok(status)
     }
@@ -289,7 +295,18 @@ impl Accounts {
         match job {
             Job::Refresh => {}
             Job::Disconnect => {
-                run(&binary, &["auth", "logout"], &vars, REQUEST, cancel)?;
+                let (code, output) = run(&binary, &["auth", "logout"], &vars, REQUEST, cancel)?;
+                if code != Some(0) {
+                    // Still signed in: say so rather than show a sign-out that didn't happen.
+                    let mut status = claude_status(&binary, &vars, cancel)?;
+                    let output = output.trim();
+                    status.detail = Some(if output.is_empty() {
+                        "Claude Code couldn't sign out.".to_owned()
+                    } else {
+                        format!("Claude Code couldn't sign out: {output}")
+                    });
+                    return Ok(status);
+                }
                 self.set_models(Provider::Claude, vec![]);
                 return Ok(Status::of(State::Disconnected, None));
             }
@@ -656,6 +673,64 @@ mod tests {
         ] {
             assert!(trusted_auth_url(bad).is_err(), "{bad}");
         }
+    }
+    /// App Server that answers slowly, has no model list, and signs in at once.
+    const SLOW_CODEX: &str = r#"#!/usr/bin/python3
+import json, os, sys, time
+flag = os.path.join(os.environ['CODEX_HOME'], 'in')
+for line in sys.stdin:
+    r = json.loads(line)
+    m, i = r.get('method'), r.get('id')
+    if m == 'account/read':
+        time.sleep(0.3)
+        a = {'type': 'chatgpt', 'email': 'user@example.invalid'} if os.path.exists(flag) else None
+        print(json.dumps({'id': i, 'result': {'account': a}}), flush=True)
+    elif m == 'account/login/start':
+        open(flag, 'w').close()
+        print(json.dumps({'id': i, 'result': {'loginId': 'l', 'authUrl': 'https://chatgpt.com/auth'}}), flush=True)
+        print(json.dumps({'method': 'account/login/completed', 'params': {'loginId': 'l', 'success': True}}), flush=True)
+    elif m == 'model/list':
+        print(json.dumps({'id': i, 'error': {'code': -32601, 'message': 'no models'}}), flush=True)
+    elif i is not None:
+        print(json.dumps({'id': i, 'result': {}}), flush=True)
+"#;
+    #[test]
+    fn a_sign_in_during_a_refresh_runs_after_it_and_a_missing_model_list_still_connects() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pm-account-slow-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let codex = root.join("codex");
+        std::fs::write(&codex, SLOW_CODEX).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let environment = Environment {
+            profile: root.join("profile"),
+            vars: BTreeMap::from([
+                ("HOME".into(), root.join("home").display().to_string()),
+                ("PATH".into(), std::env::var("PATH").unwrap()),
+                ("CODEX_BINARY".into(), codex.display().to_string()),
+            ]),
+            ..Default::default()
+        };
+        let opened = Arc::new(Mutex::new(vec![]));
+        let record = opened.clone();
+        let accounts = Accounts::new(
+            environment,
+            Arc::new(move |url: &str| {
+                record.lock().unwrap().push(url.to_owned());
+                Ok(())
+            }),
+            Arc::new(|| {}),
+        );
+        accounts.refresh(Provider::Chatgpt);
+        accounts.connect(Provider::Chatgpt);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while accounts.status(Provider::Chatgpt).state != State::Connected {
+            assert!(std::time::Instant::now() < deadline, "{:?}", accounts.status(Provider::Chatgpt));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(opened.lock().unwrap().as_slice(), ["https://chatgpt.com/auth"]);
+        assert!(accounts.models(Provider::Chatgpt).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn an_existing_login_is_copied_once_and_a_sign_out_stays_signed_out() {
