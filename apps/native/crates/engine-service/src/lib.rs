@@ -1233,8 +1233,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // short lock. Render and drawable acquisition never hold it.
             let mut state = shared.state.lock().unwrap();
             if let Some(v) = state.views.get_mut(&id) {
+                // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp {
                     v.status.stale_rejections += 1;
+                    v.capture |= capture;
                     continue;
                 }
                 match result {
@@ -1272,11 +1274,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         });
                     }
                     Ok(None) => {
+                        v.capture |= capture;
                         v.status.no_drawable += 1;
                         v.dirty = true;
                         v.input = input;
                     }
                     Err(e) if render::transient(&e) => {
+                        v.capture |= capture;
                         v.dirty = true;
                         v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {

@@ -651,26 +651,23 @@ mod lifetime_tests {
                 .into(),
             ..scene
         };
-        let s = engine
-            .frame(
-                &scene,
-                FrameSpec::exact(
-                    Ticks::ZERO,
-                    Output {
-                        width: 160,
-                        height: 90,
-                        display: 0,
-                        headroom: 1.,
-                        crop: None,
-                    },
-                ),
-                None,
-                &Default::default(),
-                false,
-                Arc::default(),
-            )
-            .unwrap()
-            .unwrap();
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                width: 160,
+                height: 90,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+        );
+        // Another test may hold both compiler slots: the worker retries that.
+        let s = loop {
+            match engine.frame(&scene, spec, None, &Default::default(), false, Arc::default()) {
+                Err(e) if transient(&e) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => break other.unwrap().unwrap(),
+            }
+        };
         let event = engine.metal.new_shared_event();
         s.command.encode_wait_for_event(&event, 1);
         let weak = Arc::downgrade(&s.surface);

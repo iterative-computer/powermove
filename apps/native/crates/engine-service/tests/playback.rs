@@ -34,11 +34,27 @@ fn snapshot(project: &str) -> Snapshot {
         }
     }
 }
+/// A layer's full transform, as every saved layer carries it.
+fn transform(x: f64, y: f64) -> String {
+    let p = |k: &str, v: f64| format!(r#""{k}":{{"v":{v},"kf":[],"expr":null}}"#);
+    [
+        p("position.x", x),
+        p("position.y", y),
+        p("anchor.x", 0.),
+        p("anchor.y", 0.),
+        p("scale.x", 100.),
+        p("scale.y", 100.),
+        p("rotation", 0.),
+        p("opacity", 100.),
+    ]
+    .join(",")
+}
 fn shape(id: &str, color: &str, x: f64) -> String {
     format!(
         r##"{{"id":"{id}","type":"shape","name":"{id}","from":0,"dur":3,"on":true,"solo":false,"mblur":false,
-        "p":{{"position.x":{{"v":{x},"kf":[],"expr":null}}}},"fx":[],"masks":[],
-        "d":{{"shape":"rect","w":200,"h":200,"radius":0,"fill":"{color}"}}}}"##
+        "p":{{{}}},"fx":[],"masks":[],
+        "d":{{"shape":"rect","w":200,"h":200,"radius":0,"color":"{color}"}}}}"##,
+        transform(x, 180.)
     )
 }
 /// Two layers over a video clip: the middle one's media can be offline.
@@ -47,10 +63,11 @@ fn project(asset: &str) -> Snapshot {
         r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#101820",
         "layers":[{},
         {{"id":"v","type":"video","name":"clip","from":0,"dur":3,"on":true,"solo":false,"mblur":false,
-          "p":{{}},"fx":[],"masks":[],"d":{{"asset":"{asset}","trim":0,"speed":1}}}}],
+          "p":{{{}}},"fx":[],"masks":[],"d":{{"asset":"{asset}","trim":0,"speed":1,"w":640,"h":360}}}}],
         "comps":{{}},"assets":{{"{asset}":{{"id":"{asset}","type":"video","name":"clip","w":640,"h":360,"dur":3}}}},
         "markers":[],"work":[0,3],"params":{{}}}}"##,
-        shape("top", "#FF0000", 120.)
+        shape("top", "#FF0000", 120.),
+        transform(320., 180.)
     ))
 }
 fn catalog(asset: &str, file: Option<&str>) -> MediaCatalog {
