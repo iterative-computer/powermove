@@ -521,7 +521,13 @@ impl Controller {
                                     self.open_builtin_composition(&id, cx)
                                 }
                                 pm_panel_media::Effect::CompositionSettings(_) => {
-                                    self.show_builtin("settings", window, cx)
+                                    self.composition_sheet(true, cx)
+                                }
+                                pm_panel_media::Effect::NewComposition => {
+                                    self.composition_sheet(false, cx)
+                                }
+                                pm_panel_media::Effect::Reveal { path, .. } => {
+                                    crate::platform::reveal(std::path::Path::new(&path))
                                 }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
@@ -672,6 +678,44 @@ impl Controller {
                                 .cloned()
                                 .unwrap_or(Value::Null)),
                         );
+                    });
+                    continue;
+                }
+                "colourMenu" => {
+                    let initial = request.input["value"]
+                        .as_str()
+                        .and_then(|hex| hex.strip_prefix('#'))
+                        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                    let options = [
+                        json!({"label":"Colors…"}),
+                        json!({"label":"Sample from Screen"}),
+                    ];
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, cx| {
+                        let chosen = match index {
+                            Some(0) => Some(crate::colour_panel::choose(initial)),
+                            Some(1) => Some(crate::colour_panel::sample()),
+                            _ => None,
+                        };
+                        let Some(chosen) = chosen else {
+                            runtime.platform_reply(request.id, Ok(Value::Null));
+                            return;
+                        };
+                        cx.spawn(async move |_| {
+                            let colour = chosen.recv().await.ok().flatten();
+                            runtime.platform_reply(request.id, Ok(json!(colour)));
+                        })
+                        .detach();
+                    });
+                    continue;
+                }
+                "fontMenu" => {
+                    let families = crate::colour_panel::font_families();
+                    let options: Vec<_> = families.iter().map(|f| json!({"label": f})).collect();
+                    let runtime = runtime.clone();
+                    crate::v4_native::menu(window, &options, cx, move |index, _| {
+                        let family = index.and_then(|i| families.get(i)).cloned();
+                        runtime.platform_reply(request.id, Ok(json!(family)));
                     });
                     continue;
                 }

@@ -9,8 +9,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSColorSpace, NSColorWell, NSColorWellStyle, NSControl, NSControlTextEditingDelegate,
-    NSPopUpButton, NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
+    NSColorWell, NSColorWellStyle, NSControl, NSControlTextEditingDelegate, NSPopUpButton,
+    NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSRect, NSString};
 
@@ -101,16 +101,7 @@ impl OpenSheet {
     pub fn colour(&self, id: &str) -> Option<String> {
         let control = self.sheet.controls.get(id)?.clone();
         let well = control.downcast::<NSColorWell>().ok()?;
-        let colour = well
-            .color()
-            .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
-        let channel = |v: f64| (v.clamp(0., 1.) * 255.).round() as u8;
-        Some(format!(
-            "#{:02X}{:02X}{:02X}",
-            channel(colour.redComponent()),
-            channel(colour.greenComponent()),
-            channel(colour.blueComponent())
-        ))
+        crate::colour_panel::hex(&well.color())
     }
     pub fn close(&self) {
         self.owner.endSheet(&self.sheet.window);

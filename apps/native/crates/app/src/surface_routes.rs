@@ -22,6 +22,9 @@ impl Controller {
             "newComposition" => self.composition_sheet(false, cx),
             "compositionSettings" => self.composition_sheet(true, cx),
             "precompose" => self.precompose_sheet(cx),
+            command if crate::keyframe_sheets::Kind::of(command).is_some() => {
+                self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
+            }
             "migrationReport" => crate::migration_report::open(self.profile.clone(), cx),
             "errorLog" => crate::error_log::open(self.errors.clone(), cx),
             _ => return false,
@@ -88,7 +91,7 @@ impl Controller {
         let project = self.session.as_ref()?.project.clone();
         Some((project.clone(), WindowId(project)))
     }
-    fn composition_sheet(&mut self, settings: bool, cx: &mut Context<Self>) {
+    pub fn composition_sheet(&mut self, settings: bool, cx: &mut Context<Self>) {
         let Some((project, owner)) = self.dialog_owner() else {
             self.message = "Open a project first.".into();
             return;
@@ -193,7 +196,7 @@ impl Controller {
         })
         .detach();
     }
-    fn report_dialog_error(&mut self, error: DialogError, cx: &mut Context<Self>) {
+    pub fn report_dialog_error(&mut self, error: DialogError, cx: &mut Context<Self>) {
         self.message = match error {
             DialogError::Invalid(text) => text.into(),
             DialogError::Stale => "The project was changed, so the dialog closed.".into(),

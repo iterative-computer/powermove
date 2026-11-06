@@ -497,6 +497,13 @@ pub struct MixedNumber {
     pub draft: String,
 }
 impl MixedNumber {
+    /// What a person typed. Blank keeps each key's own value.
+    pub fn parsed_input(text: &str) -> Self {
+        Self {
+            draft: text.into(),
+            value: text.trim().parse().ok(),
+        }
+    }
     pub fn new(values: &[f64]) -> Self {
         let value = values
             .first()

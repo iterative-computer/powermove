@@ -28,11 +28,12 @@ pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> a
 }
 /// Opens the editor windows. Whoever holds the gate calls it exactly once.
 pub type Finish = Rc<dyn Fn(&mut App)>;
+pub type Gate = Box<dyn FnOnce(Finish, &mut App)>;
 /// As `run_integrated`, with no editor window until `gate` calls its `Finish`.
 pub fn run_gated(
     device: metal::Device,
     factory: integration::Factory,
-    gate: Box<dyn FnOnce(Finish, &mut App)>,
+    gate: Gate,
 ) -> anyhow::Result<()> {
     launch(device, false, Some(factory), Some(gate))
 }
@@ -40,7 +41,7 @@ fn launch(
     device: metal::Device,
     smoke: bool,
     factory: Option<integration::Factory>,
-    gate: Option<Box<dyn FnOnce(Finish, &mut App)>>,
+    gate: Option<Gate>,
 ) -> anyhow::Result<()> {
     native::install_identity();
     let theme_error = theme::load_from_env();

@@ -205,6 +205,16 @@ export class InspectorSession {
             effect: choice,
             target: request.target,
           });
+        } else if (
+          request.type === "font-menu" ||
+          request.type === "fill-popover"
+        ) {
+          // One chosen value, one edit. A cancelled panel replies with null.
+          await this.dispatch({
+            type: "set-value",
+            row: request.row,
+            value: choice,
+          });
         } else if (request.type === "row-menu") {
           const item = request.items.find(
             (item) => item.action === choice && item.enabled,

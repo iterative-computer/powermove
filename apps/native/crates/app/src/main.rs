@@ -1,12 +1,14 @@
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
+mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
 mod error_log;
 mod export_coordinator;
 mod first_run;
+mod keyframe_sheets;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;

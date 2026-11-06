@@ -480,3 +480,7 @@ pub fn current_format(published: Option<&pm_kernel::Published>) -> Option<Format
         background: root.get("bg").and_then(crate::node_string)?.to_owned(),
     })
 }
+
+#[cfg(test)]
+#[path = "project_library_tests.rs"]
+mod tests;

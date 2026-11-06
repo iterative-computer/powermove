@@ -47,6 +47,11 @@ pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 name = "pm-corpus"
 path = "../../../../tools/corpus/main.rs"
 
+[dev-dependencies.gpui]
+package = "gpui-ce"
+path = "../../vendor/gpui-ce/crates/gpui"
+default-features = false
+features = ["test-support"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
 [dev-dependencies.blake3]
