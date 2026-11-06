@@ -639,6 +639,11 @@ impl KernelHandle {
             .insert(writer, tx);
         rx
     }
+
+    /// A finished generation stops receiving; its mailbox reader ends.
+    pub fn retire_realm(&self, writer: Writer) {
+        self.shared.realms.lock().expect("realms").remove(&writer);
+    }
 }
 
 fn publish(kernel: &mut Kernel, shared: &Shared, project: &str) -> Option<u64> {
