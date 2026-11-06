@@ -329,12 +329,23 @@ fn hdr_delivery_picks_a_ten_bit_codec_and_bt2100_tags() {
     let settings = options
         .intent(false, 0)
         .unwrap()
-        .engine_settings(planned)
+        .engine_settings(planned.clone())
         .unwrap()
         .unwrap();
     assert_eq!(settings.color, OutputColor::Rec2100Hlg);
+    // A format without HDR keeps the choice dormant and delivers SDR.
     options.format = Format::Webm;
-    assert!(options.validate().is_err());
+    assert!(options.validate().is_ok());
+    let settings = options
+        .intent(false, 0)
+        .unwrap()
+        .engine_settings(planned)
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(
+        settings.color,
+        OutputColor::Rec2100Pq | OutputColor::Rec2100Hlg
+    ));
     options.dynamic_range = DynamicRange::Sdr;
     assert!(options.validate().is_ok());
     assert!(
