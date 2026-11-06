@@ -1202,6 +1202,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 Duration::from_secs(3600)
             };
             drop(state);
+            let tap = shared.scopes.lock().unwrap().clone();
+            let timeout = engine
+                .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
+                .map_or(timeout, |retry| timeout.min(retry));
             let _ = wakes.recv_timeout(timeout);
         }
     }

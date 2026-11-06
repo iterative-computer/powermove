@@ -14,6 +14,7 @@ use pm_render::Renderer;
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 /// One immutable render input. Content identity rotates on document, comp,
@@ -168,6 +169,19 @@ impl Engine {
             tap.reset();
         }
     }
+    /// Gives the frame waiting for the tap its turn, on a viewer that has gone
+    /// quiet. Returns when to ask again, if it still waits.
+    pub fn flush_scopes(
+        &mut self,
+        tap: Option<&(
+            pm_render::scopes::ScopeConfig,
+            async_channel::Sender<crate::scopes::ScopeResult>,
+        )>,
+    ) -> Option<Duration> {
+        let scopes = self.scopes.as_mut()?;
+        scopes.retain(tap);
+        scopes.flush(&self.gpu.device, &self.gpu.queue)
+    }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
         self.sync_studio(scene)?;
         self.sync_fonts();
@@ -300,13 +314,7 @@ impl Engine {
         if let Some((config, frames)) = &self.scope_frames {
             self.scopes
                 .get_or_insert_with(|| crate::scopes::Tap::new(self.gpu.device.clone()))
-                .frame(
-                    &self.gpu.device,
-                    &self.gpu.queue,
-                    &surface.texture,
-                    *config,
-                    frames,
-                );
+                .frame(&self.gpu.device, &self.gpu.queue, &surface, *config, frames);
         }
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();

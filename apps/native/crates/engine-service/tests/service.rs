@@ -309,6 +309,44 @@ fn viewer_shuttle_and_scrub_bursts_keep_the_latest_intent() {
 }
 
 #[test]
+fn the_scope_tap_settles_on_the_frame_on_screen() {
+    let service = EngineService::start(pm_gpu::Gpu::new("scope-settle-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    let (frames, inbox) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    let next = |timeout: Duration| {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(frame) = inbox.try_recv() {
+                return Some(frame.unwrap().waveform);
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let (start, end) = (Ticks::ZERO, Ticks::new(2 * TICKS_PER_SECOND).unwrap());
+    v.scrub(end).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let mut settled = next(Duration::from_secs(20)).expect("a paused frame is analyzed");
+    while let Some(later) = next(Duration::from_millis(300)) {
+        settled = later;
+    }
+    // The first frame takes the interval's analysis. The next arrives inside
+    // it, and nothing renders after that.
+    v.scrub(start).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let first = next(Duration::from_secs(20)).expect("the first frame is analyzed");
+    assert_ne!(first, settled, "the two frames must differ");
+    v.scrub(end).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(next(Duration::from_secs(20)), Some(settled));
+    v.scopes(None).unwrap();
+}
+
+#[test]
 fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
     let service = EngineService::start(pm_gpu::Gpu::new("status-resource-test").unwrap()).unwrap();
     let rx = service.notifications();
