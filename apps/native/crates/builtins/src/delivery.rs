@@ -504,8 +504,6 @@ mod tests {
     }
 }
 
-/// Native decoder probes; no metadata-only Ready state or proxy promotion.
-#[cfg(target_os = "macos")]
 /// Path, kind, then length, modification time and inode.
 type ProbeKey = (PathBuf, String, (u64, i64, i64, u64));
 
@@ -521,6 +519,7 @@ impl MediaProbes {
     pub fn runs(&self) -> u64 {
         self.runs.load(Ordering::Relaxed)
     }
+    #[cfg(target_os = "macos")]
     fn result(&self, path: &Path, kind: &str) -> Result<(), String> {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
@@ -549,7 +548,13 @@ impl MediaProbes {
 }
 pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
     match kind {
-        "image" => pm_render::media::probe_image(path).map_err(|e| format!("{e:?}")),
+        "image" => pm_render::media::probe_image(path).map_err(|issue| match issue {
+            pm_render::media::ProbeIssue::Unreadable(message) => message,
+            pm_render::media::ProbeIssue::Unsupported(feature) => feature.to_string(),
+        }),
+        #[cfg(not(target_os = "macos"))]
+        "video" => Err("Video decoding needs macOS".into()),
+        #[cfg(target_os = "macos")]
         "video" => pm_render::media::probe_video(path).and_then(|_| {
             use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
             let service = DecodeService::new(ServiceConfig {
@@ -575,6 +580,8 @@ pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
         }
     }
 }
+/// Native decoder probes; no metadata-only Ready state or proxy promotion.
+#[cfg(target_os = "macos")]
 pub fn observe_media(
     project: &str,
     snapshot: &Snapshot,
@@ -585,7 +592,8 @@ pub fn observe_media(
     use pm_panel_media::{
         Availability, Catalog, ProxyStatus, RuntimeState, readiness::ObservedRuntime,
     };
-    let catalog = Catalog::new(project.into(), snapshot.clone()).map_err(|e| format!("{e:?}"))?;
+    let catalog = Catalog::new(project.into(), snapshot.clone())
+        .map_err(|_| "The project's media could not be read")?;
     let mut states = BTreeMap::new();
     for (id, asset) in &catalog.assets {
         let availability = match originals.get(id) {
