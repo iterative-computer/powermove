@@ -188,7 +188,7 @@ evidence is `cant_run`, not a mismatch or match. Exit 2 means P2 remains open.
 
 ```sh
 python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
-node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference-main \
+node tools/extcheck/test_bundle.mjs \
   "$HOME/Developer/pm-target/debug/pm-compat-runner"
 bash tools/extcheck/build.sh test
 bash tools/extcheck/build.sh clippy

@@ -45,7 +45,8 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>>
         vec![]
     };
     Ok(
-        json!({"version":1,"logic":"runtime-v8","activation":activation,"results":results,"dom_batches":dom_batches,"diagnostics":runner.diagnostics()}),
+        json!({"version":1,"logic":"runtime-v8","activation":activation,"results":results,"dom_batches":dom_batches,"diagnostics":runner.diagnostics(),
+            "gates":{"webkit_panels":false,"full_recorder":false}}),
     )
 }
 fn main() {
