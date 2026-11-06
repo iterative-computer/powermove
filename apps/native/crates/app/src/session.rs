@@ -22,6 +22,8 @@ struct CompositionView {
 
 pub struct Controller {
     pub builtins: crate::builtins::Host,
+    pub extensions: crate::extensions::Extensions,
+    pub font_broker: Option<pm_node::fonts::render::FontBroker>,
     /// Per-composition navigation view, scoped to the live document identity.
     composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
     pub kernel: KernelHandle,
@@ -125,8 +127,29 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::library(v, id, bounds, cx).or_else(|| v.builtin_panel(id, bounds, w, cx))
+            panels::library(v, id, bounds, cx)
+                .or_else(|| v.extension_panel(id, bounds, cx))
+                .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
+    }
+    fn native_panel(&self, id: &str, cx: &App) -> bool {
+        self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn open_panels(&self, open: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, _| v.sync_extension_panels(open));
+    }
+    fn shown_panels(&self, shown: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, _| v.hide_extension_panels(shown));
+    }
+    fn panel_menu(
+        &self,
+        id: &str,
+        entries: Vec<pm_shell::MenuEntry>,
+        at: (f32, f32),
+        cx: &mut App,
+    ) -> Option<Vec<pm_shell::MenuEntry>> {
+        self.0
+            .update(cx, |v, cx| v.extension_panel_menu(id, entries, at, cx))
     }
     fn header(
         &self,
@@ -241,6 +264,8 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         Self {
             builtins: Default::default(),
+            extensions: Default::default(),
+            font_broker: None,
             composition_views: Default::default(),
             kernel,
             engine,
@@ -1031,6 +1056,7 @@ impl Controller {
             Ok(viewer) => self.viewer = Some(viewer),
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
+        self.apply_extension_resources();
     }
     pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
         let current = self.mcp.current();
@@ -1191,6 +1217,9 @@ impl Controller {
         if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
             self.tool = cmd.name.clone();
             return false;
+        }
+        if self.extension_command(cmd) {
+            return true;
         }
         // Edit menu items reach a focused text field before the document.
         if cmd.name.starts_with("context") && self.host.borrow().system(&cmd.name) {

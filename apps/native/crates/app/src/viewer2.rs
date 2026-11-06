@@ -751,7 +751,12 @@ impl Controller {
             end: Some((self.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64),
             audio: false,
         }) {
-            Ok(viewer) => popout.bind(viewer, hz),
+            Ok(viewer) => {
+                if let Err(e) = viewer.resources(self.extensions.resources.clone()) {
+                    self.message = e.to_string();
+                }
+                popout.bind(viewer, hz)
+            }
             Err(e) => self.message = format!("Popout viewer failed: {e}"),
         }
         self.apply_viewer_options();

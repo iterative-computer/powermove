@@ -1,16 +1,24 @@
 # Extension compatibility checks
 
-**Gate P2 is OPEN.** This harness inventories sources, runs real V8 activation
-probes, and defines a paired trace/PNG/interaction comparison protocol. The
-bundled native adapter currently stops after activation/disposal. It does not
-yet drive WebKit, replay the interaction script, or capture native traces/PNGs.
-It reports `cant_run` until those adapters exist. Unit tests and successful
-activation are never extension matches.
+**Gate P2 is OPEN.** This harness inventories sources and defines a paired
+trace/PNG/interaction comparison. Native captures run the production realm:
+`pm-compat-runner` compiles with the native compiler, activates through the
+production loader and kernel channel, and embeds its bundle. Unit tests and
+successful activation are never extension matches.
 
-The continuation adds a disposable native kernel adapter, V8 contribution
-mounting, a production WebKit remote-DOM adapter, and profile-scoped Store
-admission/data-store components. The latter two are not yet integrated into the
-capture CLI. See `docs/native/extcheck-p2.md` for their limits and current counts.
+`trace_compare.py` is the headless tier: three hidden Electron and three native
+recordings per case, compared row by row, with no panel on screen and no pixels.
+It reports `trace_match` (identical rows), `trace_match_unordered` (identical once
+JSON key order and the object ids it numbers are removed; the kernel stores objects
+sorted), `trace_mismatch` by family, and every `cant_run` reason. It never counts
+as acceptance: `accepted_matches` stays 0. The compared span starts at the fixed
+`CLOCK_START`, with entropy reseeded in both hosts; how long a host booted is
+provenance in `capture.json`, because it differs between recordings of one host.
+
+```sh
+python3 tools/extcheck/trace_compare.py --reference-root /tmp/pm-extcheck/reference-main \
+  --native-runner "$CARGO_TARGET_DIR/debug/pm-compat-runner" [--owner-root DIR] [--store] [--only FIXTURE]
+```
 
 ## Prepare the frozen reference
 
@@ -27,8 +35,6 @@ node tools/extcheck/prepare-reference.mjs /tmp/pm-extcheck/reference-main
 (cd /tmp/pm-extcheck/reference-main && bun install --frozen-lockfile)
 (cd /tmp/pm-extcheck/reference-main && POWERMOVE_TRACE_RECORDER=1 bun run --cwd apps/desktop build)
 bun install --frozen-lockfile --cwd apps/native/js/compat
-# Remote DOM's lockfile v2 needs a supporting Bun; on Bun 1.3.14 use:
-(cd apps/native/js/remote-dom && npm install --ignore-scripts --no-package-lock)
 bash tools/extcheck/build.sh test
 bash tools/extcheck/build.sh test pm-compat-host
 bash tools/extcheck/build.sh test pm-store-host
@@ -178,19 +184,11 @@ exported. The six families are PM facade, sync services, raster override,
 recorder canvas, DOM panel and lifecycle. Missing/invalid/nondeterministic
 evidence is `cant_run`, not a mismatch or match. Exit 2 means P2 remains open.
 
-The actual Rust bridge currently supports a recorder subset (basic state,
-paths/rectangles, transforms, immutable drawImage sources and pixel readback).
-Unsupported canvas operations fail explicitly. JSON transport, typed ImageData,
-complete text/paint/encoding and kernel/engine backends need further integration.
-Remote-DOM batches can be drained and feedback delivered on the V8 owner;
-queue admission is not a WebKit paint acknowledgement. The native CLI runs on
-a worker and is not callable as a blocking AppKit/main-thread API.
-
 ## Verify and clean up
 
 ```sh
 python3 -m unittest discover -s tools/extcheck -p 'test_*.py'
-node tools/extcheck/test_bundle.mjs /tmp/pm-extcheck/reference-main \
+node tools/extcheck/test_bundle.mjs \
   "$HOME/Developer/pm-target/debug/pm-compat-runner"
 bash tools/extcheck/build.sh test
 bash tools/extcheck/build.sh clippy

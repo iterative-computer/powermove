@@ -627,31 +627,56 @@ impl Renderer {
     /// Install the pinned native current and historical built-in programs.
     /// File provenance is carried outside authored JSON and frozen per job.
     pub fn set_main_effects_for_document(&mut self, document: &Document) -> Result<(), String> {
-        self.set_main_effects_with(document, &[])
+        self.set_document_effects(document, &[]).map(drop)
     }
 
-    /// [`Renderer::set_main_effects_for_document`] plus the effect,
-    /// transition and layer definitions extensions registered: each replaces
-    /// any definition of its kind and id (the kernel's registry already chose
-    /// the winner), so a fork of a built-in renders as the fork.
-    pub fn set_main_effects_with(
+    /// The pinned programs plus contributed definitions. A contribution with a
+    /// built-in id replaces it, as an extension override does in the registry.
+    /// Contributed code is third-party input: a bad definition fails alone and
+    /// comes back in the returned list, and only a layer that uses it is affected.
+    /// A pinned program that fails is an engine bug and stops the document.
+    pub fn set_document_effects(
         &mut self,
         document: &Document,
-        extensions: &[pm_protocol::definitions::DefinitionSnapshot],
-    ) -> Result<(), String> {
+        contributed: &[pm_protocol::definitions::DefinitionSnapshot],
+    ) -> Result<Vec<pm_protocol::error::EngineError>, String> {
+        use pm_protocol::{
+            common::DefinitionId,
+            error::{ErrorCode, ErrorScope},
+            validate::Validate,
+        };
         let mut set = crate::effects::versions::for_document(document);
-        for d in extensions {
-            set.definitions.retain(|b| b.kind != d.kind || b.id != d.id);
-            set.missing.retain(|m| *m != d.id);
-            set.definitions.push(d.clone());
+        let mut refused = Vec::new();
+        let mut accepted = std::collections::BTreeSet::<DefinitionId>::new();
+        for definition in contributed {
+            if let Err(violation) = definition.validate() {
+                let message = format!("{} was refused: {violation:?}", definition.id.as_str());
+                refused.push(pm_protocol::error::EngineError::new(
+                    ErrorCode::ShaderCompile,
+                    ErrorScope::Definition {
+                        definition: definition.id.clone(),
+                    },
+                    message,
+                ));
+                continue;
+            }
+            accepted.insert(definition.id.clone());
+            set.definitions
+                .retain(|d| (d.kind, &d.id) != (definition.kind, &definition.id));
+            set.missing.retain(|m| *m != definition.id);
+            set.definitions.push(definition.clone());
         }
         let failures = self.set_definitions(&set).map_err(|e| format!("{e:?}"))?;
-        if !failures.is_empty() {
-            return Err(format!("effect definition failures: {failures:?}"));
+        let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
+            matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
+        });
+        if !pinned.is_empty() {
+            return Err(format!("effect definition failures: {pinned:?}"));
         }
         self.effects.versioned_builtins = true;
         self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
-        Ok(())
+        refused.extend(own);
+        Ok(refused)
     }
 
     /// Attach an immutable, worker-safe Studio source for viewer and exports.

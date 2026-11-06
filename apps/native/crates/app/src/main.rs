@@ -7,6 +7,7 @@ mod diag;
 pub mod dialogs;
 mod error_log;
 mod export_coordinator;
+mod extensions;
 mod first_run;
 mod gizmo;
 mod keyframe_sheets;
@@ -214,6 +215,8 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let font_broker = broker.clone();
+                entity.update(cx, |v, _| v.font_broker = Some(font_broker));
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
                 let weak = entity.downgrade();

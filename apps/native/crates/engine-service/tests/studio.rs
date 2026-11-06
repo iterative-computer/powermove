@@ -584,7 +584,7 @@ fn metal_imported_step_keeps_xde_parts_preview_final_and_child_export() {
                 doc: doc.clone(),
                 comp: "test".into(),
                 media: media.clone(),
-                content: 1
+                content: 1,
             },
             Ticks::ZERO,
             Size::new(64, 64)

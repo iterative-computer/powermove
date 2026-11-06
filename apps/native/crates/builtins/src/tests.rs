@@ -1484,6 +1484,64 @@ fn memory_settings_follow_durable_metadata_without_history_or_edited_changes() {
     assert!(panels.take_errors().is_empty());
     actor.shutdown();
 }
+
+#[test]
+fn a_third_party_surface_extension_mounts_its_own_realm_and_publishes_through_the_native_path() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';export const view = () => jsx('text', {children:'Synthetic surface'});"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(panels.mount_extension("synthetic-surface", &graph).unwrap());
+    let publication = panels
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "synthetic-surface")
+        .expect("a surface publication");
+    assert_eq!(publication.panel, "synthetic-surface");
+    // A view is a component: its hooks have somewhere to live.
+    let hooks = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';import { useState } from 'powermove/hooks';export const view = () => jsx('text', {children:'Hooked '+useState(7)[0]});"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {
+                "powermove/jsx-runtime":"runtime:powermove/jsx-runtime",
+                "powermove/hooks":"runtime:powermove/hooks"
+            }
+        }
+    });
+    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
+    let hooked = panels
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "synthetic-hooks")
+        .expect("a hooked publication");
+    assert!(
+        hooked
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Hooked 7")
+    );
+    // Unmounting frees the id for a rebuilt graph.
+    assert!(panels.mount_extension("synthetic-hooks", &hooks).is_err());
+    panels.unmount_extension("synthetic-hooks");
+    finish(panels.mount_extension("synthetic-hooks", &hooks).unwrap());
+    assert!(panels.mount_extension("timeline", &graph).is_err());
+    let errors = panels.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 #[test]
 fn mounted_native_worker_cannot_adopt_a_reopened_document_reusing_project_and_layer_ids() {
     let actor = actor();

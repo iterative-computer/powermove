@@ -1,5 +1,11 @@
 import { copy } from "./mirror";
-import type { Data, KernelHost, Publication, Reply, Request } from "./types";
+import type {
+  Data,
+  KernelHost,
+  PublicationDelta,
+  Reply,
+  Request,
+} from "./types";
 export class HostError extends Error {
   constructor(
     readonly code: string,
@@ -17,7 +23,7 @@ export class HostChannel {
     readonly host: KernelHost,
     readonly realm: string,
     readonly generation: number,
-    private publish: (publication: Publication, reply: Reply) => void,
+    private publish: (publication: PublicationDelta, reply: Reply) => void,
     private resume: (reply: Reply) => any,
   ) {}
   call(method: string, args: Data = {}): any {

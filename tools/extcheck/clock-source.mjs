@@ -9,6 +9,8 @@ const anchor = "export function installClockFixture";
 if (source.split(anchor).length !== 2)
   throw Error("Unexpected clock fixture module");
 export const CLOCK_SEED = 0x504d5032;
+// Virtual milliseconds where every compared span starts, past any host boot.
+export const CLOCK_START = 300_000;
 // Function.toString differs between Node and Bun. Hash/evaluate the original
 // source bytes, with only the module export removed from this owned fixture.
 export const CLOCK_SOURCE = `(()=>{${source.replace(anchor, "function installClockFixture")}\ninstallClockFixture(globalThis,${CLOCK_SEED});})()`;

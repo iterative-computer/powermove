@@ -1659,3 +1659,40 @@ fn reload_cleanup_does_not_depend_on_mutable_control_globals() {
     drop(pin);
     close(&r);
 }
+
+#[test]
+fn module_graphs_keep_esm_semantics_cycles_and_dynamic_import() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    let graph = json!({
+        "entry": "pmext://a/1/index",
+        "sources": {
+            "pmext://a/1/index": "import {count,bump} from './counter';import {late} from './cycle';export default function(){bump();return [count,late()]};export const lazy=()=>import('./later').then(m=>m.value);",
+            "pmext://a/1/counter": "export let count=0;export function bump(){count++}",
+            "pmext://a/1/cycle": "import {late as again} from './cycle-b';export const late=()=>again();",
+            "pmext://a/1/cycle-b": "import {late as first} from './cycle';export const late=()=>typeof first;",
+            "pmext://a/1/later": "export const value=await Promise.resolve(41+1);"
+        },
+        "edges": {
+            "pmext://a/1/index": {"./counter":"pmext://a/1/counter","./cycle":"pmext://a/1/cycle","./later":"pmext://a/1/later"},
+            "pmext://a/1/cycle": {"./cycle-b":"pmext://a/1/cycle-b"},
+            "pmext://a/1/cycle-b": {"./cycle":"pmext://a/1/cycle"}
+        }
+    });
+    let source = format!(
+        "(async()=>{{const [done,ns]=__linkModules({});await done;return JSON.stringify([ns.default(),await ns.lazy()])}})()",
+        json!(graph.to_string())
+    );
+    assert_eq!(eval(&r, &source), r#"[[1,"function"],42]"#);
+    let thrown = json!({
+        "entry": "pmext://b/1/index",
+        "sources": {"pmext://b/1/index": "throw new Error('synthetic')"},
+        "edges": {}
+    });
+    let source = format!(
+        "(async()=>{{const [done]=__linkModules({});try{{await done}}catch(e){{return e.message}}}})()",
+        json!(thrown.to_string())
+    );
+    assert_eq!(eval(&r, &source), "synthetic");
+    close(&r);
+}

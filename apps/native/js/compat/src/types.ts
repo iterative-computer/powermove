@@ -51,9 +51,16 @@ export interface GestureAPI {
   edit: EditAPI;
   history: HistoryAPI;
 }
+/** What a reply carries: a document only on a full sync, the rest when they moved. */
+export type PublicationDelta = Omit<
+  Publication,
+  "document" | "selection" | "workspace"
+> &
+  Partial<Pick<Publication, "document" | "selection" | "workspace">>;
 export interface Publication {
   revision: number;
   document: Data;
+  ops?: Data[];
   selection: Data;
   workspace: Data;
   facts: {
@@ -80,7 +87,7 @@ export interface Continuation {
 }
 export interface Reply {
   value?: any;
-  publication?: Publication;
+  publication?: PublicationDelta;
   continuation?: Continuation;
   /** Same-realm cleanup mailbox drained before returning this acknowledgement. */
   retired?: string[];

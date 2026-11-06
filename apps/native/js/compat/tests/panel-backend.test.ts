@@ -58,7 +58,9 @@ test("frozen icon helper creates the reference SVG in the remote document", asyn
   });
   try {
     const extension = realm.extension("synthetic-icons", 3);
-    const icon = extension.api.ui.icon("play");
+    const icon = h.shim.document.createElement("span");
+    // The shipped API answers with markup, not a node.
+    icon.innerHTML = extension.api.ui.icon("play");
     h.shim.document.body.append(icon);
     await h.settle();
     const svg = h.page.window.document.querySelector("svg")!;

@@ -1,5 +1,10 @@
 /** Production V8 worker entry. Every built-in owns a separate extension isolate. */
+import * as preact from "preact";
+import * as preactHooks from "preact/hooks";
 import { createRoot, type SurfaceRoot } from "../src";
+import * as ui from "../src/ui";
+import * as hooks from "../src/hooks";
+import * as jsxRuntime from "../src/jsx-runtime";
 import {
   HostClient,
   type HostIdentity,
@@ -395,8 +400,78 @@ async function mount(panel: string) {
   } else throw new Error(`Unregistered built-in panel: ${panel}`);
   return true;
 }
+declare const __linkModules: (graph: string) => [Promise<unknown>, any];
+/** A third-party surface extension: `export function view()`, same root as a panel. */
+async function mountExtension(id: string, text: string) {
+  if (mounted) throw new Error("Panel already mounted");
+  const identity = native("identity") as HostIdentity;
+  host = new HostClient(identity, async (request) => {
+    native("host.enqueue", request);
+    for (;;) {
+      const ack = native("host.poll", request.requestId);
+      if (ack) return ack;
+      await new Promise((r) => setTimeout(r, 1));
+    }
+  });
+  const table: Record<string, any> = {
+    preact,
+    "preact/hooks": preactHooks,
+    "powermove/ui": ui,
+    "powermove/hooks": hooks,
+    "powermove/jsx-runtime": jsxRuntime,
+    "powermove/jsx-dev-runtime": jsxRuntime,
+  };
+  (globalThis as any).__powermove_runtime = table;
+  const graph = JSON.parse(text);
+  const url = (name: string) =>
+    name.startsWith("runtime:")
+      ? `pmruntime://${name.slice(8)}`
+      : `pmext://${id}/${name}`;
+  const sources: Record<string, string> = {};
+  const edges: Record<string, Record<string, string>> = {};
+  for (const [name, source] of Object.entries(graph.sources))
+    sources[url(name)] = source as string;
+  for (const [name, targets] of Object.entries(graph.edges)) {
+    edges[url(name)] = {};
+    for (const [specifier, target] of Object.entries(
+      targets as Record<string, string>,
+    )) {
+      edges[url(name)]![specifier] = url(target);
+      if (target.startsWith("runtime:")) {
+        const module = target.slice(8);
+        if (!(module in table)) throw new Error(`Unsupported import: ${module}`);
+        sources[url(target)] = [
+          `const m = globalThis.__powermove_runtime[${JSON.stringify(module)}];`,
+          ...Object.keys(table[module])
+            .filter((key) => key !== "default")
+            .map((key) => `export const ${key} = m.${key};`),
+          "export default m;",
+        ].join("\n");
+      }
+    }
+  }
+  const [done, namespace] = __linkModules(
+    JSON.stringify({ sources, edges, entry: url("powermove:bundle") }),
+  );
+  await done;
+  if (typeof namespace.view !== "function")
+    throw new Error("A surface extension exports view()");
+  const root = createRoot(
+    async (commit) => native("surface.commit", commit),
+    report,
+    { generation: identity.generation },
+  );
+  await namespace.activate?.({ host, id });
+  // A component, so the view's hooks have one to belong to.
+  const View = namespace.view;
+  await root.render(<View />);
+  await root.flush();
+  mounted = { root, dispose: () => root.dispose() };
+  return true;
+}
 (globalThis as any).__pmBuiltin = {
   mount,
+  mountExtension,
   async publish() {
     for (const p of native("host.publications") as HostPublication[])
       host.publish(p);

@@ -1411,6 +1411,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             // short lock. Render and drawable acquisition never hold it.
             let mut state = shared.state.lock().unwrap();
             if let Some(v) = state.views.get_mut(&id) {
+                if let Some(failure) = &engine.definition_failure {
+                    v.status.error = Some(failure.clone());
+                }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp {
                     v.status.stale_rejections += 1;

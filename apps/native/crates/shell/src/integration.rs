@@ -31,6 +31,27 @@ pub trait Integration {
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
+    /// True when a native surface below GPUI draws this panel's body. The shell
+    /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel(&self, _id: &str, _cx: &App) -> bool {
+        false
+    }
+    /// A tab's context menu. Return the entries to show now, or `None` when the
+    /// app adds asynchronous items and shows the menu itself.
+    fn panel_menu(
+        &self,
+        _id: &str,
+        entries: Vec<crate::native::MenuEntry>,
+        _at: (f32, f32),
+        _cx: &mut App,
+    ) -> Option<Vec<crate::native::MenuEntry>> {
+        Some(entries)
+    }
+    /// The workspace's open panels, after any layout change.
+    fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
+    /// The native panels with a body this frame: open ones outside it are tabs
+    /// behind another, drawn by no one.
+    fn shown_panels(&self, _shown: &[&str], _cx: &mut App) {}
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);

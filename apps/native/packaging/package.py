@@ -129,6 +129,9 @@ def native_file(path):
     return path
 
 
+HELPERS = ("pm-store-helper", "pm-glsl-compiler")
+
+
 def bundle(executable, destination, channel, version, build, update_config,
            sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True,
            glsl_compiler=None, claude_runtime=None, codex_vendor=None):
@@ -159,9 +162,16 @@ def bundle(executable, destination, channel, version, build, update_config,
     (contents / "MacOS").mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(executable, contents / "MacOS" / "powermove-native")
-    # Effect shaders compile in this helper, found beside the executable.
+    # Worker executables the app starts by path: the confined Store helper and
+    # the killable shader compiler. They sit beside the build's main binary
+    # unless the compiler is given from another build.
+    helpers = {helper: executable.with_name(helper) for helper in HELPERS}
     if glsl_compiler:
-        shutil.copy2(native_file(glsl_compiler), contents / "MacOS" / "pm-glsl-compiler")
+        helpers["pm-glsl-compiler"] = Path(glsl_compiler)
+    for helper, source in helpers.items():
+        if not source.is_file():
+            raise ValueError(f"{helper} is missing at {source}")
+        shutil.copy2(native_file(source), contents / "MacOS" / helper)
     # The layout provider discovery reads: <name>/bin/<name> under Resources.
     if claude_runtime:
         (resources / "claude" / "bin").mkdir(parents=True)

@@ -28,6 +28,7 @@ import type {
   HistoryAPI,
   KernelHost,
   Publication,
+  PublicationDelta,
   Reply,
 } from "./types";
 
@@ -59,10 +60,10 @@ export class CompatRealm {
   readonly channel: HostChannel;
   readonly mirror: DocumentMirror;
   readonly globals: Data;
-  private publication: Publication;
+  private publication: PublicationDelta;
   private workspaceValue: Data;
   private selection: Data;
-  private listeners = new Map<string, Set<(value: any) => void>>();
+  private busListeners = new Map<string, Set<(a: any, b: any) => void>>();
   private external = new Map<
     string,
     { undo: () => void; redo: () => void; cleanup?: () => void }
@@ -71,7 +72,7 @@ export class CompatRealm {
   private extensions = new Map<string, { api: Data; dispose(): void }>();
   private disposed = false;
   private abandonedMutationStart = false;
-  private deferredPublications: Publication[] = [];
+  private deferredPublications: PublicationDelta[] = [];
   private unacknowledgedDocument?: Data;
   private unacknowledgedSelection?: Data;
   private unacknowledgedWorkspace?: Data;
@@ -84,7 +85,7 @@ export class CompatRealm {
       (error) => options.host.reportError(error),
       this.kernel,
     );
-    this.publication = copy(options.initial);
+    this.publication = { ...copy(options.initial), document: undefined };
     this.mirror = new DocumentMirror(options.initial.document);
     this.workspaceValue = copy(options.initial.workspace);
     this.selection = copy(options.initial.selection);
@@ -205,7 +206,7 @@ export class CompatRealm {
         } catch (error) {
           // Discard only unacknowledged JS writes; the kernel selectively aborts acknowledged owner writes.
           if (!this.channel.pending) {
-            this.mirror.accept(this.publication.document);
+            this.mirror.accept(this.mirror.acknowledged);
             try {
               this.channel.call("edit.mutateAbort", {
                 lease: lease.data!.lease,
@@ -289,8 +290,10 @@ export class CompatRealm {
       },
       Kernel: this.kernel,
       bus: {
-        on: (name: string, fn: (value: any) => void) => this.on(name, fn),
-        emit: (name: string, value?: any) => this.emit(name, value),
+        on: (name: string, fn: (a: any, b: any) => void) => this.on(name, fn),
+        off: (name: string, fn: (a: any, b: any) => void) =>
+          this.busListeners.get(name)?.delete(fn),
+        emit: (name: string, a?: any, b?: any) => this.busEmit(name, a, b),
       },
       touch: () => {
         call("document.touch");
@@ -327,6 +330,7 @@ export class CompatRealm {
         this.renderQuery("render.snapshot", args),
     };
     Object.assign(this.PM, options.capabilities?.PM ?? {});
+    this.bridgeEvents();
     options.installLegacy?.(this.PM);
     this.services.register("raster", this.baseRaster);
     this.domConnection = options.dom?.connect({
@@ -356,17 +360,23 @@ export class CompatRealm {
   private callback<T>(fn: () => T): T {
     return fn();
   }
-  private accept(publication: Publication, reply: Reply): void {
+  private accept(publication: PublicationDelta, reply: Reply): void {
     if (publication.revision < this.publication.revision)
       throw new HostError(
         "StalePublication",
         "Host publication moved backwards",
       );
+    // Reads carry facts only; nothing here may walk the document for them.
+    const moved =
+      !!publication.document ||
+      !!publication.ops?.length ||
+      !!reply.error ||
+      !!this.unacknowledgedDocument;
     const documentBase =
-      this.unacknowledgedDocument ?? this.publication.document;
+      this.unacknowledgedDocument ?? this.mirror.acknowledged;
     const later =
-      this.unacknowledgedDocument || !reply.error
-        ? diff(documentBase, this.mirror.snapshot())
+      moved && (this.unacknowledgedDocument || !reply.error)
+        ? diff(documentBase, this.mirror.document)
         : [];
     const selectionBase =
       this.unacknowledgedSelection ?? this.publication.selection;
@@ -383,26 +393,26 @@ export class CompatRealm {
     this.unacknowledgedDocument = undefined;
     this.unacknowledgedSelection = undefined;
     this.unacknowledgedWorkspace = undefined;
-    this.publication = copy(publication);
-    this.mirror.accept(publication.document);
-    if (later.length)
-      this.mirror.restore(
-        patch(
-          publication.document,
-          rebase(later, documentBase, publication.document),
-        ),
-      );
+    this.adopt(publication);
+    if (moved) {
+      const document = this.mirror.acknowledged;
+      reconcile(this.mirror.document, document);
+      if (later.length)
+        this.mirror.restore(
+          patch(document, rebase(later, documentBase, document)),
+        );
+    }
     reconcile(
       this.selection,
       selected.length
-        ? patch(publication.selection, selected)
-        : publication.selection,
+        ? patch(this.publication.selection, selected)
+        : this.publication.selection,
     );
     reconcile(
       this.workspaceValue,
       workspaceChanges.length
-        ? patch(publication.workspace, workspaceChanges)
-        : publication.workspace,
+        ? patch(this.publication.workspace, workspaceChanges)
+        : this.publication.workspace,
     );
     for (const event of publication.events ?? [])
       this.emit(event.name, event.value);
@@ -415,8 +425,21 @@ export class CompatRealm {
     }
     if (publication.notice) this.emit("kernel:notice", publication.notice);
   }
+  /** A publication carries a whole document, ops against the last one, or
+   * neither; selection and workspace are likewise only sent when they moved. */
+  private adopt(publication: PublicationDelta): void {
+    if (publication.document) this.mirror.setAcknowledged(publication.document);
+    else if (publication.ops?.length) this.mirror.applyOps(publication.ops);
+    const { document: _, ops: __, ...rest } = publication;
+    this.publication = {
+      ...this.publication,
+      ...copy(rest),
+      selection: publication.selection ?? this.publication.selection,
+      workspace: publication.workspace ?? this.publication.workspace,
+    };
+  }
   /** Host mailbox publication while local raw writes are still pending. */
-  receive(publication: Publication): void {
+  receive(publication: PublicationDelta): void {
     this.live();
     // A mailbox may overtake an acknowledgement lost in transport. Resolve that
     // immutable request before treating its acknowledged writes as new local intent.
@@ -436,24 +459,27 @@ export class CompatRealm {
     );
     let failed = false,
       failure: unknown;
-    try {
-      this.mirror.receive(publication.document);
-    } catch (error) {
-      failed = true;
-      failure = error;
-    }
-    this.publication = copy(publication);
+    const moved = !!publication.document || !!publication.ops?.length;
+    const previous = moved ? copy(this.mirror.acknowledged) : undefined;
+    this.adopt(publication);
+    if (moved)
+      try {
+        this.mirror.receive(this.mirror.acknowledged, previous!);
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
     reconcile(
       this.selection,
       selected.length
-        ? patch(publication.selection, selected)
-        : publication.selection,
+        ? patch(this.publication.selection, selected)
+        : this.publication.selection,
     );
     reconcile(
       this.workspaceValue,
       workspaceChanges.length
-        ? patch(publication.workspace, workspaceChanges)
-        : publication.workspace,
+        ? patch(this.publication.workspace, workspaceChanges)
+        : this.publication.workspace,
     );
     for (const event of publication.events ?? [])
       this.emit(event.name, event.value);
@@ -485,7 +511,7 @@ export class CompatRealm {
     try {
       ops = this.mirror.pending();
     } catch (error) {
-      this.mirror.accept(this.publication.document);
+      this.mirror.accept(this.mirror.acknowledged);
       throw error;
     }
     if (ops.length) {
@@ -516,23 +542,69 @@ export class CompatRealm {
       this.schedule();
     }
   }
-  private on(name: string, listener: (value: any) => void): () => void {
-    const listeners = this.listeners.get(name) ?? new Set();
+  private on(name: string, listener: (a: any, b: any) => void): () => void {
+    const listeners = this.busListeners.get(name) ?? new Set();
     listeners.add(listener);
-    this.listeners.set(name, listeners);
+    this.busListeners.set(name, listeners);
     return () => {
       listeners.delete(listener);
     };
   }
-  private emit(name: string, value: any): void {
-    this.kernel.events.emit(name, value);
-    for (const listener of [...(this.listeners.get(name) ?? [])]) {
+  private busEmit(name: string, a: any, b: any): void {
+    for (const listener of [...(this.busListeners.get(name) ?? [])]) {
       try {
-        listener(value);
+        listener(a, b);
       } catch (error) {
         this.options.host.reportError(error);
       }
     }
+  }
+  /** The reference's one subscription per legacy topic (kernel/install.ts). */
+  private bridgeEvents(): void {
+    const events = this.kernel.events;
+    const on = (name: string, fn: (...args: any[]) => void) =>
+      this.on(name, fn);
+    const kinds: Data = {
+      layers: "structure",
+      project: "project",
+      assets: "assets",
+      library: "library",
+      history: "history",
+    };
+    for (const [name, kind] of Object.entries(kinds))
+      on(name, () => events.emit("project:changed", { kind }));
+    on("sel", () => events.emit("selection", this.selectionSnapshot()));
+    on("time", (time: number) =>
+      events.emit("time", Number(time ?? this.PM.time ?? 0)),
+    );
+    on("transport", () =>
+      events.emit("transport", { playing: !!this.PM.playing }),
+    );
+    on("fonts", (families: string[]) => events.emit("fonts", families));
+    on("layout", () => events.emit("layout", undefined));
+    on("quality", () => events.emit("layout", undefined));
+    on("draw", () => events.emit("invalidate", "render"));
+    on("draw:timeline", () => events.emit("invalidate", "timeline"));
+    on("draw:ui", () => events.emit("invalidate", "ui"));
+    on("draw:status", () => events.emit("invalidate", "status"));
+    on("preview:presented", (frame: Data) =>
+      events.emit("frame:rendered", {
+        time: Number(frame?.time ?? 0),
+        viewport: frame?.viewport ?? null,
+        version: frame?.version,
+        quality: Number(frame?.quality ?? 1),
+      }),
+    );
+    on("overlay", () => events.emit("overlay", undefined));
+  }
+  /** Native publications name either a legacy topic or a stable kernel event. */
+  private emit(name: string, value: any): void {
+    if (name.includes(":")) this.kernel.events.emit(name, value);
+    this.busEmit(name, value, undefined);
+  }
+  /** A native undo reached this realm's closure outside any realm call. */
+  runExternal(next: NonNullable<Reply["continuation"]>): void {
+    this.continueExternal({ continuation: next });
   }
   private continueExternal(reply: Reply): any {
     const next = reply.continuation!,
@@ -686,7 +758,7 @@ export class CompatRealm {
     for (const canvas of this.canvases) canvas.dispose();
     this.domConnection?.dispose();
     this.kernel.dispose();
-    this.listeners.clear();
+    this.busListeners.clear();
     this.disposed = true;
   }
 }

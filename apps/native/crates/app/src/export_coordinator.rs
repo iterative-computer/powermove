@@ -23,6 +23,7 @@ pub struct Frozen {
     publication: Arc<pm_kernel::Published>,
     options: Options,
     media: pm_engine_service::MediaCatalog,
+    resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
     playhead: f64,
     pub destination: PathBuf,
 }
@@ -90,6 +91,7 @@ impl Controller {
         self.builtins.export_job = Some(job.clone());
         let activity = self.engine.export_activity();
         let tasks = self.builtins.export_tasks.clone();
+        let resources = self.extensions.resources.clone();
         cx.spawn(async move |this, cx| {
             let destination = if let Some(frozen) = saved {
                 Some(frozen.destination)
@@ -116,6 +118,7 @@ impl Controller {
                 publication: p,
                 options: typed,
                 media,
+                resources,
                 playhead,
                 destination,
             };
@@ -310,7 +313,7 @@ async fn execute_inner(
         return Ok(path.to_string_lossy().into());
     }
     let document = frozen.publication.snapshot.doc_id;
-    let request = pm_engine_service::jobs::ExportRequest::new(
+    let mut request = pm_engine_service::jobs::ExportRequest::new(
         pm_kernel::new_id("export").as_str().into(),
         &frozen.publication.snapshot,
         JobSpec::Export {
@@ -328,6 +331,7 @@ async fn execute_inner(
         frozen.destination.clone(),
     )
     .map_err(|e| e.to_string())?;
+    request.resources = (*frozen.resources).clone();
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
         request,

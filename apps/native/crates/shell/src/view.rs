@@ -726,7 +726,7 @@ impl Editor {
                     self.layout = g.original();
                 }
             }
-            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2)))),
+            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2))), cx),
             "dismiss" => {
                 if let Some(h) = &self.host {
                     h.borrow().dismiss_transients();
@@ -799,13 +799,17 @@ impl Editor {
         items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
         items
     }
-    fn tab_menu(&self, id: &str, position: Point<Pixels>) {
+    fn tab_menu(&self, id: &str, position: Point<Pixels>, cx: &mut App) {
         let Some(h) = &self.host else { return };
-        h.borrow().context_menu(
-            &self.tab_menu_entries(id),
-            f32::from(position.x),
-            f32::from(position.y),
-        );
+        let at = (f32::from(position.x), f32::from(position.y));
+        let entries = self.tab_menu_entries(id);
+        let entries = match &self.integration {
+            Some(integration) => integration.panel_menu(id, entries, at, cx),
+            None => Some(entries),
+        };
+        if let Some(entries) = entries {
+            h.borrow().context_menu(&entries, at.0, at.1);
+        }
     }
     /// The status bar's workspace pop-up: presets (current checked) and saved ones.
     fn workspace_menu(&self, position: Point<Pixels>) {
@@ -834,9 +838,9 @@ impl Editor {
     fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>) {
         let Some(h) = &self.host else { return };
         let open = self.layout.open_panels();
-        let items: Vec<_> = layout::PANELS
+        let items: Vec<_> = layout::all_panels()
             .iter()
-            .filter(|p| !open.contains(p))
+            .filter(|p| !open.contains(&p.as_str()))
             .map(|p| {
                 MenuEntry::item(
                     layout::panel_title(p),
@@ -1180,10 +1184,18 @@ impl Render for Editor {
             Some(Gesture::Panel(d)) if d.moved => Some(d.id.clone()),
             _ => None,
         };
+        if let Some(integration) = &self.integration {
+            integration.open_panels(&self.layout.open_panels(), cx);
+        }
+        let mut native_bodies = vec![];
         for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
             let is_viewer = id == "viewer";
+            let body_native = self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
             let tab_track = group.tab_track(p.rect.w - 2. * m.inset - m.hit, &t);
@@ -1201,7 +1213,17 @@ impl Render for Editor {
                 .border(px(m.border))
                 .border_color(rgb(c.separator))
                 .overflow_hidden();
-            if !is_viewer || !native {
+            if body_native {
+                native_bodies.push((
+                    id.to_string(),
+                    Rect {
+                        x: p.rect.x + m.border,
+                        y: p.rect.y + m.header,
+                        w: (p.rect.w - m.border * 2.).max(0.),
+                        h: (p.rect.h - m.header - m.border).max(0.),
+                    },
+                ));
+            } else if !is_viewer || !native {
                 panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
             }
             // A panel may supply its own header content (viewer: pop-ups, no
@@ -1236,8 +1258,8 @@ impl Render for Editor {
                 )
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this, e: &MouseDownEvent, _, _| {
-                        this.tab_menu(&menu_header, e.position);
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        this.tab_menu(&menu_header, e.position, cx);
                     }),
                 );
             let multi = tabs.len() > 1;
@@ -1350,7 +1372,7 @@ impl Render for Editor {
                             MouseButton::Right,
                             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                this.tab_menu(&menu_id, e.position);
+                                this.tab_menu(&menu_id, e.position, cx);
                             }),
                         ),
                     );
@@ -1514,6 +1536,13 @@ impl Render for Editor {
                 panel = panel.child(empty);
             }
             root = root.child(panel);
+        }
+        if let Some(integration) = &self.integration {
+            let shown: Vec<&str> = native_bodies.iter().map(|(id, _)| id.as_str()).collect();
+            integration.shown_panels(&shown, cx);
+        }
+        if let Some(h) = &self.host {
+            *h.borrow().native_panels.borrow_mut() = native_bodies;
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();

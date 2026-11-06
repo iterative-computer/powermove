@@ -1,4 +1,48 @@
-# P2 extension checks — 2026-11-01
+# P2 extension checks
+
+**OPEN / NOT PASSED.** Trace-only comparisons of four-step scripts (reload, two
+seeks, dispose) against Electron at `c7f46a05`. No pixels, no panels, no complete
+interaction scenarios: a match here is not an accepted extension.
+
+## 2026-11-05 — first honest comparison of all 58
+
+`tools/extcheck/trace_compare.py`, three recordings per role, native logic in the
+real compat realm (rusty_v8, production kernel adapter and transport).
+
+| Population | Total | Match (ignoring key order and ids) | Mismatch | Can't run |
+| --- | --- | --- | --- | --- |
+| Public fixtures | 10 | 8 | 1 | 1 |
+| Owner corpus | 44 | 28 | 8 | 8 |
+| Public Store | 4 | 0 | 0 | 4 |
+| **All** | **58** | **36** | **9** | **13** |
+
+No case matches byte for byte: the kernel keeps JSON keys sorted, so every row
+differs in key order, and `exact` comparison stays a mismatch.
+
+Mismatch families, by cases:
+
+1. **9 — panel retirement.** All nine are the same 12 rows. When a panel's last
+   definition goes, Electron hides it by forking the kernel workspace; the native
+   app hides the tab in the shell's layout and leaves the kernel workspace alone,
+   so `workspace.mutate` and its events never appear. It stays a mismatch.
+
+Can't-run reasons, by cases:
+
+- 5 — owner inputs absent from the frozen corpus (39 of 44 present).
+- 3 — Store: facade calls inside a confined helper aren't recorded. All four public
+  releases do activate natively there.
+- 3 — the reference itself never activated the input (a missing source file, a
+  dependency outside the one-extension profile, a fixture needing Store permissions).
+- 1 — native activation: reads the built-in `viewer` service, which doesn't exist.
+- 1 — Store: the reference's own three recordings differed in this run.
+
+This run covers lifecycle and seeking only. Most of what real extensions do in
+panels is not yet scripted, so rendering, DOM and interaction gaps do not show here;
+see [extensions-app.md](extensions-app.md).
+
+---
+
+Earlier rounds, kept for the blockers they recorded:
 
 **OPEN / NOT PASSED.** No extension has accepted paired Electron/native traces,
 visual oracles and complete scripted-interaction coverage. Successful activation

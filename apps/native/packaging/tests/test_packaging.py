@@ -36,6 +36,9 @@ class PackagingTests(unittest.TestCase):
         self.binary = self.root / "native"
         self.binary.write_bytes(bytes.fromhex("cffaedfe") + b"synthetic native binary")
         self.binary.chmod(0o755)
+        for helper in package.HELPERS:
+            (self.root / helper).write_bytes(self.binary.read_bytes())
+            (self.root / helper).chmod(0o755)
         self.app = self.root / "Powermove.app"
         self.config = self.root / "updates.json"
         self.config.write_bytes((package.HERE / "update-config.json").read_bytes())
@@ -106,6 +109,11 @@ class PackagingTests(unittest.TestCase):
         link.symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(ValueError):
             package.new_destination(link / "new.app")
+
+    def test_a_missing_worker_helper_fails_instead_of_packaging_a_broken_app(self):
+        (self.root / "pm-store-helper").unlink()
+        with self.assertRaisesRegex(ValueError, "pm-store-helper"):
+            self.bundle()
 
     def test_non_native_or_linked_executable_is_rejected(self):
         self.binary.write_bytes(b"#!/bin/sh\nexec node main.js\n")

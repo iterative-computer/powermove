@@ -240,7 +240,22 @@ impl Backend {
                 }
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
-            // Enabling needs runtime activation as well as a registry flag.
+            // The window's extension host follows this state and activates or unloads.
+            Some("extension.enabled") => {
+                let id = action["id"].as_str().ok_or("Extension id")?;
+                let mut entry = self
+                    .kernel
+                    .state()
+                    .extensions
+                    .get(id)
+                    .cloned()
+                    .ok_or("Unknown extension")?;
+                entry.enabled = action["enabled"] == true;
+                Ok(NativeCommand::State(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![pm_kernel::state::StateOp::Extension(entry)],
+                }))
+            }
             // Speech and archive actions require their actual services.
             _ => Err("Settings service is unavailable for this action".into()),
         }

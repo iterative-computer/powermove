@@ -93,6 +93,32 @@ provides the reader's data/identity plan only. Existing unsigned installations
 must enter via that migration/provenance path, without rewriting their source or
 pretending a new publisher signature existed.
 
+## What exists in the app
+
+`pm-compat-runner` runs this design: `store_host` adopts an install the shipped app
+made (the `.powermove-store.json` marker) as a release with legacy provenance, and
+starts it in its own confined helper. Its effects, transitions, layers, themes,
+status items, panels and commands land in the kernel registries; effects reach the
+engine with `origin: store`. Panels build in the helper's remote DOM and draw in a
+dedicated `MacDomHost::new_store_remote_dom` page. `store_install` is the new-install
+client.
+
+### What the Store server has to publish
+
+The native client refuses a release without this, and `PINNED_KEYS` in
+`store_install.rs` stays empty until it exists. Public catalog hashes are not a
+signature: they arrive over the same channel as the bytes.
+
+- `GET /v1/store/releases/<id>/signature` returns `SignedRelease` as JSON:
+  `{"statement":{"format":1,"key_id","publisher","extension","release_id",
+  "archive_sha256","files":{"<path>":{"sha256","bytes"}}},"signature":[64 bytes]}`.
+- `statement.files` lists every file of the existing `/tar` archive with its SHA-256
+  and size. Paths sort lexicographically.
+- `signature` is Ed25519 over `powermove.store-release.v1\0` followed by the
+  `serde_json` bytes of `statement`, in the field order above.
+- The private key stays server-side. Its public key and `key_id` ship in the app;
+  rotation adds a new pin in a release before the server switches.
+
 ## Signed release admission and install transactions
 
 A native remote release carries `SignedRelease` with protocol format 1,

@@ -1,14 +1,16 @@
 //! Store install/permission CAS on the existing kernel writer and durable state
 //! transaction. No second profile writer, renderer state, or home discovery.
 use pm_kernel::{
-    Kernel,
-    state::{ExtensionEntry, StateOp, StateTransaction},
+    Kernel, KernelHandle,
+    state::{ExtensionEntry, StateOp, StateSnapshot, StateTransaction},
 };
 use pm_store_host::{
     Error, Result,
     identity::ExtensionId,
     install::{ExtensionState, StoreKernel},
 };
+
+use std::sync::{Arc, Mutex};
 
 const SLOT: &str = "storeHostV1";
 
@@ -20,11 +22,88 @@ pub struct StoreArchive<'a> {
     pub expected: Option<u64>,
 }
 
+/// What Store code needs from the single writer. The app hands in its actor
+/// handle; every call runs on a worker, so waiting on the actor here is allowed.
+pub trait StoreAuthority: Send + Sync + 'static {
+    fn state(&self) -> Arc<StateSnapshot>;
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String>;
+    /// `(generation, realized project)` of an open project.
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)>;
+}
+impl StoreAuthority for KernelHandle {
+    fn state(&self) -> Arc<StateSnapshot> {
+        KernelHandle::state(self)
+    }
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+        self.state_transaction(tx)
+            .wait()
+            .ok_or("kernel stopped")?
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+        let published = self.published(project)?;
+        let document = published.snapshot.document.to_value()?;
+        Some((
+            published.revision() + 1,
+            pm_model::canonical::realize_project(document),
+        ))
+    }
+}
+impl StoreAuthority for Mutex<Kernel> {
+    fn state(&self) -> Arc<StateSnapshot> {
+        Arc::new(self.lock().unwrap().state().clone())
+    }
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+        self.lock()
+            .unwrap()
+            .state_transaction(tx)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+        let kernel = self.lock().unwrap();
+        let project = kernel.project(project)?;
+        let snapshot = project.store().snapshot();
+        Some((
+            project.store().revision() + 1,
+            pm_model::canonical::realize_project(snapshot.document.to_value()?),
+        ))
+    }
+}
+
+/// Extension entries change as whole values, and several threads write them: a
+/// helper's storage, the host's records, Settings. Each write re-reads and
+/// retries when another landed between its read and its commit, so none is lost.
+pub fn update_state<E: From<String>>(
+    kernel: &dyn StoreAuthority,
+    mut build: impl FnMut(&StateSnapshot) -> std::result::Result<Option<Vec<StateOp>>, E>,
+) -> std::result::Result<(), E> {
+    for _ in 0..64 {
+        let snapshot = kernel.state();
+        let Some(ops) = build(&snapshot)? else {
+            return Ok(());
+        };
+        match kernel.transact(StateTransaction {
+            expected_revision: Some(snapshot.revision),
+            ops,
+        }) {
+            Ok(()) => return Ok(()),
+            // The state did not move, so this failure is not a lost race.
+            Err(error) if kernel.state().revision == snapshot.revision => {
+                return Err(error.into());
+            }
+            Err(_) => (),
+        }
+    }
+    Err(String::from("Kernel state kept changing").into())
+}
+
 pub struct KernelStoreAdapter<'a> {
-    kernel: &'a mut Kernel,
+    kernel: &'a dyn StoreAuthority,
 }
 impl<'a> KernelStoreAdapter<'a> {
-    pub fn new(kernel: &'a mut Kernel) -> Self {
+    pub fn new(kernel: &'a dyn StoreAuthority) -> Self {
         Self { kernel }
     }
     /// Worker-only release admission. Pins come from the native Store registry;
@@ -57,7 +136,8 @@ impl<'a> KernelStoreAdapter<'a> {
 }
 impl StoreKernel for KernelStoreAdapter<'_> {
     fn load(&self, id: &ExtensionId) -> Result<Option<ExtensionState>> {
-        let Some(entry) = self.kernel.state().extensions.get(id.as_str()) else {
+        let state = self.kernel.state();
+        let Some(entry) = state.extensions.get(id.as_str()) else {
             return Ok(None);
         };
         let Some(value) = entry.source.get(SLOT) else {
@@ -82,51 +162,60 @@ impl StoreKernel for KernelStoreAdapter<'_> {
         expected: Option<u64>,
         next: &ExtensionState,
     ) -> Result<()> {
-        let current = self.load(id)?;
-        if current.as_ref().map(|state| state.revision) != expected {
-            return Err(Error::Conflict);
-        }
-        if next.data_store.extension != *id
-            || next.revision
-                != expected
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .ok_or(Error::Invalid("Store revision"))?
-            || current
-                .as_ref()
-                .is_some_and(|state| state.data_store != next.data_store)
-        {
-            return Err(Error::Invalid("Store state identity/revision"));
-        }
-        let snapshot = self.kernel.state();
-        let previous = snapshot.extensions.get(id.as_str());
-        let mut source = previous
-            .and_then(|entry| entry.source.as_object())
-            .cloned()
-            .unwrap_or_default();
-        let value = serde_json::to_string(next).map_err(|_| Error::Invalid("Store state"))?;
-        source.insert(
-            SLOT,
-            pm_model::json::parse(&value).map_err(|_| Error::Invalid("Store state"))?,
-        );
-        let entry = ExtensionEntry {
-            id: id.as_str().into(),
-            installed: next.active.is_some(),
-            enabled: previous.is_none_or(|entry| entry.enabled),
-            version: next
-                .active
-                .as_ref()
-                .map(|release| release.manifest.version.clone())
-                .unwrap_or_default(),
-            source: pm_model::Value::Object(source),
-        };
-        self.kernel
-            .state_transaction(StateTransaction {
-                expected_revision: Some(snapshot.revision),
-                ops: vec![StateOp::Extension(entry)],
-            })
-            .map_err(|error| Error::Io(error.to_string()))?;
-        Ok(())
+        let kernel = self.kernel;
+        update_state(kernel, |snapshot| {
+            let current = self.load(id).map_err(StoreWrite::Refused)?;
+            if current.as_ref().map(|state| state.revision) != expected {
+                return Err(StoreWrite::Refused(Error::Conflict));
+            }
+            if next.data_store.extension != *id
+                || next.revision
+                    != expected
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(StoreWrite::Refused(Error::Invalid("Store revision")))?
+                || current
+                    .as_ref()
+                    .is_some_and(|state| state.data_store != next.data_store)
+            {
+                return Err(StoreWrite::Refused(Error::Invalid(
+                    "Store state identity/revision",
+                )));
+            }
+            let previous = snapshot.extensions.get(id.as_str());
+            let mut source = previous
+                .and_then(|entry| entry.source.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let invalid = || StoreWrite::Refused(Error::Invalid("Store state"));
+            let value = serde_json::to_string(next).map_err(|_| invalid())?;
+            source.insert(SLOT, pm_model::json::parse(&value).map_err(|_| invalid())?);
+            Ok(Some(vec![StateOp::Extension(ExtensionEntry {
+                id: id.as_str().into(),
+                installed: next.active.is_some(),
+                enabled: previous.is_none_or(|entry| entry.enabled),
+                version: next
+                    .active
+                    .as_ref()
+                    .map(|release| release.manifest.version.clone())
+                    .unwrap_or_default(),
+                source: pm_model::Value::Object(source),
+            })]))
+        })
+        .map_err(|error| match error {
+            StoreWrite::Refused(error) => error,
+            StoreWrite::Kernel(error) => Error::Io(error),
+        })
+    }
+}
+
+enum StoreWrite {
+    Refused(Error),
+    Kernel(String),
+}
+impl From<String> for StoreWrite {
+    fn from(error: String) -> Self {
+        Self::Kernel(error)
     }
 }
 
@@ -178,8 +267,8 @@ mod tests {
         let id = ExtensionId::new("synthetic-store").unwrap();
         let initial = state(&id, "synthetic-profile");
         {
-            let mut kernel = kernel(profile.path(), "initial");
-            let mut store = KernelStoreAdapter::new(&mut kernel);
+            let kernel = Mutex::new(kernel(profile.path(), "initial"));
+            let mut store = KernelStoreAdapter::new(&kernel);
             store.compare_exchange(&id, None, &initial).unwrap();
             assert_eq!(
                 store.compare_exchange(&id, None, &initial),
@@ -192,8 +281,8 @@ mod tests {
                 Err(Error::Invalid("Store state identity/revision"))
             );
         }
-        let mut kernel = kernel(profile.path(), "reopen");
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(kernel(profile.path(), "reopen"));
+        let mut store = KernelStoreAdapter::new(&kernel);
         assert_eq!(store.load(&id).unwrap(), Some(initial.clone()));
         let mut next = initial;
         next.revision = 2;
@@ -216,7 +305,8 @@ mod tests {
                 })],
             })
             .unwrap();
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(kernel);
+        let mut store = KernelStoreAdapter::new(&kernel);
         assert_eq!(
             store.compare_exchange(&id, None, &state(&id, "synthetic-profile")),
             Err(Error::Conflict)
@@ -287,8 +377,8 @@ mod tests {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut artifacts = FileArtifacts::new(root.path().canonicalize().unwrap()).unwrap();
-        let mut kernel = Kernel::new(KernelConfig::default());
-        let mut store = KernelStoreAdapter::new(&mut kernel);
+        let kernel = Mutex::new(Kernel::new(KernelConfig::default()));
+        let mut store = KernelStoreAdapter::new(&kernel);
         release.signature[0] ^= 1;
         assert!(
             store

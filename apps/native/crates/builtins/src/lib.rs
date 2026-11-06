@@ -74,8 +74,11 @@ pub struct Builtins {
     pool: RuntimePool,
     broker: Arc<Broker>,
     realms: BTreeMap<String, Realm>,
+    extension_realms: Mutex<BTreeMap<String, Realm>>,
 }
 struct Broker {
+    /// Third-party v4 surface extensions mounted in this window.
+    extensions: Mutex<std::collections::BTreeSet<String>>,
     project: String,
     application: bool,
     kernel: KernelHandle,
@@ -144,6 +147,7 @@ impl Builtins {
             None => Default::default(),
         };
         let broker = Arc::new(Broker {
+            extensions: Default::default(),
             project: project.into(),
             application,
             kernel,
@@ -177,6 +181,7 @@ impl Builtins {
             pool,
             broker,
             realms: BTreeMap::new(),
+            extension_realms: Mutex::default(),
         })
     }
     /// Ticket is awaited off the UI handler. First publication is delivered only
@@ -204,9 +209,49 @@ impl Builtins {
     ) {
         self.broker.agent.set_environment(environment, open);
     }
+    /// A third-party v4 extension: its own isolate, the same host and native
+    /// surface path as a built-in, and a module graph from the native compiler.
+    pub fn mount_extension(&self, id: &str, graph: &Value) -> Result<Ticket<Evaluation>> {
+        let mut extensions = self.extension_realms.lock().unwrap();
+        if LIVE_PANELS.contains(&id) || extensions.contains_key(id) || self.broker.application {
+            return Err(Error::Invalid("extension panel id is taken"));
+        }
+        self.broker.extensions.lock().unwrap().insert(id.into());
+        let realm = self.pool.realm(RealmKind::V4Extension(id.into()))?;
+        let ticket = realm.eval(format!(
+            "{BUNDLE}\n__pmBuiltin.mountExtension({},{})",
+            json!(id),
+            json!(graph.to_string())
+        ))?;
+        extensions.insert(id.into(), realm);
+        Ok(ticket)
+    }
+    /// A surface that was disabled, removed or rebuilt. Closing the realm revokes
+    /// its writer on the isolate owner; the same id can mount again.
+    pub fn unmount_extension(&self, id: &str) {
+        if let Some(realm) = self.extension_realms.lock().unwrap().remove(id) {
+            realm.close();
+        }
+        self.broker.extensions.lock().unwrap().remove(id);
+        // Its surface and router go too; a late call from it is a stale generation.
+        self.broker.entries.lock().unwrap().remove(id);
+    }
+    fn realm_of(&self, panel: &str) -> Result<Realm> {
+        if let Some(realm) = self.realms.get(panel) {
+            return Ok(realm.clone());
+        }
+        self.extension_realms
+            .lock()
+            .unwrap()
+            .get(panel)
+            .cloned()
+            .ok_or(Error::Closed)
+    }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
+        let extensions = self.extension_realms.lock().unwrap();
         self.realms
             .iter()
+            .chain(extensions.iter())
             .map(|(id, realm)| (id.clone(), realm.eval("__pmBuiltin.publish()")))
             .collect()
     }
@@ -310,19 +355,13 @@ impl Builtins {
         );
     }
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
-        self.realms
-            .get("export")
-            .ok_or(Error::Closed)?
-            .eval(format!(
-                "runtime.engine('export.observe',{});__pmBuiltin.publish()",
-                run
-            ))
+        self.realm_of("export")?.eval(format!(
+            "runtime.engine('export.observe',{});__pmBuiltin.publish()",
+            run
+        ))
     }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
-        self.realms
-            .get(panel)
-            .ok_or(Error::Closed)?
-            .eval("__pmBuiltin.show()")
+        self.realm_of(panel)?.eval("__pmBuiltin.show()")
     }
     /// A shell-admitted mask reveal uses the same model and persistence as M in the timeline.
     pub fn reveal_masks(&self) -> Result<Ticket<Evaluation>> {
@@ -366,11 +405,8 @@ impl Builtins {
             .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
-        self.realms.get(panel).ok_or(Error::Closed)?.eval(format!(
-            "__pmBuiltin.write({},{})",
-            json!(handle),
-            value
-        ))
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.write({},{})", json!(handle), value))
     }
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
         std::mem::take(&mut *self.broker.platform.lock().unwrap())
@@ -407,9 +443,7 @@ impl Builtins {
             )
             .map_err(Error::Host)?;
         let wire = serde_json::to_string(&event).map_err(|e| Error::Host(e.to_string()))?;
-        self.realms
-            .get(panel)
-            .ok_or(Error::Closed)?
+        self.realm_of(panel)?
             .eval(format!("__pmBuiltin.event({wire})"))
     }
     /// A press may republish before its click lands. Activation still reaches
@@ -542,7 +576,7 @@ impl Builtins {
     /// Caller drops the owning window without waiting on JS. Runtime disposal
     /// revokes its writer on the isolate owner, including after a failed mount.
     pub fn close_panel(&self, id: &str) {
-        if let Some(realm) = self.realms.get(id) {
+        if let Ok(realm) = self.realm_of(id) {
             realm.close();
         }
     }
@@ -554,7 +588,8 @@ impl Builtins {
         {
             self.broker.agent.close();
         }
-        for realm in self.realms.values() {
+        let extensions = self.extension_realms.lock().unwrap();
+        for realm in self.realms.values().chain(extensions.values()) {
             realm.close();
         }
     }
@@ -571,7 +606,7 @@ impl Broker {
             .rsplit_once("V4Extension(\"")
             .and_then(|(_, s)| s.strip_suffix("\")"))
             .ok_or(Error::Invalid("not a v4 built-in realm"))?;
-        if !LIVE_PANELS.contains(&id) {
+        if !LIVE_PANELS.contains(&id) && !self.extensions.lock().unwrap().contains(id) {
             return Err(Error::Invalid("unknown panel"));
         }
         Ok(id)

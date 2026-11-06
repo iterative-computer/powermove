@@ -2201,15 +2201,22 @@ name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "block2",
+ "ed25519-dalek",
+ "objc2",
+ "objc2-foundation",
  "pm-compat-host",
  "pm-kernel",
  "pm-mcp",
  "pm-model",
  "pm-recorder",
+ "pm-remote-dom",
  "pm-runtime-v8",
  "pm-store-host",
  "png",
  "serde_json",
+ "sha2",
+ "url",
 ]
 
 [[package]]

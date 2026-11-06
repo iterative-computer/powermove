@@ -5,11 +5,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-const [reference, runner] = process.argv.slice(2);
-assert(
-  reference && runner,
-  "Pass the prepared reference checkout and native runner",
-);
+const [runner] = process.argv.slice(2);
+assert(runner, "Pass the native runner");
 const root = await mkdtemp("/tmp/pm-extcheck/bundle-test-");
 try {
   const input = path.join(root, "input"),
@@ -47,8 +44,6 @@ try {
     "bun",
     [
       fileURLToPath(new URL("./bundle.ts", import.meta.url)),
-      reference,
-      input,
       out,
     ],
     { stdio: "pipe" },
@@ -58,35 +53,24 @@ try {
     CLOCK_SOURCE,
     "Bun and Node must install identical fixture source bytes",
   );
-  assert.equal(
-    JSON.parse(await readFile(path.join(out, "compiler.json"), "utf8"))
-      .revision,
-    execFileSync("git", ["-C", reference, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-    }).trim(),
-  );
   const result = JSON.parse(
     execFileSync(runner, [], {
       encoding: "utf8",
       input: JSON.stringify({
         clock_fixture: path.join(out, "clock.js"),
-        compat_bundle: path.join(out, "compat.js"),
-        module: path.join(out, "extension.js"),
-        manifest: JSON.parse(
-          await readFile(path.join(out, "manifest.json"), "utf8"),
-        ),
+        extension: input,
         initial: JSON.parse(
           await readFile(path.join(out, "initial.json"), "utf8"),
         ),
         expressions: [
-          "__extcheck.realm.kernel.commands.get('synthetic').run()",
+          "__compat.realm.kernel.commands.get('synthetic').run()",
           "typeof PowermoveCompat.runtimeModules.svelte.mount",
           "Array.isArray(PM.proj.markers)",
-          "__extcheck.dom.document.querySelector('input').value",
-          "(()=>{__extcheck.realm.history.do('Synthetic control update',()=>PM.proj.name='Synthetic changed');PowermoveCompat.runtimeModules.svelte.flushSync();return __extcheck.dom.document.querySelector('input').value})()",
+          "__compat.dom.document.querySelector('input').value",
+          "(()=>{__compat.realm.history.do('Synthetic control update',()=>PM.proj.name='Synthetic changed');PowermoveCompat.runtimeModules.svelte.flushSync();return __compat.dom.document.querySelector('input').value})()",
           "(()=>{const select=document.querySelector('select');select.value='0';select.dispatchEvent(new Event('change',{bubbles:true}));PowermoveCompat.runtimeModules.svelte.flushSync();return [PM.proj.name,document.querySelector('input').value,select.selectedIndex]})()",
-          "(()=>{__extcheck.realm.history.undo();PowermoveCompat.runtimeModules.svelte.flushSync();return [PM.proj.name,document.querySelector('input').value]})()",
-          "__extcheck.dispose()",
+          "(()=>{__compat.realm.history.undo();PowermoveCompat.runtimeModules.svelte.flushSync();return [PM.proj.name,document.querySelector('input').value]})()",
+          "__compat.loader.dispose().then(()=>true)",
         ],
       }),
     }),
@@ -106,7 +90,7 @@ try {
   assert.deepEqual(result.diagnostics.missing, []);
   assert.equal(result.gates.webkit_panels, false);
   console.log(
-    "PASS: default entry, compiled module global, shared compat+DOM bundle and actual V8 activation",
+    "PASS: default entry, native module graph and actual V8 activation",
   );
 } finally {
   await rm(root, { recursive: true, force: true });

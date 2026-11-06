@@ -518,7 +518,37 @@ impl Backend {
             json!({"id":p.project,"name":name})
         });
         let state = self.kernel.state();
-        let extensions=state.extensions.values().map(|e|json!({"id":e.id,"name":e.id,"type":"Other","source":if e.installed{"Installed"}else{"Built in"},"enabled":e.enabled,"about":"","includes":[],"shortcuts":[],"files":[],"variables":[],"canArchive":false})).collect::<Vec<_>>();
+        let extensions = state
+            .extensions
+            .values()
+            .map(|e| {
+                let host = e.source.get("hostRecord");
+                let text = |key: &str| {
+                    host.and_then(|h| h.get(key))
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned)
+                };
+                let includes = host
+                    .and_then(|h| h.get("contributes"))
+                    .and_then(pm_model::Value::as_array)
+                    .map(|kinds| {
+                        kinds
+                            .iter()
+                            .filter_map(pm_model::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let source = match (e.installed, text("trust").as_deref()) {
+                    (false, _) => "Built in",
+                    (true, Some("local")) => "Custom",
+                    _ => "Installed",
+                };
+                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
+                    "enabled":e.enabled,"about":text("about").unwrap_or_default(),"includes":includes,
+                    "shortcuts":[],"files":[],"variables":[],"canArchive":false})
+            })
+            .collect::<Vec<_>>();
         let accounts = self.account_rows();
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready","speech":[]});
         if let Some(project) = project {

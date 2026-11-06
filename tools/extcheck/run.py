@@ -307,6 +307,15 @@ def capture(command, request, output, timeout):
             if output.exists():shutil.rmtree(output)
 
 
+def capture_trace(command, request, output, timeout):
+    """Hidden, screenless capture: needs no GUI lease and never yields a P2 match."""
+    disk_check()
+    status = capture_unlocked(command, request, output, timeout)
+    if request["role"] == "native" and status.get("path") != {"logic": "runtime-v8"}:
+        raise Blocked("native-path-unverified")
+    return status
+
+
 def capture_unlocked(command, request, output, timeout):
     if not command:
         raise Blocked("native-integrated-runner-unavailable")
@@ -353,7 +362,8 @@ def capture_unlocked(command, request, output, timeout):
                           "reference-store-profile-adapter-unavailable", "native-reference-revision-mismatch",
                           "reference-capture-failed", "reference-clock-fixture-unavailable", "native-integrated-runner-unavailable",
                           "native-extension-compile-failed", "native-store-facade-unavailable", "native-store-release-admission-unavailable", "native-runner-failed",
-                          "native-webkit-script-adapter-unavailable", "native-activation-needs-backend"):
+                          "native-webkit-script-adapter-unavailable", "native-activation-needs-backend", "native-store-trace-driver-unavailable",
+                          "native-store-activation-failed"):
             reason = "capture-driver-blocked"
         raise Blocked(reason)
     if status.get("clock_fixture") != request.get("clock_fixture") or not request.get("clock_fixture"):
@@ -365,7 +375,7 @@ def capture_unlocked(command, request, output, timeout):
     if request["role"] == "reference":
         if status.get("revision") != request.get("reference_revision", REFERENCE):
             raise Blocked("reference-revision-mismatch")
-    elif status.get("path") != {"logic": "runtime-v8", "panels": "webkit-remote-dom", "canvas": "native-recorder"}:
+    elif not request.get("trace_only") and status.get("path") != {"logic": "runtime-v8", "panels": "webkit-remote-dom", "canvas": "native-recorder"}:
         raise Blocked("native-path-unverified")
     return status
 
@@ -400,6 +410,14 @@ def load_script(scripts, case):
         validate_script(script)
         return script
     except (OSError, ValueError, TypeError, AttributeError):
+        raise Blocked("invalid-script") from None
+
+
+def load_trace_script(scripts, case, default):
+    path = scripts / (case + ".json") if scripts else None
+    try:
+        return json.loads(path.read_text()) if path and path.is_file() else default
+    except (OSError, ValueError):
         raise Blocked("invalid-script") from None
 
 

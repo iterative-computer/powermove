@@ -19,6 +19,14 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// A selection an extension recorded for its history entry.
+    pub fn from_parts(layers: Vec<String>, keys: Vec<String>, channel: Option<String>) -> Self {
+        Self {
+            layers,
+            keys,
+            channel,
+        }
+    }
     pub(crate) fn encoded_bytes(&self) -> usize {
         use pm_model::{Map, Value};
         let mut value = Map::new();

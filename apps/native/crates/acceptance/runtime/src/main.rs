@@ -77,7 +77,7 @@ fn check(id: &str, bundle: Option<&str>) -> Result<()> {
         return source_mcp::fork().map_err(Error::Host);
     }
     if native_compat::IDS.contains(&id) {
-        return native_compat::check(id, bundle.ok_or(Error::Invalid("compat bundle required"))?);
+        return native_compat::check(id);
     }
     if let Some(result) = portable::check(id) {
         return result.map_err(Error::Host);

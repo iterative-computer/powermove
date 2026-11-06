@@ -70,6 +70,7 @@ export function extensionAPI(
     util: namespaces.util,
   };
   namespaces.ui = mergeDescriptors(namespaces.ui, {
+    icon: (name: string) => realm.PM.icon(name).outerHTML,
     controls: mergeDescriptors(
       required("ui.controls", [
         "Segmented",

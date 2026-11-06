@@ -126,6 +126,17 @@ export function installClockFixture(root = globalThis, seed = 0x504d5032) {
     get now() {
       return now;
     },
+    // Host boot length differs by design. Both drivers start the compared span
+    // from the same time and entropy; earlier virtual work stays in provenance.
+    align(target) {
+      if (!Number.isFinite(target) || target < now)
+        throw RangeError("Invalid comparison start");
+      const boot = { now, draws, timers: timers.size, frames: frames.size };
+      now = target;
+      random = seed >>> 0;
+      draws = 0;
+      return boot;
+    },
     async advance(ms = 16) {
       if (!Number.isFinite(ms) || ms < 0)
         throw RangeError("Invalid comparison time");

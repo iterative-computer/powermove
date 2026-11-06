@@ -153,6 +153,8 @@ pub struct Engine {
     /// Wakes an idle worker when the device is lost ([`Engine::set_waker`]).
     waker: Waker,
     resources: Arc<crate::resources::ResourceSnapshot>,
+    /// Why a contributed definition cannot draw, for the viewer's status.
+    pub definition_failure: Option<String>,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -289,6 +291,7 @@ impl Engine {
             failed,
             waker,
             resources: Arc::default(),
+            definition_failure: None,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -340,15 +343,23 @@ impl Engine {
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
         let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
         if self.studio_content != Some(key) {
-            self.renderer
-                .set_main_effects_with(&scene.doc, &self.resources.definitions)
+            // A bad contribution draws nothing and is reported; frames carry on.
+            // A compiler slot that was busy is retried, never reported as broken.
+            let busy = |e: &str| e.contains("compiler-busy");
+            let failures = self
+                .renderer
+                .set_document_effects(&scene.doc, &self.resources.definitions)
                 .map_err(|e| {
-                    if e.contains("compiler-busy") {
+                    if busy(&e) {
                         anyhow::Error::new(CompilerBusy)
                     } else {
                         anyhow::Error::msg(e)
                     }
                 })?;
+            if failures.iter().any(|failure| busy(&failure.message)) {
+                return Err(anyhow::Error::new(CompilerBusy));
+            }
+            self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
             crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
             self.studio_content = Some(key);
@@ -793,6 +804,101 @@ mod lifetime_tests {
         event.set_signaled_value(1);
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
+    }
+    #[test]
+    fn a_contributed_effect_changes_rendered_pixels_through_its_snapshot() {
+        use pm_protocol::definitions::{
+            DefinitionFlags, DefinitionKind, DefinitionOrigin, DefinitionSnapshot, ParamSpec,
+            WrappedGlsl,
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        value["layers"][0]["fx"] = serde_json::json!([{
+            "id":"fx1","type":"synthetic.black","version":1,"on":true,
+            "p":{"amount":{"v":1,"kf":[],"expr":null}}
+        }]);
+        let body = "o = vec4(0.0, 0.0, 0.0, src(v_uv).a * u_amount);";
+        let source = format!(
+            "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvec4 src(vec2 uv){{return texture(u_tex,uv);}}\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"
+        );
+        let definition = DefinitionSnapshot {
+            id: "synthetic.black".into(),
+            kind: DefinitionKind::Effect,
+            version: 0,
+            origin: DefinitionOrigin::Local,
+            renderer: None,
+            glsl: Some(WrappedGlsl {
+                body_line_offset: 8,
+                body_utf16_len: body.len() as u32,
+                body_utf8_len: body.len() as u32,
+                source,
+            }),
+            params: vec![ParamSpec::Number {
+                key: "amount".into(),
+                default: 1.,
+                min: 0.,
+                max: 1.,
+                step: None,
+            }],
+            flags: DefinitionFlags::default(),
+        };
+        let size = Size::new(160, 90);
+        // Contributions reach the engine as the viewer's pinned resource snapshot.
+        let draw = |gpu: &str, value: &serde_json::Value, definitions: Vec<DefinitionSnapshot>| {
+            let parsed = pm_model::json::parse(&value.to_string()).unwrap();
+            let comp = parsed.get("compId").unwrap().as_str().unwrap().to_owned();
+            let scene = Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(parsed)),
+                    1,
+                )),
+                comp,
+                media: Default::default(),
+                content: 1,
+            };
+            let mut engine = Engine::new(Gpu::new(gpu).unwrap()).unwrap();
+            engine.set_resources(Arc::new(crate::resources::ResourceSnapshot {
+                definitions,
+                ..Default::default()
+            }));
+            let pixels = engine.export(&scene, Ticks::ZERO, size).unwrap();
+            (pixels, engine.definition_failure.take())
+        };
+        let mut plain: serde_json::Value = value.clone();
+        plain["layers"][0]["fx"] = serde_json::json!([]);
+        let (before, _) = draw("contributed-effect", &plain, vec![]);
+        let (after, _) = draw("contributed-effect-after", &value, vec![definition.clone()]);
+        assert_ne!(before, after, "the contributed program drew");
+        // A broken contribution fails alone: unused it costs nothing, and the
+        // valid one beside it still draws.
+        let mut broken = definition.clone();
+        broken.id = "synthetic.broken".into();
+        broken.glsl.as_mut().unwrap().source = "not glsl".into();
+        let mut invalid = definition.clone();
+        invalid.id = "synthetic.invalid".into();
+        invalid.params[0] = ParamSpec::Number {
+            key: "Not A Key".into(),
+            default: 1.,
+            min: 2.,
+            max: 1.,
+            step: None,
+        };
+        let (unused, failure) = draw(
+            "contributed-effect-broken",
+            &plain,
+            vec![broken.clone(), invalid.clone()],
+        );
+        assert_eq!(before, unused, "unused bad definitions change nothing");
+        assert!(failure.is_some());
+        let (beside, _) = draw(
+            "contributed-effect-beside",
+            &value,
+            vec![broken, invalid, definition],
+        );
+        assert_eq!(
+            after, beside,
+            "a good definition is untouched beside a bad one"
+        );
     }
     #[test]
     fn encoded_hdr_outputs_match_independent_f64_reference() {

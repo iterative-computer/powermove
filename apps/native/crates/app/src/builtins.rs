@@ -113,6 +113,7 @@ impl Controller {
                 .insert("viewer.gizmos".into(), gizmos.clone().into());
             self.builtins.gizmos = Some(gizmos);
         }
+        self.start_extensions(cx);
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
             let _ = tx.try_send(());
@@ -198,6 +199,23 @@ impl Controller {
         })
         .detach();
     }
+    /// A surface extension's first commit landed; its panel can render.
+    pub fn surface_ready(&mut self, id: String) {
+        self.builtins.ready.insert(id);
+    }
+}
+impl Host {
+    /// An unmounted surface: its view and anything it published go with it, so a
+    /// rebuilt graph starts from its own first commit.
+    pub fn forget_surface(&mut self, id: &str) {
+        self.ready.remove(id);
+        self.pending.remove(id);
+        self.views.remove(id);
+        self.headers.remove(id);
+        self.generations.remove(id);
+    }
+}
+impl Controller {
     /// Readiness depends only on the media inputs, so an edit that left them
     /// alone moves the observation to its revision without any worker.
     fn probe_builtin_media(&mut self, cx: &mut Context<Self>) {
@@ -272,6 +290,10 @@ impl Controller {
     /// the playhead and timecode are CALayers fed from the display link.
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
         let (playing, time) = (self.playing(), self.time());
+        // Extensions follow playback themselves; the host coalesces the updates.
+        if let Some(host) = &self.extensions.host {
+            host.publish_time(time, playing);
+        }
         if !self.builtins.clock.due(time, playing) {
             return;
         }

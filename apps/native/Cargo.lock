@@ -4736,14 +4736,21 @@ name = "pm-compat-runner"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "block2 0.6.2",
  "ed25519-dalek",
  "flate2",
  "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "pm-compat-host",
  "pm-kernel",
  "pm-mcp",
  "pm-model",
+ "pm-protocol",
  "pm-recorder",
+ "pm-remote-dom",
  "pm-runtime-v8",
  "pm-store-host",
  "png",
@@ -4751,6 +4758,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -5089,6 +5097,8 @@ dependencies = [
  "pm-agents",
  "pm-audio",
  "pm-builtins",
+ "pm-compat-host",
+ "pm-compat-runner",
  "pm-design",
  "pm-engine-service",
  "pm-eval",
@@ -5106,6 +5116,7 @@ dependencies = [
  "pm-panel-viewerchrome",
  "pm-promedia",
  "pm-protocol",
+ "pm-recorder",
  "pm-render",
  "pm-runtime-v8",
  "pm-services",

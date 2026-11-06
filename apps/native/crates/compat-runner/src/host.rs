@@ -1,0 +1,2140 @@
+//! The application's extension host, one per project window. A dedicated owner
+//! thread talks to V8; the main thread only enqueues and reads published copies,
+//! so a slow, hung or failing extension can never stall AppKit (N8).
+//!
+//! The kernel is app-wide. The realm is a writer generation: rebuilding it seals
+//! the old generation and starts a new one, with a new page behind its panels.
+use crate::{
+    adapter::KernelAdapter,
+    compile::{self, ModuleGraph},
+    discovery::{self, Discovered},
+    recorder::{CanvasText, NativeHost, RealmEvents},
+    store_kernel::update_state,
+    transport::{Transport, TransportOwner},
+};
+use crate::{store_host::StoreExtension, store_install, store_runtime::StoreViews};
+use pm_compat_host::{AdmittedDomBatch, CanvasFrame, RemoteDomPanel};
+use pm_kernel::{
+    KernelEvent, KernelHandle, RealmEnvelope, RealmMessage, Writer,
+    state::{Registration, StateOp, StateTransaction},
+};
+use pm_remote_dom::{TrySink, protocol::Session};
+use pm_runtime_v8::*;
+use pm_store_host::adapter::StoreSession;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+/// Every host gets its own kernel writer; one window's retirement is its own.
+static NEXT_REALM: AtomicU32 = AtomicU32::new(1000);
+const PANEL: u64 = 1;
+const GENERATION: u32 = 1;
+/// The page document of a realm starts its own session, whatever the writer's
+/// generation: a rebuilt realm always gets a new page.
+const PAGE_SESSION: u32 = 1;
+/// A realm that fails this often in one session stays off until reopened.
+const MAX_RESTARTS: usize = 2;
+/// Admitted batches waiting for a page. Past this, batches wait in the realm,
+/// whose document coalesces them, so memory stays bounded with no page at all.
+const PAGE_QUEUE: usize = 256;
+/// How often an idle owner looks for extensions changed on disk.
+const DISK_POLL: Duration = Duration::from_secs(3);
+const TIME_MOVED: u8 = 1;
+const PLAY_MOVED: u8 = 2;
+
+pub struct HostConfig {
+    pub kernel: KernelHandle,
+    pub project: String,
+    /// Extension folders; later roots replace earlier ones.
+    pub roots: Vec<PathBuf>,
+    /// Compiled module graphs, keyed by source digest.
+    pub cache: PathBuf,
+    /// The app's clock. Every realm generation asks the same owner.
+    pub owner: Option<Arc<dyn TransportOwner>>,
+    /// Canvas text against the app's font service, built on the owner thread.
+    pub text: Option<Box<dyn Fn() -> CanvasText + Send>>,
+    /// Published state changed. Runs on any thread; must only schedule.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+enum Input {
+    Kernel,
+    Realm(Writer, RealmEnvelope),
+    Moved,
+    Run(String, Value),
+    Panel(String, bool),
+    Place(String, Option<[f32; 4]>),
+    Page(u64, Value),
+    Answer(u64, Value),
+    Menu(String, Value, u64),
+    StorePage(String, u64, Value),
+    StoreDom(String),
+    Dom,
+    Canvases,
+    Health(String, Value),
+    Enabled(String, bool),
+    Booted(u32),
+    Rescan,
+    Failed(u32),
+    Close,
+}
+
+/// A contribution list is the realm's plus every confined helper's.
+fn merge_store(value: &mut Value, store: &Value) {
+    for (kind, items) in store.as_object().into_iter().flatten() {
+        if let (Some(list), Some(items)) = (value[kind.as_str()].as_array_mut(), items.as_array()) {
+            list.extend(items.iter().cloned());
+        } else if value[kind.as_str()].is_null() {
+            value[kind.as_str()] = items.clone();
+        }
+    }
+}
+
+#[derive(Default)]
+struct Published {
+    contributions: Option<Arc<Value>>,
+    records: BTreeMap<String, Value>,
+    toasts: Vec<String>,
+    /// Admitted view batches of each confined helper run, for its own page.
+    store_batches: BTreeMap<(String, u64), VecDeque<AdmittedDomBatch>>,
+    /// Questions only the main thread can answer: menus, sheets, panel reveals.
+    requests: Vec<Value>,
+    batches: VecDeque<AdmittedDomBatch>,
+    /// The latest frame of each bound canvas; a newer version replaces it.
+    canvases: BTreeMap<(u64, String), CanvasFrame>,
+    surfaces: Vec<Value>,
+    ready: bool,
+    /// The realm generation drawing now, 0 with none. Its page is keyed by this.
+    view: u64,
+    revision: u64,
+}
+
+struct Shared {
+    published: Mutex<Published>,
+    /// What the confined helpers registered, in contribution-list form.
+    store: Mutex<Value>,
+    sessions: Mutex<BTreeMap<String, StoreSession>>,
+    /// The generation whose page is reading batches. Canvases encode only for it.
+    reader: AtomicU64,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+impl Shared {
+    fn update(&self, change: impl FnOnce(&mut Published)) {
+        {
+            let mut published = self.published.lock().unwrap();
+            change(&mut published);
+            published.revision += 1;
+        }
+        (self.wake)();
+    }
+}
+
+/// Native surfaces read these registries: Effects, Properties, MCP and the kernel's
+/// layer commands see a contribution exactly as they see a built-in.
+fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
+    let mut ops = vec![StateOp::DisposeOwner { owner }];
+    for (kind, registry) in [
+        ("effects", "effects"),
+        ("transitions", "transitions"),
+        ("layers", "layerTypes"),
+        ("panels", "panels"),
+        ("commands", "commands"),
+        ("inspector", "inspectorSections"),
+        ("themes", "themes"),
+        ("status", "status"),
+    ] {
+        for item in value[kind].as_array().into_iter().flatten() {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let Ok(definition) = pm_model::json::parse(&item.to_string()) else {
+                continue;
+            };
+            ops.push(StateOp::Register {
+                registry: registry.into(),
+                entry: Registration {
+                    token: format!("{}.{}.{registry}.{id}", owner.realm, owner.generation),
+                    owner,
+                    id: id.into(),
+                    definition,
+                },
+            });
+        }
+    }
+    ops
+}
+
+struct Events {
+    shared: Arc<Shared>,
+    kernel: KernelHandle,
+    writer: Writer,
+    inbox: Sender<Input>,
+    /// The extension whose activation is on the stack, for failure attribution.
+    activating: Mutex<Option<String>>,
+    dom_pending: AtomicBool,
+    canvas_pending: AtomicBool,
+}
+impl RealmEvents for Arc<Events> {
+    fn health(&self, id: &str, health: &Value) {
+        let _ = self
+            .inbox
+            .send(Input::Health(id.to_owned(), health.clone()));
+    }
+    fn toast(&self, text: &str, _: &Value) {
+        let text = text.to_owned();
+        self.shared.update(|p| p.toasts.push(text));
+    }
+    fn request(&self, request: Value) {
+        self.shared.update(|p| p.requests.push(request));
+    }
+    fn set_enabled(&self, id: &str, enabled: bool) {
+        let _ = self.inbox.send(Input::Enabled(id.to_owned(), enabled));
+    }
+    fn contributions(&self, mut value: Value) {
+        drop(self.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: registrations(&value, self.writer),
+        }));
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
+        self.shared
+            .update(|p| p.contributions = Some(Arc::new(value)));
+    }
+    fn dom_ready(&self) {
+        if !self.dom_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.inbox.send(Input::Dom);
+        }
+    }
+    fn canvases_ready(&self) {
+        if !self.canvas_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.inbox.send(Input::Canvases);
+        }
+    }
+    fn ready(&self) {
+        let _ = self.inbox.send(Input::Booted(self.writer.generation));
+    }
+    fn activating(&self, id: Option<&str>) {
+        *self.activating.lock().unwrap() = id.map(str::to_owned);
+    }
+    fn watchdog_stop(&self) {
+        let _ = self.inbox.send(Input::Failed(self.writer.generation));
+    }
+}
+
+/// A confined helper's views: its batches wait here for the owner to admit them.
+struct ViewEvents {
+    id: String,
+    shared: Arc<Shared>,
+    inbox: Sender<Input>,
+    pending: Mutex<VecDeque<Value>>,
+    /// A batch was refused; the helper's document holds it until asked again.
+    refused: AtomicBool,
+}
+impl StoreViews for ViewEvents {
+    fn batch(&self, batch: Value) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.len() >= 64 {
+            self.refused.store(true, Ordering::Release);
+            return false;
+        }
+        pending.push_back(batch);
+        let _ = self.inbox.send(Input::StoreDom(self.id.clone()));
+        true
+    }
+    fn panel(&self, id: &str, open: bool) {
+        let request = json!({"kind":"panel","id":id,"open":open});
+        self.shared.update(|p| p.requests.push(request));
+    }
+}
+
+/// Bounded handoff to AppKit: a full queue is backpressure, never a dropped batch.
+struct PageQueue<'a>(&'a Shared);
+struct StorePageQueue<'a>(&'a Shared, (String, u64));
+impl TrySink<AdmittedDomBatch> for StorePageQueue<'_> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
+        let mut published = self.0.published.lock().unwrap();
+        let queue = published.store_batches.entry(self.1.clone()).or_default();
+        if queue.len() >= PAGE_QUEUE {
+            return Err(pm_remote_dom::Error::Backpressure);
+        }
+        queue.push_back(batch);
+        drop(published);
+        (self.0.wake)();
+        Ok(())
+    }
+}
+impl TrySink<AdmittedDomBatch> for PageQueue<'_> {
+    fn try_send(
+        &mut self,
+        batch: AdmittedDomBatch,
+    ) -> std::result::Result<(), pm_remote_dom::Error> {
+        let mut published = self.0.published.lock().unwrap();
+        if published.batches.len() >= PAGE_QUEUE {
+            return Err(pm_remote_dom::Error::Backpressure);
+        }
+        published.batches.push_back(batch);
+        Ok(())
+    }
+}
+
+pub struct ExtensionHost {
+    inbox: Sender<Input>,
+    shared: Arc<Shared>,
+    kernel: KernelHandle,
+    profile: PathBuf,
+    transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    moved: Arc<AtomicU8>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl ExtensionHost {
+    pub fn start(config: HostConfig) -> Self {
+        let (inbox, input) = mpsc::channel();
+        let kernel = config.kernel.clone();
+        let profile = config
+            .roots
+            .last()
+            .and_then(|root| root.parent())
+            .unwrap_or(&config.cache)
+            .to_path_buf();
+        let shared = Arc::new(Shared {
+            published: Mutex::default(),
+            store: Mutex::new(json!({})),
+            sessions: Mutex::default(),
+            reader: AtomicU64::new(0),
+            wake: config.wake.clone(),
+        });
+        let transport = Arc::new(Mutex::new(None));
+        let moved = Arc::new(AtomicU8::new(0));
+        let writer = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
+        forward_kernel(&config.kernel, inbox.clone());
+        forward_mailbox(&config.kernel, writer, inbox.clone());
+        let owner = Owner {
+            writer,
+            retired: false,
+            stores: vec![],
+            confined: BTreeMap::new(),
+            open: BTreeMap::new(),
+            shared: shared.clone(),
+            inbox: inbox.clone(),
+            transport: transport.clone(),
+            moved: moved.clone(),
+            restarts: 0,
+            realm: None,
+            router: None,
+            records: vec![],
+            canvases: BTreeMap::new(),
+            dom_waiting: VecDeque::new(),
+            disk: 0,
+            store_revision: None,
+            config,
+        };
+        let worker = thread::Builder::new()
+            .name("pm-compat-host".into())
+            .spawn(move || owner.run(input))
+            .expect("compat host thread");
+        Self {
+            inbox,
+            shared,
+            kernel,
+            profile,
+            transport,
+            moved,
+            worker: Some(worker),
+        }
+    }
+    /// Latest contributions, or `None` until the first activation pass finishes.
+    pub fn contributions(&self) -> Option<Arc<Value>> {
+        self.shared.published.lock().unwrap().contributions.clone()
+    }
+    pub fn revision(&self) -> u64 {
+        self.shared.published.lock().unwrap().revision
+    }
+    pub fn is_ready(&self) -> bool {
+        self.shared.published.lock().unwrap().ready
+    }
+    /// The realm generation drawing now, 0 with none. A page belongs to one
+    /// generation: when this moves, that page is finished.
+    pub fn view(&self) -> u64 {
+        self.shared.published.lock().unwrap().view
+    }
+    pub fn records(&self) -> Vec<Value> {
+        let published = self.shared.published.lock().unwrap();
+        published.records.values().cloned().collect()
+    }
+    /// Enabled v4 surface extensions with their compiled graphs.
+    pub fn surfaces(&self) -> Vec<Value> {
+        self.shared.published.lock().unwrap().surfaces.clone()
+    }
+    pub fn take_toasts(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().toasts)
+    }
+    pub fn take_store_batches(&self, id: &str, view: u64) -> VecDeque<AdmittedDomBatch> {
+        let mut published = self.shared.published.lock().unwrap();
+        let taken = published
+            .store_batches
+            .remove(&(id.to_owned(), view))
+            .unwrap_or_default();
+        drop(published);
+        // Room again: whatever was held back can move.
+        if !taken.is_empty() {
+            let _ = self.inbox.send(Input::StoreDom(id.to_owned()));
+        }
+        taken
+    }
+    pub fn return_store_batches(&self, id: &str, view: u64, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut published = self.shared.published.lock().unwrap();
+        let queue = published
+            .store_batches
+            .entry((id.to_owned(), view))
+            .or_default();
+        rest.append(queue);
+        *queue = rest;
+    }
+    /// What a Store page needs: its data store and permissions.
+    pub fn store_session(&self, id: &str) -> Option<StoreSession> {
+        self.shared.sessions.lock().unwrap().get(id).cloned()
+    }
+    /// Feedback from the page of one helper run; a later run ignores it.
+    pub fn store_page_sink(&self, id: &str, view: u64) -> impl Fn(Value) + Send + 'static + use<> {
+        let (inbox, id) = (self.inbox.clone(), id.to_owned());
+        move |message| {
+            let _ = inbox.send(Input::StorePage(id.clone(), view, message));
+        }
+    }
+    pub fn take_requests(&self) -> Vec<Value> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().requests)
+    }
+    pub fn answer(&self, token: u64, value: Value) {
+        let _ = self.inbox.send(Input::Answer(token, value));
+    }
+    /// The Store's listings, as a request for the main thread to show.
+    pub fn browse_store(&self) {
+        let shared = self.shared.clone();
+        thread::spawn(move || match store_install::catalog() {
+            Ok(items) => shared.update(|p| p.requests.push(json!({"kind":"store","items":items}))),
+            Err(error) => shared.update(|p| p.toasts.push(error.to_string())),
+        });
+    }
+    /// Verifies and installs off every thread that matters, then discovers it.
+    pub fn install_store(&self, release: &str, repo: &str) {
+        let (shared, inbox) = (self.shared.clone(), self.inbox.clone());
+        let (release, repo) = (release.to_owned(), repo.to_owned());
+        let kernel = self.kernel.clone();
+        let profile = self.profile.clone();
+        thread::spawn(move || {
+            match store_install::install(&kernel, &profile, "native", &release, &repo) {
+                Ok(_) => {
+                    let _ = inbox.send(Input::Rescan);
+                }
+                Err(error) => shared.update(|p| p.toasts.push(error.to_string())),
+            }
+        });
+    }
+    /// Contributions for one open menu. A `key` keeps the reply tied to it.
+    pub fn gather_menu(&self, location: &str, context: Value, key: u64) {
+        let _ = self
+            .inbox
+            .send(Input::Menu(location.to_owned(), context, key));
+    }
+    /// Admitted batches of generation `view` for `AdmittedDomBatch::present`,
+    /// oldest first. Keep the front of a failed presentation and return the rest.
+    pub fn take_batches(&self, view: u64) -> VecDeque<AdmittedDomBatch> {
+        let mut published = self.shared.published.lock().unwrap();
+        let taken = if published.view == view {
+            std::mem::take(&mut published.batches)
+        } else {
+            VecDeque::new()
+        };
+        drop(published);
+        // A first reader wants canvases; a drained queue has room for more.
+        if self.shared.reader.swap(view, Ordering::AcqRel) != view || !taken.is_empty() {
+            let _ = self.inbox.send(Input::Dom);
+        }
+        taken
+    }
+    pub fn return_batches(&self, view: u64, mut rest: VecDeque<AdmittedDomBatch>) {
+        let mut published = self.shared.published.lock().unwrap();
+        if published.view == view {
+            rest.append(&mut published.batches);
+            published.batches = rest;
+        }
+    }
+    pub fn take_canvases(&self) -> Vec<CanvasFrame> {
+        std::mem::take(&mut self.shared.published.lock().unwrap().canvases)
+            .into_values()
+            .collect()
+    }
+    pub fn run_command(&self, id: &str, args: Value) {
+        let _ = self.inbox.send(Input::Run(id.to_owned(), args));
+    }
+    pub fn set_panel(&self, id: &str, open: bool) {
+        let _ = self.inbox.send(Input::Panel(id.to_owned(), open));
+    }
+    /// Feedback from the page of generation `view`. Called on a forwarding
+    /// thread; a later generation ignores it.
+    pub fn page_sink(&self, view: u64) -> impl Fn(Value) + Send + 'static + use<> {
+        let inbox = self.inbox.clone();
+        move |message| {
+            let _ = inbox.send(Input::Page(view, message));
+        }
+    }
+    /// Window position of a contributed panel's root, in points. `None` is a
+    /// tab behind another: open, kept, and neither painted nor hit.
+    pub fn place_panel(&self, id: &str, rect: Option<[f32; 4]>) {
+        let _ = self.inbox.send(Input::Place(id.to_owned(), rect));
+    }
+    /// The app's clock moved. Cheap enough for every presented frame.
+    pub fn publish_time(&self, time: f64, playing: bool) {
+        if let Some(host) = &*self.transport.lock().unwrap() {
+            let (time_moved, play_moved) = host.transport().publish(time, playing);
+            let moved = (if time_moved { TIME_MOVED } else { 0 })
+                | (if play_moved { PLAY_MOVED } else { 0 });
+            // One message at a time; what it reports accumulates until it runs.
+            if moved != 0 && self.moved.fetch_or(moved, Ordering::AcqRel) == 0 {
+                let _ = self.inbox.send(Input::Moved);
+            }
+        }
+    }
+    pub fn close(&mut self) {
+        let _ = self.inbox.send(Input::Close);
+        if let Some(worker) = self.worker.take() {
+            // The owner stops V8 and exits; joined off the main thread.
+            thread::spawn(move || {
+                let _ = worker.join();
+            });
+        }
+    }
+}
+impl Drop for ExtensionHost {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn forward_kernel(kernel: &KernelHandle, inbox: Sender<Input>) {
+    let events = kernel.subscribe();
+    thread::spawn(move || {
+        while let Ok(event) = events.recv() {
+            let relevant = matches!(
+                event,
+                KernelEvent::Published { .. }
+                    | KernelEvent::SelectionChanged { .. }
+                    | KernelEvent::WorkspaceChanged { .. }
+                    | KernelEvent::StateChanged { .. }
+            );
+            if relevant && inbox.send(Input::Kernel).is_err() {
+                break;
+            }
+        }
+    });
+}
+/// Ends when the kernel retires this generation's mailbox.
+fn forward_mailbox(kernel: &KernelHandle, writer: Writer, inbox: Sender<Input>) {
+    let mailbox = kernel.register_realm(writer);
+    thread::spawn(move || {
+        while let Ok(envelope) = mailbox.recv() {
+            if inbox.send(Input::Realm(writer, envelope)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+struct Live {
+    realm: Realm,
+    pool: RuntimePool,
+    host: Arc<NativeHost>,
+    events: Arc<Events>,
+}
+struct StoreLive {
+    owner: Writer,
+    /// The source this helper runs: a rescan restarts it only when this moves.
+    hash: String,
+    extension: StoreExtension,
+    views: Arc<ViewEvents>,
+}
+struct Owner {
+    writer: Writer,
+    /// This generation is sealed; the next realm starts a new one.
+    retired: bool,
+    stores: Vec<StoreLive>,
+    /// What each Store extension would run, so a toggle can start it.
+    confined: BTreeMap<String, (Discovered, ModuleGraph)>,
+    /// Open panels and their last placement, replayed into a rebuilt realm or helper.
+    open: BTreeMap<String, Option<[f32; 4]>>,
+    config: HostConfig,
+    shared: Arc<Shared>,
+    inbox: Sender<Input>,
+    transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
+    moved: Arc<AtomicU8>,
+    restarts: usize,
+    realm: Option<Live>,
+    router: Option<RemoteDomPanel>,
+    records: Vec<Value>,
+    canvases: BTreeMap<(u64, String), u64>,
+    /// Batches taken from the realm that the page queue has no room for yet.
+    dom_waiting: VecDeque<Value>,
+    disk: u64,
+    store_revision: Option<u64>,
+}
+impl Owner {
+    fn run(mut self, input: Receiver<Input>) {
+        self.disk = self.stamp();
+        self.boot();
+        loop {
+            let message = match input.recv_timeout(DISK_POLL) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Extensions change on disk: an agent's edit, a manual copy.
+                    let stamp = self.stamp();
+                    if stamp != self.disk {
+                        self.disk = stamp;
+                        self.rescan();
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            // A burst of kernel publications is one mirror update.
+            let mut kernel = matches!(message, Input::Kernel);
+            let mut next = (!kernel).then_some(message);
+            while next.is_none() {
+                match input.try_recv() {
+                    Ok(Input::Kernel) => kernel = true,
+                    Ok(other) => next = Some(other),
+                    Err(_) => break,
+                }
+            }
+            if kernel {
+                self.eval("__compat.sync()");
+                self.follow_state();
+                self.tick_stores();
+            }
+            match next {
+                Some(Input::Close) => break,
+                Some(message) => self.handle(message),
+                None => (),
+            }
+        }
+        for store in std::mem::take(&mut self.stores) {
+            self.stop_store(store);
+        }
+        self.retire_realm();
+    }
+    /// Ends the current generation: its open entry is sealed, its contributions
+    /// go, and nothing later reaches or comes from it.
+    fn retire_realm(&mut self) {
+        let live = self.realm.take();
+        if let Some(live) = &live {
+            live.realm.close();
+            live.host.seal();
+        }
+        drop(live);
+        *self.transport.lock().unwrap() = None;
+        self.router = None;
+        self.dom_waiting.clear();
+        self.canvases.clear();
+        self.shared.reader.store(0, Ordering::Release);
+        self.shared.update(|p| {
+            p.view = 0;
+            p.batches.clear();
+            p.canvases.clear();
+        });
+        drop(self.config.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::DisposeOwner { owner: self.writer }],
+        }));
+        self.config.kernel.retire_realm(self.writer);
+        self.retired = true;
+    }
+    fn eval(&mut self, source: &str) {
+        let Some(live) = &self.realm else { return };
+        match live.realm.eval(source) {
+            Ok(_) => (),
+            Err(Error::Busy) => {
+                // The owner's queue is full: wait for room rather than drop state.
+                let realm = live.realm.clone();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                    if !matches!(realm.eval(source), Err(Error::Busy)) {
+                        return;
+                    }
+                }
+            }
+            Err(_) => {
+                let _ = self.inbox.send(Input::Failed(self.writer.generation));
+            }
+        }
+    }
+    fn handle(&mut self, message: Input) {
+        match message {
+            Input::Run(id, args) => {
+                if !self.run_store(&id, &args) {
+                    let source = format!("__compat.run({},{args})", json!(id));
+                    self.eval(&source);
+                }
+            }
+            Input::StorePage(id, view, message) => {
+                let live = self.stores.iter_mut().find(|s| s.extension.id == id);
+                if let Some(store) = live.filter(|s| u64::from(s.owner.realm) == view) {
+                    store.extension.page(message);
+                }
+                self.drain_store_dom(&id);
+            }
+            Input::StoreDom(id) => self.drain_store_dom(&id),
+            Input::Panel(id, open) => {
+                if open {
+                    self.open.entry(id.clone()).or_default();
+                } else {
+                    self.open.remove(&id);
+                }
+                self.show_panel(&id, open);
+            }
+            Input::Place(id, rect) => {
+                if let Some(placed) = self.open.get_mut(&id) {
+                    *placed = rect;
+                }
+                self.place_panel(&id, rect);
+            }
+            Input::Answer(token, value) => {
+                self.eval(&format!("__compat.answer({token},{value})"));
+            }
+            Input::Menu(location, context, key) => {
+                self.eval(&format!(
+                    "__compat.gatherMenu({},{context},{key})",
+                    json!(location)
+                ));
+            }
+            Input::Moved => {
+                let moved = self.moved.swap(0, Ordering::AcqRel);
+                if let Some(live) = &self.realm {
+                    let now = live.host.transport().time();
+                    self.eval(&format!(
+                        "__compat.moved({now},{},{})",
+                        moved & TIME_MOVED != 0,
+                        moved & PLAY_MOVED != 0
+                    ));
+                }
+            }
+            Input::Realm(writer, envelope) if writer == self.writer => self.realm_message(envelope),
+            Input::Page(view, message) if view == u64::from(self.writer.generation) => {
+                self.page(message)
+            }
+            Input::Dom => self.drain_dom(),
+            Input::Canvases => self.collect_canvases(),
+            Input::Health(id, health) => self.set_health(&id, health),
+            Input::Enabled(id, enabled) => self.set_enabled(&id, enabled),
+            Input::Booted(generation) if generation == self.writer.generation => {
+                self.shared.update(|p| p.ready = true);
+                self.reopen_panels(None);
+            }
+            Input::Rescan => self.rescan(),
+            Input::Failed(generation) if generation == self.writer.generation => self.restart(),
+            Input::Realm(..)
+            | Input::Page(..)
+            | Input::Booted(_)
+            | Input::Failed(_)
+            | Input::Kernel
+            | Input::Close => (),
+        }
+    }
+    fn tick_stores(&mut self) {
+        let revision = self
+            .config
+            .kernel
+            .published(&self.config.project)
+            .map(|published| published.revision());
+        if revision.is_none() || revision == self.store_revision {
+            return;
+        }
+        self.store_revision = revision;
+        for store in &self.stores {
+            store.extension.tick(revision.unwrap_or_default());
+        }
+    }
+    /// The last provider of `id` among this window's writers, and which helper it
+    /// is if it is not the realm. Other windows' helpers hold their own entries.
+    fn provider(&self, registry: &str, id: &str) -> Option<(Option<usize>, Registration)> {
+        let state = self.config.kernel.state();
+        let store = |owner: Writer| self.stores.iter().position(|s| s.owner == owner);
+        let entry = state.registries.get(registry)?.iter().rev().find(|entry| {
+            entry.id == id && (entry.owner == self.writer || store(entry.owner).is_some())
+        })?;
+        Some((store(entry.owner), entry.clone()))
+    }
+    fn store_of(&self, panel: &str) -> Option<&StoreExtension> {
+        let (store, _) = self.provider("panels", panel)?;
+        Some(&self.stores[store?].extension)
+    }
+    fn show_panel(&mut self, id: &str, open: bool) {
+        if let Some(store) = self.store_of(id) {
+            if open {
+                store.open_panel(id);
+            } else {
+                store.close_panel(id);
+            }
+            return;
+        }
+        let verb = if open { "openPanel" } else { "closePanel" };
+        self.eval(&format!("__compat.{verb}({})", json!(id)));
+    }
+    fn place_panel(&mut self, id: &str, rect: Option<[f32; 4]>) {
+        if let Some(store) = self.store_of(id) {
+            store.place_panel(id, rect);
+            return;
+        }
+        let source = format!("__compat.placePanel({},{})", json!(id), json!(rect));
+        self.eval(&source);
+    }
+    /// A rebuilt realm or helper starts with no panels open. `store` is the helper
+    /// that just started; `None` is the realm.
+    fn reopen_panels(&mut self, store: Option<Writer>) {
+        for (id, rect) in self.open.clone() {
+            let owner = self
+                .provider("panels", &id)
+                .and_then(|(index, _)| index.map(|index| self.stores[index].owner));
+            if owner == store {
+                self.show_panel(&id, true);
+                if rect.is_some() {
+                    self.place_panel(&id, rect);
+                }
+            }
+        }
+    }
+    /// A full page queue leaves batches waiting. The helper's document holds what
+    /// it could not send, and an admitted batch is never dropped.
+    fn drain_store_dom(&mut self, id: &str) {
+        let Some(store) = self.stores.iter_mut().find(|s| s.extension.id == id) else {
+            return;
+        };
+        let mut queue = StorePageQueue(&self.shared, (id.to_owned(), u64::from(store.owner.realm)));
+        let mut pending = store.views.pending.lock().unwrap();
+        while let Some(batch) = pending.front() {
+            if matches!(
+                store.extension.enqueue(batch.clone(), &mut queue),
+                Err(pm_compat_host::Error::Backpressure)
+            ) {
+                return;
+            }
+            pending.pop_front();
+        }
+        drop(pending);
+        if store.views.refused.swap(false, Ordering::AcqRel) {
+            store.extension.flush();
+        }
+    }
+    /// A confined helper owns this command: its callback is a handle in there.
+    fn run_store(&self, id: &str, args: &Value) -> bool {
+        let Some((Some(store), entry)) = self.provider("commands", id) else {
+            return false;
+        };
+        if let Some(handle) = entry.definition.get("run").and_then(|run| run.as_f64()) {
+            self.stores[store].extension.run(handle as u64, args);
+        }
+        true
+    }
+    /// Publishes what a helper registered through the same path the realm uses.
+    fn publish_store(&self) {
+        let state = self.config.kernel.state();
+        let mut store = json!({});
+        let mut definitions = vec![];
+        for store_entry in &self.stores {
+            let (owner, extension) = (&store_entry.owner, &store_entry.extension);
+            let mut own = json!({"effects":[],"transitions":[],"layers":[]});
+            for (kind, registry) in [
+                ("commands", "commands"),
+                ("panels", "panels"),
+                ("effects", "effects"),
+                ("transitions", "transitions"),
+                ("layers", "layerTypes"),
+            ] {
+                let items: Vec<Value> = state
+                    .registries
+                    .get(registry)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| entry.owner == *owner)
+                    .filter_map(|entry| {
+                        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(
+                            &entry.definition,
+                        ))
+                        .ok()
+                    })
+                    .map(|mut item| {
+                        // Panels name the helper whose page draws them, and which run of it.
+                        if kind == "panels" {
+                            item["store"] = json!(extension.id);
+                            item["view"] = json!(owner.realm);
+                        }
+                        item
+                    })
+                    .collect();
+                own[kind] = json!(items);
+                let list = store[kind].as_array().cloned().unwrap_or_default();
+                store[kind] = json!(list.into_iter().chain(items).collect::<Vec<_>>());
+            }
+            definitions.extend(extension.definitions(&own));
+        }
+        store["definitions"] = Value::Array(definitions);
+        let mut published = self.shared.published.lock().unwrap();
+        if let Some(current) = published.contributions.take() {
+            let mut next = (*current).clone();
+            let previous = self.shared.store.lock().unwrap().clone();
+            for (kind, items) in previous.as_object().into_iter().flatten() {
+                if let (Some(list), Some(items)) =
+                    (next[kind.as_str()].as_array_mut(), items.as_array())
+                {
+                    list.retain(|item| !items.contains(item));
+                }
+            }
+            merge_store(&mut next, &store);
+            published.contributions = Some(Arc::new(next));
+        }
+        drop(published);
+        *self.shared.store.lock().unwrap() = store;
+        self.shared.update(|_| ());
+    }
+    fn realm_message(&mut self, envelope: RealmEnvelope) {
+        if envelope.project != self.config.project {
+            return;
+        }
+        let Some(live) = &self.realm else { return };
+        let source = match envelope.message {
+            RealmMessage::RunExternal { continuation, .. } => live
+                .host
+                .continuation(&continuation)
+                .ok()
+                .map(|reply| format!("__compat.runExternal({})", reply["continuation"])),
+            RealmMessage::Cleanup { handle, .. } => live
+                .host
+                .handle_name(handle)
+                .map(|name| format!("__compat.retire({})", json!(name))),
+        };
+        if let Some(source) = source {
+            self.eval(&source);
+        }
+    }
+    fn page(&mut self, message: Value) {
+        let Some(router) = &mut self.router else {
+            return;
+        };
+        struct Realmward(Vec<Value>);
+        impl TrySink<pm_remote_dom::protocol::PageMessage> for Realmward {
+            fn try_send(
+                &mut self,
+                message: pm_remote_dom::protocol::PageMessage,
+            ) -> std::result::Result<(), pm_remote_dom::Error> {
+                self.0.push(
+                    serde_json::to_value(message)
+                        .map_err(|_| pm_remote_dom::Error::Invalid("page message"))?,
+                );
+                Ok(())
+            }
+        }
+        let mut delivered = Realmward(vec![]);
+        if router.receive(message, &mut delivered).is_err() {
+            return;
+        }
+        for message in delivered.0 {
+            self.eval(&format!(
+                "__compat.dom.receive({message});__compat.dom.flush()"
+            ));
+        }
+        self.drain_dom();
+    }
+    /// Batches the page queue cannot take stay here and in the realm, whose
+    /// document coalesces later changes: nothing is dropped and nothing grows.
+    fn drain_dom(&mut self) {
+        let (Some(live), Some(router)) = (&self.realm, &mut self.router) else {
+            return;
+        };
+        live.events.dom_pending.store(false, Ordering::Release);
+        let mut queue = PageQueue(&self.shared);
+        let mut admitted = false;
+        let mut full = false;
+        loop {
+            if self.dom_waiting.is_empty() {
+                self.dom_waiting.extend(live.host.take_dom_batches());
+            }
+            let Some(batch) = self.dom_waiting.front() else {
+                break;
+            };
+            // A rejected tree is an extension fault; the page keeps its last state.
+            if matches!(
+                router.enqueue(batch.clone(), &mut queue),
+                Err(pm_compat_host::Error::Backpressure)
+            ) {
+                full = true;
+                break;
+            }
+            self.dom_waiting.pop_front();
+            admitted = true;
+        }
+        if admitted {
+            (self.shared.wake)();
+        }
+        // Also the shim's next flush: it holds a batch the realm's queue refused.
+        if !full {
+            let _ = live.realm.eval("__compat.flushCanvases?.()");
+        }
+    }
+    /// Only a page that is reading gets pixels, and only surfaces that changed.
+    fn collect_canvases(&mut self) {
+        let Some(live) = &self.realm else { return };
+        live.events.canvas_pending.store(false, Ordering::Release);
+        let view = u64::from(self.writer.generation);
+        if self.shared.reader.load(Ordering::Acquire) != view {
+            return;
+        }
+        let frames = live
+            .host
+            .changed_canvas_frames(&self.canvases)
+            .unwrap_or_default();
+        if frames.is_empty() {
+            return;
+        }
+        for frame in &frames {
+            self.canvases
+                .insert((frame.node, frame.surface.clone()), frame.version);
+        }
+        self.shared.update(|p| {
+            for frame in frames {
+                p.canvases
+                    .insert((frame.node, frame.surface.clone()), frame);
+            }
+        });
+    }
+    fn set_health(&mut self, id: &str, health: Value) {
+        for record in &mut self.records {
+            if record["id"] == id {
+                record["health"] = health.clone();
+            }
+        }
+        self.shared.update(|p| {
+            if let Some(record) = p.records.get_mut(id) {
+                record["health"] = health;
+            }
+        });
+        self.publish_entries();
+    }
+    fn persist_enabled(&self, id: &str, enabled: bool) {
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            Ok(state
+                .extensions
+                .get(id)
+                .filter(|entry| entry.enabled != enabled)
+                .map(|entry| {
+                    vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry.clone()
+                    })]
+                }))
+        });
+    }
+    fn set_enabled(&mut self, id: &str, enabled: bool) {
+        self.persist_enabled(id, enabled);
+        let mut confined = false;
+        for record in &mut self.records {
+            if record["id"] == id {
+                record["enabled"] = json!(enabled);
+                confined = record["confined"] == true;
+                // What stopped it may be gone; what it is made of has not changed.
+                let stopped = ["disabled", "runtime-error", "activation-error"]
+                    .contains(&record["health"]["state"].as_str().unwrap_or_default());
+                if enabled && stopped {
+                    record["health"] = json!({"state":"ok"});
+                }
+            }
+        }
+        if confined {
+            self.sync_stores();
+            self.publish_store();
+        } else {
+            let records = self.trusted_records();
+            self.eval(&format!(
+                "__compat.update({records},{},\"enable\")",
+                json!([id])
+            ));
+        }
+        self.publish_records();
+    }
+    fn enabled(&self, id: &str) -> bool {
+        let state = self.config.kernel.state();
+        state.extensions.get(id).is_none_or(|entry| entry.enabled)
+    }
+    /// Settings and MCP read extensions from kernel state, as they do built-ins.
+    fn publish_entries(&self) {
+        let _ = update_state::<String>(&self.config.kernel, |state| {
+            let ops: Vec<StateOp> = self
+                .records
+                .iter()
+                .filter_map(|record| {
+                    let id = record["id"].as_str()?;
+                    let previous = state.extensions.get(id);
+                    let mut source = previous
+                        .and_then(|entry| entry.source.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    let summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
+                    "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
+                    source.insert("hostRecord", pm_model::json::parse(&summary.to_string()).ok()?);
+                    let next = pm_kernel::state::ExtensionEntry {
+                        id: id.to_owned(),
+                        installed: true,
+                        enabled: previous.is_none_or(|entry| entry.enabled),
+                        version: record["manifest"]["version"].as_str().unwrap_or("").to_owned(),
+                        source: pm_model::Value::Object(source),
+                    };
+                    (previous != Some(&next)).then_some(StateOp::Extension(next))
+                })
+                .collect();
+            Ok((!ops.is_empty()).then_some(ops))
+        });
+    }
+    /// A Settings toggle or an agent's edit lands in state or on disk; follow it.
+    fn follow_state(&mut self) {
+        let state = self.config.kernel.state();
+        let toggled: Vec<(String, bool)> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let id = record["id"].as_str()?;
+                let enabled = state.extensions.get(id)?.enabled;
+                (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
+            })
+            .collect();
+        for (id, enabled) in toggled {
+            self.set_enabled(&id, enabled);
+        }
+    }
+    fn stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for found in discovery::scan(&self.config.roots) {
+            found.id.hash(&mut hash);
+            if let Ok(tree) = compile::fingerprint(&found.directory) {
+                tree.hash(&mut hash);
+            }
+        }
+        hash.finish()
+    }
+    /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
+    fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
+        let enabled = self.enabled(&found.id);
+        let graph = match &found.manifest {
+            Ok(manifest) => compile::compile(
+                &found.directory,
+                manifest["entry"].as_str().unwrap_or("index.ts"),
+                manifest["apiVersion"].as_u64().unwrap_or(1),
+                compiler,
+                Some(&self.config.cache),
+            ),
+            Err(error) => Err(error.clone()),
+        };
+        let mut record = discovery::record(
+            found,
+            enabled,
+            graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone),
+        );
+        let surface = record["manifest"]["apiVersion"].as_u64() >= Some(4);
+        if record["trust"] != "store" {
+            // Surface extensions get their own realm from the panel host.
+            if surface {
+                record["surface"] = json!(true);
+            }
+            return record;
+        }
+        // Someone else's code: confined whatever its state, and never in the plan
+        // of the trusted realm or the panel host, so no later toggle can move it.
+        record["confined"] = json!(true);
+        if record["health"]["state"] != "ok" {
+            return record;
+        }
+        let wants_full_access = record["manifest"]["permissions"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p == "full-access"));
+        if surface {
+            // The panel host has no permission model, so it takes no Store code.
+            record["health"] = json!({"state":"build-error",
+                "error":"Store extensions run on API versions 1 to 3"});
+        } else if wants_full_access {
+            record["health"] = json!({"state":"needs-trust"});
+        } else if let Ok(graph) = graph {
+            self.confined
+                .insert(found.id.clone(), (found.clone(), graph));
+        }
+        record
+    }
+    /// Runs exactly the helpers the records want: stops those disabled, removed
+    /// or changed, starts what is missing, and leaves every other one alone.
+    fn sync_stores(&mut self) {
+        let wanted: BTreeMap<String, String> = self
+            .records
+            .iter()
+            .filter(|r| {
+                r["confined"] == true && r["enabled"] == true && r["health"]["state"] == "ok"
+            })
+            .filter_map(|r| {
+                Some((
+                    r["id"].as_str()?.to_owned(),
+                    r["graph"]["hash"].as_str()?.to_owned(),
+                ))
+            })
+            .filter(|(id, _)| self.confined.contains_key(id))
+            .collect();
+        let (keep, stop): (Vec<_>, Vec<_>) = std::mem::take(&mut self.stores)
+            .into_iter()
+            .partition(|store| wanted.get(&store.extension.id) == Some(&store.hash));
+        self.stores = keep;
+        for store in stop {
+            self.stop_store(store);
+        }
+        for (id, hash) in wanted {
+            if !self.stores.iter().any(|store| store.extension.id == id) {
+                self.start_store(&id, hash);
+            }
+        }
+    }
+    fn start_store(&mut self, id: &str, hash: String) {
+        let Some((found, graph)) = self.confined.get(id).cloned() else {
+            return;
+        };
+        let owner = Writer {
+            realm: NEXT_REALM.fetch_add(1, Ordering::Relaxed),
+            generation: GENERATION,
+        };
+        let views = Arc::new(ViewEvents {
+            id: id.to_owned(),
+            shared: self.shared.clone(),
+            inbox: self.inbox.clone(),
+            pending: Mutex::default(),
+            refused: AtomicBool::new(false),
+        });
+        let started = StoreExtension::start(
+            Arc::new(self.config.kernel.clone()),
+            &self.config.project,
+            "native",
+            &found,
+            &graph,
+            owner,
+            views.clone(),
+        );
+        match started {
+            Ok(extension) => {
+                self.shared
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .insert(extension.id.clone(), extension.session.clone());
+                self.stores.push(StoreLive {
+                    owner,
+                    hash,
+                    extension,
+                    views,
+                });
+                self.reopen_panels(Some(owner));
+            }
+            Err(error) => {
+                for record in &mut self.records {
+                    if record["id"] == id {
+                        record["health"] =
+                            json!({"state":"activation-error","error":error.to_string()});
+                    }
+                }
+            }
+        }
+    }
+    /// Disposing the helper revokes its grants; the registrations go with its writer.
+    fn stop_store(&mut self, store: StoreLive) {
+        let (id, owner) = (store.extension.id.clone(), store.owner);
+        drop(store);
+        self.shared.sessions.lock().unwrap().remove(&id);
+        drop(self.config.kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: vec![StateOp::DisposeOwner { owner }],
+        }));
+        self.shared.update(|p| {
+            p.store_batches.retain(|(store, _), _| *store != id);
+        });
+    }
+    fn publish_records(&self) {
+        let records: BTreeMap<_, _> = self
+            .records
+            .iter()
+            .map(|record| {
+                let mut row = record.clone();
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("graph");
+                }
+                (record["id"].as_str().unwrap_or_default().to_owned(), row)
+            })
+            .collect();
+        let surfaces: Vec<Value> = self
+            .records
+            .iter()
+            .filter(|r| {
+                r["surface"] == true && r["health"]["state"] == "ok" && r["enabled"] == true
+            })
+            .cloned()
+            .collect();
+        self.shared.update(|p| {
+            p.records = records;
+            p.surfaces = surfaces;
+        });
+        self.publish_entries();
+    }
+    fn start_realm(&mut self, clock: Option<(f64, bool)>) -> Result<()> {
+        if std::mem::take(&mut self.retired) {
+            self.writer.generation += 1;
+            forward_mailbox(&self.config.kernel, self.writer, self.inbox.clone());
+        }
+        let events = Arc::new(Events {
+            shared: self.shared.clone(),
+            kernel: self.config.kernel.clone(),
+            writer: self.writer,
+            inbox: self.inbox.clone(),
+            activating: Mutex::default(),
+            dom_pending: AtomicBool::new(false),
+            canvas_pending: AtomicBool::new(false),
+        });
+        let adapter = KernelAdapter::new(
+            self.config.kernel.clone(),
+            &self.config.project,
+            crate::PROJECT,
+            self.writer,
+        );
+        let transport = Transport::new(self.config.owner.clone());
+        if let Some((time, playing)) = clock {
+            transport.publish(time, playing);
+        }
+        let host = Arc::new(NativeHost::new(
+            adapter,
+            transport,
+            Box::new(events.clone()),
+        ));
+        if let Some(text) = &self.config.text {
+            host.set_text(text());
+        }
+        let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
+        let realm = pool.realm(RealmKind::Compat)?;
+        crate::boot_realm(&realm, &host, "")?;
+        *self.transport.lock().unwrap() = Some(host.clone());
+        self.router = Some(
+            RemoteDomPanel::new(
+                PANEL,
+                Session {
+                    panel: "compat".into(),
+                    generation: PAGE_SESSION,
+                },
+            )
+            .map_err(|e| Error::Host(format!("{e:?}")))?,
+        );
+        self.realm = Some(Live {
+            realm,
+            pool,
+            host,
+            events,
+        });
+        let view = u64::from(self.writer.generation);
+        self.shared.update(|p| p.view = view);
+        Ok(())
+    }
+    fn boot(&mut self) {
+        let found = discovery::scan(&self.config.roots);
+        if found.is_empty() {
+            // Nothing to run: no realm, no memory, no bundle evaluation.
+            self.shared.update(|p| p.ready = true);
+            return;
+        }
+        if let Err(error) = self.start_realm(None) {
+            self.shared.update(|p| {
+                p.toasts
+                    .push(format!("Extensions could not start: {error}"))
+            });
+            return;
+        }
+        let live = self.realm.as_ref().unwrap();
+        let compiler = match SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024) {
+            Ok(compiler) => compiler,
+            Err(error) => {
+                self.shared.update(|p| {
+                    p.toasts
+                        .push(format!("Extensions could not compile: {error}"))
+                });
+                return;
+            }
+        };
+        self.confined.clear();
+        self.records = found.iter().map(|f| self.compile(&compiler, f)).collect();
+        compiler.realm().close();
+        self.sync_stores();
+        self.publish_records();
+        self.publish_store();
+        let records = self.trusted_records();
+        self.eval(&format!("__compat.boot({records})"));
+    }
+    /// The plan of the trusted realm. Confined records never enter it.
+    fn trusted_records(&self) -> Value {
+        Value::Array(
+            self.records
+                .iter()
+                .filter(|record| record["confined"] != true && record["surface"] != true)
+                .cloned()
+                .collect(),
+        )
+    }
+    fn rescan(&mut self) {
+        if self.realm.is_none() {
+            self.boot();
+            return;
+        }
+        let found = discovery::scan(&self.config.roots);
+        let live = self.realm.as_ref().unwrap();
+        let Ok(compiler) = SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024)
+        else {
+            return;
+        };
+        self.confined.clear();
+        let records: Vec<_> = found.iter().map(|f| self.compile(&compiler, f)).collect();
+        compiler.realm().close();
+        let changed: Vec<_> = records
+            .iter()
+            .filter(|next| {
+                !self.records.iter().any(|old| {
+                    old["id"] == next["id"] && old["graph"]["hash"] == next["graph"]["hash"]
+                })
+            })
+            .map(|record| record["id"].clone())
+            .collect();
+        self.records = records;
+        self.sync_stores();
+        self.publish_records();
+        self.publish_store();
+        let records = self.trusted_records();
+        self.eval(&format!(
+            "__compat.update({records},{},\"rescan\")",
+            Value::Array(changed)
+        ));
+    }
+    /// A hung or failed realm is rebuilt without the extension that broke it. That
+    /// extension stays off until someone turns it back on, here and in every other
+    /// window, and the next launch does not run into it again.
+    fn restart(&mut self) {
+        let Some(live) = &self.realm else { return };
+        let culprit = live.events.activating.lock().unwrap().take();
+        let transport = live.host.transport();
+        let clock = (transport.time(), transport.playing());
+        self.retire_realm();
+        self.restarts += 1;
+        if let Some(id) = &culprit {
+            self.persist_enabled(id, false);
+            for record in &mut self.records {
+                if record["id"] == id.as_str() {
+                    record["enabled"] = json!(false);
+                    record["health"] =
+                        json!({"state":"runtime-error","error":"Stopped responding"});
+                }
+            }
+            let id = id.clone();
+            self.shared
+                .update(|p| p.toasts.push(format!("{id} stopped working — check Mods")));
+        }
+        if self.restarts > MAX_RESTARTS {
+            // Helpers stay; what the realm contributed went with it.
+            let mut value = json!({});
+            merge_store(&mut value, &self.shared.store.lock().unwrap());
+            self.shared.update(|p| {
+                p.contributions = Some(Arc::new(value));
+                p.toasts.push(
+                    "Extensions stopped after repeated failures. Reopen the project to retry."
+                        .into(),
+                );
+            });
+            self.publish_records();
+            return;
+        }
+        match self.start_realm(Some(clock)) {
+            Ok(()) => {
+                self.publish_records();
+                let records = self.trusted_records();
+                self.eval(&format!("__compat.boot({records})"));
+            }
+            Err(error) => self.shared.update(|p| {
+                p.toasts
+                    .push(format!("Extensions could not start: {error}"))
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_kernel::{HistoryCall, KernelActor, KernelConfig, OpenSource, Reply, Request};
+    use std::{fs, path::Path};
+    fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
+        let directory = root.join(id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3}).to_string(),
+        )
+        .unwrap();
+        for (name, source) in files {
+            fs::write(directory.join(name), source).unwrap();
+        }
+    }
+    struct Fixture {
+        actor: Option<KernelActor>,
+        kernel: KernelHandle,
+        host: ExtensionHost,
+        _root: tempfile::TempDir,
+    }
+    impl Fixture {
+        fn start(root: tempfile::TempDir) -> Self {
+            let actor = KernelActor::spawn(KernelConfig::default());
+            let kernel = actor.handle();
+            let document =
+                pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+            kernel
+                .open("window", OpenSource::Untitled(document))
+                .wait()
+                .unwrap()
+                .unwrap();
+            let host = ExtensionHost::start(HostConfig {
+                kernel: kernel.clone(),
+                project: "window".into(),
+                roots: vec![root.path().join("extensions")],
+                cache: root.path().join("cache"),
+                owner: None,
+                text: None,
+                wake: Arc::new(|| ()),
+            });
+            Self {
+                actor: Some(actor),
+                kernel,
+                host,
+                _root: root,
+            }
+        }
+        fn until(&self, what: &str, done: impl Fn(&ExtensionHost) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&self.host) {
+                assert!(
+                    Instant::now() < deadline,
+                    "{what}; toasts {:?}, records {:?}",
+                    self.host.take_toasts(),
+                    self.host.records()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        fn name(&self) -> String {
+            let published = self.kernel.published("window").unwrap();
+            let root = published.snapshot.root().unwrap();
+            root.get("name")
+                .and_then(|n| n.to_value().as_js_string().map(|s| s.to_string_lossy()))
+                .unwrap_or_default()
+        }
+        fn health(&self, id: &str) -> String {
+            self.host
+                .records()
+                .iter()
+                .find(|r| r["id"] == id)
+                .map(|r| r["health"]["state"].as_str().unwrap_or_default().to_owned())
+                .unwrap_or_default()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.host.close();
+            if let Some(worker) = self.host.worker.take() {
+                let _ = worker.join();
+            }
+            if let Some(actor) = self.actor.take() {
+                thread::sleep(Duration::from_millis(50));
+                actor.shutdown();
+            }
+        }
+    }
+    fn command(fixture: &Fixture, id: &str) -> bool {
+        fixture.host.contributions().is_some_and(|c| {
+            c["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["id"] == id)
+        })
+    }
+    #[test]
+    fn appkit_answers_reach_realm_closures_and_storage_outlives_the_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-ui",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const rename=(name)=>api.history.do('Rename',()=>{api.project.get().name=name});
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   api.panels.register({id:'synthetic-ui.panel',title:'Synthetic',build(){}});
+                   api.menus.contribute('panel:context',(ctx)=>[{label:'For '+ctx.panelId,run(){rename('tab')}}]);
+                   api.commands.register({id:'synthetic-ui.round',label:'Round',run(){rename('round '+round)}});
+                   api.commands.register({id:'synthetic-ui.open',label:'Open',run(){api.panels.open('synthetic-ui.panel')}});
+                   api.commands.register({id:'synthetic-ui.icon',label:'Icon',run(){rename(api.ui.icon('plus').slice(0,4)+api.extensions.list().length)}});
+                   api.commands.register({id:'synthetic-ui.off',label:'Off',run(){api.extensions.setEnabled('synthetic-ui',false)}});
+                   api.commands.register({id:'synthetic-ui.confirm',label:'Confirm',run(){
+                     api.ui.confirm('Sure?','Body').then((yes)=>rename(yes?'confirmed':'declined'))}});
+                   api.commands.register({id:'synthetic-ui.menu',label:'Menu',run(){
+                     api.ui.toast('Choose');
+                     api.ui.menu({x:4,y:5},[{header:'Pick'},'-',{label:'Rename',run(){rename('menu')}}])}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        let request = |what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(request) = fixture.host.take_requests().pop() {
+                    return request;
+                }
+                assert!(Instant::now() < deadline, "{what}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let named = |name: &str| {
+            fixture.until(name, |_| fixture.name() == name);
+        };
+        fixture.host.run_command("synthetic-ui.open", json!([]));
+        let reveal = request("panel reveal");
+        assert_eq!(
+            (&reveal["kind"], &reveal["id"], &reveal["open"]),
+            (&json!("panel"), &json!("synthetic-ui.panel"), &json!(true))
+        );
+        fixture.host.run_command("synthetic-ui.confirm", json!([]));
+        let sheet = request("confirm");
+        assert_eq!(
+            (&sheet["title"], &sheet["body"]),
+            (&json!("Sure?"), &json!("Body"))
+        );
+        fixture
+            .host
+            .answer(sheet["token"].as_u64().unwrap(), json!(true));
+        named("confirmed");
+        fixture.host.run_command("synthetic-ui.menu", json!([]));
+        let menu = request("menu");
+        assert_eq!(
+            (menu["x"].as_f64(), menu["y"].as_f64()),
+            (Some(4.), Some(5.))
+        );
+        assert_eq!(menu["items"].as_array().unwrap().len(), 3);
+        assert_eq!(fixture.host.take_toasts(), ["Choose"]);
+        fixture.host.answer(
+            menu["token"].as_u64().unwrap(),
+            menu["items"][2]["run"].clone(),
+        );
+        named("menu");
+        fixture
+            .host
+            .gather_menu("panel:context", json!({"panelId":"first"}), 7);
+        let gathered = request("gathered");
+        assert_eq!(gathered["key"], 7);
+        assert_eq!(gathered["items"][0]["label"], "For first");
+        fixture.host.answer(
+            gathered["token"].as_u64().unwrap(),
+            gathered["items"][0]["run"].clone(),
+        );
+        named("tab");
+        // Storage lives in durable `ext.*` settings, so a later window reads it.
+        fixture.until("storage", |_| {
+            fixture
+                .kernel
+                .state()
+                .settings
+                .contains_key("ext.synthetic-ui")
+        });
+        fixture.host.run_command("synthetic-ui.round", json!([]));
+        named("round 1");
+        fixture.host.run_command("synthetic-ui.icon", json!([]));
+        named("<svg1");
+        let mut later = ExtensionHost::start(HostConfig {
+            kernel: fixture.kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: fixture._root.path().join("cache-later"),
+            owner: None,
+            text: None,
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !later.is_ready() || later.contributions().is_none() {
+            assert!(Instant::now() < deadline, "second host");
+            thread::sleep(Duration::from_millis(5));
+        }
+        later.run_command("synthetic-ui.round", json!([]));
+        named("round 2");
+        later.run_command("synthetic-ui.off", json!([]));
+        fixture.until("disabled", |_| {
+            !fixture.kernel.state().extensions["synthetic-ui"].enabled
+        });
+        later.close();
+        let _ = later.worker.take().map(thread::JoinHandle::join);
+    }
+    #[test]
+    fn discovered_typescript_and_svelte_extensions_contribute_and_edit_the_live_project() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-good",
+            &[
+                (
+                    "index.ts",
+                    "import { label } from './label';
+                     import Panel from './Panel.svelte';
+                     import type { Nothing } from './types';
+                     export default function activate(api: any): void {
+                       const unused: Nothing | null = null;
+                       api.commands.register({id:'synthetic-good.rename',label:label(),run(name: string){
+                         api.history.do('Rename',()=>{api.project.get().name=name});
+                         return name}});
+                       api.panels.register({id:'synthetic-good.panel',title:'Synthetic',component:Panel});
+                     }",
+                ),
+                ("label.ts", "export const label = (): string => 'Rename project';"),
+                ("types.ts", "export type Nothing = never;"),
+                (
+                    "Panel.svelte",
+                    "<script lang='ts'>let { api }: { api: any } = $props();</script><p class='note'>{api.project.get().name}</p><style>.note{color:red}</style>",
+                ),
+            ],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        assert!(command(&fixture, "synthetic-good.rename"));
+        let contributions = fixture.host.contributions().unwrap();
+        assert_eq!(contributions["panels"][0]["title"], "Synthetic");
+        fixture
+            .host
+            .run_command("synthetic-good.rename", json!(["Renamed by extension"]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.name() != "Renamed by extension" {
+            assert!(Instant::now() < deadline, "edit reached the kernel");
+            thread::sleep(Duration::from_millis(5));
+        }
+        // A native undo reaches the same mirror.
+        // The name publishes before the extension's history entry closes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+                )
+                .unwrap();
+            if matches!(ack.reply, Reply::Bool(true)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "undo stayed refused");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fixture.name(), "Synthetic extension check");
+    }
+    #[test]
+    fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'synthetic.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:2,def:1},{k:'color',label:'Color',type:'color',def:'#ff0000'}],frag:'o = src(v_uv) * u_amount;'})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let state = fixture.kernel.state();
+        let provider = state.provider("effects", "synthetic.tint").unwrap();
+        assert_eq!(
+            provider.definition.get("label").unwrap().as_str(),
+            Some("Tint")
+        );
+        let contributions = fixture.host.contributions().unwrap();
+        let definition: pm_protocol::definitions::DefinitionSnapshot =
+            serde_json::from_value(contributions["definitions"][0].clone()).unwrap();
+        let glsl = definition.glsl.unwrap();
+        assert!(glsl.source.starts_with("#version 300 es"));
+        assert!(glsl.source.contains("uniform float u_amount;"));
+        assert!(glsl.source.contains("uniform vec3 u_color;"));
+        assert_eq!(
+            glsl.source.lines().nth(glsl.body_line_offset as usize),
+            Some("o = src(v_uv) * u_amount;")
+        );
+    }
+    #[test]
+    fn a_store_install_runs_confined_and_contributes_like_a_local_one() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-store",
+            &[
+                (
+                    "index.ts",
+                    "export default function(api: any){
+                       api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:1}],frag:'o = src(v_uv) * u_amount;'});
+                       api.commands.register({id:'mark',label:'Mark',run(){globalThis.ran=(typeof document)+':'+(typeof PM)}});
+                       api.events.on('project:changed',()=>{api.storage.set('seen',true)});
+                     }",
+                ),
+                (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+            ],
+        );
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-editor",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-editor.rename',label:'Rename',
+                   run(){api.history.do('Rename',()=>{api.project.get().name='Moved'})}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.is_ready() && host.contributions().is_some()
+        });
+        assert_eq!(
+            fixture.health("synthetic-store"),
+            "ok",
+            "{:?}",
+            fixture.host.records()
+        );
+        let state = fixture.kernel.state();
+        assert!(state.provider("effects", "synthetic-store.tint").is_some());
+        assert!(state.provider("commands", "synthetic-store.mark").is_some());
+        let contributions = fixture.host.contributions().unwrap();
+        let definitions = contributions["definitions"].as_array().unwrap();
+        assert_eq!(definitions[0]["origin"], "store");
+        assert_eq!(definitions[0]["id"], "synthetic-store.tint");
+        assert!(command(&fixture, "synthetic-store.mark"));
+        // A listener in the helper hears a project change and writes through its
+        // own storage, proving the delivery end to end.
+        fixture
+            .host
+            .run_command("synthetic-editor.rename", json!([]));
+        fixture.until("listener", |_| {
+            fixture
+                .kernel
+                .state()
+                .extensions
+                .get("synthetic-store")
+                .and_then(|entry| entry.source.get("storePrivateStorageV1").cloned())
+                .is_some_and(|storage| {
+                    pm_model::json::to_canonical_string(&storage).contains("seen")
+                })
+        });
+        // A Settings toggle stops the helper and starts it again; the trusted
+        // realm never runs Store code, whatever the toggle order.
+        let toggle = |enabled: bool| {
+            let entry = fixture.kernel.state().extensions["synthetic-store"].clone();
+            fixture
+                .kernel
+                .state_transaction(StateTransaction {
+                    expected_revision: None,
+                    ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        };
+        toggle(false);
+        fixture.until("helper stopped", |host| {
+            host.store_session("synthetic-store").is_none()
+                && !command(&fixture, "synthetic-store.mark")
+        });
+        assert!(
+            fixture
+                .kernel
+                .state()
+                .provider("commands", "synthetic-store.mark")
+                .is_none()
+        );
+        toggle(true);
+        fixture.until("helper again", |host| {
+            host.store_session("synthetic-store").is_some()
+                && command(&fixture, "synthetic-store.mark")
+        });
+        let state = fixture.kernel.state();
+        let owner = state.provider("commands", "synthetic-store.mark").unwrap();
+        assert!(
+            owner.token.starts_with("store:synthetic-store:"),
+            "{owner:?}"
+        );
+    }
+    #[test]
+    fn a_v4_extension_compiles_as_a_surface_and_stays_out_of_the_trusted_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        fs::create_dir_all(extensions.join("synthetic-v4")).unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/manifest.json"),
+            json!({"id":"synthetic-v4","name":"Synthetic surface","version":"1.0.0","apiVersion":4,"entry":"panel.tsx"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4/panel.tsx"),
+            "import { useState } from 'powermove/hooks';
+             export const view = () => <text>{String(useState(1)[0])}</text>;",
+        )
+        .unwrap();
+        // A Store install never reaches the panel host, which has no permissions.
+        fs::create_dir_all(extensions.join("synthetic-v4-store")).unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/manifest.json"),
+            json!({"id":"synthetic-v4-store","name":"Synthetic","version":"1.0.0","apiVersion":4,"entry":"panel.tsx"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/panel.tsx"),
+            "export const view = () => <text>Store</text>;",
+        )
+        .unwrap();
+        fs::write(
+            extensions.join("synthetic-v4-store/.powermove-store.json"),
+            "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}",
+        )
+        .unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-v4-store"), "build-error");
+        let surfaces = fixture.host.surfaces();
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0]["id"], "synthetic-v4");
+        let graph = &surfaces[0]["graph"];
+        let source = graph["sources"]["panel.tsx"].as_str().unwrap();
+        assert!(source.contains("powermove/jsx-runtime"), "{source}");
+        assert_eq!(
+            graph["edges"]["panel.tsx"]["powermove/hooks"],
+            "runtime:powermove/hooks"
+        );
+    }
+    #[test]
+    fn settings_toggles_and_disk_edits_reach_the_live_realm() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let write = |label: &str| {
+            extension(
+                &extensions,
+                "synthetic-live",
+                &[(
+                    "index.ts",
+                    &format!(
+                        "export default function(api){{api.commands.register({{id:'synthetic-live.run',label:'{label}',run(){{}}}})}}"
+                    ),
+                )],
+            );
+        };
+        write("First");
+        let fixture = Fixture::start(root);
+        let label = |host: &ExtensionHost| {
+            host.contributions()
+                .and_then(|c| c["commands"][0]["label"].as_str().map(str::to_owned))
+        };
+        fixture.until("activation", |host| label(host).as_deref() == Some("First"));
+        let state = fixture.kernel.state();
+        let entry = state.extensions.get("synthetic-live").unwrap().clone();
+        assert_eq!(entry.version, "1.0.0");
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: false,
+                    ..entry.clone()
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("unload", |host| label(host).is_none());
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: true,
+                    ..entry
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        fixture.until("reload", |host| label(host).as_deref() == Some("First"));
+        std::thread::sleep(Duration::from_millis(1100));
+        extension(
+            &fixture._root.path().join("extensions"),
+            "synthetic-live",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-live.run',label:'Second',run(){}})}",
+            )],
+        );
+        fixture.until("rescan", |host| label(host).as_deref() == Some("Second"));
+    }
+    #[test]
+    fn one_bad_extension_leaves_the_others_running() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-throws",
+            &[(
+                "index.ts",
+                "export default function(){throw new Error('synthetic')}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-broken",
+            &[(
+                "index.ts",
+                "export default function(api){ this is not javascript",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-missing",
+            &[(
+                "index.ts",
+                "import './nowhere'; export default function(){}",
+            )],
+        );
+        extension(
+            &extensions,
+            "synthetic-noexport",
+            &[("index.ts", "export const nothing = 1;")],
+        );
+        extension(
+            &extensions,
+            "synthetic-good",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-good.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        assert_eq!(fixture.health("synthetic-throws"), "activation-error");
+        assert_eq!(fixture.health("synthetic-broken"), "build-error");
+        assert_eq!(fixture.health("synthetic-missing"), "build-error");
+        assert!(matches!(
+            fixture.health("synthetic-noexport").as_str(),
+            "build-error" | "activation-error"
+        ));
+        assert!(command(&fixture, "synthetic-good.run"));
+    }
+    #[test]
+    fn a_hung_activation_is_stopped_and_the_realm_comes_back_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "synthetic-hangs",
+            &[("index.ts", "export default function(){for(;;);}")],
+        );
+        extension(
+            &extensions,
+            "synthetic-good",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-good.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("recovery", |host| {
+            let stopped = host
+                .records()
+                .iter()
+                .any(|r| r["id"] == "synthetic-hangs" && r["health"]["state"] == "runtime-error");
+            stopped
+                && host.is_ready()
+                && host.contributions().is_some_and(|c| {
+                    c["commands"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["id"] == "synthetic-good.run")
+                })
+        });
+        assert_eq!(fixture.health("synthetic-good"), "ok");
+        // The stop is persisted, so following state never brings the culprit back
+        // into the rebuilt realm, and the next launch does not run it either.
+        let enabled = |fixture: &Fixture| {
+            fixture
+                .kernel
+                .state()
+                .extensions
+                .get("synthetic-hangs")
+                .map(|entry| entry.enabled)
+        };
+        assert_eq!(enabled(&fixture), Some(false));
+        let view = fixture.host.view();
+        assert_eq!(view, 2, "one rebuild, one new page");
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(fixture.host.view(), view, "no second hang");
+        assert_eq!(fixture.health("synthetic-hangs"), "runtime-error");
+        // A hung command with an open entry: the rebuild seals it, so native undo
+        // is not left refused behind an entry no one will close.
+        extension(
+            &fixture._root.path().join("extensions"),
+            "synthetic-stuck",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-stuck.run',label:'Stuck',
+                   run(){api.history.begin('Stuck');for(;;);}})}",
+            )],
+        );
+        fixture.until("rescan", |host| command_of(host, "synthetic-stuck.run"));
+        fixture.host.run_command("synthetic-stuck.run", json!([]));
+        fixture.until("entry open", |_| {
+            fixture.kernel.published("window").unwrap().entry.is_some()
+        });
+        fixture.until("second rebuild", |host| host.view() == 3 && host.is_ready());
+        let published = fixture.kernel.published("window").unwrap();
+        assert!(published.entry.is_none(), "the open entry was sealed");
+    }
+    fn command_of(host: &ExtensionHost, id: &str) -> bool {
+        host.contributions().is_some_and(|c| {
+            c["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["id"] == id)
+        })
+    }
+}
