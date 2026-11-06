@@ -510,7 +510,9 @@ fn unwrap_project(raw: Value) -> Option<Value> {
 }
 
 /// `applyPatches` from `projects.ts` (not `shared/patch.ts`): patches whose
-/// parent is missing are skipped; a delete on an array index splices.
+/// parent is missing are skipped; a delete on an array index splices. Journal
+/// entries also hold id-keyed operations; one its array does not match is
+/// skipped the same way (`applyOpsSkipping`).
 pub fn legacy_apply_patches(root: &mut Option<Value>, patches: &Value) {
     let Some(list) = patches.as_array() else {
         return;
@@ -519,6 +521,12 @@ pub fn legacy_apply_patches(root: &mut Option<Value>, patches: &Value) {
         let Some(path) = patch.get("path").and_then(Value::as_array) else {
             continue;
         };
+        if patch.get("op").and_then(Value::as_str).is_some() {
+            if let Some(root) = root.as_mut() {
+                apply_id_op(root, path, patch);
+            }
+            continue;
+        }
         let exists = patch
             .get("exists")
             .and_then(Value::as_bool)
@@ -564,6 +572,60 @@ pub fn legacy_apply_patches(root: &mut Option<Value>, patches: &Value) {
             _ => {}
         }
     }
+}
+
+/// `applyIdOp` from `shared/patch-ids.ts`; `None` is its `IdOpMismatch`.
+fn apply_id_op(root: &mut Value, path: &[Value], op: &Value) -> Option<()> {
+    let Value::Array(items) = walk(root, path)? else {
+        return None;
+    };
+    let mut ids: Vec<String> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let id = item.as_object()?.get("id")?.as_str()?;
+        if ids.iter().any(|known| known == id) {
+            return None;
+        }
+        ids.push(id.to_owned());
+    }
+    match op.get("op")?.as_str()? {
+        "order" => {
+            let picks: Vec<usize> = op
+                .get("ids")?
+                .as_array()?
+                .iter()
+                .map(|id| {
+                    let id = id.as_str()?;
+                    ids.iter().position(|known| known == id)
+                })
+                .collect::<Option<_>>()?;
+            let mut named = picks.clone();
+            named.sort_unstable();
+            named.dedup();
+            if picks.len() != items.len() || named.len() != items.len() {
+                return None;
+            }
+            let mut slots: Vec<Option<Value>> =
+                std::mem::take(items).into_iter().map(Some).collect();
+            *items = picks.into_iter().filter_map(|i| slots[i].take()).collect();
+        }
+        "insert" => {
+            let index = op.get("index")?.as_f64()?;
+            let value = op.get("value")?;
+            let id = value.as_object()?.get("id")?.as_str()?;
+            let fits = index.fract() == 0. && index >= 0. && index <= items.len() as f64;
+            if !fits || ids.iter().any(|known| known == id) {
+                return None;
+            }
+            items.insert(index as usize, value.clone());
+        }
+        "delete" => {
+            let id = op.get("id")?.as_str()?;
+            let at = ids.iter().position(|known| *known == id)?;
+            items.remove(at);
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 fn property_key(part: &Value) -> String {
