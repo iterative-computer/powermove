@@ -324,3 +324,44 @@ fn a_fixed_quality_renders_every_frame_at_that_resolution() {
         s.frame.as_ref().is_some_and(|f| f.scale == 1.)
     });
 }
+
+/// View › Media: a clip whose original is missing plays its proxy in
+/// Automatic, is offline in Originals, and a proxy is never counted as an
+/// original.
+#[test]
+fn media_modes_choose_proxies_and_originals_per_clip() {
+    let s = project("clip");
+    let mut media = MediaCatalog::default();
+    media.proxies.insert("clip".into(), fixture("h264-aac.mp4"));
+    let service = service("media-modes");
+    let v = service
+        .viewer(config(s, media, output(320, 180)))
+        .unwrap();
+    let settled = |v: &Viewer, why: &str| {
+        let stamp = v.stamp().unwrap();
+        wait(v, why, |s| s.frame.as_ref().is_some_and(|f| f.stamp == stamp))
+    };
+    let status = settled(&v, "Automatic");
+    assert!(status.layer_failures.is_empty(), "{:?}", status.layer_failures);
+    assert_eq!(status.proxied, 1);
+    v.media_mode(MediaMode::Originals).unwrap();
+    let status = settled(&v, "Originals");
+    assert!(status.layer_failures.iter().any(|f| f.layer == "v"));
+    assert_eq!(status.proxied, 0);
+    v.media_mode(MediaMode::ProxyOnly).unwrap();
+    let status = settled(&v, "Proxy Only");
+    assert!(status.layer_failures.is_empty(), "{:?}", status.layer_failures);
+    assert_eq!(status.proxied, 1);
+
+    let mut both = MediaCatalog::default();
+    both.originals.insert("a".into(), "/original.mov".into());
+    both.proxies.insert("a".into(), "/proxy.mov".into());
+    both.originals.insert("b".into(), "/b.mov".into());
+    assert_eq!(both.viewer_paths(MediaMode::Automatic)["a"].to_str(), Some("/original.mov"));
+    assert_eq!(both.viewer_paths(MediaMode::ProxyPreferred)["a"].to_str(), Some("/proxy.mov"));
+    assert_eq!(both.viewer_paths(MediaMode::ProxyPreferred)["b"].to_str(), Some("/b.mov"));
+    assert!(!both.viewer_paths(MediaMode::ProxyOnly).contains_key("b"));
+    assert_eq!(both.proxied(MediaMode::Automatic), 0);
+    assert_eq!(both.proxied(MediaMode::ProxyPreferred), 1);
+    assert_eq!(both.export_paths(false).paths["a"].to_str(), Some("/original.mov"));
+}

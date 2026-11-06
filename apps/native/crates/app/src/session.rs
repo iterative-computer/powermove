@@ -39,6 +39,8 @@ pub struct Controller {
     /// The last refresh saw a save in flight (drives the status note).
     pub saving_note: bool,
     pub output_mode: crate::viewer2::OutputMode,
+    /// View › Viewer Media for this editor's viewers.
+    pub media_mode: pm_engine_service::MediaMode,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -236,6 +238,7 @@ impl Controller {
             rows: Default::default(),
             saving_note: false,
             output_mode: crate::viewer2::OutputMode::from_env(),
+            media_mode: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,

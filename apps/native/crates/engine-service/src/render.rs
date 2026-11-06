@@ -194,6 +194,7 @@ impl Engine {
         self.lost.load(std::sync::atomic::Ordering::Acquire)
     }
     /// Test hook: lose the device as a removed or reset GPU does.
+    #[cfg(test)]
     pub fn destroy_device(&self) {
         self.gpu.device.destroy();
     }

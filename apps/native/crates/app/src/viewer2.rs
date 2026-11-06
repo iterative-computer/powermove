@@ -12,7 +12,7 @@ use objc2::{
 };
 use objc2_app_kit::{NSBackingStoreType, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask};
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
-use pm_engine_service::{OverlayGeometry, OverlayLine, color::Mastering};
+use pm_engine_service::{MediaMode, OverlayGeometry, OverlayLine, color::Mastering};
 use std::{cell::RefCell, rc::Rc};
 
 /// The viewer's output transform. SDR keeps the default extended-linear P3
@@ -131,15 +131,29 @@ pub enum Action {
     SafeAreas,
     Guides,
     Popout,
+    Media(MediaMode),
+    ToggleProxies,
 }
+/// View › Viewer Media, in the order of the menu.
+const MEDIA_MODES: [(MediaMode, &str); 4] = [
+    (MediaMode::Automatic, "Automatic"),
+    (MediaMode::Originals, "Originals"),
+    (MediaMode::ProxyPreferred, "Proxy Preferred"),
+    (MediaMode::ProxyOnly, "Proxy Only"),
+];
 impl Action {
-    const ALL: [Action; 6] = [
+    const ALL: [Action; 11] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
         Action::SafeAreas,
         Action::Guides,
         Action::Popout,
+        Action::Media(MediaMode::Automatic),
+        Action::Media(MediaMode::Originals),
+        Action::Media(MediaMode::ProxyPreferred),
+        Action::Media(MediaMode::ProxyOnly),
+        Action::ToggleProxies,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -212,7 +226,25 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
             unsafe { parent.setAction(None) };
             parent.setSubmenu(Some(&output));
             view.addItem(&parent);
+            let media =
+                NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Viewer Media"));
+            for (mode, label) in MEDIA_MODES {
+                let item = menu_item(mtm, label, Action::Media(mode), &target, "");
+                media.addItem(&item);
+                items.push((Action::Media(mode), item));
+            }
+            let parent = menu_item(
+                mtm,
+                "Viewer Media",
+                Action::Media(MediaMode::Automatic),
+                &target,
+                "",
+            );
+            unsafe { parent.setAction(None) };
+            parent.setSubmenu(Some(&media));
+            view.addItem(&parent);
             for (label, action) in [
+                ("Toggle Proxies", Action::ToggleProxies),
                 ("Show Safe Areas", Action::SafeAreas),
                 ("Show Guides", Action::Guides),
                 ("Popout Viewer", Action::Popout),
@@ -292,12 +324,20 @@ fn focused(cx: &mut App) -> Option<gpui::Entity<Controller>> {
         .cloned()
 }
 /// Checkmarks follow the focused controller's state.
-pub fn update_checks(output: OutputMode, safe: bool, guides: bool, popout: bool) {
+pub fn update_checks(
+    output: OutputMode,
+    media: MediaMode,
+    safe: bool,
+    guides: bool,
+    popout: bool,
+) {
     MENU.with(|m| {
         if let Some(m) = &*m.borrow() {
             for (action, item) in &m.items {
                 let on = match action {
                     Action::Output(mode) => *mode == output,
+                    Action::Media(mode) => *mode == media,
+                    Action::ToggleProxies => false,
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
@@ -575,7 +615,26 @@ impl Controller {
             Action::SafeAreas => self.set_overlays(!self.safe_areas, self.guides, cx),
             Action::Guides => self.set_overlays(self.safe_areas, !self.guides, cx),
             Action::Popout => self.toggle_popout(cx),
+            Action::Media(mode) => self.set_media_mode(mode, cx),
+            // Premiere's toggle: proxies where they exist, or originals.
+            Action::ToggleProxies => self.set_media_mode(
+                match self.media_mode {
+                    MediaMode::ProxyPreferred | MediaMode::ProxyOnly => MediaMode::Originals,
+                    MediaMode::Automatic | MediaMode::Originals => MediaMode::ProxyPreferred,
+                },
+                cx,
+            ),
         }
+    }
+    pub fn set_media_mode(&mut self, mode: MediaMode, cx: &mut Context<Self>) {
+        self.media_mode = mode;
+        self.apply_viewer_options();
+        let label = MEDIA_MODES
+            .iter()
+            .find(|(m, _)| *m == mode)
+            .map_or("", |(_, l)| l);
+        self.message = format!("Viewer media: {label}");
+        cx.notify();
     }
     pub fn set_output_mode(&mut self, mode: OutputMode, cx: &mut Context<Self>) {
         self.output_mode = mode;
@@ -598,6 +657,7 @@ impl Controller {
         for viewer in self.viewer.iter().chain(popout.as_ref()) {
             if let Err(e) = viewer
                 .mastering(mtm, self.output_mode.mastering())
+                .and_then(|_| viewer.media_mode(self.media_mode))
                 .and_then(|_| viewer.safe_areas(geometry.clone()))
             {
                 self.message = format!("Viewer: {e}");
@@ -605,6 +665,7 @@ impl Controller {
         }
         update_checks(
             self.output_mode,
+            self.media_mode,
             self.safe_areas,
             self.guides,
             self.popout.is_some(),

@@ -108,6 +108,20 @@ pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,
 }
+/// What the viewer plays for each clip (View › Media). Exports read
+/// originals whatever this says; only an explicit draft export uses proxies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaMode {
+    /// Originals, and a proxy for a clip whose original is missing.
+    #[default]
+    Automatic,
+    /// Originals only: a clip whose original is missing is offline.
+    Originals,
+    /// A proxy where one exists, the original otherwise.
+    ProxyPreferred,
+    /// Proxies only: a clip without one is offline.
+    ProxyOnly,
+}
 impl MediaCatalog {
     /// Export safety: a draft is the only path that can substitute proxy pixels.
     pub fn export_paths(&self, draft: bool) -> pm_export::render::MediaPaths {
@@ -117,11 +131,31 @@ impl MediaCatalog {
         }
         pm_export::render::MediaPaths { paths }
     }
-    pub fn audio_paths(&self) -> MediaMap {
+    /// The file the viewer reads for each asset in `mode`.
+    pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
+        let (first, second) = match mode {
+            MediaMode::Automatic => (&self.originals, Some(&self.proxies)),
+            MediaMode::Originals => (&self.originals, None),
+            MediaMode::ProxyPreferred => (&self.proxies, Some(&self.originals)),
+            MediaMode::ProxyOnly => (&self.proxies, None),
+        };
+        let mut paths = second.cloned().unwrap_or_default();
+        paths.extend(first.iter().map(|(k, v)| (k.clone(), v.clone())));
+        paths
+    }
+    /// Assets the viewer draws from a proxy in `mode`.
+    pub fn proxied(&self, mode: MediaMode) -> usize {
+        let paths = self.viewer_paths(mode);
+        self.proxies
+            .iter()
+            .filter(|(id, path)| paths.get(*id) == Some(path) && self.originals.get(*id) != Some(path))
+            .count()
+    }
+    pub fn audio_paths(&self, mode: MediaMode) -> MediaMap {
         MediaMap(Arc::new(
-            self.originals
-                .iter()
-                .map(|(k, v)| (k.clone(), Some(v.clone())))
+            self.viewer_paths(mode)
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
                 .collect(),
         ))
     }
@@ -184,6 +218,9 @@ pub struct ViewerStatus {
     pub wants_display: bool,
     /// GPU devices lost and rebuilt under this viewer.
     pub device_losses: u64,
+    /// Clips the viewer plays from a proxy (View › Media). Never counted as
+    /// originals.
+    pub proxied: usize,
 }
 struct View {
     config: ViewerConfig,
@@ -204,6 +241,7 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
 }
 impl View {
@@ -337,8 +375,34 @@ impl Viewer {
             .views
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
-        v.paths = Arc::new(media.export_paths(false));
+        v.paths = Arc::new(pm_export::render::MediaPaths {
+            paths: media.viewer_paths(v.media_mode),
+        });
+        v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
+        v.content = content;
+        v.stamp.sequence += 1;
+        v.dirty = true;
+        self.shared.wake.try_send(()).ok();
+        Ok(())
+    }
+    /// Which file each clip plays from (View › Media). Audio follows it.
+    pub fn media_mode(&self, mode: MediaMode) -> Result<()> {
+        let mut state = self.shared.state.lock().unwrap();
+        state.content += 1;
+        let content = state.content;
+        let v = state
+            .views
+            .get_mut(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        if v.media_mode == mode {
+            return Ok(());
+        }
+        v.media_mode = mode;
+        v.paths = Arc::new(pm_export::render::MediaPaths {
+            paths: v.config.media.viewer_paths(mode),
+        });
+        v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
         v.stamp.sequence += 1;
         v.dirty = true;
@@ -655,7 +719,10 @@ impl EngineService {
             revision: config.snapshot.revision,
             sequence: 1,
         };
-        let paths = Arc::new(config.media.export_paths(false));
+        let paths = Arc::new(pm_export::render::MediaPaths {
+            paths: config.media.viewer_paths(MediaMode::default()),
+        });
+        let proxied = config.media.proxied(MediaMode::default());
         state.views.insert(
             id,
             View {
@@ -669,7 +736,10 @@ impl EngineService {
                 locked_provider: None,
                 commands: VecDeque::new(),
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
-                status: ViewerStatus::default(),
+                status: ViewerStatus {
+                    proxied,
+                    ..Default::default()
+                },
                 phase: None,
                 input: None,
                 pending_input: None,
@@ -677,6 +747,7 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                media_mode: MediaMode::default(),
                 paths,
             },
         );
@@ -962,7 +1033,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     (
                         *id,
                         v.config.snapshot.clone(),
-                        v.config.media.audio_paths(),
+                        v.config.media.audio_paths(v.media_mode),
                         v.config.composition.clone(),
                         v.stamp.revision,
                         v.content,
@@ -1011,7 +1082,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     if let Err(e) = transport.enable_audio(
                         &v.config.snapshot.document,
                         v.config.composition.clone(),
-                        v.config.media.audio_paths(),
+                        v.config.media.audio_paths(v.media_mode),
                         levels,
                     ) {
                         v.status.error = Some(e.to_string());
@@ -1039,7 +1110,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if r.revision != v.stamp.revision || r.content != v.content {
                 r.transport.update(
                     &v.config.snapshot,
-                    v.config.media.audio_paths(),
+                    v.config.media.audio_paths(v.media_mode),
                     &v.config.composition,
                 );
                 r.revision = v.stamp.revision;
