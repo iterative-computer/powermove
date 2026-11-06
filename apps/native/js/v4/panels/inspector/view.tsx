@@ -567,15 +567,38 @@ export function InspectorPanel({
                 id={`section-action:${section.id}`}
                 label={sectionActions[section.action]}
                 disabled={target.kind === "layers" && target.first.locked}
-                onActivate={() =>
-                  session.send({
-                    type: "section-action",
-                    section: section.id,
-                    action: section.action!,
-                  })
+                onActivate={(event) =>
+                  section.action === "animator"
+                    ? session.nativeRequest({
+                        type: "animator-menu",
+                        anchor: event.currentTarget,
+                        items: section.presets ?? [],
+                      })
+                    : session.send({
+                        type: "section-action",
+                        section: section.id,
+                        action: section.action!,
+                      })
                 }
               />
             ) : null}
+            {section.animators?.map((animator) => (
+              <InspectorRow key={animator.id} label={animator.name}>
+                <Action
+                  id={`remove-animator:${animator.id}`}
+                  label={`Remove ${animator.name}`}
+                  tooltip="Remove Text Animator"
+                  symbol="minus"
+                  disabled={target.kind === "layers" && target.first.locked}
+                  onActivate={() =>
+                    session.send({
+                      type: "remove-animator",
+                      animator: animator.id,
+                    })
+                  }
+                />
+              </InspectorRow>
+            ))}
             {section.rows.map((row) => (
               <Property key={row.id} row={row} session={session} />
             ))}

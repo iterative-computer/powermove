@@ -5,10 +5,8 @@ use pm_kernel::commands::comps::PrecomposeMode;
 use pm_kernel::commands::layers::LayerPatch;
 use pm_kernel::commands::text::{SplitMode, TextCommand};
 use pm_kernel::commands::transform::TransformCommand;
-use pm_kernel::text_host::{SharedTextHost, TextHost};
 use pm_kernel::{Command, CompCommand, LayerCommand, Published, new_id};
 use pm_model::Value;
-use std::sync::Arc;
 
 pub struct Plan {
     pub label: String,
@@ -183,25 +181,6 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
             .into(),
         ],
     }
-}
-
-/// The same font registry rendering asks, measured on the kernel's own thread.
-struct RegistryText(pm_node::fonts::render::RenderFonts);
-impl TextHost for RegistryText {
-    fn measure(&self) -> Box<dyn pm_eval::text_geom::TextMeasure> {
-        Box::new(pm_eval::text_measure::CompatMeasure::new(
-            pm_node::fonts::render::BrokerResolver::new(
-                self.0.broker.clone(),
-                self.0.health.clone(),
-            ),
-        ))
-    }
-    fn take_failure(&self) -> Option<String> {
-        self.0.health.take_failure()
-    }
-}
-pub fn text_host(fonts: &pm_node::fonts::render::RenderFonts) -> SharedTextHost {
-    SharedTextHost(Arc::new(RegistryText(fonts.sibling())))
 }
 
 #[cfg(test)]

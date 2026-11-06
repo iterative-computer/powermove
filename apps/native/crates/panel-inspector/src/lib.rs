@@ -12,6 +12,7 @@ mod effects;
 mod effect_definitions;
 pub mod input;
 mod relations;
+pub mod text_animators;
 pub mod v4_effects;
 pub mod v4_properties;
 mod view;

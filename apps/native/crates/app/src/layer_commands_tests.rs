@@ -6,6 +6,7 @@ use pm_kernel::{
     Request, SelectionCall, WriteBody,
 };
 use pm_protocol::{color::Precision, common::Size, common::Ticks};
+use std::sync::Arc;
 
 const W: u32 = 96;
 const H: u32 = 54;
@@ -218,4 +219,47 @@ fn commands_with_nothing_to_act_on_are_not_handled() {
     for name in ["releasePrecomp", "toggleContinuousRaster", "splitTextWords", "other"] {
         assert!(plan(name, &published, 0.).is_none(), "{name}");
     }
+}
+
+#[test]
+fn a_font_registry_that_cannot_answer_refuses_the_split_and_writes_nothing() {
+    let broker = pm_node::fonts::render::FontBroker::new();
+    let fonts = pm_node::fonts::render::RenderFonts::new(broker.clone());
+    broker.close();
+    let actor = KernelActor::spawn(KernelConfig {
+        text: Some(crate::text_host::text_host(&fonts)),
+        ..Default::default()
+    });
+    let kernel = actor.handle();
+    let source = layer("t", "text", 20., 30., 0., "#FFFFFF", "");
+    let project = pm_model::json::parse(&format!(
+        r##"{{"id":"synthetic","name":"Text","compId":"root","w":{W},"h":{H},"fps":30,"dur":3,
+        "bg":"#000000","assets":{{}},"comps":{{}},"layers":[{source}]}}"##
+    ))
+    .unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = select(&kernel, &["t"]);
+    let before = published.revision();
+    let plan = plan("splitTextWords", &published, 0.).unwrap();
+    let ack = kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some(plan.label),
+                    expected_revision: Some(before),
+                    body: WriteBody::Commands(plan.commands),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+    assert_eq!(kernel.published("synthetic").unwrap().revision(), before);
 }

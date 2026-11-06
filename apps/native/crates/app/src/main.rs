@@ -22,6 +22,7 @@ mod rows;
 mod session;
 mod smoke;
 mod surfaces;
+mod text_host;
 mod v4_control;
 mod v4_native;
 mod v4_view;
@@ -116,7 +117,7 @@ fn main() -> Result<()> {
     let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
-            text: Some(layer_commands::text_host(&text_fonts)),
+            text: Some(text_host::text_host(&text_fonts)),
             ..Default::default()
         });
         mcp::attach(&actor.handle(), &worker_profile)?;

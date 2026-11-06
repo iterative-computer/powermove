@@ -52,8 +52,8 @@ pub enum TransformCommand {
     /// The alignment strip's Align (`pm_edit::align::align`): the layers'
     /// common box meets the composition frame's edge or center, every layer
     /// moving by the same world delta, written as `set_property` on
-    /// position (keyed when animated; hand-edit markers refuse). Text needs the
-    /// host's fonts. Label "Align Layers".
+    /// position (keyed when animated, overriding hand-edit markers as the strip
+    /// does). Text needs the host's fonts. Label "Align Layers".
     Align {
         layer_ids: Vec<String>,
         mode: AlignMode,
@@ -277,7 +277,8 @@ fn align(
     cx.check_fonts()?;
     for m in moves {
         let Some(id) = ids.get(m.layer) else { continue };
-        let c = SetProperty::new(id.clone(), m.channel, m.value, time);
+        let mut c = SetProperty::new(id.clone(), m.channel, m.value, time);
+        c.preserve_hand_edits = false;
         properties::set_property(cx, &c)?;
     }
     Ok(())

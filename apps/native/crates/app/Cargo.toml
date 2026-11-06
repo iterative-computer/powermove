@@ -42,6 +42,10 @@ gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gp
 pm-panel-media = { path = "../panel-media" }
 pm-panel-viewerchrome = { path = "../panel-viewerchrome" }
 
+[[test]]
+name = "text_commands"
+harness = false
+
 [[example]]
 name = "pm-corpus"
 path = "../../../../tools/corpus/main.rs"
