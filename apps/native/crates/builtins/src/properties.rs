@@ -120,6 +120,7 @@ impl Properties {
                         "parent" => ("layer.parent", "Parent", ""),
                         "matteSource" => ("layer.matteSource", "Track Matte", ""),
                         "threeD" => ("layer.threeD", "3D", ""),
+                        "continuousRaster" => ("layer.continuousRaster", "Rasterize", ""),
                         "solo" => ("layer.solo", "Solo", ""),
                         "visible" => ("layer.visible", "Visible", ""),
                         "color" => ("layer.color", "Label Color", ""),
@@ -306,7 +307,11 @@ impl Properties {
                 sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
             }
             if !layer_rows.is_empty() {
-                sections.push(json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows}));
+                let mut section = json!({"id":"layer","title":"Layer","collapsed":self.collapsed.get("layer").copied().unwrap_or(false),"rows":layer_rows});
+                if target["first"]["type"] == "precomp" {
+                    section["action"] = json!("release-precomp");
+                }
+                sections.push(section);
             }
         } else {
             let mut rows = vec![];
@@ -383,6 +388,19 @@ impl Properties {
                 .add_effect_at(caller, target, definition, time)
                 .map(Some)
                 .map_err(|e| e.to_string());
+        }
+        if intent["type"] == "section-action" && intent["action"] == "release-precomp" {
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Release Pre-comp".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                        pm_kernel::commands::comps::CompCommand::ReleasePrecomp { layer_id },
+                    )]),
+                },
+            )));
         }
         if intent["type"] == "align" {
             use pm_kernel::commands::transform::{AlignMode, TransformCommand};

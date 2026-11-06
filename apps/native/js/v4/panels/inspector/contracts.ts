@@ -61,12 +61,13 @@ export interface Row {
   expression?: { binding: Binding; source: string; error: string | null };
   error?: { kind: "number" } | { kind: "range"; min: number; max: number };
 }
+export type SectionAction = "mask" | "animator" | "release-precomp";
 export interface Section {
   id: string;
   title: string;
   collapsed: boolean;
   rows: Row[];
-  action?: "mask" | "animator";
+  action?: SectionAction;
 }
 export interface InspectorSnapshot {
   target: Target;
@@ -96,7 +97,7 @@ export type Intent =
   | { type: "row-action"; row: string; action: RowAction }
   | { type: "align"; alignment: Alignment }
   | { type: "collapse"; section: string; collapsed: boolean }
-  | { type: "section-action"; section: string; action: "mask" | "animator" }
+  | { type: "section-action"; section: string; action: SectionAction }
   | { type: "drop-effect"; effect: Json; target: string }
   | { type: "set-value"; row: string; value: Json };
 export type ModelOperation = Extract<

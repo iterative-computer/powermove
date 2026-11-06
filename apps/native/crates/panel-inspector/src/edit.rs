@@ -242,7 +242,11 @@ impl Inspector {
                 let value = raw
                     .get(storage_field(field))
                     .cloned()
-                    .unwrap_or(Value::Null);
+                    .unwrap_or(if field == "continuousRaster" {
+                        Value::Bool(false)
+                    } else {
+                        Value::Null
+                    });
                 if value.get("kf").is_some() {
                     self.evaluate(
                         &PropertyId::new(layer, format!("l.{}", storage_field(field))),
