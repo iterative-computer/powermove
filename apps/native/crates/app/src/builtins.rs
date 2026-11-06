@@ -56,6 +56,7 @@ impl Controller {
         self.builtins.windows = windows;
         self.builtins.project = Some(project.clone());
         self.builtins.application = application;
+        self.start_extensions(cx);
         let (tx, rx) = async_channel::bounded(1);
         let wake = move || {
             let _ = tx.try_send(());
@@ -191,6 +192,9 @@ impl Controller {
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
         let playing = self.playing();
         let time = self.time();
+        if let Some(host) = &self.extensions.host {
+            host.publish_time(time, playing);
+        }
         if time == self.builtins.last_time && playing == self.builtins.last_playing {
             return;
         }

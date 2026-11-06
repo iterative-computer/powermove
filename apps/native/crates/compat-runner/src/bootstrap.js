@@ -241,7 +241,7 @@ globalThis.__compat = {
       .catch((error) => this.reportFailure(error))
       .finally(() => {
         this.publishContributions();
-        call("extensions.ready");
+        runtime.engine("extensions.ready", {});
       });
   },
   update(records, ids, reason) {
@@ -277,6 +277,10 @@ globalThis.__compat = {
   },
   openPanel(id) {
     this.realm.task(() => this.panels.open(id));
+    this.dom.flush();
+  },
+  placePanel(id, rect) {
+    this.panels.place(id, rect);
     this.dom.flush();
   },
   closePanel(id) {

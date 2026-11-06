@@ -751,7 +751,10 @@ impl Layout {
     /// Shows a panel: activates its tab and reopens its dock, or adds it back to
     /// the dock it occupies in this workspace's preset (else the right dock).
     pub fn show_panel(&mut self, id: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(PANELS.contains(&id), "Unknown panel");
+        anyhow::ensure!(
+            PANELS.contains(&id) || contributed_title(id).is_some(),
+            "Unknown panel"
+        );
         if let Some((di, gi, ti)) = self.find(id) {
             self.docks[di].groups[gi].active = ti;
             self.docks[di].collapsed = false;
@@ -986,7 +989,47 @@ pub fn empty_state(
         _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
+thread_local! {
+    /// Panels contributed at runtime: id and interned title, in menu order.
+    static CONTRIBUTED: std::cell::RefCell<Vec<(String, &'static str)>> = const { std::cell::RefCell::new(vec![]) };
+}
+/// Replaces the contributed panels. Layout, menus and palette read these like
+/// built-ins, so a contributed panel docks, tabs and persists the same way.
+pub fn set_contributed_panels(panels: impl IntoIterator<Item = (String, String)>) {
+    CONTRIBUTED.with(|list| {
+        let mut list = list.borrow_mut();
+        let known = std::mem::take(&mut *list);
+        *list = panels
+            .into_iter()
+            .map(|(id, title)| {
+                let interned = known
+                    .iter()
+                    .find(|(_, t)| **t == *title)
+                    .map(|(_, t)| *t)
+                    .unwrap_or_else(|| Box::leak(title.into_boxed_str()));
+                (id, interned)
+            })
+            .collect();
+    });
+}
+pub fn contributed_panels() -> Vec<String> {
+    CONTRIBUTED.with(|list| list.borrow().iter().map(|(id, _)| id.clone()).collect())
+}
+fn contributed_title(id: &str) -> Option<&'static str> {
+    CONTRIBUTED.with(|list| list.borrow().iter().find(|(p, _)| p == id).map(|(_, t)| *t))
+}
+/// Built-ins, then contributions, in Window ▸ Panels order.
+pub fn all_panels() -> Vec<String> {
+    PANELS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .chain(contributed_panels())
+        .collect()
+}
 pub fn panel_title(id: &str) -> &str {
+    if let Some(title) = contributed_title(id) {
+        return title;
+    }
     match id {
         "assets" => "Project",
         "layer-effects" => "Effect Controls",

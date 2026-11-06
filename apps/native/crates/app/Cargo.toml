@@ -32,6 +32,8 @@ serde_json = "1"
 tempfile = "3"
 
 pm-builtins = { path = "../builtins" }
+pm-compat-runner = { path = "../compat-runner", features = ["macos-sandbox"] }
+pm-compat-host = { path = "../compat-host" }
 pm-surface = { path = "../surface" }
 pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"

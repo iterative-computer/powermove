@@ -22,6 +22,7 @@ struct CompositionView {
 
 pub struct Controller {
     pub builtins: crate::builtins::Host,
+    pub extensions: crate::extensions::Extensions,
     /// Per-composition navigation view, scoped to the live document identity.
     composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
     pub kernel: KernelHandle,
@@ -102,8 +103,16 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::library(v, id, bounds, cx).or_else(|| v.builtin_panel(id, bounds, w, cx))
+            panels::library(v, id, bounds, cx)
+                .or_else(|| v.extension_panel(id, bounds, cx))
+                .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
+    }
+    fn native_panel(&self, id: &str, cx: &App) -> bool {
+        self.0.read(cx).extensions.owns_panel(id)
+    }
+    fn open_panels(&self, open: &[&str], cx: &mut App) {
+        self.0.update(cx, |v, _| v.sync_extension_panels(open));
     }
     fn header(
         &self,
@@ -221,6 +230,7 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         Self {
             builtins: Default::default(),
+            extensions: Default::default(),
             composition_views: Default::default(),
             kernel,
             engine,
@@ -852,6 +862,9 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.extension_command(cmd) {
+            return true;
+        }
         match cmd.name.as_str() {
             "v4.platform" => self.builtin_platform(window, cx),
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),

@@ -697,6 +697,10 @@ impl EngineProxy for NativeHost {
             state.bindings = bindings;
             return Ok(Value::Null);
         }
+        if operation == "recorder.command" {
+            // Canvas strokes change presented pixels without a DOM mutation.
+            self.events.dom_ready();
+        }
         if operation.starts_with("recorder.") {
             return self.recorder(operation, input);
         }

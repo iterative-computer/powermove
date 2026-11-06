@@ -188,6 +188,8 @@ pub(crate) struct Panel {
 pub(crate) struct Panels {
     pub items: BTreeMap<PanelId, Panel>,
     pub viewport: Rect,
+    /// One document can show through several shell rectangles; empty means its slots.
+    pub regions: Vec<Rect>,
 }
 #[cfg(any(target_os = "macos", test))]
 impl Panels {
@@ -222,10 +224,18 @@ impl Panels {
             .map(|r| r.intersection(self.viewport))
             .filter(|r| r.w > 0. && r.h > 0.)
             .collect();
-        let mut visible_union: Vec<_> = panels
-            .iter()
-            .map(|(_, s)| s.visible().intersection(self.viewport))
-            .collect();
+        let mut visible_union: Vec<_> = if self.regions.is_empty() {
+            panels
+                .iter()
+                .map(|(_, s)| s.visible().intersection(self.viewport))
+                .collect()
+        } else {
+            self.regions
+                .iter()
+                .map(|r| r.intersection(self.viewport))
+                .filter(|r| r.w > 0. && r.h > 0.)
+                .collect()
+        };
         visible_union.extend(overlay_holes.iter().copied());
         CompositionSnapshot {
             panels,
@@ -261,6 +271,19 @@ mod tests {
             clip: Rect::new(10., 20., 60., 100.),
             reading_order: order,
         });
+    }
+    #[test]
+    fn regions_replace_the_slot_for_a_shared_document() {
+        let mut p = Panels {
+            viewport: Rect::new(0., 0., 400., 400.),
+            ..Panels::default()
+        };
+        panel(&mut p, 1, 0);
+        p.regions = vec![Rect::new(0., 0., 50., 50.), Rect::new(300., 300., 200., 200.)];
+        assert_eq!(
+            p.snapshot().visible_union,
+            vec![Rect::new(0., 0., 50., 50.), Rect::new(300., 300., 100., 100.)]
+        );
     }
     #[test]
     fn logical_lifecycle_and_duplicates() {

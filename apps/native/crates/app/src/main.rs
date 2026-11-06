@@ -5,6 +5,7 @@ mod diag;
 #[path = "surfaces/dialogs.rs"]
 pub mod dialogs;
 mod export_coordinator;
+mod extensions;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;

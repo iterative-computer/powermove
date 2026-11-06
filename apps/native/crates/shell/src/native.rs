@@ -515,13 +515,13 @@ fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
         }
         MenuKind::Panels => {
             menu.removeAllItems();
-            for id in crate::layout::PANELS {
+            for id in crate::layout::all_panels() {
                 let item = named_item(
                     mtm,
-                    crate::layout::panel_title(id),
+                    crate::layout::panel_title(&id),
                     &format!("panel:toggle:{id}"),
                 );
-                item.setState(if state.open.iter().any(|o| o == id) {
+                item.setState(if state.open.iter().any(|o| *o == id) {
                     NSControlStateValueOn
                 } else {
                     NSControlStateValueOff
@@ -843,6 +843,16 @@ pub struct Host {
     pub palette: Rc<RefCell<Popup>>,
     pub fields: Rc<RefCell<Popup>>,
     base_choices: Vec<Choice>,
+    /// Commands contributed at runtime, listed in the palette after built-ins.
+    pub contributed_choices: Vec<Choice>,
+    /// Rectangles of panel bodies a native surface below GPUI draws.
+    pub native_panels: Rc<RefCell<Vec<crate::layout::Rect>>>,
+    /// Runs inside the composition transaction, with the window size.
+    pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
+    /// True when a native surface must receive this window point.
+    pub native_hit: Option<Rc<dyn Fn(f64, f64) -> bool>>,
+    /// Native views to expose in reading order after GPUI's.
+    pub native_accessibility: Vec<Retained<NSView>>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -1015,6 +1025,11 @@ impl Host {
             palette,
             fields,
             base_choices: choices,
+            contributed_choices: vec![],
+            native_panels: Rc::default(),
+            native_present: None,
+            native_hit: None,
+            native_accessibility: vec![],
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             title,
@@ -1022,6 +1037,7 @@ impl Host {
         }));
         let weak = Rc::downgrade(&host);
         let hit_rect = host.borrow().viewer_rect.clone();
+        let native_rects = host.borrow().native_panels.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
@@ -1034,6 +1050,10 @@ impl Host {
                 !hit_rect
                     .get()
                     .is_some_and(|r| r.contains(p.x as f32, p.y as f32))
+                    && !native_rects
+                        .borrow()
+                        .iter()
+                        .any(|r| r.contains(p.x as f32, p.y as f32))
             }),
         );
         host.borrow_mut().registration = Some(reg);
@@ -1464,6 +1484,18 @@ impl Host {
             .bindings
             .sort_by_key(|b| std::cmp::Reverse(b.priority));
     }
+    /// The view native surfaces install beside the viewer, below GPUI.
+    pub fn native_container(&self) -> Retained<NSView> {
+        self.content.clone()
+    }
+    pub fn set_contributed_bindings(
+        &mut self,
+        owner: &str,
+        bindings: impl IntoIterator<Item = crate::keyboard::Binding>,
+    ) {
+        self.resolver.bindings.retain(|b| !b.id.starts_with(owner));
+        self.add_bindings(bindings);
+    }
     pub fn viewer_layer(&self) -> metal::MetalLayer {
         self.layer.clone()
     }
@@ -1519,14 +1551,23 @@ impl Host {
             }
             self.last_geometry = Some(geometry);
         }
-        gpui_macos::composition::publish_accessibility(
-            &self.gpui,
-            vec![
-                gpui_macos::composition::AccessibilityItem::RemainingGpui,
-                gpui_macos::composition::AccessibilityItem::Native(self.viewer.clone()),
-            ],
+        let bounds = self.content.bounds().size;
+        let native = self
+            .native_present
+            .as_ref()
+            .is_some_and(|present| present(bounds.width, bounds.height));
+        let mut order = vec![
+            gpui_macos::composition::AccessibilityItem::RemainingGpui,
+            gpui_macos::composition::AccessibilityItem::Native(self.viewer.clone()),
+        ];
+        order.extend(
+            self.native_accessibility
+                .iter()
+                .cloned()
+                .map(gpui_macos::composition::AccessibilityItem::Native),
         );
-        moved.into()
+        gpui_macos::composition::publish_accessibility(&self.gpui, order);
+        (moved || native).into()
     }
     pub fn frame(&self) -> [f64; 4] {
         let f = self.window.frame();
@@ -1641,8 +1682,8 @@ impl Host {
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
-        for id in crate::layout::PANELS {
-            let open = state.open.iter().any(|o| o == id);
+        for id in crate::layout::all_panels() {
+            let open = state.open.iter().any(|o| *o == id);
             if open && id == "viewer" {
                 continue;
             }
@@ -1650,11 +1691,12 @@ impl Host {
                 label: format!(
                     "{} {}",
                     if open { "Hide" } else { "Show" },
-                    crate::layout::panel_title(id)
+                    crate::layout::panel_title(&id)
                 ),
                 command: format!("panel:toggle:{id}"),
             });
         }
+        choices.extend(self.contributed_choices.iter().cloned());
         for name in &state.saved {
             choices.push(Choice {
                 label: format!("Layout: {name}"),

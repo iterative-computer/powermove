@@ -49,6 +49,7 @@ enum Input {
     Moved(bool, bool),
     Run(String, Value),
     Panel(String, bool),
+    Place(String, [f32; 4]),
     Page(Value),
     Dom,
     Enabled(String, bool),
@@ -88,6 +89,7 @@ struct Events {
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
     activating: Mutex<Option<String>>,
+    dom_pending: AtomicBool,
 }
 impl RealmEvents for Arc<Events> {
     fn health(&self, id: &str, health: &Value) {
@@ -106,7 +108,9 @@ impl RealmEvents for Arc<Events> {
         self.shared.update(|p| p.contributions = Some(Arc::new(value)));
     }
     fn dom_ready(&self) {
-        let _ = self.inbox.send(Input::Dom);
+        if !self.dom_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.inbox.send(Input::Dom);
+        }
     }
     fn ready(&self) {
         self.shared.update(|p| p.ready = true);
@@ -159,6 +163,7 @@ impl ExtensionHost {
             realm: None,
             router: None,
             records: vec![],
+            canvases: BTreeMap::new(),
             config,
         };
         let worker = thread::Builder::new()
@@ -218,6 +223,17 @@ impl ExtensionHost {
     /// Page feedback. Called from AppKit: only enqueues.
     pub fn page_message(&self, message: Value) {
         let _ = self.inbox.send(Input::Page(message));
+    }
+    /// A sendable handle to `page_message` for a forwarding thread.
+    pub fn page_sink(&self) -> impl Fn(Value) + Send + 'static + use<> {
+        let inbox = self.inbox.clone();
+        move |message| {
+            let _ = inbox.send(Input::Page(message));
+        }
+    }
+    /// Window position of a contributed panel's root, in points.
+    pub fn place_panel(&self, id: &str, rect: [f32; 4]) {
+        let _ = self.inbox.send(Input::Place(id.to_owned(), rect));
     }
     /// The app's clock moved. Cheap enough for every presented frame.
     pub fn publish_time(&self, time: f64, playing: bool) {
@@ -290,6 +306,7 @@ struct Owner {
     realm: Option<Live>,
     router: Option<RemoteDomPanel>,
     records: Vec<Value>,
+    canvases: BTreeMap<(u64, String), u64>,
 }
 impl Owner {
     fn run(mut self, input: Receiver<Input>) {
@@ -358,6 +375,9 @@ impl Owner {
                 );
                 self.eval(&source);
             }
+            Input::Place(id, rect) => {
+                self.eval(&format!("__compat.placePanel({},{})", json!(id), json!(rect)));
+            }
             Input::Moved(time, playing) => {
                 self.moved.store(false, Ordering::Release);
                 if let Some(live) = &self.realm {
@@ -424,6 +444,7 @@ impl Owner {
         let (Some(live), Some(router)) = (&self.realm, &mut self.router) else {
             return;
         };
+        live.events.dom_pending.store(false, Ordering::Release);
         for batch in live.host.take_dom_batches() {
             // A rejected tree is an extension fault; the page keeps its last state.
             let mut queue = PageQueue(&self.shared);
@@ -438,12 +459,21 @@ impl Owner {
                 }
             }
         }
-        if let Ok(frames) = live.host.canvas_frames()
-            && !frames.is_empty()
-        {
-            self.shared.update(|p| p.canvases.extend(frames));
-        } else {
+        let _ = crate::settled(&live.realm, "__compat.flushCanvases?.()", 5);
+        let frames: Vec<_> = live
+            .host
+            .canvas_frames()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|frame| {
+                let key = (frame.node, frame.surface.clone());
+                self.canvases.insert(key, frame.version) != Some(frame.version)
+            })
+            .collect();
+        if frames.is_empty() {
             (self.shared.wake)();
+        } else {
+            self.shared.update(|p| p.canvases.extend(frames));
         }
     }
     fn set_enabled(&mut self, id: &str, enabled: bool) {
@@ -511,6 +541,7 @@ impl Owner {
             shared: self.shared.clone(),
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
+            dom_pending: AtomicBool::new(false),
         });
         let adapter = KernelAdapter::new(
             self.config.kernel.clone(),
@@ -847,10 +878,16 @@ mod tests {
         );
         let fixture = Fixture::start(root);
         fixture.until("recovery", |host| {
-            host.contributions().is_some_and(|c| {
-                c["commands"].as_array().unwrap().iter().any(|c| c["id"] == "synthetic-good.run")
-            })
+            let stopped = host
+                .records()
+                .iter()
+                .any(|r| r["id"] == "synthetic-hangs" && r["health"]["state"] == "runtime-error");
+            stopped
+                && host.is_ready()
+                && host.contributions().is_some_and(|c| {
+                    c["commands"].as_array().unwrap().iter().any(|c| c["id"] == "synthetic-good.run")
+                })
         });
-        assert_eq!(fixture.health("synthetic-hangs"), "runtime-error");
+        assert_eq!(fixture.health("synthetic-good"), "ok");
     }
 }

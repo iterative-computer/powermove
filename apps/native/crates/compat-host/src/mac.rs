@@ -717,6 +717,18 @@ impl MacDomHost {
             Some(gpui),
         );
     }
+    /// Shell rectangles the shared document shows through this frame.
+    pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
+        if regions.len() > 256 || regions.iter().any(|r| !r.valid()) {
+            return Err(Error::InvalidGeometry);
+        }
+        let mut panels = self.shared.panels.borrow_mut();
+        if panels.regions != regions {
+            panels.regions = regions;
+            self.shared.geometry_dirty.set(true);
+        }
+        Ok(())
+    }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here. Returns the committed page geometry.
     pub fn present(&mut self, viewport: Rect) -> Result<CompositionSnapshot> {

@@ -27,6 +27,13 @@ pub trait Integration {
     ) -> Option<AnyElement> {
         None
     }
+    /// True when a native surface below GPUI draws this panel's body. The shell
+    /// leaves the body transparent and routes its pointer events to that surface.
+    fn native_panel(&self, _id: &str, _cx: &App) -> bool {
+        false
+    }
+    /// The workspace's open panels, after any layout change.
+    fn open_panels(&self, _open: &[&str], _cx: &mut App) {}
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);

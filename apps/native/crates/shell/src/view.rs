@@ -816,9 +816,9 @@ impl Editor {
     fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>) {
         let Some(h) = &self.host else { return };
         let open = self.layout.open_panels();
-        let items: Vec<_> = layout::PANELS
+        let items: Vec<_> = layout::all_panels()
             .iter()
-            .filter(|p| !open.contains(p))
+            .filter(|p| !open.contains(&p.as_str()))
             .map(|p| {
                 MenuEntry::item(
                     layout::panel_title(p),
@@ -1162,10 +1162,15 @@ impl Render for Editor {
             Some(Gesture::Panel(d)) if d.moved => Some(d.id.clone()),
             _ => None,
         };
+        if let Some(integration) = &self.integration {
+            integration.open_panels(&self.layout.open_panels(), cx);
+        }
+        let mut native_bodies = vec![];
         for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
             let is_viewer = id == "viewer";
+            let body_native = self.integration.as_ref().is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
             let tab_track = group.tab_track(p.rect.w - 2. * m.inset - m.hit, &t);
@@ -1183,7 +1188,14 @@ impl Render for Editor {
                 .border(px(m.border))
                 .border_color(rgb(c.separator))
                 .overflow_hidden();
-            if !is_viewer || !native {
+            if body_native {
+                native_bodies.push(Rect {
+                    x: p.rect.x + m.border,
+                    y: p.rect.y + m.header,
+                    w: (p.rect.w - m.border * 2.).max(0.),
+                    h: (p.rect.h - m.header - m.border).max(0.),
+                });
+            } else if !is_viewer || !native {
                 panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
             }
             // A panel may supply its own header content (viewer: pop-ups, no
@@ -1496,6 +1508,9 @@ impl Render for Editor {
                 panel = panel.child(empty);
             }
             root = root.child(panel);
+        }
+        if let Some(h) = &self.host {
+            *h.borrow().native_panels.borrow_mut() = native_bodies;
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();

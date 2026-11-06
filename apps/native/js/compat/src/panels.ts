@@ -48,6 +48,16 @@ export class CompatPanels {
       entry.root.remove();
     }
   }
+  /** Window points of the shell's panel body. The root is host-owned geometry. */
+  place = (id: string, rect: [number, number, number, number]) => {
+    const [x, y, w, h] = rect;
+    this.openPanels
+      .get(id)
+      ?.root.setAttribute(
+        "style",
+        `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`,
+      );
+  };
   close = (id: string) => {
     this.hidden.add(id);
     this.remove(id);
