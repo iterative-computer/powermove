@@ -7,11 +7,13 @@
 //   4:2:0; then the matrix.
 // - Transfer and primaries into the working encoding. In Standard an
 //   E-encoded Rec.709 source is the identity: code values pass through.
-//   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 and tone
-//   mapped with the BT.2390 EETF to linear light with SDR white at 1.0
-//   (pm_color::tonemap's WGSL is prepended too); the primaries columns
-//   then convert the source's primaries to Rec.709. Transfer 7 is a pure
-//   power with the exponent in `hdr.z` (PNG gAMA).
+//   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 to linear
+//   light with SDR white at 1.0: kept whole in HDR projects (`hdr.w`), tone
+//   mapped with the BT.2390 EETF otherwise (pm_color::tonemap's WGSL is
+//   prepended too). The primaries columns then convert the source's
+//   primaries to Rec.709. Transfer 7 is a pure power with the exponent in
+//   `hdr.z` (PNG gAMA). Transfers 10 to 14 are camera log curves
+//   (pm_color::camera_log's WGSL is prepended).
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -36,8 +38,8 @@ struct Params {
     p2: vec4<f32>,
     // Matte color for "premultiplied with color".
     matte: vec4<f32>,
-    // HDR tone mapping: x the content peak in cd/m²; y 1 for BT.2020
-    // constant luminance; z the exponent of the pure power transfer (7).
+    // HDR: x the content peak in cd/m²; y 1 for BT.2020 constant luminance;
+    // z the exponent of the pure power transfer (7); w 1 to keep HDR light.
     hdr: vec4<f32>,
 };
 
@@ -157,6 +159,9 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
             // A pure power (PNG gAMA alone), odd-symmetric.
             return sign(c) * pow(abs(c), vec3<f32>(P.hdr.z));
         }
+        case 10u, 11u, 12u, 13u, 14u: {
+            return pm_camera_log_decode3(c, P.a.y);
+        }
         default: {
             return c;
         }
@@ -167,15 +172,20 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 // SDR transfers are extended and sign-preserving, so superwhites and
 // sub-blacks survive linearisation and any primaries conversion for every
 // reading; only 8-bit storage or display clips them. PQ and HLG are defined
-// on 0..1, so the tone map's input is clipped.
+// on 0..1, so their signal is clipped.
 fn to_working(c: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
         return c;
     }
     if (P.a.y == 5u || P.a.y == 6u) {
-        let sdr = pm_hdr_to_sdr(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), P.a.y == 6u, P.hdr.x);
-        let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * sdr;
+        let signal = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+        let light = select(
+            pm_hdr_to_sdr(signal, P.a.y == 6u, P.hdr.x),
+            pm_hdr_to_working(signal, P.a.y == 6u),
+            P.hdr.w == 1.0,
+        );
+        let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * light;
         if (P.a.z == 0u) {
             return pm_e_encode3(l);
         }

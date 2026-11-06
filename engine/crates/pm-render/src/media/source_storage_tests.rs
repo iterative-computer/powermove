@@ -14,6 +14,36 @@ fn source(
     precision: Precision,
     format: wgpu::TextureFormat,
 ) -> Target {
+    let color = SourceColor {
+        transfer: Transfer::DisplayE,
+        primaries: Primaries::Bt709,
+        matrix: MatrixCoefficients::Identity,
+        siting: ChromaSiting::Left,
+        alpha: AlphaMode::Opaque,
+        tone_map: None,
+        chromaticities: None,
+        power: None,
+    };
+    source_read(
+        gpu,
+        pipelines,
+        pixels,
+        &color,
+        WorkingEncoding::Standard,
+        precision,
+        format,
+    )
+}
+
+fn source_read(
+    gpu: &pm_gpu::Gpu,
+    pipelines: &Pipelines,
+    pixels: &[[f32; 4]],
+    color: &SourceColor,
+    working: WorkingEncoding,
+    precision: Precision,
+    format: wgpu::TextureFormat,
+) -> Target {
     let width = u32::try_from(pixels.len()).unwrap();
     let input = Target::new(
         &gpu.device,
@@ -45,16 +75,6 @@ fn source(
     let normalized = Normalized::Rgb {
         rgba: input.texture,
     };
-    let color = SourceColor {
-        transfer: Transfer::DisplayE,
-        primaries: Primaries::Bt709,
-        matrix: MatrixCoefficients::Identity,
-        siting: ChromaSiting::Left,
-        alpha: AlphaMode::Opaque,
-        tone_map: None,
-        chromaticities: None,
-        power: None,
-    };
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -66,8 +86,8 @@ fn source(
         pipelines,
         &mut encoder,
         &normalized,
-        &color,
-        WorkingEncoding::Standard,
+        color,
+        working,
         precision,
         Factors { x: 1, y: 1 },
         None,
@@ -77,6 +97,146 @@ fn source(
     );
     gpu.queue.submit([encoder.finish()]);
     target
+}
+
+/// BT.709 linear from linear light in `gamut`, through the reference's
+/// matrices (pm_reference shares no code with pm-color).
+fn to_rec709(gamut: &pm_reference::color::Primaries, light: [f64; 3]) -> [f64; 3] {
+    use pm_reference::color::{Primaries as P, apply, invert, mul};
+    apply(&mul(&invert(&P::BT709.to_xyz()), &gamut.to_xyz()), light)
+}
+
+#[test]
+fn camera_log_reaches_the_working_space_as_the_vendor_transform_says() {
+    use pm_reference::camera_log::Curve;
+    use pm_reference::color::Primaries as P;
+    let gpu = pm_gpu::Gpu::new("camera log test").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let pixels: Vec<[f32; 4]> = (0..24)
+        .map(|i| {
+            let v = i as f32 / 20.0;
+            [v, (0.2 + 0.7 * v).min(1.1), 0.9 - 0.5 * v, 1.0]
+        })
+        .collect();
+    for (transfer, curve, primaries, gamut) in [
+        (
+            Transfer::AppleLog,
+            Curve::AppleLog,
+            Primaries::Bt2020,
+            P::BT2020,
+        ),
+        (
+            Transfer::SLog3,
+            Curve::SLog3,
+            Primaries::SGamut3Cine,
+            P::S_GAMUT3_CINE,
+        ),
+        (
+            Transfer::SLog3,
+            Curve::SLog3,
+            Primaries::SGamut3,
+            P::S_GAMUT3,
+        ),
+        (Transfer::VLog, Curve::VLog, Primaries::VGamut, P::V_GAMUT),
+        (Transfer::LogC3, Curve::LogC3, Primaries::AwgGen3, P::AWG3),
+        (Transfer::LogC4, Curve::LogC4, Primaries::AwgGen4, P::AWG4),
+    ] {
+        let color = SourceColor {
+            transfer,
+            primaries,
+            matrix: MatrixCoefficients::Identity,
+            siting: ChromaSiting::Left,
+            alpha: AlphaMode::Opaque,
+            tone_map: None,
+            chromaticities: None,
+            power: None,
+        };
+        let target = source_read(
+            &gpu,
+            &pipelines,
+            &pixels,
+            &color,
+            WorkingEncoding::LinearLight,
+            Precision::Float32,
+            wgpu::TextureFormat::Rgba32Float,
+        );
+        let actual = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
+        for (i, p) in pixels.iter().enumerate() {
+            let expected = to_rec709(
+                &gamut,
+                [p[0], p[1], p[2]].map(|v| curve.to_linear(f64::from(v))),
+            );
+            for c in 0..3 {
+                let a = f64::from(actual[i * 4 + c]);
+                assert!(
+                    (a - expected[c]).abs() <= 4e-6 + 4e-6 * expected[c].abs(),
+                    "{transfer:?} {primaries:?} pixel {i}: {a} {}",
+                    expected[c]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hdr_projects_keep_bt2100_light_and_sdr_projects_tone_map_it() {
+    use pm_reference::color::{Primaries as P, Transfer as T};
+    let gpu = pm_gpu::Gpu::new("hdr light test").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let pixels: Vec<[f32; 4]> = (0..21)
+        .map(|i| {
+            let v = i as f32 / 20.0;
+            [v, v * 0.8, v * 0.6, 1.0]
+        })
+        .collect();
+    let mut color = SourceColor {
+        transfer: Transfer::Pq,
+        primaries: Primaries::Bt2020,
+        matrix: MatrixCoefficients::Identity,
+        siting: ChromaSiting::Left,
+        alpha: AlphaMode::Opaque,
+        tone_map: None,
+        chromaticities: None,
+        power: None,
+    };
+    let read = |color: &SourceColor, pixels: &[[f32; 4]]| {
+        let target = source_read(
+            &gpu,
+            &pipelines,
+            pixels,
+            color,
+            WorkingEncoding::LinearLight,
+            Precision::Float32,
+            wgpu::TextureFormat::Rgba32Float,
+        );
+        read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap()
+    };
+    let kept = read(&color, &pixels);
+    for (i, p) in pixels.iter().enumerate() {
+        let nits = [p[0], p[1], p[2]].map(|v| T::Pq.to_linear(f64::from(v)) * 10000.0 / 203.0);
+        let expected = to_rec709(&P::BT2020, nits);
+        for c in 0..3 {
+            let a = f64::from(kept[i * 4 + c]);
+            assert!(
+                (a - expected[c]).abs() <= 1e-5 + 1e-4 * expected[c].abs(),
+                "pixel {i}: {a} {}",
+                expected[c]
+            );
+        }
+    }
+    assert!(kept.iter().step_by(4).copied().fold(0.0, f32::max) > 40.0);
+    color.tone_map = Some(ToneMap {
+        transfer: Transfer::Pq,
+        peak_nits: 1000.0,
+    });
+    let neutral: Vec<[f32; 4]> = (0..21)
+        .map(|i| {
+            let v = i as f32 / 20.0;
+            [v, v, v, 1.0]
+        })
+        .collect();
+    let mapped = read(&color, &neutral);
+    assert!(mapped.iter().step_by(4).copied().fold(0.0, f32::max) <= 1.0001);
 }
 
 #[test]

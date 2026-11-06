@@ -25,6 +25,7 @@ pub(crate) const FLAG_BLEND_IN_E: i32 = 32;
 pub(crate) const FLAG_SRGB8: i32 = 64;
 pub(crate) const FLAG_PATH_MASKS: i32 = 128;
 pub(crate) const FLAG_FLIP: i32 = 256;
+pub(crate) const FLAG_TONE_MAP: i32 = 512;
 /// Which fragment entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -68,10 +69,11 @@ pub(crate) struct OpPipelines {
 impl OpPipelines {
     pub fn new(device: &wgpu::Device) -> OpPipelines {
         let code = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             pm_color::wgsl::COLOR,
             pm_color::wgsl::BLEND,
             pm_color::wgsl::CSS_GAMUT,
+            pm_color::tonemap::wgsl(),
             crate::nearest_half::NEAREST_HALF_WGSL,
             include_str!("../shaders/scene_output.wgsl"),
             include_str!("ops.wgsl")

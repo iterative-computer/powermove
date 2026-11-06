@@ -241,10 +241,14 @@ fn pq_and_hlg_are_encoded_and_tagged_as_bt2100() {
         return;
     }
     for tags in [
-        ColorTags::Rec2100Pq { white_nits: 203 },
+        ColorTags::Rec2100Pq {
+            white_nits: 203,
+            metadata: None,
+        },
         ColorTags::Rec2100Hlg {
             white_nits: 203,
             peak_nits: 1000,
+            metadata: None,
         },
     ] {
         let t = Temp::new();
@@ -468,7 +472,10 @@ fn unsupported_hevc_alpha_and_eight_bit_hdr_fail_before_work() {
     s.alpha = AlphaOutput::Straight;
     assert!(software::SoftwareSink::new(&s).is_err());
     s.alpha = AlphaOutput::None;
-    s.tags = ColorTags::Rec2100Pq { white_nits: 203 };
+    s.tags = ColorTags::Rec2100Pq {
+        white_nits: 203,
+        metadata: None,
+    };
     assert!(s.validate().is_err());
     assert_eq!(std::fs::read_dir(&t.0).unwrap().count(), 0);
 }
@@ -602,7 +609,10 @@ fn hdr_neutral_highlights_decode_to_standard_signal_values() {
     }
     for (tags, levels, signals) in [
         (
-            ColorTags::Rec2100Pq { white_nits: 100 },
+            ColorTags::Rec2100Pq {
+                white_nits: 100,
+                metadata: None,
+            },
             [1.0, 10.0, 40.0],
             [0.5080784215, 0.7518270962, 0.9025723933],
         ),
@@ -610,6 +620,7 @@ fn hdr_neutral_highlights_decode_to_standard_signal_values() {
             ColorTags::Rec2100Hlg {
                 white_nits: 203,
                 peak_nits: 1000,
+                metadata: None,
             },
             [0.0, 1.0, 1000.0 / 203.0],
             [0.0, 0.75, 1.0],

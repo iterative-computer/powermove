@@ -18,13 +18,6 @@ pub mod worker;
 #[path = "../../../../../engine/crates/pm-media/src/proxy.rs"]
 pub mod proxy;
 
-// Lane ownership excludes pm-color/lib.rs. Compile the actual engine sources
-// here until the colour owner exports these modules from pm-color.
-#[path = "../../../../../engine/crates/pm-color/src/lut.rs"]
-pub mod lut;
-#[path = "../../../../../engine/crates/pm-color/src/scopes.rs"]
-pub mod scopes;
-
 // Process-local lifetimes fence late work after a catalog/queue is replaced.
 pub(crate) fn next_epoch() -> u64 {
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

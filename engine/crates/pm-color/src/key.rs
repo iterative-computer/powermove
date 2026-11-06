@@ -44,6 +44,11 @@ fn transfer_id(t: Transfer) -> u8 {
         Transfer::Hlg => 6,
         Transfer::Log100 => 7,
         Transfer::Log316 => 8,
+        Transfer::AppleLog => 9,
+        Transfer::SLog3 => 10,
+        Transfer::VLog => 11,
+        Transfer::LogC3 => 12,
+        Transfer::LogC4 => 13,
     }
 }
 

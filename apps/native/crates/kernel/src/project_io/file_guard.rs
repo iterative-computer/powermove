@@ -187,6 +187,7 @@ fn project_needs_native<T: JsonTree>(root: &T) -> bool {
         if field(project, "color").is_some_and(|color| {
             is_true(field(color, "linearBlending"))
                 || text(field(color, "blendDomain")) == Some("displayEncoded")
+                || text(field(color, "mode")) == Some("hdr")
         }) {
             return true;
         }
@@ -501,6 +502,7 @@ mod tests {
         for color in [
             r#"{"linearBlending":true}"#,
             r#"{"blendDomain":"displayEncoded"}"#,
+            r#"{"mode":"hdr"}"#,
         ] {
             let mut p = project(r#"{"id":"L","type":"shape"}"#);
             p.as_object_mut()

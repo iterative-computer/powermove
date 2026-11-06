@@ -67,6 +67,21 @@ pub enum Codec {
 fn eight() -> u8 {
     8
 }
+/// How a delivery carries light. HDR needs an HDR project and a 10-bit codec;
+/// elsewhere the choice stays dormant, like every other format-only field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DynamicRange {
+    #[default]
+    Sdr,
+    Pq,
+    Hlg,
+}
+impl DynamicRange {
+    pub fn is_sdr(&self) -> bool {
+        *self == Self::Sdr
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scale {
@@ -95,6 +110,8 @@ pub struct Options {
     /// PNG bits per channel, 8 or 16.
     #[serde(default = "eight")]
     pub depth: u8,
+    #[serde(default, skip_serializing_if = "DynamicRange::is_sdr")]
+    pub dynamic_range: DynamicRange,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -134,6 +151,11 @@ impl Options {
         Ok(Intent {
             options: self.clone(),
             audio: video && has_audio && self.audio,
+            dynamic_range: if matches!(self.format, Format::Prores | Format::Mp4) {
+                self.dynamic_range
+            } else {
+                DynamicRange::Sdr
+            },
             straight_alpha: match self.format {
                 Format::Prores => self.profile.engine().supports_alpha(),
                 Format::Png | Format::Still => true,
@@ -153,6 +175,7 @@ impl Options {
 pub struct Intent {
     pub options: Options,
     pub audio: bool,
+    pub dynamic_range: DynamicRange,
     pub straight_alpha: bool,
     pub motion_blur: bool,
     pub burn_captions: bool,
@@ -176,6 +199,11 @@ impl Intent {
             Format::Prores => ExportFormat::ProRes {
                 profile: self.options.profile.engine(),
             },
+            // H.264 has no HDR profile on VideoToolbox: HDR delivers HEVC Main 10.
+            Format::Mp4 if !self.dynamic_range.is_sdr() => ExportFormat::Hevc {
+                ten_bit: true,
+                container: Container::Mp4,
+            },
             Format::Mp4 => match self.options.codec {
                 Codec::H264 => ExportFormat::H264,
                 Codec::Hevc => ExportFormat::Hevc {
@@ -188,6 +216,11 @@ impl Intent {
             },
             Format::Png => ExportFormat::PngSequence { sixteen_bit },
             Format::Still => ExportFormat::PngStill { sixteen_bit },
+        };
+        planned.color = match self.dynamic_range {
+            DynamicRange::Sdr => planned.color,
+            DynamicRange::Pq => pm_protocol::color::OutputColor::Rec2100Pq,
+            DynamicRange::Hlg => pm_protocol::color::OutputColor::Rec2100Hlg,
         };
         planned.alpha = if self.straight_alpha {
             AlphaOutput::Straight

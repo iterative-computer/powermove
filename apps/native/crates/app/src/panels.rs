@@ -3,6 +3,11 @@ use crate::session::Controller;
 use gpui::{prelude::*, *};
 use pm_shell::layout::Rect;
 
+/// The Scopes panel beside the viewer (Window ▸ Panels ▸ Scopes).
+pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Option<AnyElement> {
+    (id == "scopes").then(|| v.scopes_panel(cx))
+}
+
 pub fn library(
     v: &mut Controller,
     id: &str,

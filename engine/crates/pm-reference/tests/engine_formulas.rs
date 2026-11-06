@@ -326,3 +326,60 @@ fn range_normalization_agrees_at_12_and_16_bits() {
         }
     }
 }
+
+#[test]
+fn camera_log_curves_agree_with_the_independent_reference() {
+    use pm_protocol::color::Transfer as Engine;
+    use pm_reference::camera_log::Curve;
+    for (engine, curve) in [
+        (Engine::AppleLog, Curve::AppleLog),
+        (Engine::SLog3, Curve::SLog3),
+        (Engine::VLog, Curve::VLog),
+        (Engine::LogC3, Curve::LogC3),
+        (Engine::LogC4, Curve::LogC4),
+    ] {
+        for i in -512..=5120 {
+            let code = f64::from(i) / 4096.0;
+            let reference = curve.to_linear(code);
+            let actual = pm_color::camera_log::decode(engine, code).unwrap();
+            assert!(
+                (actual - reference).abs() <= 1e-12 * reference.abs().max(1.0),
+                "{engine:?} at {code}: {actual} {reference}"
+            );
+            if engine != Engine::AppleLog || code >= 0.0 {
+                let back = pm_color::camera_log::encode(engine, reference).unwrap();
+                assert!((back - code).abs() < 1e-9, "{engine:?} at {code}: {back}");
+            }
+        }
+    }
+}
+
+#[test]
+fn vendor_gamuts_agree_with_the_independent_reference() {
+    use pm_protocol::color::Primaries as Engine;
+    for (engine, reference) in [
+        (Engine::SGamut3, Primaries::S_GAMUT3),
+        (Engine::SGamut3Cine, Primaries::S_GAMUT3_CINE),
+        (Engine::VGamut, Primaries::V_GAMUT),
+        (Engine::AwgGen3, Primaries::AWG3),
+        (Engine::AwgGen4, Primaries::AWG4),
+    ] {
+        let actual = pm_color::primaries::conversion(engine, Engine::Bt709).unwrap();
+        let (from, to) = (reference.to_xyz(), Primaries::BT709.to_xyz());
+        let expected = color::mul(&color::invert(&to), &from);
+        for (row, want) in actual.iter().zip(expected) {
+            for (a, b) in row.iter().zip(want) {
+                assert!((a - b).abs() < 1e-9, "{engine:?}: {a} {b}");
+            }
+        }
+    }
+}
+
+#[test]
+fn dci_white_adapts_to_d65() {
+    use pm_protocol::color::Primaries as Engine;
+    let m = pm_color::primaries::conversion(Engine::DciP3, Engine::Bt709).unwrap();
+    for c in pm_color::primaries::apply(&m, [1.0; 3]) {
+        assert!((c - 1.0).abs() < 1e-9, "{c}");
+    }
+}

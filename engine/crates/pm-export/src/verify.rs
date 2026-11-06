@@ -102,6 +102,7 @@ pub struct Expected {
     pub codec: Codec,
     pub container: Container,
     pub cicp: (u16, u16, u16),
+    pub hdr: Option<crate::settings::HdrMetadata>,
     pub alpha: AlphaOutput,
     pub frames: u64,
     pub timing: VideoTiming,
@@ -121,6 +122,7 @@ impl Expected {
             codec: spec.codec,
             container: spec.container,
             cicp: spec.tags.cicp(),
+            hdr: spec.tags.hdr_metadata(),
             alpha: spec.alpha,
             frames: spec.frames,
             timing,
@@ -470,6 +472,14 @@ pub fn check(
             "colr {}-{}-{}, expected {}-{}-{}",
             cicp.0, cicp.1, cicp.2, expected.cicp.0, expected.cicp.1, expected.cicp.2
         ));
+    }
+    if let Some(hdr) = expected.hdr {
+        if visual.mdcv != Some(hdr.mdcv()) {
+            fail(format!("mdcv {:?}, expected {:?}", visual.mdcv, hdr.mdcv()));
+        }
+        if hdr.max_cll != 0 && visual.clli != Some(hdr.clli()) {
+            fail(format!("clli {:?}, expected {:?}", visual.clli, hdr.clli()));
+        }
     }
     let mut full_range = visual
         .colr

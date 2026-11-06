@@ -289,14 +289,67 @@ pub enum ColorTags {
     /// CICP 1-13-0, full range RGB: sRGB images (PNG `sRGB` and `cICP`).
     SrgbImage,
     /// BT.2100 PQ, linear working value 1 maps to explicit diffuse white (nits).
-    Rec2100Pq { white_nits: u16 },
+    Rec2100Pq {
+        white_nits: u16,
+        metadata: Option<HdrMetadata>,
+    },
     /// BT.2100 HLG, explicit diffuse white and mastering display peak (nits).
-    Rec2100Hlg { white_nits: u16, peak_nits: u16 },
+    Rec2100Hlg {
+        white_nits: u16,
+        peak_nits: u16,
+        metadata: Option<HdrMetadata>,
+    },
     /// CICP 1-1-0, full range RGB: Rec.709 images (PNG `cICP`).
     Rec709Image,
 }
 
+/// What an HDR output says about its light: SMPTE ST 2086 mastering display
+/// and CTA-861.3 content light level, in their wire units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HdrMetadata {
+    /// Green, blue, red chromaticities in 0.00002 steps (x, y).
+    pub primaries: [[u16; 2]; 3],
+    /// White in 0.00002 steps (x, y).
+    pub white: [u16; 2],
+    /// In 0.0001 cd/m² steps.
+    pub max_luminance: u32,
+    pub min_luminance: u32,
+    /// Maximum content and frame-average light levels in cd/m²; 0 is unknown.
+    pub max_cll: u16,
+    pub max_fall: u16,
+}
+
+impl HdrMetadata {
+    /// The payload of `mdcv`, and of VideoToolbox's and CoreVideo's mastering
+    /// display colour volume.
+    pub fn mdcv(&self) -> [u8; 24] {
+        let mut out = [0; 24];
+        let values = self.primaries.into_iter().flatten().chain(self.white);
+        for (slot, value) in out.chunks_exact_mut(2).zip(values) {
+            slot.copy_from_slice(&value.to_be_bytes());
+        }
+        out[16..20].copy_from_slice(&self.max_luminance.to_be_bytes());
+        out[20..24].copy_from_slice(&self.min_luminance.to_be_bytes());
+        out
+    }
+
+    /// The payload of `clli`.
+    pub fn clli(&self) -> [u8; 4] {
+        let [a, b] = self.max_cll.to_be_bytes();
+        let [c, d] = self.max_fall.to_be_bytes();
+        [a, b, c, d]
+    }
+}
+
 impl ColorTags {
+    /// The HDR metadata an output carries.
+    pub fn hdr_metadata(self) -> Option<HdrMetadata> {
+        match self {
+            Self::Rec2100Pq { metadata, .. } | Self::Rec2100Hlg { metadata, .. } => metadata,
+            _ => None,
+        }
+    }
+
     /// CICP transfer 1 uses the BT.709 OETF. Transfer 13 is sRGB E.
     pub fn bt709_transfer(self) -> bool {
         matches!(self, Self::Rec709Broadcast | Self::Rec709Image)

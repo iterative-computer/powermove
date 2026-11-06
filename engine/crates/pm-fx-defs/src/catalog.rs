@@ -132,9 +132,73 @@ pub struct EffectShader {
 pub fn main_effects() -> &'static MainEffects {
     static MAIN: OnceLock<MainEffects> = OnceLock::new();
     MAIN.get_or_init(|| {
-        serde_json::from_str(include_str!("main-effects.json"))
-            .expect("pinned main effect definitions")
+        let mut main: MainEffects = serde_json::from_str(include_str!("main-effects.json"))
+            .expect("pinned main effect definitions");
+        add_lut_revision(&mut main);
+        main
     })
+}
+
+/// The Apply Color LUT program, including its stated input and output spaces.
+const LUT_SOURCE: &str = include_str!("apply-color-lut.glsl");
+const LUT_SPACES: [&str; 9] = [
+    "Working",
+    "Rec.709 Linear",
+    "Apple Log (Rec.2020)",
+    "S-Log3 (S-Gamut3.Cine)",
+    "S-Log3 (S-Gamut3)",
+    "V-Log (V-Gamut)",
+    "LogC3 (AWG3)",
+    "LogC4 (AWG4)",
+    "PQ (Rec.2020)",
+];
+
+/// Revision 2 of Apply Color LUT, added here and not in main: tetrahedral
+/// cubes, 1D shapers and stated colour spaces. Revision 1 stays exact for files
+/// that saved it; new effects take revision 2.
+fn add_lut_revision(main: &mut MainEffects) {
+    let revision = main
+        .effects
+        .iter_mut()
+        .find(|e| e.id == "applyColorLut")
+        .expect("pinned Apply Color LUT");
+    let mut history = revision.clone();
+    history.metadata.insert("version".into(), Value::from(1));
+    let space = |k: &str, label: &str| -> Parameter {
+        serde_json::from_value(serde_json::json!({
+            "k": k,
+            "label": label,
+            "def": 0,
+            "min": 0,
+            "max": LUT_SPACES.len() - 1,
+            "step": 1,
+            "advanced": false,
+            "options": LUT_SPACES
+                .iter()
+                .enumerate()
+                .map(|(v, label)| serde_json::json!({ "v": v, "label": label }))
+                .collect::<Vec<_>>(),
+        }))
+        .expect("a LUT space parameter")
+    };
+    revision.params.push(space("inputSpace", "Input Space"));
+    revision.params.push(space("outputSpace", "Output Space"));
+    revision.metadata.insert("version".into(), Value::from(2));
+    revision.metadata.insert(
+        "legacy".into(),
+        Value::Array(vec![
+            serde_json::to_value(history).expect("a serializable definition"),
+        ]),
+    );
+    let (_, body) = LUT_SOURCE
+        .split_once("void main(){\n")
+        .expect("the LUT program's main");
+    revision.frag = body.trim_end().trim_end_matches('}').trim_end().to_owned();
+    main.shaders.push(EffectShader {
+        id: revision.id.clone(),
+        version: 2,
+        source: LUT_SOURCE.to_owned(),
+    });
 }
 pub fn main_catalog() -> &'static EffectCatalog {
     static CATALOG: OnceLock<EffectCatalog> = OnceLock::new();

@@ -128,6 +128,9 @@ fn append_menu(
         } else {
             NSControlStateValueOff
         });
+        if let Some(tooltip) = option.get("tooltip").and_then(Value::as_str) {
+            item.setToolTip(Some(&NSString::from_str(tooltip)));
+        }
         unsafe {
             item.setTarget(Some(target));
         }

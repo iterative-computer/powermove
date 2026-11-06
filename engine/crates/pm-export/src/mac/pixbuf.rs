@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_core_foundation::{CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFData, CFRetained, CFString, CFType};
 use objc2_core_video::*;
 use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
@@ -307,6 +307,18 @@ impl PixelBuffer {
             self.attach(kCVImageBufferColorPrimariesKey, primaries.as_ref());
             self.attach(kCVImageBufferTransferFunctionKey, transfer.as_ref());
             self.attach(kCVImageBufferYCbCrMatrixKey, matrix.as_ref());
+            if let Some(hdr) = tags.hdr_metadata() {
+                self.attach(
+                    kCVImageBufferMasteringDisplayColorVolumeKey,
+                    CFData::from_bytes(&hdr.mdcv()).as_ref(),
+                );
+                if hdr.max_cll != 0 {
+                    self.attach(
+                        kCVImageBufferContentLightLevelInfoKey,
+                        CFData::from_bytes(&hdr.clli()).as_ref(),
+                    );
+                }
+            }
             match alpha {
                 AlphaOutput::None => {}
                 AlphaOutput::Straight => self.attach(

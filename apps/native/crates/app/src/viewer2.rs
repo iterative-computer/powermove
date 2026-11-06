@@ -22,18 +22,27 @@ use std::{cell::RefCell, rc::Rc};
 pub enum OutputMode {
     #[default]
     Sdr,
+    /// An HDR project's light in the EDR layer, up to the display's headroom.
+    Edr,
     Pq,
     Hlg,
 }
-/// Explicit mastering peaks (nits). Dynamic display headroom never edits
-/// authored light; it is telemetry for WindowServer's display mapping.
+/// Explicit mastering peaks (nits) of an SDR project; an HDR project's come
+/// from the project. Dynamic display headroom never edits authored light; it
+/// is telemetry for WindowServer's display mapping.
 pub const SOURCE_PEAK: f32 = 1000.;
 pub const TARGET_PEAK: f32 = 1000.;
 impl OutputMode {
-    pub const ALL: [OutputMode; 3] = [OutputMode::Sdr, OutputMode::Pq, OutputMode::Hlg];
+    pub const ALL: [OutputMode; 4] = [
+        OutputMode::Sdr,
+        OutputMode::Edr,
+        OutputMode::Pq,
+        OutputMode::Hlg,
+    ];
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "sdr" | "linear" | "p3" => Some(Self::Sdr),
+            "edr" => Some(Self::Edr),
             "pq" | "hdr10" | "st2084" => Some(Self::Pq),
             "hlg" => Some(Self::Hlg),
             _ => None,
@@ -42,6 +51,7 @@ impl OutputMode {
     pub fn name(self) -> &'static str {
         match self {
             Self::Sdr => "sdr",
+            Self::Edr => "edr",
             Self::Pq => "pq",
             Self::Hlg => "hlg",
         }
@@ -49,6 +59,7 @@ impl OutputMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Sdr => "SDR (Extended Linear P3)",
+            Self::Edr => "HDR EDR (Extended Linear P3)",
             Self::Pq => "HDR PQ (BT.2100)",
             Self::Hlg => "HDR HLG (BT.2100)",
         }
@@ -56,6 +67,7 @@ impl OutputMode {
     pub fn mastering(self) -> Mastering {
         match self {
             Self::Sdr => Mastering::LinearP3,
+            Self::Edr => Mastering::Edr,
             Self::Pq => Mastering::Pq {
                 source_peak: SOURCE_PEAK,
                 target_peak: TARGET_PEAK,
@@ -142,6 +154,10 @@ pub enum Action {
     Popout,
     Media(MediaMode),
     ToggleProxies,
+    ApplyLut,
+    /// An index of [`crate::colour::CAMERA_LOGS`], or the file's own reading.
+    Interpret(Option<usize>),
+    CleanAperture,
 }
 /// View › Viewer Media, in the order of the menu.
 const MEDIA_MODES: [(MediaMode, &str); 4] = [
@@ -151,7 +167,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 11] = [
+    const ALL: [Action; 21] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -163,6 +179,16 @@ impl Action {
         Action::Media(MediaMode::ProxyPreferred),
         Action::Media(MediaMode::ProxyOnly),
         Action::ToggleProxies,
+        Action::Output(OutputMode::Edr),
+        Action::ApplyLut,
+        Action::Interpret(None),
+        Action::Interpret(Some(0)),
+        Action::Interpret(Some(1)),
+        Action::Interpret(Some(2)),
+        Action::Interpret(Some(3)),
+        Action::Interpret(Some(4)),
+        Action::Interpret(Some(5)),
+        Action::CleanAperture,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -262,6 +288,41 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
                 view.addItem(&item);
                 items.push((action, item));
             }
+            view.addItem(&NSMenuItem::separatorItem(mtm));
+            view.addItem(&menu_item(mtm, "Apply LUT…", Action::ApplyLut, &target, ""));
+            let interpret = NSMenu::initWithTitle(
+                NSMenu::alloc(mtm),
+                &NSString::from_str("Interpret Selection As"),
+            );
+            interpret.addItem(&menu_item(
+                mtm,
+                "As the File Says",
+                Action::Interpret(None),
+                &target,
+                "",
+            ));
+            for (index, log) in crate::colour::CAMERA_LOGS.iter().enumerate() {
+                let action = Action::Interpret(Some(index));
+                interpret.addItem(&menu_item(mtm, log.label, action, &target, ""));
+            }
+            interpret.addItem(&NSMenuItem::separatorItem(mtm));
+            interpret.addItem(&menu_item(
+                mtm,
+                "Crop to Clean Aperture",
+                Action::CleanAperture,
+                &target,
+                "",
+            ));
+            let parent = menu_item(
+                mtm,
+                "Interpret Selection As",
+                Action::Interpret(None),
+                &target,
+                "",
+            );
+            unsafe { parent.setAction(None) };
+            parent.setSubmenu(Some(&interpret));
+            view.addItem(&parent);
         }
         MENU.with(|m| {
             *m.borrow_mut() = Some(Menu {
@@ -344,6 +405,7 @@ pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: b
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
+                    Action::ApplyLut | Action::Interpret(_) | Action::CleanAperture => false,
                 };
                 item.setState(if on { 1 } else { 0 });
             }
@@ -627,6 +689,12 @@ impl Controller {
                 },
                 cx,
             ),
+            Action::ApplyLut => self.apply_lut(cx),
+            Action::Interpret(log) => {
+                let log = log.map(|index| crate::colour::CAMERA_LOGS[index]);
+                self.interpret_selection(log, cx);
+            }
+            Action::CleanAperture => self.crop_selection(cx),
         }
     }
     pub fn set_media_mode(&mut self, mode: MediaMode, cx: &mut Context<Self>) {

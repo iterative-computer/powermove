@@ -943,6 +943,83 @@ fn composition_set_fractional_rate_keeps_limits_and_rejects_nonfinite_atomically
 }
 
 #[test]
+fn hdr_moves_the_project_to_float_and_records_its_mastering_peak_in_one_undo() {
+    let mut store = store();
+    let set = |store: &mut DocumentStore, patch: CompPatch| {
+        store.execute(
+            CompCommand::Set {
+                patch: Box::new(patch),
+            }
+            .into(),
+            Origin::Interface,
+        )
+    };
+    set(
+        &mut store,
+        CompPatch {
+            hdr: Some(true),
+            mastering_peak: Some(2000.),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let snapshot = store.snapshot();
+    let root = snapshot.root().unwrap();
+    let color = root.get("color").unwrap();
+    assert_eq!(color.get("mode").unwrap().to_value().as_str(), Some("hdr"));
+    assert_eq!(
+        color.get("masteringPeak").unwrap().to_value().as_f64(),
+        Some(2000.)
+    );
+    assert_eq!(
+        root.get("colorDepth").unwrap().to_value().as_f64(),
+        Some(32.)
+    );
+    assert!(
+        set(
+            &mut store,
+            CompPatch {
+                mastering_peak: Some(100.),
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn interpretation_is_set_and_cleared_on_the_asset() {
+    let mut store = store();
+    let set = |store: &mut DocumentStore, interpret: Option<Value>| {
+        store.execute(
+            MediaCommand::SetInterpretation {
+                asset_id: "a1".into(),
+                interpret,
+            }
+            .into(),
+            Origin::Interface,
+        )
+    };
+    set(&mut store, Some(parse(r#"{"transfer":"sLog3"}"#).unwrap())).unwrap();
+    let interpret = |store: &DocumentStore| {
+        let snapshot = store.snapshot();
+        let root = snapshot.root().unwrap();
+        let asset = root.get("assets").unwrap().get("a1").unwrap();
+        asset.get("interpret").map(pm_model::Node::to_value)
+    };
+    assert_eq!(
+        interpret(&store)
+            .unwrap()
+            .get("transfer")
+            .and_then(Value::as_str),
+        Some("sLog3")
+    );
+    set(&mut store, None).unwrap();
+    assert!(interpret(&store).is_none());
+    assert!(set(&mut store, Some(parse("3").unwrap())).is_err());
+}
+
+#[test]
 fn asset_folder_move_matches_main_and_undo_keeps_unknown_fields() {
     let mut value = parse(PROJECT).unwrap();
     value.as_object_mut().unwrap().insert(

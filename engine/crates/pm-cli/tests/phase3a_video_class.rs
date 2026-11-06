@@ -1313,14 +1313,7 @@ fn video_class_against_ffmpeg_and_zimg() {
         misread.is_empty(),
         "the engine misreads the tags of {misread:?}"
     );
-    // Only the BT.2020-primaries source routes (wide gamut waits for
-    // Interpret and wide-gamut projects; `pm_render::media::video_supported`).
-    assert!(
-        refused.len() == 1
-            && refused[0].0 == "edges-hevc-main10-bt2020.mp4"
-            && refused[0].1.contains("Bt2020 primaries"),
-        "routed to legacy: {refused:?}"
-    );
+    assert!(refused.is_empty(), "refused: {refused:?}");
     assert!(unrendered.is_empty(), "not rendered: {unrendered:?}");
     // Judged: FFmpeg's software decode plus zimg with the engine's filter and
     // edge rule, color and alpha.

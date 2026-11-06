@@ -32,6 +32,7 @@ export function initial(): ExportSnapshot {
       profile: "4444",
       codec: "h264",
       depth: 8,
+      dynamicRange: "sdr",
       future: { keep: true },
     },
     bindings: Object.fromEntries(
@@ -51,6 +52,7 @@ export function initial(): ExportSnapshot {
         "profile",
         "codec",
         "depth",
+        "dynamicRange",
         "preset",
         "presetName",
       ].map((k) => [k, `fixture:export:${k}`]),

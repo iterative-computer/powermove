@@ -5097,6 +5097,7 @@ dependencies = [
  "pm-agents",
  "pm-audio",
  "pm-builtins",
+ "pm-color",
  "pm-compat-host",
  "pm-compat-runner",
  "pm-design",
@@ -5361,6 +5362,7 @@ name = "pm-promedia"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pm-color",
  "pm-protocol",
  "pm-time",
  "serde",

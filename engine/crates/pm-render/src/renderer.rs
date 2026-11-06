@@ -1847,11 +1847,11 @@ impl Renderer {
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
+        // One look at each media file per frame (`media::StampFrame`).
+        let _stamps = crate::media::StampFrame::begin();
         if self.effects.versioned_builtins {
             self.effects.assets.prepare(document, assets);
         }
-        // One look at each media file per frame (`media::StampFrame`).
-        let _stamps = crate::media::StampFrame::begin();
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
@@ -1974,6 +1974,7 @@ impl Renderer {
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;
         self.media.scrub = scrub && !request.export;
+        self.media.hdr_light = color.hdr;
         // Renderers drawing their own definitions time effects,
         // transitions, and shader and fragment layers (the budget and the
         // hang guard; `effects::watchdog`).
@@ -2020,7 +2021,8 @@ impl Renderer {
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
             let pooled_gl_rows = (rows == SnapshotRows::TopDown
-                || target.format() != working_format(precision))
+                || target.format() != working_format(precision)
+                || request.output_tone.is_some())
             .then(|| {
                 exec.pool.take(
                     exec.device,
@@ -2078,7 +2080,13 @@ impl Renderer {
                 && exec.effects.fallback.fatal.is_none()
                 && !held;
             if complete && pooled_gl_rows.is_some() {
-                exec.finish_color(&mut encoder, gl_rows, target, rows == SnapshotRows::TopDown);
+                exec.finish_color(
+                    &mut encoder,
+                    gl_rows,
+                    target,
+                    rows == SnapshotRows::TopDown,
+                    request.output_tone,
+                );
             }
             if let Some(gl_rows) = pooled_gl_rows {
                 exec.taken.push(gl_rows);

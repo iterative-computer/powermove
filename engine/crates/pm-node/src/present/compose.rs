@@ -603,6 +603,7 @@ impl Composer {
             output_size: place.output,
             scale: place.scale,
             origin: place.origin,
+            output_tone: None,
             region: Some(region),
             preview_canvas: false,
             precision: Precision::Float16,

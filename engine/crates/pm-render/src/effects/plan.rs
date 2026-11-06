@@ -430,7 +430,7 @@ pub(crate) fn effect_steps_raster<'d>(
                         if let Some(id) = &a.asset_id {
                             let lut = param.presentation.get("assetKind").and_then(|v| v.as_str())
                                 == Some("lut");
-                            match effects.assets.0.get(&(id.clone(), lut)) {
+                            match effects.assets.prepared.get(&(id.clone(), lut)) {
                                 Some(Ok(asset)) => {
                                     step.assets.push((param.k.clone(), asset.clone()))
                                 }

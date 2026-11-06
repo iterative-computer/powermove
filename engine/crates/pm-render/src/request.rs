@@ -84,6 +84,34 @@ pub struct RenderRequest {
     /// level starts at its origin. `None`: `(0, 0)`, every snapshot and
     /// export.
     pub origin: Option<(f64, f64)>,
+    /// Tone map the finished frame ([`OutputTone`]).
+    pub output_tone: Option<OutputTone>,
+}
+
+/// BT.2390 on the finished frame, for a target that holds less light than
+/// the frame ([`crate::composite::ColorSettings::hdr`]): SDR delivery of an
+/// HDR project, or HDR delivery below the content's peak.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputTone {
+    pub source_peak: f32,
+    pub target_peak: f32,
+}
+
+impl OutputTone {
+    /// The one rule for an HDR project's output, shared by delivery and the
+    /// viewer: `hdr` targets hold `mastering_peak`, SDR targets SDR white.
+    /// `None` when the target holds the frame's `content_peak`.
+    pub fn for_target(content_peak: f32, mastering_peak: f32, hdr: bool) -> Option<Self> {
+        let (source_peak, target_peak) = if hdr {
+            (content_peak, mastering_peak)
+        } else {
+            (content_peak.max(mastering_peak), 203.0)
+        };
+        (source_peak > target_peak).then_some(Self {
+            source_peak,
+            target_peak,
+        })
+    }
 }
 
 impl RenderRequest {
@@ -105,6 +133,7 @@ impl RenderRequest {
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
             origin: None,
+            output_tone: None,
         }
     }
 
@@ -125,6 +154,7 @@ impl RenderRequest {
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
             origin: None,
+            output_tone: None,
         }
     }
 
@@ -162,6 +192,7 @@ impl RenderRequest {
             sampling,
             output_kind: OutputKind::of(request.purpose),
             origin: None,
+            output_tone: None,
         })
     }
 

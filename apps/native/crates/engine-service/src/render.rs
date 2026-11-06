@@ -14,7 +14,7 @@ use pm_render::{LayerFailure, RenderError, Renderer};
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::AtomicBool},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// One immutable render input. Content identity rotates on document, comp,
@@ -155,6 +155,15 @@ pub struct Engine {
     resources: Arc<crate::resources::ResourceSnapshot>,
     /// Why a contributed definition cannot draw, for the viewer's status.
     pub definition_failure: Option<String>,
+    /// The peaks of the content on screen, and the output tone of its frames.
+    hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
+    output_tone: Option<pm_render::OutputTone>,
+    /// Where the viewer's analysis goes, while a Scopes panel is showing.
+    pub scope_frames: Option<(
+        pm_render::scopes::ScopeConfig,
+        async_channel::Sender<crate::scopes::ScopeResult>,
+    )>,
+    scopes: Option<crate::scopes::Tap>,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -292,6 +301,10 @@ impl Engine {
             waker,
             resources: Arc::default(),
             definition_failure: None,
+            hdr: None,
+            output_tone: None,
+            scope_frames: None,
+            scopes: None,
         })
     }
     pub fn set_fonts(&mut self, fonts: pm_node::fonts::render::RenderFonts) {
@@ -366,6 +379,40 @@ impl Engine {
         }
         Ok(())
     }
+    /// The HDR view of this content, and the frame cache kept to its tone.
+    fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
+        let key = (scene.content, scene.doc.revision(), scene.comp.clone());
+        if self.hdr.as_ref().is_none_or(|(k, _)| *k != key) {
+            let view = crate::color::HdrView::of(&scene.doc, &scene.comp, &scene.media);
+            self.hdr = Some((key, view));
+        }
+        let view = self.hdr.as_ref().and_then(|(_, view)| *view);
+        let tone = view.and_then(|v| v.tone(self.mastering));
+        if tone != self.output_tone {
+            self.output_tone = tone;
+            self.cache.clear();
+        }
+        view
+    }
+    /// A new tap analyzes the very next frame.
+    pub fn scopes_changed(&mut self) {
+        if let Some(tap) = &mut self.scopes {
+            tap.reset();
+        }
+    }
+    /// Gives the frame waiting for the tap its turn, on a viewer that has gone
+    /// quiet. Returns when to ask again, if it still waits.
+    pub fn flush_scopes(
+        &mut self,
+        tap: Option<&(
+            pm_render::scopes::ScopeConfig,
+            async_channel::Sender<crate::scopes::ScopeResult>,
+        )>,
+    ) -> Option<Duration> {
+        let scopes = self.scopes.as_mut()?;
+        scopes.retain(tap);
+        scopes.flush(&self.gpu.device, &self.gpu.queue)
+    }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
         self.sync_studio(scene)?;
         self.sync_fonts();
@@ -421,6 +468,7 @@ impl Engine {
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
         let size = spec.render_size();
+        let hdr = self.sync_hdr(scene);
         let key = crate::policy::CacheKey {
             content: scene.content,
             revision: scene.doc.revision(),
@@ -474,7 +522,8 @@ impl Engine {
                 }
             };
             let target = Target::wrap(surface.texture.clone());
-            let request = spec.request(scene)?;
+            let mut request = spec.request(scene)?;
+            request.output_tone = self.output_tone;
             self.renderer.set_scrub(spec.moment == Moment::Scrub);
             self.renderer.set_playback(spec.decode_deadline);
             self.renderer.set_isolate_layers(true);
@@ -511,6 +560,11 @@ impl Engine {
             }
             (surface, failures)
         };
+        if let Some((config, frames)) = &self.scope_frames {
+            self.scopes
+                .get_or_insert_with(|| crate::scopes::Tap::new(self.gpu.device.clone()))
+                .frame(&self.gpu.device, &self.gpu.queue, &surface, *config, frames);
+        }
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();
             metal::TextureRef::from_ptr(
@@ -568,7 +622,11 @@ impl Engine {
         pass.set_render_pipeline_state(&self.pipeline);
         pass.set_fragment_texture(0, Some(&source));
         let mut params = overlays.params();
-        params.output = self.mastering.params()?;
+        params.output = hdr
+            .map_or(self.mastering, |v| {
+                self.mastering.with_peaks(v.source_peak, v.mastering_peak)
+            })
+            .params()?;
         params.reduced = u32::from(size != Size::new(output.width, output.height));
         params.drawable = [output.width as f32, output.height as f32];
         params.canvas = match output.crop {

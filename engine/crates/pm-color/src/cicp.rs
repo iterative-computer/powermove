@@ -117,6 +117,12 @@ pub fn transfer_code(transfer: Transfer) -> u8 {
         Transfer::Hlg => 18,
         Transfer::Log100 => 9,
         Transfer::Log316 => 10,
+        // Vendor curves have no H.273 code point: unspecified.
+        Transfer::AppleLog
+        | Transfer::SLog3
+        | Transfer::VLog
+        | Transfer::LogC3
+        | Transfer::LogC4 => 2,
     }
 }
 

@@ -90,6 +90,36 @@ fn delta_lab(a: [f64; 3], b: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
     #[test]
+    fn hdr_outputs_roll_off_to_the_delivery_target() {
+        let view = HdrView {
+            source_peak: 4000.,
+            mastering_peak: 1000.,
+        };
+        let tone = |source_peak, target_peak| {
+            Some(pm_render::OutputTone {
+                source_peak,
+                target_peak,
+            })
+        };
+        assert_eq!(view.tone(Mastering::Edr), tone(4000., 1000.));
+        assert_eq!(view.tone(Mastering::LinearP3), tone(4000., 203.));
+        let held = HdrView {
+            source_peak: 1000.,
+            mastering_peak: 1000.,
+        };
+        assert_eq!(held.tone(Mastering::Edr), None);
+        assert_eq!(held.tone(Mastering::LinearP3), tone(1000., 203.));
+        let encoded = Mastering::Pq {
+            source_peak: 4000.,
+            target_peak: 1000.,
+        };
+        assert_eq!(
+            view.tone(encoded),
+            None,
+            "the encoded mode rolls off itself"
+        );
+    }
+    #[test]
     fn published_ciede2000_reference_pair() {
         assert!((delta_lab([50., 2.6772, -79.7751], [50., 0., -82.7485]) - 2.0425).abs() < 0.0001);
     }
@@ -100,12 +130,15 @@ mod tests {
     }
 }
 
-/// Explicit mastering output. Default linear P3 preserves working values.
+/// Explicit mastering output. Default linear P3 shows an SDR project's values
+/// and an HDR project's SDR delivery. [`Self::Edr`] shows an HDR project's
+/// delivered light, held to its mastering peak, up to the display's headroom.
 /// Encoded modes use BT.2020, 203-nit reference white and a stated source peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Mastering {
     #[default]
     LinearP3,
+    Edr,
     Pq {
         source_peak: f32,
         target_peak: f32,
@@ -118,7 +151,7 @@ pub enum Mastering {
 impl Mastering {
     pub fn params(self) -> anyhow::Result<[f32; 4]> {
         let (mode, source, target) = match self {
-            Self::LinearP3 => return Ok([0.; 4]),
+            Self::LinearP3 | Self::Edr => return Ok([0.; 4]),
             Self::Pq {
                 source_peak,
                 target_peak,
@@ -136,5 +169,59 @@ impl Mastering {
             "invalid mastering peaks"
         );
         Ok([mode, source, target, 203.])
+    }
+
+    /// The same output with an HDR project's peaks.
+    pub fn with_peaks(self, source_peak: f32, target_peak: f32) -> Self {
+        match self {
+            Self::Pq { .. } => Self::Pq {
+                source_peak,
+                target_peak,
+            },
+            Self::Hlg { .. } => Self::Hlg {
+                source_peak,
+                target_peak,
+            },
+            other => other,
+        }
+    }
+}
+
+/// What an HDR project's viewer needs: its content and mastering peaks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrView {
+    pub source_peak: f32,
+    pub mastering_peak: f32,
+}
+
+impl HdrView {
+    /// The project's peaks, or `None` for an SDR project. Probes are per file
+    /// stamp, so this reads the disk once per media change.
+    pub fn of(
+        document: &pm_model::Document,
+        composition: &str,
+        media: &pm_export::render::MediaPaths,
+    ) -> Option<HdrView> {
+        let color = pm_render::composite::project_color(document.root()?).ok()?;
+        (color.mode == pm_protocol::color::ColorMode::Hdr).then(|| {
+            let mastering_peak = f32::from(color.mastering_peak);
+            HdrView {
+                source_peak: mastering_peak.max(
+                    pm_render::media::hdr_content(document, composition, media).peak_nits as f32,
+                ),
+                mastering_peak,
+            }
+        })
+    }
+
+    /// The final pass's tone, as for a delivery: SDR for the SDR view, and the
+    /// project's peak for EDR. PQ and HLG roll off in the viewer's own shader.
+    pub fn tone(self, mastering: Mastering) -> Option<pm_render::OutputTone> {
+        let hdr = match mastering {
+            Mastering::LinearP3 => false,
+            Mastering::Edr => true,
+            Mastering::Pq { .. } | Mastering::Hlg { .. } => return None,
+        };
+        pm_render::OutputTone::for_target(self.source_peak, self.mastering_peak, hdr)
     }
 }

@@ -14,7 +14,7 @@ use objc2_core_foundation::{CFRetained, CFString, CFType};
 use objc2_core_media::{CMSampleBuffer, CMTime, kCMTimeInvalid};
 use objc2_video_toolbox::*;
 
-use super::cf::{self, any_bool, any_num_f64, any_num_i64, any_str};
+use super::cf::{self, any_bool, any_data, any_num_f64, any_num_i64, any_str};
 use super::pixbuf::{PixelBuffer, color_constants};
 use crate::Error;
 use crate::settings::{AlphaOutput, Codec, ExportSpec};
@@ -225,6 +225,22 @@ impl Encoder {
                 &any_str(matrix),
                 false,
             )?;
+            if let Some(hdr) = spec.tags.hdr_metadata() {
+                set(
+                    &session,
+                    kVTCompressionPropertyKey_MasteringDisplayColorVolume,
+                    &any_data(&hdr.mdcv()),
+                    false,
+                )?;
+                if hdr.max_cll != 0 {
+                    set(
+                        &session,
+                        kVTCompressionPropertyKey_ContentLightLevelInfo,
+                        &any_data(&hdr.clli()),
+                        false,
+                    )?;
+                }
+            }
             set(
                 &session,
                 kVTCompressionPropertyKey_RealTime,

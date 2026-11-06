@@ -32,6 +32,11 @@ project when a source or delivery format has more bits. The direct CLI's ANGLE
 sidecar and the native hidden host carry binary32 input and output for depth-32
 shader fallback, and retain u16 wire slots for depth 8 and 16.
 
+HDR projects (`color.mode: "hdr"`) need float storage: depth 8 reads as 16, and
+turning HDR on sets depth 32, because BT.2020 colours lose their small channels
+through Rec.709 working primaries in half float. [hdr.md](hdr.md) has the
+pipeline.
+
 ## Storage and render boundaries
 
 Working targets use RGBA8Unorm, RGBA16Float, or RGBA32Float throughout the

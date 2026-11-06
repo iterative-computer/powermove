@@ -2,9 +2,9 @@
 //! in float, relative colorimetric, no clip until output"; the viewer's
 //! Rec.709 → P3 conversion on a `display-p3` canvas).
 //!
-//! Every supported primaries set has a D65 white, so conversion is the
-//! product of two RGB → XYZ matrices with no chromatic adaptation. Values
-//! outside the destination gamut stay negative or above 1 (no clipping).
+//! Sets that share a white convert as the product of two RGB → XYZ matrices.
+//! A set with another white (DCI, illuminant C) adapts it with Bradford.
+//! Values outside the destination gamut stay negative or above 1 (no clipping).
 
 use pm_protocol::color::Primaries;
 
@@ -18,6 +18,7 @@ pub struct Chromaticities {
 }
 
 const D65: [f64; 2] = [0.3127, 0.3290];
+const ILLUMINANT_C: [f64; 2] = [0.310, 0.316];
 
 /// The chromaticities of a primaries tag; `None` when unspecified.
 pub fn chromaticities(p: Primaries) -> Option<Chromaticities> {
@@ -50,6 +51,60 @@ pub fn chromaticities(p: Primaries) -> Option<Chromaticities> {
             r: [0.630, 0.340],
             g: [0.310, 0.595],
             b: [0.155, 0.070],
+            w: D65,
+        },
+        Primaries::Bt470M => Chromaticities {
+            r: [0.67, 0.33],
+            g: [0.21, 0.71],
+            b: [0.14, 0.08],
+            w: ILLUMINANT_C,
+        },
+        Primaries::GenericFilm => Chromaticities {
+            r: [0.681, 0.319],
+            g: [0.243, 0.692],
+            b: [0.145, 0.049],
+            w: ILLUMINANT_C,
+        },
+        Primaries::DciP3 => Chromaticities {
+            r: [0.680, 0.320],
+            g: [0.265, 0.690],
+            b: [0.150, 0.060],
+            w: [0.314, 0.351],
+        },
+        Primaries::Ebu3213 => Chromaticities {
+            r: [0.630, 0.340],
+            g: [0.295, 0.605],
+            b: [0.155, 0.077],
+            w: D65,
+        },
+        Primaries::SGamut3 => Chromaticities {
+            r: [0.730, 0.280],
+            g: [0.140, 0.855],
+            b: [0.100, -0.050],
+            w: D65,
+        },
+        Primaries::SGamut3Cine => Chromaticities {
+            r: [0.766, 0.275],
+            g: [0.225, 0.800],
+            b: [0.089, -0.087],
+            w: D65,
+        },
+        Primaries::VGamut => Chromaticities {
+            r: [0.730, 0.280],
+            g: [0.165, 0.840],
+            b: [0.100, -0.030],
+            w: D65,
+        },
+        Primaries::AwgGen3 => Chromaticities {
+            r: [0.6840, 0.3130],
+            g: [0.2210, 0.8480],
+            b: [0.0861, -0.1020],
+            w: D65,
+        },
+        Primaries::AwgGen4 => Chromaticities {
+            r: [0.7347, 0.2653],
+            g: [0.1424, 0.8576],
+            b: [0.0991, -0.0308],
             w: D65,
         },
         Primaries::Unspecified => return None,
@@ -119,9 +174,12 @@ pub fn conversion(from: Primaries, to: Primaries) -> Option<Mat3> {
     if from == to && from != Primaries::Unspecified {
         return Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     }
-    let a = rgb_to_xyz(&chromaticities(from)?);
-    let b = rgb_to_xyz(&chromaticities(to)?);
-    Some(mul(&inverse(&b), &a))
+    let source = chromaticities(from)?;
+    let target = chromaticities(to)?;
+    if source.w != target.w {
+        return conversion_from(&source, to);
+    }
+    Some(mul(&inverse(&rgb_to_xyz(&target)), &rgb_to_xyz(&source)))
 }
 
 /// The linear-light conversion from arbitrary chromaticities (PNG `cHRM`,

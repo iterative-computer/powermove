@@ -43,8 +43,8 @@ use crate::Error;
 use crate::convert::WorkingFrame;
 use crate::pipeline::{Pipeline, Sink};
 use crate::settings::{
-    AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec, Overwrite,
-    ProResProfile, WorkingEncoding,
+    AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec,
+    HdrMetadata, Overwrite, ProResProfile, WorkingEncoding,
 };
 
 /// Output rows per slicing unit while the interactive engine plays.
@@ -623,8 +623,20 @@ pub fn codec_of(settings: &ExportSettings) -> Result<(Codec, Container), JobErro
     })
 }
 
-fn tags_of(color: OutputColor) -> Result<ColorTags, JobError> {
+/// HDR reference white in delivered light (BT.2408).
+const HDR_WHITE_NITS: u16 = 203;
+
+fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
     match color {
+        OutputColor::Rec2100Pq => Ok(ColorTags::Rec2100Pq {
+            white_nits: HDR_WHITE_NITS,
+            metadata: None,
+        }),
+        OutputColor::Rec2100Hlg => Ok(ColorTags::Rec2100Hlg {
+            white_nits: HDR_WHITE_NITS,
+            peak_nits: peak_nits.clamp(400, 4000),
+            metadata: None,
+        }),
         OutputColor::Rec709Broadcast => Ok(ColorTags::Rec709Broadcast),
         OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
@@ -634,6 +646,49 @@ fn tags_of(color: OutputColor) -> Result<ColorTags, JobError> {
         other => Err(JobError::Invalid(format!(
             "output color {other:?} is not an export tag at cutover"
         ))),
+    }
+}
+
+/// The mastering display and light levels an HDR delivery states: the
+/// sources' where they carry them, within the project's mastering peak.
+fn hdr_metadata(
+    project: &pm_protocol::color::ProjectColor,
+    content: &pm_render::media::HdrContent,
+) -> HdrMetadata {
+    use pm_media::probe::color::MasteringDisplay;
+    let peak = f64::from(project.mastering_peak);
+    let display: Option<&MasteringDisplay> = content.mastering.as_ref();
+    // Display P3 primaries and D65 when no source states a display: the
+    // common grading monitor (BT.2408).
+    let xy = |value: Option<(f64, f64)>, default: (f64, f64)| {
+        let (x, y) = value.unwrap_or(default);
+        [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16]
+    };
+    let luminance = |nits: f64| (nits / 0.0001).round() as u32;
+    let max = display
+        .and_then(|d| d.max_luminance)
+        .map_or(peak, |l| l.min(peak));
+    HdrMetadata {
+        primaries: [
+            xy(display.and_then(|d| d.green), (0.265, 0.690)),
+            xy(display.and_then(|d| d.blue), (0.150, 0.060)),
+            xy(display.and_then(|d| d.red), (0.680, 0.320)),
+        ],
+        white: xy(display.and_then(|d| d.white), (0.3127, 0.3290)),
+        max_luminance: luminance(max),
+        min_luminance: luminance(display.and_then(|d| d.min_luminance).unwrap_or(0.0)),
+        max_cll: content.content_light.map_or(0, |c| {
+            u16::try_from(c.max_cll.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
+        }),
+        max_fall: content.content_light.map_or(0, |c| {
+            u16::try_from(c.max_fall.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
+        }),
+    }
+}
+
+fn set_hdr_metadata(tags: &mut ColorTags, value: HdrMetadata) {
+    if let ColorTags::Rec2100Pq { metadata, .. } | ColorTags::Rec2100Hlg { metadata, .. } = tags {
+        *metadata = Some(value);
     }
 }
 
@@ -940,7 +995,34 @@ fn plan_export_checked(
     );
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
-    let tags = tags_of(s.color)?;
+    let project = doc
+        .root()
+        .map(pm_render::composite::project_color)
+        .transpose()
+        .map_err(JobError::Invalid)?
+        .unwrap_or(pm_protocol::color::ProjectColor::DEFAULT);
+    let hdr_project = project.mode == pm_protocol::color::ColorMode::Hdr;
+    let mut tags = tags_of(s.color, project.mastering_peak)?;
+    if tags.is_hdr() && !hdr_project {
+        return Err(JobError::Invalid(
+            "HDR delivery needs an HDR project".into(),
+        ));
+    }
+    let content = if hdr_project {
+        pm_render::media::hdr_content(doc, &job.composition, &*job.media)
+    } else {
+        Default::default()
+    };
+    let output_tone = hdr_project
+        .then(|| {
+            pm_render::OutputTone::for_target(
+                content.peak_nits as f32,
+                f32::from(project.mastering_peak),
+                tags.is_hdr(),
+            )
+        })
+        .flatten();
+    set_hdr_metadata(&mut tags, hdr_metadata(&project, &content));
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
         .iter()
         .map(ToString::to_string)
@@ -1045,6 +1127,7 @@ fn plan_export_checked(
         sampling: pm_render::sampling::Sampling::Final,
         output_kind: OutputKind::Final,
         origin: None,
+        output_tone,
     };
     Ok(ExportPlan {
         spec,

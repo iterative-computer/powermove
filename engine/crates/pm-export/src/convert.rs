@@ -982,7 +982,10 @@ mod tests {
             assert_eq!(out, before);
         }
         let mut hdr = params;
-        hdr.tags = ColorTags::Rec2100Pq { white_nits: 203 };
+        hdr.tags = ColorTags::Rec2100Pq {
+            white_nits: 203,
+            metadata: None,
+        };
         assert!(matches!(
             convert_rgba8_into(
                 &WorkingFrame {

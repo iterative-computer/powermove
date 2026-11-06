@@ -33,6 +33,8 @@ export interface Options {
   profile: Profile;
   codec: Codec;
   depth: 8 | 16;
+  /** Absent from options saved before HDR delivery: read as SDR. */
+  dynamicRange: "sdr" | "pq" | "hlg";
 }
 /** Presets saved before profile, codec and depth existed keep today's output. */
 const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
@@ -69,6 +71,8 @@ export interface ExportSnapshot {
     hasAudio: boolean;
     captionLayers: number;
     hasWorkArea: boolean;
+    /** The project keeps HDR light, so HDR delivery is on offer. */
+    hdr?: boolean;
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;
     note?: string;

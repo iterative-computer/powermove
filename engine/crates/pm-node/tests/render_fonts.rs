@@ -472,6 +472,7 @@ mod child {
             sampling: pm_render::sampling::Sampling::Final,
             output_kind: pm_render::OutputKind::of(pm_protocol::frame::FramePurpose::Export),
             origin: None,
+            output_tone: None,
         };
         let frame_out = direct
             .render(

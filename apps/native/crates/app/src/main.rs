@@ -1,6 +1,7 @@
 mod builtins;
 #[cfg(test)]
 mod builtins_tests;
+mod colour;
 mod colour_panel;
 mod diag;
 #[path = "surfaces/dialogs.rs"]

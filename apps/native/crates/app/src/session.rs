@@ -48,6 +48,9 @@ pub struct Controller {
     pub media_mode: pm_engine_service::MediaMode,
     /// Preview Resolution (viewer bar) for this editor's viewers.
     pub quality: pm_engine_service::Quality,
+    /// The open project keeps HDR light.
+    pub project_hdr: bool,
+    pub scopes: crate::colour::Scopes,
     pub safe_areas: bool,
     pub guides: bool,
     pub popout: Option<crate::viewer2::Popout>,
@@ -129,6 +132,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| {
             panels::library(v, id, bounds, cx)
                 .or_else(|| v.extension_panel(id, bounds, cx))
+                .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -158,8 +162,12 @@ impl pm_shell::integration::Integration for Bridge {
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        self.0
-            .update(cx, |v, cx| v.builtin_header(id, bounds, w, cx))
+        self.0.update(cx, |v, cx| {
+            if id == "scopes" {
+                return Some(v.scopes_header(cx));
+            }
+            v.builtin_header(id, bounds, w, cx)
+        })
     }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
@@ -284,6 +292,8 @@ impl Controller {
             output_mode: crate::viewer2::OutputMode::from_env(),
             media_mode: Default::default(),
             quality: Default::default(),
+            project_hdr: false,
+            scopes: Default::default(),
             safe_areas: false,
             guides: false,
             popout: None,
@@ -405,6 +415,7 @@ impl Controller {
             }
         }
         self.sync_rows(&p, cx);
+        self.follow_project_hdr();
         let saving = p.saving || self.save_pending;
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
             self.message = note.into();

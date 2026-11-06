@@ -7,6 +7,8 @@ pub mod policy;
 mod present;
 mod render;
 pub mod resources;
+mod scopes;
+pub use scopes::ScopeResult;
 pub mod studio;
 pub mod trace;
 pub mod transport;
@@ -284,12 +286,18 @@ struct State {
     stop: bool,
     subscribers: Vec<async_channel::Sender<()>>,
 }
+type ScopeTap = (
+    pm_render::scopes::ScopeConfig,
+    async_channel::Sender<ScopeResult>,
+);
 struct Shared {
     state: Mutex<State>,
     wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
     /// The worker engine's current Metal device; a GPU loss replaces it.
     device: Mutex<metal::Device>,
+    /// The viewer the Scopes panel analyzes, and where results go.
+    scopes: Mutex<Option<(u64, ScopeTap)>>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -592,6 +600,16 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Sends this viewer's scope analysis while `tap` is set. Results arrive
+    /// off the main thread, at most ten a second.
+    pub fn scopes(&self, tap: Option<ScopeTap>) -> Result<()> {
+        *self.shared.scopes.lock().unwrap() = tap.map(|tap| (self.id, tap));
+        self.edit(|v| {
+            v.stamp.sequence += 1;
+            v.dirty = true;
+            Ok(())
+        })
+    }
     pub fn capture_next(&self) -> Result<()> {
         self.edit(|v| {
             v.capture = true;
@@ -657,6 +675,7 @@ impl EngineService {
             wake,
             interactive: Arc::default(),
             device: Mutex::new(device),
+            scopes: Mutex::new(None),
             #[cfg(test)]
             before_submit: Mutex::new(None),
             #[cfg(test)]
@@ -1388,6 +1407,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             engine.mastering = mastering;
             engine.set_resources(resources);
             let landed_before = engine.media_landed();
+            let tap = shared
+                .scopes
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(viewer, _)| *viewer == id)
+                .map(|(_, tap)| tap.clone());
+            if tap.is_some() && engine.scope_frames.is_none() {
+                engine.scopes_changed();
+            }
+            engine.scope_frames = tap;
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
@@ -1503,6 +1533,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 Duration::from_secs(3600)
             };
             drop(state);
+            let tap = shared.scopes.lock().unwrap().clone();
+            let timeout = engine
+                .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
+                .map_or(timeout, |retry| timeout.min(retry));
             let _ = wakes.recv_timeout(timeout);
         }
     }

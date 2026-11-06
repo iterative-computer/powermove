@@ -43,6 +43,7 @@ const FLAG_SRGB8: i32 = 64;
 // Bezier path masks: the layer times today's coverage canvas (`tcov`).
 const FLAG_PATH_MASKS: i32 = 128;
 const FLAG_FLIP: i32 = 256;
+const FLAG_TONE_MAP: i32 = 512;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
@@ -219,7 +220,8 @@ fn fs_copy_value(in: VsOut) -> vec4<f32> {
 }
 
 // The finished frame from GL row order to top-down rows, encoded with E
-// when the working encoding is linear light (section 9: E on output).
+// when the working encoding is linear light (section 9: E on output), and
+// tone mapped when the target holds less light than the frame.
 // Color outside coverage (alpha above 1 or below the unpremultiply floor:
 // light a legacy effect wrote, `crate::effects::SimpleOp::DecodeE`) is
 // encoded per channel, as the effect passes decode it.
@@ -234,6 +236,9 @@ fn fs_encode_flip_value(in: VsOut) -> vec4<f32> {
         } else {
             c = pm_premultiplied_linear_to_e(c);
         }
+    }
+    if (has(FLAG_TONE_MAP)) {
+        c = pm_tone_map_output(c, op.f.x, op.f.y);
     }
     if (has(FLAG_SRGB8)) {
         var rgb = pm_css_gamut_srgb(c.rgb);

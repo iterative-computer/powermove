@@ -1,4 +1,4 @@
-use pm_promedia::{lut::CubeLut, scopes::*};
+use pm_color::{lut::CubeLut, scopes::*};
 fn cube(rows: &[[f64; 3]]) -> String {
     let mut s = String::from("LUT_3D_SIZE 2\n");
     for row in rows {

@@ -19,6 +19,7 @@
 //! | [`compare`] | Pixel classes, error statistics, the gate verdict, geometry and preview == export checks |
 #![forbid(unsafe_code)]
 
+pub mod camera_log;
 pub mod chroma;
 pub mod color;
 pub mod compare;

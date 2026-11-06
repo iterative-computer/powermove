@@ -1,9 +1,12 @@
 //! Bounded worker asset leases. A prepared chain owns its exact decoded bytes;
 //! replacement or deletion cannot retarget an in-flight effect to another file.
+//! A file is read when its stamp changes and a table uploads once, so a frame
+//! costs one look at each file and no copy.
 use pm_eval::node;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::PathBuf,
     sync::Arc,
 };
 #[derive(PartialEq)]
@@ -12,7 +15,7 @@ pub struct Asset {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<f32>,
-    pub lut: Option<pm_fx_defs::lut::Cube>,
+    pub lut: Option<pm_color::lut::GpuLut>,
     pub vector: Option<crate::vector::VectorSource>,
     pub brush: bool,
 }
@@ -25,9 +28,60 @@ impl std::fmt::Debug for Asset {
             .finish()
     }
 }
+/// An asset id and whether it's read as a LUT.
+type Request = (String, bool);
+
 #[derive(Default)]
-pub(crate) struct Assets(pub BTreeMap<(String, bool), Result<Arc<Asset>, String>>);
+pub(crate) struct Assets {
+    pub prepared: BTreeMap<Request, Result<Arc<Asset>, String>>,
+    /// The file behind each prepared entry, as it was on disk when read.
+    sources: BTreeMap<Request, (PathBuf, (u64, u128))>,
+    /// Prepared assets' textures, by content. Only what `prepared` holds stays.
+    uploads: HashMap<[u8; 32], pm_gpu::Target>,
+}
 impl Assets {
+    /// `asset`'s texture, uploaded on first use.
+    pub fn texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        asset: &Asset,
+    ) -> pm_gpu::Target {
+        // A brush's mask changes per frame, and its key is only that mask's.
+        if !asset.brush
+            && let Some(target) = self.uploads.get(&asset.key)
+        {
+            return target.clone();
+        }
+        let target = pm_gpu::Target::new(
+            device,
+            "pm effect asset lease",
+            asset.width,
+            asset.height,
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        let data = asset
+            .lut
+            .as_ref()
+            .map_or(asset.rgba.as_slice(), |c| c.rgba.as_slice());
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        queue.write_texture(
+            target.texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(asset.width * 16),
+                rows_per_image: Some(asset.height),
+            },
+            target.texture.size(),
+        );
+        if !asset.brush {
+            self.uploads.insert(asset.key, target.clone());
+        }
+        target
+    }
+
     pub fn prepare(
         &mut self,
         document: &pm_model::Document,
@@ -62,11 +116,14 @@ impl Assets {
             }
         }
         let Some(root) = document.root() else {
-            self.0.clear();
+            self.prepared.clear();
+            self.sources.clear();
+            self.uploads.clear();
             return;
         };
         walk(root, &mut requests);
-        let old = std::mem::take(&mut self.0);
+        let old = std::mem::take(&mut self.prepared);
+        let sources = std::mem::take(&mut self.sources);
         for (id, lut) in requests {
             let loaded = (|| {
                 let record = node::member(node::member(Some(root), "assets"), &id);
@@ -80,26 +137,47 @@ impl Assets {
                 let path = resolver
                     .path(&id, record)
                     .ok_or_else(|| format!("Effect asset is offline: {id}"))?;
+                let request = (id.clone(), lut);
+                let stamp = crate::media::stamp(&path);
+                if let Some(stamp) = stamp {
+                    let source = (path.clone(), stamp);
+                    let unchanged = sources.get(&request) == Some(&source);
+                    self.sources.insert(request.clone(), source);
+                    pm_perf::cache(
+                        pm_perf::Counter::EffectAssetHits,
+                        pm_perf::Counter::EffectAssetMisses,
+                        unchanged,
+                    );
+                    if unchanged && let Some(prepared) = old.get(&request) {
+                        return prepared.clone();
+                    }
+                }
                 use std::io::Read;
+                let limit = if lut {
+                    pm_color::lut::MAX_FILE_BYTES
+                } else {
+                    16 * 1024 * 1024
+                };
                 let mut bytes = vec![];
                 std::fs::File::open(path)
                     .map_err(|e| e.to_string())?
-                    .take(16 * 1024 * 1024 + 1)
+                    .take(limit + 1)
                     .read_to_end(&mut bytes)
                     .map_err(|e| e.to_string())?;
-                if bytes.len() > 16 * 1024 * 1024 {
-                    return Err("Effect asset exceeds 16 MiB".into());
+                if bytes.len() as u64 > limit {
+                    return Err(format!("Effect asset exceeds {} MiB", limit / 1024 / 1024));
                 }
                 let key = Sha256::digest(&bytes).into();
-                if let Some(Ok(asset)) = old.get(&(id.clone(), lut))
+                if let Some(Ok(asset)) = old.get(&request)
                     && asset.key == key
                 {
                     return Ok(asset.clone());
                 }
                 let asset = if lut {
-                    let cube = pm_fx_defs::lut::parse(
+                    let cube = pm_color::lut::CubeLut::parse(
                         std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
                     )
+                    .and_then(|lut| lut.gpu())
                     .map_err(|e| e.to_string())?;
                     Asset {
                         key,
@@ -143,8 +221,10 @@ impl Assets {
                 };
                 Ok(Arc::new(asset))
             })();
-            self.0.insert((id, lut), loaded);
+            self.prepared.insert((id, lut), loaded);
         }
+        let held: BTreeSet<_> = self.prepared.values().flatten().map(|a| a.key).collect();
+        self.uploads.retain(|key, _| held.contains(key));
     }
 }
 

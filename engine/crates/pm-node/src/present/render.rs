@@ -6721,6 +6721,7 @@ impl Thread {
                 pm_render::OutputKind::of(purpose)
             },
             origin: viewer_grid.and_then(|grid| grid.1),
+            output_tone: None,
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         // The session's compatibility producers (the `raster` override).

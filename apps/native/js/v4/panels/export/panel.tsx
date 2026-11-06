@@ -12,6 +12,7 @@ import {
   kinds,
   kindOf,
   profiles,
+  dynamicRanges,
   qualities,
   rates,
   rows,
@@ -127,7 +128,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             : undefined
         }
         binding={s.bindings[key]}
-        value={o[key]}
+        value={key === "dynamicRange" ? (o[key] ?? "sdr") : o[key]}
         options={options}
         disabled={busy}
         onChange={(e) => edit(key, e.value as Options[typeof key])}
@@ -340,7 +341,10 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     })),
                 )}
                 {shows(o, "profile") ? select("profile", profiles) : null}
-                {shows(o, "codec") ? select("codec", codecs) : null}
+                {/* HDR MP4 is always HEVC 10-bit: H.264 carries no HDR. */}
+                {shows(o, "codec") && !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                  ? select("codec", codecs)
+                  : null}
                 {shows(o, "depth") ? select("depth", depths) : null}
                 {shows(o, "scale")
                   ? select("scale", [
@@ -399,6 +403,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   : null}
                 {shows(o, "quality")
                   ? select("quality", qualities)
+                  : null}
+                {p.hdr && (o.format === "prores" || o.format === "mp4")
+                  ? select("dynamicRange", dynamicRanges)
                   : null}
               </Group>
               <Group label="Rendering">

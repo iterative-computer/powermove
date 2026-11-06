@@ -292,7 +292,7 @@ pub(crate) fn mastering_space(
 ) -> Result<()> {
     let name = unsafe {
         match mode {
-            crate::color::Mastering::LinearP3 => {
+            crate::color::Mastering::LinearP3 | crate::color::Mastering::Edr => {
                 objc2_core_graphics::kCGColorSpaceExtendedLinearDisplayP3
             }
             crate::color::Mastering::Pq { .. } => objc2_core_graphics::kCGColorSpaceITUR_2100_PQ,

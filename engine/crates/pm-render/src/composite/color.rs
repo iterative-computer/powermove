@@ -1,8 +1,10 @@
 //! The project's color settings (Settings › Project › Color; section 9,
 //! "Project color settings"; contract 4 `ProjectColor`).
 //!
-//! The document stores them at the root as
-//! `colorDepth: 8 | 16 | 32` plus `color: { mode, linearBlending, blendDomain }`.
+//! The document stores them at the root as `colorDepth: 8 | 16 | 32` plus
+//! `color: { mode, linearBlending, blendDomain, masteringPeak }`. Mode `hdr`
+//! keeps BT.2100 light in the working space; it needs float storage, so depth
+//! 8 reads as 16 there.
 //! The old `color.precision` is read only when depth is absent. An absent or
 //! `null` field, and any absent key, is decision 1's default (Standard,
 //! linear blending off, 16-bit float, HDR-safe blend formulas), which is
@@ -20,6 +22,8 @@ pub struct ColorSettings {
     pub blend_domain: BlendDomain,
     /// The project's authoritative intermediate storage precision.
     pub precision: Precision,
+    /// Working light goes past SDR white ([`ColorMode::Hdr`]).
+    pub hdr: bool,
 }
 
 impl ColorSettings {
@@ -30,6 +34,7 @@ impl ColorSettings {
             working: project.working(),
             blend_domain: project.blend_domain,
             precision: project.precision,
+            hdr: matches!(project.mode, ColorMode::Hdr),
         }
     }
 
@@ -53,6 +58,10 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
         let text = node::string(Some(value)).map(|s| s.to_string_lossy());
         match (key.as_str(), text.as_deref(), value.kind()) {
             ("mode", Some("standard"), _) => out.mode = ColorMode::Standard,
+            ("mode", Some("hdr"), _) => out.mode = ColorMode::Hdr,
+            ("masteringPeak", _, NodeKind::Number(n)) if (203.0..=10000.0).contains(n) => {
+                out.mastering_peak = *n as u16
+            }
             ("linearBlending", _, NodeKind::Bool(b)) => out.linear_blending = *b,
             ("precision", Some("float16"), _) => out.precision = Precision::Float16,
             ("precision", Some("float32"), _) => out.precision = Precision::Float32,
@@ -71,6 +80,9 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
             NodeKind::Number(n) if *n == 32.0 => Precision::Float32,
             _ => Precision::Float16, // normalizeColorDepth in the shipped app
         };
+    }
+    if out.mode == ColorMode::Hdr && out.precision == Precision::Unorm8 {
+        out.precision = Precision::Float16;
     }
     Ok(out)
 }

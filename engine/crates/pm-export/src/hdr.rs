@@ -9,10 +9,11 @@ use crate::{AlphaOutput, ColorTags, Error, WorkingEncoding};
 
 pub fn validate(tags: ColorTags) -> Result<(), Error> {
     let valid = match tags {
-        ColorTags::Rec2100Pq { white_nits } => (1..=10_000).contains(&white_nits),
+        ColorTags::Rec2100Pq { white_nits, .. } => (1..=10_000).contains(&white_nits),
         ColorTags::Rec2100Hlg {
             white_nits,
             peak_nits,
+            ..
         } => (400..=4000).contains(&peak_nits) && white_nits > 0 && white_nits <= peak_nits,
         _ => true,
     };
@@ -70,10 +71,11 @@ pub(crate) fn output_ycbcra(
         0.016_391_439 * c[0] + 0.088_013_308 * c[1] + 0.895_595_253 * c[2],
     ];
     let mut encoded = match tags {
-        ColorTags::Rec2100Pq { white_nits } => c.map(|v| pq(v * f64::from(white_nits))),
+        ColorTags::Rec2100Pq { white_nits, .. } => c.map(|v| pq(v * f64::from(white_nits))),
         ColorTags::Rec2100Hlg {
             white_nits,
             peak_nits,
+            ..
         } => {
             let gamma = 1.2 + 0.42 * (f64::from(peak_nits) / 1000.0).log10();
             let display = c.map(|v| (v * f64::from(white_nits) / f64::from(peak_nits)).max(0.0));
@@ -118,6 +120,7 @@ mod tests {
             ColorTags::Rec2100Hlg {
                 white_nits: 203,
                 peak_nits: 1000,
+                metadata: None,
             },
         );
         assert!((c[0] - 0.75).abs() < 0.001);
@@ -125,13 +128,38 @@ mod tests {
     }
     #[test]
     fn invalid_mastering_is_rejected() {
-        assert!(validate(ColorTags::Rec2100Pq { white_nits: 0 }).is_err());
         assert!(
-            validate(ColorTags::Rec2100Hlg {
-                white_nits: 203,
-                peak_nits: 200
+            validate(ColorTags::Rec2100Pq {
+                white_nits: 0,
+                metadata: None
             })
             .is_err()
         );
+        assert!(
+            validate(ColorTags::Rec2100Hlg {
+                white_nits: 203,
+                peak_nits: 200,
+                metadata: None
+            })
+            .is_err()
+        );
+    }
+    #[test]
+    fn hdr_metadata_payloads_are_big_endian_green_first() {
+        let metadata = crate::settings::HdrMetadata {
+            primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
+            white: [15635, 16450],
+            max_luminance: 10_000_000,
+            min_luminance: 50,
+            max_cll: 1000,
+            max_fall: 400,
+        };
+        let mdcv = metadata.mdcv();
+        assert_eq!(mdcv[0..2], 13250u16.to_be_bytes());
+        assert_eq!(mdcv[10..12], 16000u16.to_be_bytes());
+        assert_eq!(mdcv[12..14], 15635u16.to_be_bytes());
+        assert_eq!(mdcv[16..20], 10_000_000u32.to_be_bytes());
+        assert_eq!(mdcv[20..24], 50u32.to_be_bytes());
+        assert_eq!(metadata.clli(), [0x03, 0xE8, 0x01, 0x90]);
     }
 }

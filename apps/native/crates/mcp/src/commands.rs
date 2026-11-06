@@ -220,6 +220,8 @@ fn comp_patch(v: &Value) -> Result<CompPatch> {
         shutter: num("shutter")?,
         work_area,
         color_depth: v["colorDepth"].as_u64().map(|v| v as u32),
+        hdr: None,
+        mastering_peak: None,
         audio_gain: num("audioGain")?,
     })
 }

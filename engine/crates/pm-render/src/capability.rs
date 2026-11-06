@@ -567,14 +567,13 @@ impl<'a> GroupIndex<'a> {
     }
 }
 
-/// Whether a layer sits in a 3D group or a motion-blurred group, through
-/// any depth of group membership.
-fn enclosing_groups(index: &GroupIndex<'_>, layer: &Node) -> (bool, bool) {
+/// The groups around a layer, inner first, through any depth of membership.
+fn ancestors<'a>(index: &GroupIndex<'a>, layer: &Node) -> Vec<&'a Node> {
     let id_of = |n: Option<&Node>| {
         n.filter(|g| node::truthy(Some(g)))
             .map(|g| node::js_value_opt(Some(g)).to_js_string().to_string_lossy())
     };
-    let (mut three_d, mut blurred) = (false, false);
+    let mut found = vec![];
     let mut next = id_of(node::member(Some(layer), "group"));
     // A cycle in group membership ends at the layer count.
     for _ in 0..index.layers {
@@ -582,12 +581,53 @@ fn enclosing_groups(index: &GroupIndex<'_>, layer: &Node) -> (bool, bool) {
         let Some(group) = index.groups.get(&id).copied() else {
             break;
         };
+        found.push(group);
+        next = id_of(node::member(Some(group), "group"));
+    }
+    found
+}
+
+/// Whether a layer sits in a 3D group or a motion-blurred group.
+fn enclosing_groups(index: &GroupIndex<'_>, layer: &Node) -> (bool, bool) {
+    let (mut three_d, mut blurred) = (false, false);
+    for group in ancestors(index, layer) {
         three_d |= js::flag(group, "threeD");
         let mblur = node::member(Some(group), "mblur");
         blurred |= is_property(mblur) || node::truthy(mblur);
-        next = id_of(node::member(Some(group), "group"));
     }
     (three_d, blurred)
+}
+
+/// The assets a composition can show: `d.asset` of its layers and its
+/// precomps' layers, leaving out what's switched off for its whole span. An
+/// animated switch counts as on.
+pub(crate) fn shown_assets(root: &Node, composition: &str) -> BTreeSet<String> {
+    let off = |layer: &Node| {
+        let on = node::member(Some(layer), "on");
+        !is_property(on) && !node::truthy(on)
+    };
+    let mut shown = BTreeSet::new();
+    let mut seen = BTreeSet::from([composition.to_owned()]);
+    let mut pending: Vec<&Node> = composition_node(root, composition).into_iter().collect();
+    while let Some(comp) = pending.pop() {
+        let layers = node::array(node::member(Some(comp), "layers")).unwrap_or(&[]);
+        let groups = GroupIndex::new(layers);
+        for layer in layers {
+            if off(layer) || ancestors(&groups, layer).into_iter().any(off) {
+                continue;
+            }
+            if let Some((id, target)) = precomp_target(root, layer) {
+                if seen.insert(id) {
+                    pending.push(target);
+                }
+            } else if let Some(asset) =
+                node::string(node::member(node::member(Some(layer), "d"), "asset"))
+            {
+                shown.insert(asset.to_string_lossy());
+            }
+        }
+    }
+    shown
 }
 
 /// `L.fx` holds an effect that is not marked missing (enabled or not: the
@@ -693,6 +733,49 @@ fn check_media(
 mod tests {
     use super::*;
     use pm_protocol::patch::{FIELD_TABLE, LegacyBehavior};
+
+    #[test]
+    fn shown_assets_follow_what_the_composition_can_show() {
+        let doc = pm_model::json::parse(
+            &serde_json::json!({
+                "compId": "open", "id": "P",
+                "layers": [
+                    { "id": "a", "type": "video", "on": true, "d": { "asset": "shown" } },
+                    { "id": "b", "type": "video", "on": false, "d": { "asset": "off" } },
+                    { "id": "c", "type": "video", "on": true, "group": "g",
+                      "d": { "asset": "grouped-off" } },
+                    { "id": "g", "type": "group", "on": false, "d": {} },
+                    { "id": "e", "type": "video", "on": { "v": 1, "kf": [], "expr": null },
+                      "d": { "asset": "animated" } },
+                    { "id": "p", "type": "precomp", "on": true, "d": { "comp": "nested" } },
+                    { "id": "q", "type": "precomp", "on": false, "d": { "comp": "skipped" } },
+                ],
+                "comps": {
+                    "nested": { "layers": [
+                        { "id": "n", "type": "video", "on": true, "d": { "asset": "inner" } },
+                        { "id": "r", "type": "precomp", "on": true, "d": { "comp": "nested" } },
+                    ] },
+                    "skipped": { "layers": [
+                        { "id": "s", "type": "video", "on": true, "d": { "asset": "unused" } },
+                    ] },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let doc = Document::new(Some(doc), 1);
+        let root = doc.root().unwrap();
+        assert_eq!(
+            shown_assets(root, "open").into_iter().collect::<Vec<_>>(),
+            ["animated", "inner", "shown"]
+        );
+        assert_eq!(
+            shown_assets(root, "skipped")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["unused"]
+        );
+    }
 
     #[test]
     fn every_stamping_field_is_classified() {

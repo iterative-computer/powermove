@@ -164,13 +164,9 @@ fn prepare_one(
                 })?);
         }
         let src = source.as_ref().expect("source opened");
-        match &job.interpret {
-            Some(i) => video_drawable(src, i),
-            None => video_supported(src),
-        }
-        .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
         let none = Interpretation::default();
         let interp = job.interpret.as_ref().unwrap_or(&none);
+        video_drawable(src, interp).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
         let v = src
             .probe
             .video
