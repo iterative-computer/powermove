@@ -14,8 +14,16 @@ struct Client {
 }
 impl Client {
     fn new(profile: &std::path::Path, project: Option<&std::path::Path>) -> Self {
+        Self::with_env(profile, project, &[])
+    }
+    fn with_env(
+        profile: &std::path::Path,
+        project: Option<&std::path::Path>,
+        env: &[(&str, &std::path::Path)],
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_powermove-native"));
         command.args(["--powermove-mcp", "--profile"]).arg(profile);
+        command.envs(env.iter().copied());
         if let Some(project) = project {
             command.arg(project);
         }
@@ -151,4 +159,58 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
         }
         assert!(!profile.join("mcp/connection.json").exists());
     }
+}
+
+/// Effects compile in the helper the app bundle carries beside its executable.
+fn glsl_compiler() -> std::path::PathBuf {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["build", "--locked", "-p", "pm-glsl", "--bin", "pm-glsl-compiler"])
+        .args(["--message-format=json"])
+        .stderr(Stdio::inherit())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|v| v["reason"] == "compiler-artifact" && v["target"]["name"] == "pm-glsl-compiler")
+        .and_then(|v| v["executable"].as_str().map(Into::into))
+        .expect("cargo did not report the GLSL compiler")
+}
+/// The real executable over real pipes, with a real engine child for each job.
+#[test]
+fn export_video_and_render_frames_reach_the_production_engine_job() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let compiler = glsl_compiler();
+    let mut client = Client::with_env(&profile, None, &[("POWERMOVE_GLSL_COMPILER", &compiler)]);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool(
+        "create_project",
+        json!({"name":"Synthetic export","width":320,"height":180,"fps":30,"duration":0.5}),
+    );
+    client.tool("start_session", json!({"prompt":"Synthetic export"}));
+    client.tool(
+        "apply_commands",
+        json!({"commands":[{"type":"add_layer","id":"solid","layerType":"solid","name":"Solid"}]}),
+    );
+    let frames = client.rpc(
+        "tools/call",
+        json!({"name":"render_frames","arguments":{"times":[0],"width":160}}),
+    );
+    assert_eq!(frames["isError"], false, "{frames}");
+    let image = &frames["content"][1];
+    assert_eq!(image["mimeType"], "image/png");
+    assert!(image["data"].as_str().unwrap().starts_with("iVBOR"));
+    let exported = client.tool("export_video", json!({"audio":false}));
+    let path = std::path::Path::new(exported["path"].as_str().unwrap());
+    assert!(path.starts_with(profile.join("exports")));
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
 }

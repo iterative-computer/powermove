@@ -12,6 +12,7 @@ pub mod editing;
 pub mod library_surface;
 mod lifecycle;
 mod mcp;
+mod mcp_services;
 mod media;
 mod panels;
 mod perf_gate;
@@ -44,6 +45,17 @@ fn native_profile(profile: Option<PathBuf>, home: Option<std::ffi::OsString>) ->
         home.filter(|home| !home.is_empty())
             .map(|home| PathBuf::from(home).join("Library/Application Support/Powermove Native"))
     })
+}
+
+/// MCP's host export folder is ~/Powermove. An explicit test or lane profile
+/// keeps its exports to itself.
+fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) -> PathBuf {
+    match home.map(PathBuf::from) {
+        Some(home) if native_profile(None, Some(home.clone().into())).as_deref() == Some(profile) => {
+            home.join("Powermove")
+        }
+        _ => profile.join("exports"),
+    }
 }
 
 fn main() -> Result<()> {
@@ -86,6 +98,7 @@ fn main() -> Result<()> {
         profile.is_absolute(),
         "Use an absolute isolated native profile"
     );
+    let exports = export_folder(&profile, std::env::var_os("HOME"));
     if mcp_mode {
         if profile.join("mcp/connection.json").exists() {
             anyhow::ensure!(
@@ -97,7 +110,7 @@ fn main() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
                 .map_err(Into::into);
         }
-        return mcp::headless(profile, launch);
+        return mcp::headless(profile, exports, launch);
     }
     std::fs::create_dir_all(&profile)?;
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
@@ -118,13 +131,14 @@ fn main() -> Result<()> {
         });
         mcp::attach(&actor.handle(), &worker_profile)?;
         let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
-        let tools = mcp::Tools::new(mcp_host.clone());
-        let server =
-            pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || tools.connect())?;
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu, fonts,
         )?);
+        let tools = mcp::Tools::new(mcp_host.clone(), exports);
+        tools.connect_engine(engine.export_activity())?;
+        let server =
+            pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || tools.connect())?;
         Ok((actor, engine, mcp_host, server))
     })
     .join()

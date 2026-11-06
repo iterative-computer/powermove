@@ -33,10 +33,10 @@ impl Fixture {
         host.open("test".into(),SessionSource::New(model(&json!({"id":"test","name":"Synthetic","compId":"c","w":320,"h":180,"fps":30,"dur":2,"bg":"#000000","layers":[],"assets":{},"comps":{}})))).unwrap();
         host.save(host.current().unwrap(), None).unwrap();
         Self {
-            _root: root,
             actor: Some(actor),
-            tools: Tools::new(host.clone()),
+            tools: Tools::new(host.clone(), root.path().join("exports")),
             host,
+            _root: root,
         }
     }
     fn connection(&self) -> Connection {

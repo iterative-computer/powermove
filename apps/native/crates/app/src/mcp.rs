@@ -6,7 +6,10 @@ use pm_mcp::{Automation, Error, McpSession, Result, transport::ToolConnection};
 use serde_json::Value;
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// The tool host shared by every connection to this app.
@@ -16,12 +19,24 @@ pub struct Tools {
     pub automation: Arc<Mutex<Automation>>,
 }
 impl Tools {
-    pub fn new(host: Arc<Host>) -> Self {
-        let exports = host.profile.join("exports");
+    pub fn new(host: Arc<Host>, exports: PathBuf) -> Self {
         Self {
             automation: Arc::new(Mutex::new(Automation::attached(host.clone(), exports))),
             host,
         }
+    }
+    /// Install the production engine hosts. Call on a worker before serving.
+    pub fn connect_engine(&self, activity: Arc<AtomicBool>) -> anyhow::Result<()> {
+        let jobs = crate::mcp_services::EngineJobs::new(
+            self.host.kernel.clone(),
+            std::env::current_exe()?,
+            activity,
+            self.host.profile.join("cache/mcp"),
+        );
+        let mut automation = self.automation.lock().unwrap();
+        automation.export_child = jobs.clone();
+        automation.engine = Some(jobs);
+        Ok(())
     }
     pub fn connect(&self) -> Connection {
         Connection {
@@ -75,7 +90,11 @@ impl ToolConnection for Connection {
     }
 }
 
-pub fn headless(profile: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn headless(
+    profile: PathBuf,
+    exports: PathBuf,
+    launch: Option<PathBuf>,
+) -> anyhow::Result<()> {
     std::thread::spawn(move || -> anyhow::Result<()> {
         let actor = KernelActor::spawn(KernelConfig {
             journal_root: Some(profile.join("journals")),
@@ -86,7 +105,8 @@ pub fn headless(profile: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()>
         if let Some(path) = launch {
             host.open(super::session::stable_id(&path), SessionSource::File(path))?;
         }
-        let tools = Tools::new(host);
+        let tools = Tools::new(host, exports);
+        tools.connect_engine(Arc::default())?;
         let shared = tools.clone();
         let server =
             pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
