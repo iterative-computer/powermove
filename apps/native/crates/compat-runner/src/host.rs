@@ -305,6 +305,7 @@ impl ExtensionHost {
             records: vec![],
             canvases: BTreeMap::new(),
             disk: 0,
+            store_revision: None,
             config,
         };
         let worker = thread::Builder::new()
@@ -515,6 +516,7 @@ struct Owner {
     records: Vec<Value>,
     canvases: BTreeMap<(u64, String), u64>,
     disk: u64,
+    store_revision: Option<u64>,
 }
 impl Owner {
     fn run(mut self, input: Receiver<Input>) {
@@ -547,6 +549,7 @@ impl Owner {
             if kernel {
                 self.eval("__compat.sync()");
                 self.follow_state();
+                self.tick_stores();
             }
             match next {
                 Some(Input::Close) => break,
@@ -647,6 +650,20 @@ impl Owner {
             Input::Rescan => self.rescan(),
             Input::Failed => self.restart(),
             Input::Kernel | Input::Close => (),
+        }
+    }
+    fn tick_stores(&mut self) {
+        let revision = self
+            .config
+            .kernel
+            .published(&self.config.project)
+            .map(|published| published.revision());
+        if revision.is_none() || revision == self.store_revision {
+            return;
+        }
+        self.store_revision = revision;
+        for store in &self.stores {
+            store.extension.tick(revision.unwrap_or_default());
         }
     }
     fn store_of(&self, panel: &str) -> Option<&StoreExtension> {
@@ -1507,10 +1524,20 @@ mod tests {
                     "export default function(api: any){
                        api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:1}],frag:'o = src(v_uv) * u_amount;'});
                        api.commands.register({id:'mark',label:'Mark',run(){globalThis.ran=(typeof document)+':'+(typeof PM)}});
+                       api.events.on('project:changed',()=>{api.storage.set('seen',true)});
                      }",
                 ),
                 (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
             ],
+        );
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-editor",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-editor.rename',label:'Rename',
+                   run(){api.history.do('Rename',()=>{api.project.get().name='Moved'})}})}",
+            )],
         );
         let fixture = Fixture::start(root);
         fixture.until("activation", |host| {
@@ -1530,6 +1557,20 @@ mod tests {
         assert_eq!(definitions[0]["origin"], "store");
         assert_eq!(definitions[0]["id"], "synthetic-store.tint");
         assert!(command(&fixture, "synthetic-store.mark"));
+        // A listener in the helper hears a project change and writes through its
+        // own storage, proving the delivery end to end.
+        fixture.host.run_command("synthetic-editor.rename", json!([]));
+        fixture.until("listener", |_| {
+            fixture
+                .kernel
+                .state()
+                .extensions
+                .get("synthetic-store")
+                .and_then(|entry| entry.source.get("storePrivateStorageV1").cloned())
+                .is_some_and(|storage| {
+                    pm_model::json::to_canonical_string(&storage).contains("seen")
+                })
+        });
     }
     #[test]
     fn a_v4_extension_compiles_as_a_surface_and_stays_out_of_the_trusted_realm() {

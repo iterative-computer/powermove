@@ -209,6 +209,13 @@ impl StoreExtension {
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default()
     }
+    /// The project moved: reads refresh and listeners run inside the helper.
+    pub fn tick(&self, revision: u64) {
+        let _ = self.runner.eval(&format!(
+            "void __storeCheck.control.tick({},[[\"project:changed\",{{kind:\"values\"}}]])",
+            json!({"revision":revision,"generation":revision})
+        ));
+    }
     /// Panels are registered under the extension's namespace; its code knows the
     /// id it wrote.
     pub fn open_panel(&self, panel: &str) {

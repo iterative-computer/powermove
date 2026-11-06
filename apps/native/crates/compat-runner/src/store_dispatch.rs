@@ -124,6 +124,8 @@ impl StoreDispatch for KernelStoreDispatch {
             .as_array()
             .ok_or(Error::Invalid("Store dispatch arguments"))?;
         match method {
+            // Listeners stay in the helper; every project change reaches it.
+            "register" if args.first().is_some_and(|kind| kind == "events") => Ok(json!({})),
             "register" => {
                 let registry = args
                     .first()
