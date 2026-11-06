@@ -114,7 +114,7 @@ pub fn references(p: &Value, asset: &str) -> Vec<Value> {
 pub fn list(p: &Value, args: &Value, registry: Option<&dyn MediaRegistry>) -> Value {
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(100) as usize;
-    let assets=p["assets"].as_object().into_iter().flatten().map(|(_,meta)| {
+    let assets=crate::assets_in_order(p).into_iter().map(|meta| {
         let id=meta["id"].as_str().unwrap_or("");
         let refs=references(p,id);
         let runtime=registry.map(|r|r.state(p["id"].as_str().unwrap_or(""),id)).unwrap_or_default();

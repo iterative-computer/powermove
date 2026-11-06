@@ -1,6 +1,8 @@
-//! Sparkle custom-driver policy bridge. Sparkle owns extraction/replacement and
-//! signature/DR checks. The macOS host implements `Sparkle` using its main-run-loop
-//! dispatcher; Rust worker calls must not synchronously wait on JS or AppKit.
+//! Legacy synchronous external-archive policy bridge, retained for existing
+//! injected-capability consumers/tests. Sparkle 2.10.1 has no public archive-
+//! adoption API. The linked asynchronous production route now lives in
+//! `pm_update_policy::sparkle`; do not implement this trait using a fabricated
+//! stage selector or a ticket returned before authentication/extraction.
 use anyhow::{Result, ensure};
 use pm_update_policy::update_distribution::{Installer, Recovery, Release, Stage};
 use sha2::{Digest, Sha256};
@@ -16,13 +18,13 @@ pub struct Enclosure {
 }
 impl Enclosure {
     fn matches(&self, release: &Release) -> bool {
-        self.version == release.version
+        self.version == release.sparkle_version()
             && self.archive_url == release.archive_url
             && self.size == release.size
             && self.signature == release.sparkle_signature
     }
 }
-/// Capability implemented by the pinned Sparkle 2.10.1 custom user driver.
+/// Legacy externally staged installer capability; not Sparkle's public API.
 /// A ticket is returned only after Sparkle's authenticated extraction/DR/Team,
 /// architecture, OS, space and notarization checks complete. No success fallback.
 /// Operations are idempotent by the signed policy hash `id`, including recovery

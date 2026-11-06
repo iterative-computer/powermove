@@ -41,6 +41,8 @@ pub(crate) struct Backend {
     pub(crate) caller: Caller,
     pub(crate) model: Option<Inspector>,
     pub(crate) application: bool,
+    /// The document session this worker was mounted on; a reopen never rebinds.
+    document: Option<u64>,
     panel: EffectsPanel,
     extension: String,
     bindings: BTreeMap<String, Vec<String>>,
@@ -98,10 +100,12 @@ impl Backend {
             application,
             panel == "agent",
         )?;
+        let document = published.as_ref().map(|p| p.snapshot.doc_id);
         Ok(Self {
             kernel,
             identity,
             application,
+            document,
             caller: Caller::realm(realm, 1, Origin::Interface),
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
             panel: EffectsPanel::new(presentation, 0..96),
@@ -124,7 +128,9 @@ impl Backend {
         if self.application {
             None
         } else {
-            self.kernel.published(&self.identity.project)
+            self.kernel
+                .published(&self.identity.project)
+                .filter(|p| Some(p.snapshot.doc_id) == self.document)
         }
     }
     pub(crate) fn sync(&mut self) -> Result<(), String> {

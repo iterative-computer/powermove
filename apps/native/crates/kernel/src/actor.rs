@@ -291,6 +291,7 @@ enum Msg {
     PrepareSave {
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
+        replace: bool,
         document: Option<u64>,
         reply: Reply<Result<crate::session::SessionSave, KernelFailure>>,
     },
@@ -475,7 +476,15 @@ impl KernelHandle {
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
     ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
-        self.prepare_save_checked(session, path, None)
+        self.prepare_save_checked(session, path, false, None)
+    }
+    /// Save As after the save panel confirmed replacing an existing file.
+    pub fn prepare_save_replacing(
+        &self,
+        session: crate::session::SessionHandle,
+        path: std::path::PathBuf,
+    ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
+        self.prepare_save_checked(session, Some(path), true, None)
     }
     /// A queued automation save remains bound to the observed document lifetime.
     pub fn prepare_document_save(
@@ -483,18 +492,20 @@ impl KernelHandle {
         session: crate::session::SessionHandle,
         document: u64,
     ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
-        self.prepare_save_checked(session, None, Some(document))
+        self.prepare_save_checked(session, None, false, Some(document))
     }
     fn prepare_save_checked(
         &self,
         session: crate::session::SessionHandle,
         path: Option<std::path::PathBuf>,
+        replace: bool,
         document: Option<u64>,
     ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
         let (r, p) = oneshot();
         self.send(Msg::PrepareSave {
             session,
             path,
+            replace,
             document,
             reply: Box::new(move |v| r.resolve(v)),
         });
@@ -834,6 +845,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             Msg::PrepareSave {
                 session,
                 path,
+                replace,
                 document,
                 reply,
             } => {
@@ -847,7 +859,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                         "The document was closed or replaced; the save was not applied".into(),
                     ))
                 } else {
-                    kernel.prepare_session_save(session, path)
+                    kernel.prepare_session_save(session, path, replace)
                 };
                 let revision = publish(&mut kernel, &shared, &id);
                 reply(result);

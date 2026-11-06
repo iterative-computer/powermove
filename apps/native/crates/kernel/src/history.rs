@@ -79,20 +79,22 @@ impl HistoryRecord {
         self.external.is_none() && self.selection.is_none()
     }
 
-    /// The patches the file stores for this record (`forward`, `backward`).
-    pub(crate) fn saved_patches(&self) -> (Vec<Patch>, Vec<Patch>) {
+    /// The leaf patches the file stores for this record (`forward`,
+    /// `backward`). `None` for a structural edit too large to keep whole: it
+    /// saves as operations, and its entry costs what it changed.
+    pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
-            return (saved.0.clone(), saved.1.clone());
+            return Some((saved.0.clone(), saved.1.clone()));
         }
         let leaves = |ops: &[Op]| {
             ops.iter()
-                .filter_map(|op| match op {
+                .map(|op| match op {
                     Op::Leaf(p) => Some(p.clone()),
                     _ => None,
                 })
-                .collect()
+                .collect::<Option<Vec<_>>>()
         };
-        (leaves(&self.forward), leaves(&self.inverse))
+        Some((leaves(&self.forward)?, leaves(&self.inverse)?))
     }
 }
 
@@ -482,17 +484,22 @@ impl History {
             .rev()
             .flat_map(|r| r.inverse.iter().cloned())
             .collect();
-        let saved = tail.iter().any(|r| r.saved.is_some()).then(|| {
-            let mut f = Vec::new();
-            let mut b = Vec::new();
-            for r in &tail {
-                f.extend(r.saved_patches().0);
-            }
-            for r in tail.iter().rev() {
-                b.extend(r.saved_patches().1);
-            }
-            (f, b)
-        });
+        // Whole-value forms join only when every step has one.
+        let saved = if tail.iter().any(|r| r.saved.is_some()) {
+            tail.iter()
+                .map(HistoryRecord::saved_form)
+                .collect::<Option<Vec<_>>>()
+                .map(|forms| {
+                    let backward = forms.iter().rev().flat_map(|(_, b)| b.iter().cloned());
+                    let backward = backward.collect();
+                    (
+                        forms.iter().flat_map(|(f, _)| f.clone()).collect(),
+                        backward,
+                    )
+                })
+        } else {
+            None
+        };
         let revision = tail.last().map_or(0, |r| r.revision);
         Some(self.push(
             label.to_owned(),
@@ -524,10 +531,10 @@ fn forbidden(key: &JsString) -> bool {
     )
 }
 
-/// `validPatches` for one patch: string parts other than the prototype keys,
+/// `validPatches` for one path: string parts other than the prototype keys,
 /// or safe non-negative integers.
-fn valid_patch(patch: &Patch) -> bool {
-    patch.path.iter().all(|part| match part {
+fn valid_path(path: &[PathPart]) -> bool {
+    path.iter().all(|part| match part {
         PathPart::Key(k) => !forbidden(k),
         PathPart::Index(n) => n.fract() == 0.0 && *n >= 0.0 && *n <= 9_007_199_254_740_991.0,
     })
@@ -639,37 +646,44 @@ impl History {
                 .and_then(Value::as_str)
                 .ok_or("a history entry has no label")?
                 .to_owned();
-            let patches = |side: &str| -> Result<Vec<Patch>, String> {
+            let operations = |side: &str| -> Result<Vec<Op>, String> {
                 e.get(side)
                     .and_then(Value::as_array)
                     .ok_or_else(|| format!("a history entry has no {side} list"))?
                     .iter()
                     .map(|p| {
-                        let patch = Patch::from_value(p)
+                        let op = Op::from_value(p)
                             .map_err(|_| format!("a {side} patch is malformed"))?;
-                        if valid_patch(&patch) {
-                            Ok(patch)
+                        if valid_path(op.path()) {
+                            Ok(op)
                         } else {
                             Err(format!("a {side} patch has an invalid path"))
                         }
                     })
                     .collect()
             };
-            let (mut forward, mut backward) = (patches("forward")?, patches("backward")?);
+            let (mut forward, mut backward) = (operations("forward")?, operations("backward")?);
             if root_relative {
-                (forward, backward) = canonicalize_patches(&forward, &backward, open_comp);
+                let leaves = |ops: &[Op]| {
+                    ops.iter()
+                        .map(|op| match op {
+                            Op::Leaf(patch) => Ok(patch.clone()),
+                            _ => Err("a history entry needs its composition paths"),
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                };
+                let (f, b) =
+                    canonicalize_patches(&leaves(&forward)?, &leaves(&backward)?, open_comp);
+                forward = f.into_iter().map(Op::Leaf).collect();
+                backward = b.into_iter().map(Op::Leaf).collect();
             }
-            let bytes = patches_bytes(&forward) + patches_bytes(&backward);
+            let bytes = ops_bytes(&forward) + ops_bytes(&backward);
             history.entries.push(HistoryRecord {
                 id: next_token(),
                 label,
                 origin: Origin::Interface,
-                forward: forward.into_iter().map(Op::Leaf).collect::<Vec<_>>().into(),
-                inverse: backward
-                    .into_iter()
-                    .map(Op::Leaf)
-                    .collect::<Vec<_>>()
-                    .into(),
+                forward: forward.into(),
+                inverse: backward.into(),
                 saved: None,
                 revision: 0,
                 bytes,
@@ -708,12 +722,15 @@ impl HistorySnapshot {
             .iter()
             .filter(|r| r.is_document())
             .map(|r| {
-                let (forward, backward) = r.saved_patches();
                 let list = |p: Vec<Patch>| Value::Array(p.iter().map(Patch::to_value).collect());
+                let (forward, backward) = match r.saved_form() {
+                    Some((forward, backward)) => (list(forward), list(backward)),
+                    None => (ops_to_value(&r.forward), ops_to_value(&r.inverse)),
+                };
                 let mut e = Map::new();
                 e.insert("label", Value::from(r.label.as_str()));
-                e.insert("forward", list(forward));
-                e.insert("backward", list(backward));
+                e.insert("forward", forward);
+                e.insert("backward", backward);
                 Value::Object(e)
             })
             .collect();

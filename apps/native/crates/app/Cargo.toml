@@ -31,12 +31,12 @@ block2 = "0.6"
 async-channel = "2"
 serde_json = "1"
 tempfile = "3"
+sha2 = "0.10"
 
 pm-builtins = { path = "../builtins" }
 pm-agents = { path = "../agents" }
 pm-media = { path = "../../../../engine/crates/pm-media" }
 png = "0.18"
-sha2 = "0.10"
 pm-surface = { path = "../surface" }
 pm-runtime-v8 = { path = "../runtime-v8", features = ["macos-sandbox"] }
 raw-window-handle = "0.6"

@@ -215,22 +215,28 @@ def nested_code(app):
     return sorted(targets, key=lambda p: (-len(p.parts), str(p)))
 
 
-def sign(app, identity=None):
+def sign(app, identity=None, *, adhoc_proof=False):
     macos()
-    identity = identity or os.environ.get("PM_CODESIGN_IDENTITY")
-    if not identity or identity == "-" or identity.startswith("-"):
+    identity = "-" if adhoc_proof else identity or os.environ.get("PM_CODESIGN_IDENTITY")
+    if not adhoc_proof and (not identity or identity.startswith("-")):
         raise ValueError("set PM_CODESIGN_IDENTITY to a Developer ID identity in Keychain")
     app = Path(app).resolve(strict=True)
+    if adhoc_proof:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        if not re.fullmatch(r"com\.powermove\.signature-proof(?:\.[A-Za-z0-9-]+)*", info.get("CFBundleIdentifier", "")):
+            raise ValueError("ad-hoc proof signing is limited to synthetic proof bundles")
+    timestamp = "--timestamp=none" if adhoc_proof else "--timestamp"
+    proof_requirement = ["--requirements", '=designated => identifier "' + info["CFBundleIdentifier"] + '"'] if adhoc_proof else []
     if not (app / "Contents" / "Resources" / "Assets.car").is_file():
         raise ValueError("compile the asset catalog before distribution signing")
     # Validate identity availability without printing Keychain contents.
     for target in nested_code(app):
         if target == app / "Contents" / "MacOS" / "powermove-native":
             continue  # app signing seals its executable with the main entitlements
-        run(["codesign", "--force", "--timestamp", "--options", "runtime", "--sign", identity,
+        run(["codesign", "--force", timestamp, "--options", "runtime", "--sign", identity,
              "--preserve-metadata=identifier,entitlements", target])
-    run(["codesign", "--force", "--timestamp", "--options", "runtime", "--sign", identity,
-         "--entitlements", HERE / "entitlements" / "app.plist", app])
+    run(["codesign", "--force", timestamp, "--options", "runtime", "--sign", identity,
+         "--entitlements", HERE / "entitlements" / "app.plist", *proof_requirement, app])
     run(["codesign", "--verify", "--deep", "--strict", "--all-architectures", app])
 
 

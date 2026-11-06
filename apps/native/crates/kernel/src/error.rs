@@ -234,6 +234,13 @@ impl From<ContainerError> for ProjectIoError {
     }
 }
 
+impl ProjectIoError {
+    pub(crate) fn is_disk_full(&self) -> bool {
+        matches!(self, ProjectIoError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::StorageFull)
+    }
+}
+
 pub(crate) fn io_err(path: &std::path::Path, source: std::io::Error) -> ProjectIoError {
     ProjectIoError::Io {
         path: path.display().to_string(),

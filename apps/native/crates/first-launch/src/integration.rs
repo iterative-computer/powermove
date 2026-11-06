@@ -9,9 +9,9 @@ use pm_update_policy::update_handoff::{
 /// Trusted application capability, never renderer flags. Implementations keep
 /// source/import leases for the entire `first_run` call. Evidence must be read
 /// again AFTER the final delta, including signed identity and full closure.
-/// The distribution contract still has an unresolved `restore_verified` field;
-/// it must not be asserted as proof of nonexistent reverse migration. Its owner
-/// must align that gate with actual installer recovery. Missing proof is false.
+/// Installer recovery means retaining the previous signed app/checkpoints and
+/// verifying replacement recovery, never reverse migration of native work.
+/// Missing proof stays false.
 pub trait Evidence {
     fn electron_quiescent(&mut self) -> Result<bool>;
     fn verify_transition_receipt(&mut self) -> Result<bool>;

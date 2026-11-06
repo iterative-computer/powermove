@@ -6,6 +6,7 @@ mod agent_host;
 mod agent_tests;
 mod data;
 pub mod delivery;
+pub mod media_import;
 mod models;
 mod properties;
 mod settings;
@@ -60,6 +61,7 @@ struct Entry {
     interaction: Interaction,
 }
 /// Completed byte receipts stay native; the JSX panel receives metadata only.
+#[derive(Clone)]
 pub struct RetainedAsset {
     pub id: String,
     pub metadata: pm_model::Value,
@@ -206,6 +208,7 @@ impl Builtins {
         items: Vec<RetainedAsset>,
         folder: Option<String>,
         replace: Option<String>,
+        place: Vec<pm_kernel::Command>,
         caller: pm_kernel::Caller,
     ) -> std::result::Result<
         pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
@@ -219,8 +222,8 @@ impl Builtins {
             .kernel
             .published(&owner.project)
             .ok_or("Project closed")?;
-        let catalog =
-            pm_panel_media::Catalog::published(&published).map_err(|e| format!("{e:?}"))?;
+        let catalog = pm_panel_media::Catalog::published(&published)
+            .map_err(|_| "The project's media could not be read")?;
         let mut stored = Vec::new();
         let mut bindings = Vec::new();
         for item in items {
@@ -243,13 +246,22 @@ impl Builtins {
                 previous: item.previous,
             });
         }
-        let edit = catalog
+        let mut edit = catalog
             .prepare_import(owner, stored, folder, replace)
-            .map_err(|e| format!("{e:?}"))?;
-        Ok(self
-            .broker
-            .kernel
-            .call(&owner.project, edit.request_with_media(caller, bindings)))
+            .map_err(|error| match error {
+                pm_panel_media::Error::MissingItem => "That folder is no longer in the project",
+                _ => "The import no longer matches the project",
+            })?;
+        if !place.is_empty() {
+            edit.label = match place.len() {
+                1 => "Import file".to_owned(),
+                n => format!("Import {n} files"),
+            };
+        }
+        Ok(self.broker.kernel.call(
+            &owner.project,
+            edit.request_with_media(caller, bindings, place),
+        ))
     }
 
     pub fn platform_reply(&self, id: u64, result: std::result::Result<Value, String>) {

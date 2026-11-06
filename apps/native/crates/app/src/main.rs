@@ -15,6 +15,9 @@ mod lifecycle;
 mod mcp;
 mod mcp_services;
 mod media;
+mod media_import;
+mod media_refresh;
+mod new_project;
 mod panels;
 mod perf_gate;
 mod platform;
@@ -133,6 +136,7 @@ fn main() -> Result<()> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
+            backup_root: Some(worker_profile.join("backups")),
             ..Default::default()
         });
         mcp::attach(&actor.handle(), &worker_profile)?;

@@ -610,6 +610,7 @@ fn project(
                 .shell(ShellCall::SaveAs {
                     session: handle,
                     path: saved.clone(),
+                    replace: false,
                 })
                 .wait()
                 .unwrap()?;

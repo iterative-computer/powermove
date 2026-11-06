@@ -53,6 +53,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
     std::thread::spawn(move || -> anyhow::Result<()> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(profile.join("journals")),
+            backup_root: Some(profile.join("backups")),
             ..Default::default()
         });
         let (host, _) = crate::mcp::Host::new(actor.handle(), profile.clone());
@@ -122,8 +123,9 @@ impl EngineJobs {
             &published.snapshot,
             &published.media,
             published.path.as_deref(),
-            &self.cache.join(&published.project),
-        )?;
+            &crate::media::cache_root(&self.profile),
+        )?
+        .catalog;
         let request = ExportRequest::new(
             pm_kernel::new_id("export").as_str().into(),
             &published.snapshot,
@@ -505,6 +507,7 @@ impl MediaImporter for EngineJobs {
                         original,
                         previous,
                     }],
+                    vec![],
                 ),
             )
             .wait()
@@ -889,9 +892,10 @@ impl EngineJobs {
             &published.snapshot,
             &published.media,
             published.path.as_deref(),
-            &self.cache.join(&published.project),
+            &crate::media::cache_root(&self.profile),
         )
         .map_err(failed)?
+        .catalog
         .originals
         .remove(asset)
         .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))

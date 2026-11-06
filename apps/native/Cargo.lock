@@ -5468,6 +5468,8 @@ dependencies = [
  "fs2",
  "pm-captions",
  "pm-first-launch",
+ "pm-model",
+ "pm-native-migrate",
  "pm-promedia",
  "pm-update-policy",
  "semver",
@@ -5586,11 +5588,16 @@ name = "pm-update-policy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "cc",
+ "ed25519-dalek",
  "fs2",
+ "memmap2",
  "semver",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "url",
 ]
 
