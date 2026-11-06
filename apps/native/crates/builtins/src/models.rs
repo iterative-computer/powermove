@@ -510,11 +510,7 @@ impl Backend {
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let provider = session.settings.provider;
         let connected = self.native.agent_link.available(provider);
-        let needs_answer = session
-            .trace
-            .rows
-            .values()
-            .any(|row| row["kind"] == "question" && row["status"] == "open");
+        let needs_answer = session.needs_answer();
         let reason = if provider == pm_agents::Provider::Compatible {
             "Connect an API, Ollama, or LM Studio in Settings."
         } else {
@@ -955,7 +951,7 @@ impl Backend {
                         .provider;
                     let action = &args["action"];
                     crate::agent_host::admit(action, link.available(provider))?;
-                    if action["type"] == "submit" || action["type"] == "key" {
+                    if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
                     let run = new_id("run");

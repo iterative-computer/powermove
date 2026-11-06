@@ -117,16 +117,31 @@ pub fn admit(action: &Value, connected: bool) -> Result<(), String> {
         Err(UNAVAILABLE.into())
     }
 }
-/// A send can't reach a provider yet with attachments, and there is a run cap.
+pub fn sends(action: &Value) -> bool {
+    action["type"] == "submit"
+        || action["type"] == "key"
+            && action["key"]["key"] == "Enter"
+            && action["key"]["shiftKey"] != true
+            && action["key"]["composing"] != true
+}
+/// Refuse a send the panel could not hand to a provider, before it is consumed.
 pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
     let session = state.panel.session(thread).map_err(|e| format!("{e:?}"))?;
+    if !session.draft.sendable() {
+        return Ok(());
+    }
     if session.draft.attachments().next().is_some() {
         return Err("Attachments can't reach the agent in this build. Remove them to send.".into());
     }
-    if session.run.is_none() && state.runs.active() >= 8 {
-        return Err("Eight agents are already running. Wait for one to finish.".into());
+    match &session.run {
+        None if state.runs.active() >= 8 => {
+            Err("Eight agents are already running. Wait for one to finish.".into())
+        }
+        Some(run) if !state.runs.steerable(&run.id) && !session.needs_answer() => {
+            Err("This run can't take new messages. Stop it first.".into())
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 fn workspace(profile: &std::path::Path, project: &str, thread: &str) -> std::io::Result<PathBuf> {
     use pm_agents::workspace::safe_component;

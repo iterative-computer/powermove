@@ -89,7 +89,7 @@ pub trait SurfaceHook: Send + Sync {
 }
 /// Either the headless binary's own kernel or the running app's actor.
 enum Backend {
-    Owned(Kernel),
+    Owned(Box<Kernel>),
     App(Arc<crate::app_host::Host>),
 }
 /// One project's published state, read the same way from either backend.
@@ -162,7 +162,11 @@ impl Automation {
             ShellReply::Library(pm_kernel::locks::OpenDecision::Writable) => {}
             other => return Err(Error::kernel(other)),
         }
-        Ok(Self::with_backend(Backend::Owned(kernel), profile, exports))
+        Ok(Self::with_backend(
+            Backend::Owned(Box::new(kernel)),
+            profile,
+            exports,
+        ))
     }
     /// Attach to the running app's kernel actor and session slot.
     pub fn attached(host: Arc<crate::app_host::Host>, exports: PathBuf) -> Self {

@@ -1,5 +1,6 @@
 //! Production hosts behind MCP's service traits. Everything here runs on MCP or
 //! export workers. Exports and frames use the same child job as the Export panel.
+use crate::mcp::Tools;
 use anyhow::{Context, Result as AnyResult};
 use pm_engine_service::jobs::{ExportHandle, ExportRequest};
 use pm_kernel::{KernelHandle, Published};
@@ -26,6 +27,50 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Install the production engine hosts. Call on a worker before serving.
+pub fn connect_engine(tools: &Tools, activity: Arc<AtomicBool>) -> AnyResult<()> {
+    let jobs = EngineJobs::new(
+        tools.host.kernel.clone(),
+        std::env::current_exe()?,
+        activity,
+        tools.host.profile.join("cache/mcp"),
+    );
+    let mut automation = tools.automation.lock().unwrap();
+    automation.export_child = jobs.clone();
+    automation.engine = Some(jobs);
+    Ok(())
+}
+pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
+    std::thread::spawn(move || -> anyhow::Result<()> {
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
+            journal_root: Some(profile.join("journals")),
+            ..Default::default()
+        });
+        let (host, _) = crate::mcp::Host::new(actor.handle(), profile.clone());
+        crate::mcp::attach(&host.kernel, &profile)?;
+        if let Some(path) = launch {
+            host.open(
+                crate::session::stable_id(&path),
+                pm_kernel::session::SessionSource::File(path),
+            )?;
+        }
+        let tools = Tools::new(host, exports);
+        connect_engine(&tools, Arc::default())?;
+        let shared = tools.clone();
+        let server =
+            pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
+        let result = pm_mcp::transport::serve_stdio(
+            std::io::stdin().lock(),
+            std::io::stdout().lock(),
+            tools.connect(),
+        );
+        drop(server);
+        actor.shutdown();
+        result.map_err(Into::into)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
+}
 /// Starts engine child jobs from the running executable. `activity` lets the
 /// viewer keep precedence over export bands, as it does for panel exports.
 pub struct EngineJobs {

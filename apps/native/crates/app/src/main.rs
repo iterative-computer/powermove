@@ -112,7 +112,7 @@ fn main() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
                 .map_err(Into::into);
         }
-        return mcp::headless(profile, exports, launch);
+        return mcp_services::headless(profile, exports, launch);
     }
     std::fs::create_dir_all(&profile)?;
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
             gpu, fonts,
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
-        tools.connect_engine(engine.export_activity())?;
+        mcp_services::connect_engine(&tools, engine.export_activity())?;
         let server = pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || {
             tools.connect()
         })?;

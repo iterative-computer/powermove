@@ -94,6 +94,12 @@ impl ProviderRuns {
             }
         }
     }
+    /// Only App Server takes more input during a turn.
+    pub fn steerable(&self, run: &str) -> bool {
+        self.runs.iter().any(|r| {
+            !r.finished && r.target.run.as_deref() == Some(run) && r.handle.supports_steering()
+        })
+    }
     /// Unfinished runs, which is what the thread lease and the UI care about.
     pub fn active(&self) -> usize {
         self.runs.iter().filter(|r| !r.finished).count()

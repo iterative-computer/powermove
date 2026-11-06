@@ -181,6 +181,13 @@ impl Session {
         self.conversation.upsert(id.clone(), value)?;
         Ok(id)
     }
+    /// A question the run is blocked on; the composer's text answers it.
+    pub fn needs_answer(&self) -> bool {
+        self.trace
+            .rows
+            .values()
+            .any(|row| row["kind"] == "question" && row["status"] == "open")
+    }
     pub fn elapsed_ms(&self, now: u64) -> Option<u64> {
         self.run.as_ref().map(|r| now.saturating_sub(r.started_at))
     }

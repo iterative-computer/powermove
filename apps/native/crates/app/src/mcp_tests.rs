@@ -34,7 +34,7 @@ impl Fixture {
         host.save(host.current().unwrap(), None).unwrap();
         Self {
             actor: Some(actor),
-            tools: Tools::new(host.clone(), root.path().join("exports")),
+            tools: Tools::new(host.clone(), host.profile.join("exports")),
             host,
             _root: root,
         }

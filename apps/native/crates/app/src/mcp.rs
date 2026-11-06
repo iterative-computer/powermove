@@ -6,10 +6,7 @@ use pm_mcp::{Automation, Error, McpSession, Result, transport::ToolConnection};
 use serde_json::Value;
 use std::{
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 
 /// The tool host shared by every connection to this app.
@@ -24,19 +21,6 @@ impl Tools {
             automation: Arc::new(Mutex::new(Automation::attached(host.clone(), exports))),
             host,
         }
-    }
-    /// Install the production engine hosts. Call on a worker before serving.
-    pub fn connect_engine(&self, activity: Arc<AtomicBool>) -> anyhow::Result<()> {
-        let jobs = crate::mcp_services::EngineJobs::new(
-            self.host.kernel.clone(),
-            std::env::current_exe()?,
-            activity,
-            self.host.profile.join("cache/mcp"),
-        );
-        let mut automation = self.automation.lock().unwrap();
-        automation.export_child = jobs.clone();
-        automation.engine = Some(jobs);
-        Ok(())
     }
     pub fn connect(&self) -> Connection {
         Connection {
@@ -90,34 +74,6 @@ impl ToolConnection for Connection {
     }
 }
 
-pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
-    std::thread::spawn(move || -> anyhow::Result<()> {
-        let actor = KernelActor::spawn(KernelConfig {
-            journal_root: Some(profile.join("journals")),
-            ..Default::default()
-        });
-        let (host, _) = Host::new(actor.handle(), profile.clone());
-        attach(&host.kernel, &profile)?;
-        if let Some(path) = launch {
-            host.open(super::session::stable_id(&path), SessionSource::File(path))?;
-        }
-        let tools = Tools::new(host, exports);
-        tools.connect_engine(Arc::default())?;
-        let shared = tools.clone();
-        let server =
-            pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
-        let result = pm_mcp::transport::serve_stdio(
-            std::io::stdin().lock(),
-            std::io::stdout().lock(),
-            tools.connect(),
-        );
-        drop(server);
-        actor.shutdown();
-        result.map_err(Into::into)
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
-}
 pub fn attach(kernel: &KernelHandle, profile: &std::path::Path) -> anyhow::Result<()> {
     match kernel
         .shell(ShellCall::AttachLibrary {

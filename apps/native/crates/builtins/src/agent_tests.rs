@@ -138,7 +138,8 @@ impl Agent {
         for (_, ticket) in self.panels.publish() {
             finish(ticket.unwrap());
         }
-        self.panels.take_errors().iter().for_each(|e| panic!("{e}"));
+        let errors = self.panels.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
         self.surface()
             .surface
             .nodes()
