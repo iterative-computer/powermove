@@ -11,7 +11,7 @@ pub fn run() -> anyhow::Result<()> {
 struct SharedMetalDevice(metal::Device);
 impl Global for SharedMetalDevice {}
 pub fn run_with_device(device: metal::Device) -> anyhow::Result<()> {
-    launch(device, false, None)
+    launch(device, false, None, None)
 }
 /// Initializes native chrome with activation prohibited and every window hidden.
 pub fn smoke() -> anyhow::Result<()> {
@@ -19,16 +19,28 @@ pub fn smoke() -> anyhow::Result<()> {
         metal::Device::system_default().ok_or_else(|| anyhow::anyhow!("Metal unavailable"))?,
         true,
         None,
+        None,
     )
 }
 /// Launch using the engine device and app-owned panel/command implementation.
 pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> anyhow::Result<()> {
-    launch(device, false, Some(factory))
+    launch(device, false, Some(factory), None)
+}
+/// Opens the editor windows. Whoever holds the gate calls it exactly once.
+pub type Finish = Rc<dyn Fn(&mut App)>;
+/// As `run_integrated`, with no editor window until `gate` calls its `Finish`.
+pub fn run_gated(
+    device: metal::Device,
+    factory: integration::Factory,
+    gate: Box<dyn FnOnce(Finish, &mut App)>,
+) -> anyhow::Result<()> {
+    launch(device, false, Some(factory), Some(gate))
 }
 fn launch(
     device: metal::Device,
     smoke: bool,
     factory: Option<integration::Factory>,
+    gate: Option<Box<dyn FnOnce(Finish, &mut App)>>,
 ) -> anyhow::Result<()> {
     native::install_identity();
     let theme_error = theme::load_from_env();
@@ -58,6 +70,8 @@ fn launch(
         }
         if smoke {
             open_editor_window(cx, false, None, None);
+        } else if let Some(gate) = gate {
+            gate(Rc::new(restore_session), cx);
         } else {
             restore_session(cx);
         }
@@ -69,7 +83,7 @@ fn launch(
     });
     Ok(())
 }
-fn tokens() -> Tokens {
+pub fn tokens() -> Tokens {
     let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {
         Scheme::Light
     } else if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("dark") {

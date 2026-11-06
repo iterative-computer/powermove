@@ -17,10 +17,13 @@ pub mod theme;
 pub mod transient;
 #[cfg(target_os = "macos")]
 pub mod view;
+pub mod welcome;
+#[cfg(target_os = "macos")]
+pub mod welcome_view;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{open_editor, open_editor_tab, open_settings};
 #[cfg(target_os = "macos")]
-pub use macos::{run, run_integrated, run_with_device, smoke};
+pub use macos::{Finish, run, run_gated, run_integrated, run_with_device, smoke, tokens};
 #[cfg(target_os = "macos")]
 pub use native::{
     Command, FlowchartRow, Host, MenuEntry, accent_color, document_subtitle, system_accent,
