@@ -303,6 +303,7 @@ fn save_as_pmv_and_changed_file_fall_back_to_a_recovery_slot() {
     k.shell(ShellCall::SaveAs {
         session: h.clone(),
         path: file.clone(),
+        replace: false,
     })
     .unwrap();
     assert!(dir.path("export.pmvlock").exists());
@@ -964,6 +965,7 @@ fn embedded_media_in_a_copy_survives_removal_of_the_original_file() {
     k.shell(ShellCall::SaveAs {
         session: h,
         path: exported.clone(),
+        replace: false,
     })
     .unwrap();
     assert_eq!(
@@ -1151,6 +1153,7 @@ fn duplicated_embedded_media_has_an_independent_file() {
     k.shell(ShellCall::SaveAs {
         session: h,
         path: dir.path("independent.pmv"),
+        replace: false,
     })
     .unwrap();
 }

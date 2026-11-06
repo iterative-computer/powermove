@@ -62,6 +62,7 @@
 //! * [`model`]: read helpers over the canonical tree (layer lookup, lock).
 
 pub mod actor;
+pub mod asset_order;
 pub mod commands;
 pub mod document;
 pub mod error;
@@ -81,6 +82,7 @@ pub mod pro_mcp;
 pub mod project_io;
 pub mod queries;
 pub mod selection;
+pub mod text_host;
 pub mod tx;
 
 pub use commands::{

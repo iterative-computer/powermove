@@ -416,7 +416,7 @@ fn save_handoff_allows_foreign_edits_but_refuses_close_quit_and_second_save() {
     let s = new(&mut k);
     edit(&mut k, caller(5), 60.);
     let save = k
-        .prepare_session_save(s.clone(), Some(root.path("saved.pmv")))
+        .prepare_session_save(s.clone(), Some(root.path("saved.pmv")), false)
         .unwrap();
     assert!(k.shell(ShellCall::Close(s.clone())).is_err());
     assert!(k.shell(ShellCall::PrepareQuit).is_err());
@@ -449,7 +449,7 @@ fn failed_save_completion_clears_flight_and_retains_dirty_journal() {
     edit(&mut k, caller(5), 25.);
     fs::write(root.path("exists.pmv"), b"keep").unwrap();
     let save = k
-        .prepare_session_save(s.clone(), Some(root.path("exists.pmv")))
+        .prepare_session_save(s.clone(), Some(root.path("exists.pmv")), false)
         .unwrap();
     assert!(k.finish_session_save(save.run()).is_err());
     assert!(k.project("p").unwrap().store().is_dirty());
@@ -688,7 +688,7 @@ fn dropped_handoff_requires_explicit_abort_before_close() {
     let mut k = kernel(&root.0);
     let s = new(&mut k);
     let save = k
-        .prepare_session_save(s.clone(), Some(root.path("saved.pmv")))
+        .prepare_session_save(s.clone(), Some(root.path("saved.pmv")), false)
         .unwrap();
     let ticket = save.ticket.clone();
     assert!(

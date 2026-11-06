@@ -230,6 +230,40 @@ fn legacy_apply_patches_matches_projects_ts() {
     assert!(root.is_none());
 }
 
+#[test]
+fn legacy_journal_replays_id_keyed_operations_and_skips_mismatches() {
+    let layer = |id: &str| format!(r#"{{"id":"{id}","name":"{id}"}}"#);
+    let project = format!(
+        r#"{{"layers":[{},{}],"comps":{{"x":{{"layers":[{}]}}}}}}"#,
+        layer("a"),
+        layer("b"),
+        layer("c")
+    );
+    let mut root = Some(parse(&project).unwrap());
+    let patches = format!(
+        r#"[{{"op":"insert","path":["layers"],"index":2,"value":{}}},
+            {{"op":"delete","path":["layers"],"id":"a"}},
+            {{"op":"order","path":["layers"],"ids":["n","b"]}},
+            {{"path":["layers",1,"name"],"exists":true,"value":"New"}},
+            {{"op":"delete","path":["comps","x","layers"],"id":"missing"}},
+            {{"op":"insert","path":["nowhere"],"index":0,"value":{}}},
+            {{"op":"insert","path":["layers"],"index":9,"value":{}}},
+            {{"op":"insert","path":["layers"],"index":0,"value":{}}},
+            {{"op":"order","path":["layers"],"ids":["b","b"]}},
+            {{"op":"order","path":["layers"],"ids":["b"]}},
+            {{"op":"delete","path":["comps","x","layers"],"id":"c"}}]"#,
+        layer("n"),
+        layer("x"),
+        layer("x"),
+        layer("b"),
+    );
+    legacy_apply_patches(&mut root, &parse(&patches).unwrap());
+    assert_eq!(
+        to_canonical_string(root.as_ref().unwrap()),
+        r#"{"comps":{"x":{"layers":[]}},"layers":[{"id":"n","name":"n"},{"id":"b","name":"New"}]}"#
+    );
+}
+
 /// Read-only smoke test against a copy of a real profile store. Ignored by
 /// default; reports counts only (never names, ids or content):
 /// `PM_KERNEL_STORE_COPY=/tmp/copy cargo test -p pm-kernel --test library -- --ignored --nocapture`

@@ -351,7 +351,7 @@ pub(crate) fn plan_cleaned_with_definitions(
 ) -> Result<Batch> {
     let mut scratch = DocumentStore::new_untitled(model(project));
     if let Some(state) = state {
-        scratch.set_runtime_state(state.clone());
+        scratch.set_runtime_state(state.clone(), None);
     }
     let mut batch = Batch {
         commands: vec![],
@@ -361,11 +361,6 @@ pub(crate) fn plan_cleaned_with_definitions(
     };
     for mut c in cleaned.iter().cloned() {
         let kind = c["type"].as_str().unwrap().to_owned();
-        if kind == "transform_layers" {
-            return Err(Error::unavailable(format!(
-                "kernel command/runtime definition: {kind}"
-            )));
-        }
         let p = realized(&scratch);
         let target = || resolve(&c["target"], &p, &batch.selection);
         let mut data = Value::Null;
@@ -388,6 +383,17 @@ pub(crate) fn plan_cleaned_with_definitions(
                 data = json!({"id":id,"channel":path,"value":c["value"]});
                 PropertyCommand::Set(s).into()
             }
+            "transform_layers" => LayerCommand::TransformLayers {
+                transform: model(&c["transform"]),
+                state: if c["state"].is_object() {
+                    model(&c["state"])
+                } else {
+                    pm_model::Value::Object(Default::default())
+                },
+                selection: batch.selection.clone(),
+                time,
+            }
+            .into(),
             "set_expression" => {
                 let id = target()?;
                 let channel = required(&c, "path")?;

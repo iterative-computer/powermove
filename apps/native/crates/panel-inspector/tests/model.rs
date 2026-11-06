@@ -722,7 +722,10 @@ fn invalid_inputs_fail_without_mutation() {
 #[test]
 fn add_effect_uses_definition_defaults() {
     let mut f = Fixture::new();
-    let r = f.model.add_effect(Caller::native(), "b", "blur").unwrap();
+    let r = f
+        .model
+        .add_effect_at(Caller::native(), "b", "blur", 0.)
+        .unwrap();
     f.run(r);
     let ids = f.model.effect_ids("b").unwrap();
     assert_eq!(f.value("b", &format!("{}.amount", ids[1])), 3.0.into());

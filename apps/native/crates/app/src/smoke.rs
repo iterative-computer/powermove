@@ -91,7 +91,8 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                 &p.media,
                 p.path.as_deref(),
                 &temp.path().join(format!("media-{index}")),
-            )?;
+            )?
+            .catalog;
             if let Some(paths) = row["media"].as_object() {
                 for (id, path) in paths {
                     media.originals.insert(
@@ -163,7 +164,8 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
                         &kernel,
                         ShellCall::SaveAs {
                             session: session.clone(),
-                            path: save.clone()
+                            path: save.clone(),
+                            replace: false,
                         }
                     )?,
                     ShellReply::Saved {

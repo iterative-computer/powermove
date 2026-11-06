@@ -377,7 +377,7 @@ fn library_failure(error: LibraryError) -> Failure {
         LibraryError::InvalidKey(_) => ErrorCode::InvalidInput,
     })
 }
-fn project_value(id: &str, values: &NewProject) -> Result<Value, Failure> {
+pub(crate) fn project_value(id: &str, values: &NewProject) -> Result<Value, Failure> {
     let format = &values.format;
     // Validate again at the drivable service boundary, not just in the form.
     if values.name.trim().is_empty()

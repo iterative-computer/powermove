@@ -9,11 +9,15 @@ mod extensions;
 
 #[path = "surfaces/editing.rs"]
 pub mod editing;
+mod layer_commands;
 #[path = "surfaces/library.rs"]
 pub mod library_surface;
 mod lifecycle;
 mod mcp;
 mod media;
+mod media_import;
+mod media_refresh;
+mod new_project;
 mod panels;
 mod perf_gate;
 mod platform;
@@ -22,6 +26,7 @@ mod rows;
 mod session;
 mod smoke;
 mod surfaces;
+mod text_host;
 mod v4_control;
 mod v4_native;
 mod v4_view;
@@ -111,10 +116,13 @@ fn main() -> Result<()> {
         let _ = wake_tx.try_send(());
     }));
     let fonts = RenderFonts::new(broker.clone());
+    let text_fonts = fonts.clone();
     let worker_profile = profile.clone();
     let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
+            text: Some(text_host::text_host(&text_fonts)),
+            backup_root: Some(worker_profile.join("backups")),
             ..Default::default()
         });
         mcp::attach(&actor.handle(), &worker_profile)?;

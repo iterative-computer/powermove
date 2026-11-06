@@ -328,6 +328,111 @@ fn preview_window(
     })
 }
 
+/// A cropped effect needs the pixels outside the presentation rectangle.
+/// Keep a logical canvas around the viewport and express the viewport as its
+/// ROI; the compositor then grows that ROI by the declared chain padding.
+/// Without this, the viewport edge becomes an artificial blur/shadow sampling
+/// edge. Only the grown ROI is allocated. Padding that outreaches the canvas
+/// stops at its edge, as any padding stops at the frame.
+fn effect_viewport_request(
+    comp: &Comp<'_>,
+    effects: &Effects,
+    request: &RenderRequest,
+) -> Option<RenderRequest> {
+    let (ox, oy) = request.origin?;
+    if !comp.layers().iter().any(|layer| {
+        // Local source chains already retain their complete padded raster.
+        if pm_eval::node::string(pm_eval::node::member(Some(layer), "effectSpace"))
+            .is_some_and(|s| s.as_bytes() == b"source")
+        {
+            return false;
+        }
+        pm_eval::node::array(pm_eval::node::member(Some(layer), "fx")).is_some_and(|fx| {
+            fx.iter().any(|effect| {
+                if matches!(
+                    pm_eval::node::member(Some(effect), "on").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Bool(false))
+                ) {
+                    return false;
+                }
+                let id = pm_eval::node::to_js_string(pm_eval::node::member(Some(effect), "type"))
+                    .to_string_lossy();
+                let Ok(key) =
+                    effects.saved_key(&id, pm_eval::node::member(Some(effect), "version"))
+                else {
+                    return false;
+                };
+                effects
+                    .get(pm_protocol::definitions::DefinitionKind::Effect, &key)
+                    .is_some_and(|d| {
+                        !d.flags.viewport_safe
+                            || !d.flags.viewport_padding.is_empty()
+                            || crate::effects::versions::main_definition(&key).is_some_and(|d| {
+                                d.metadata
+                                    .get("viewportPaddingPixels")
+                                    .and_then(|v| v.as_f64())
+                                    .is_some_and(|p| p > 0.)
+                            })
+                    })
+            })
+        })
+    }) {
+        return None;
+    }
+    let scale = request.scale.unwrap_or_else(|| {
+        plan::derived_scale(comp, request.output_size.width, request.output_size.height)
+    });
+    let dim = |field: &str, fallback: u32| {
+        let n = pm_eval::node::to_number(comp.member(field));
+        if n.is_finite() && n > 0. {
+            n
+        } else {
+            f64::from(fallback)
+        }
+    };
+    // Align the new ROI to integer pixels while retaining fractional pan in
+    // the canvas origin. Negative pans keep their exact outside-comp extent.
+    // A canvas beyond the largest output, which every viewer crop is, becomes
+    // a window of that size around the viewport, the limit of `Region::grow`.
+    let limit = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
+    let window = |origin: f64, visible: u32, extent: f64| {
+        let start = origin.ceil().max(0.);
+        let base = origin - start;
+        let visible = f64::from(visible);
+        let full = (extent - base).ceil().max(start + visible);
+        let shift = (start - ((limit - visible) / 2.).floor()).clamp(0., (full - limit).max(0.));
+        (base + shift, full.min(limit), start - shift, full > limit)
+    };
+    let (ox, width, x, cut_x) = window(
+        ox,
+        request.output_size.width,
+        dim("w", request.output_size.width) * scale.0,
+    );
+    let (oy, height, y, cut_y) = window(
+        oy,
+        request.output_size.height,
+        dim("h", request.output_size.height) * scale.1,
+    );
+    let r = request.region.unwrap_or(pm_protocol::common::PixelRect {
+        x: 0,
+        y: 0,
+        width: request.output_size.width,
+        height: request.output_size.height,
+    });
+    let mut expanded = request.clone();
+    expanded.output_size = pm_protocol::common::Size::new(width as u32, height as u32);
+    expanded.scale = Some(scale);
+    expanded.region = Some(pm_protocol::common::PixelRect {
+        x: x as u32 + r.x,
+        y: y as u32 + r.y,
+        width: r.width,
+        height: r.height,
+    });
+    expanded.origin = (cut_x || cut_y || (ox, oy) != (0., 0.)).then_some((ox, oy));
+    expanded.preview_canvas = true;
+    Some(expanded)
+}
+
 /// The renderer.
 pub struct Renderer {
     device: wgpu::Device,
@@ -1732,6 +1837,11 @@ impl Renderer {
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
+        self.effects.map_midpoint = if color.precision == Precision::Unorm8 {
+            128. / 255.
+        } else {
+            0.5
+        };
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
         let precision = available_precision(
             effective_precision(request.precision, color.precision),
@@ -1754,6 +1864,8 @@ impl Renderer {
         }
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let expanded_request = effect_viewport_request(&comp, &self.effects, request);
+        let request = expanded_request.as_ref().unwrap_or(request);
         let open = capability::open_composition_id(root);
         let project = open
             .as_deref()

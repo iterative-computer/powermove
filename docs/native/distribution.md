@@ -1,5 +1,15 @@
 # Native distribution plumbing
 
+Current implementation: see [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation).
+`pm-update-policy::sparkle` now owns the supported asynchronous public-API bridge
+behind `sparkle-macos`; the synchronous `Installer` contract below remains for
+older consumers and tests, not the production Sparkle integration route. Policy
+readiness now requires `installer_recovery_verified`, not reverse migration.
+The owner has ruled out reverse migration and archive Restore UI; older Restore
+requirements below do not override that decision. Application termination/import
+leases and real signed installer/Keychain/notarization proofs remain required.
+
+
 Status: Linux-tested code and local packaging commands, **not cutover approval**.
 No app was published, signed, submitted for notarization, installed, tagged or
 released. No production feed, credential, Keychain item, profile or release
@@ -152,7 +162,8 @@ Unknown or duplicate structured fields are errors. Payload fields are:
 | --- | --- |
 | `schema` | Exactly 1. |
 | `channel` | `cutover` or `beta`, matched to bundled config. |
-| `version` | SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `version` | Display SemVer, strictly newer than installed; stable never offers a prerelease. |
+| `sparkleVersion` | Optional signed numeric `CFBundleVersion` / appcast `sparkle:version`, independent of display SemVer. New packaging uses this build number; absent legacy fields fall back to `version`. |
 | `architecture` | `arm64` or `x86_64`, matched to the running app. |
 | `bundleId` | Exact production or beta id for the channel. |
 | `minimumMacos` | At least 14 and no newer than this host for an offer. |
@@ -310,3 +321,86 @@ Sparkle policy bridge is not a linked production installer: Sparkle 2.10.1 has n
 public external-archive adoption method matching the current synchronous
 `Installer::stage` contract. The report specifies the required asynchronous
 application/distribution change. No signing or distribution action was performed.
+
+
+## 2026-11-05 — asynchronous Sparkle binding and signed candidate proof
+
+Beta3 adds `pm-update-policy::update_distribution::sparkle`, an asynchronous
+alternative to external-archive `Installer::stage`. The existing synchronous
+contract/consumers remain intact. Separate durable Sparkle states record check,
+download, extraction, ready and install-request intent. Signed policy, callback
+identity and the exact full enclosure are checked before download; install repeats
+fresh readiness/expiry after normal quit approval. An installed callback is not
+proof of installation. Unknown persisted native state stays blocked, with receipts
+and native recovery state retained. Legacy download/stage cannot take over a
+Sparkle transaction. Existing `restore_verified` gates are unchanged: they must
+not be asserted as evidence of the nonexistent reverse-migration feature.
+
+The opt-in `macos-sparkle` feature compiles and links a public Sparkle 2.10.1
+Objective-C custom user driver, behind the Rust `Session` trait. There is no Linux
+production installer. `NativeSession` enqueues main-run-loop commands and copies
+bounded callbacks to a worker; it never waits on AppKit or JS. The driver checks
+the pinned framework version, bundled disabled/enabled policy config, installed
+bundle id and HTTPS Sparkle bootstrap; suppresses automatic checks/downloads and
+system-profile transmission; selects only the exact policy enclosure; and holds
+public found/ready continuations until worker approval. It uses no private selector,
+external ZIP adoption, forced quit or Rust extractor. Sparkle authenticates its own
+archive using EdDSA and code-signing checks. The policy SHA-256 is not separately
+measured by the native bridge because Sparkle exposes no public archive path;
+exact policy-bound EdDSA identifies those bytes. Delta enclosures are refused.
+
+The application must retain source/import leases and install its ordinary
+save/export/quit termination guard for the **entire** native session. Sparkle can
+install after ordinary termination once extraction starts, regardless of whether
+the ready continuation was replied to. The host owns the atomic permit, and must
+revoke it on stale evidence; revoking it does not authorize removing the normal
+termination guard or deleting installer state. Pending recovery requires real
+installer inspection and freshly verified installed signed identity. Those shell
+bindings and recovery evidence remain outside these owned paths; the feature is
+not enabled in the application or release configuration by this lane.
+
+Mac compile/link probe (read-only artifact verification; no update check):
+
+```sh
+PM_SPARKLE_ARCHIVE="$VERIFIED_UPSTREAM_ARCHIVE" \
+PM_SPARKLE_FRAMEWORK_DIR="$DIRECTORY_CONTAINING_SPARKLE_FRAMEWORK" \
+sh apps/native/scripts/check-sparkle-binding.sh
+```
+
+This compiles the actual public-header Objective-C boundary and runs a guard
+refusal probe. It is **unrun on Linux**. Then verify actual callbacks, cancellation,
+full-enclosure selection (including an appcast offering a delta), denied/failing
+normal quit, extraction-time ordinary quit, exact installed Team/DR/architecture,
+interruption/relaunch and persisted installer recovery on a signed Mac candidate.
+An appcast delta can remain blocked if Sparkle selects it: no private API is used
+to strip or force a delta. Supply the reviewed full-only appcast for this route.
+
+`apps/native/scripts/prove-signed-build.py` performs a read-only per-slice signed
+candidate proof over the existing resource/rpath auditor. Extend that auditor's
+requirements JSON with `signatures`, an exact mapping from every real Mach-O path
+to `{team_id, identifier, requirement, entitlements}`. Each value must be reviewed;
+there are no Team/DR/entitlement defaults. For each architecture it checks strict
+signature/requirement validity, exact identity, hardened runtime and exact
+entitlements, then deep verification, Gatekeeper assessment and stapled-ticket
+validation. It compares the complete file/link inventory again after checking.
+A missing tool, wrong signature/entitlement, failed assessment or changed bundle
+remains blocked. A new report path is required; failed attempts remain intact.
+There is no sign, notary submission, installation, publication or dispatch call.
+
+```sh
+python3 apps/native/scripts/prove-signed-build.py \
+  --bundle "$SIGNED_EXISTING_APP" --requirements "$REVIEWED_REQUIREMENTS" \
+  --output "$NEW_PRIVATE_SIGNED_PROOF_JSON"
+```
+
+Linux command doubles validate these read-only command contracts; they cannot
+establish that any Mac signature or Gatekeeper check passes. Static proof also
+cannot certify runtime discovery, V8 JIT/confinement, Keychain, migration, physical
+filesystem interruption, installer recovery or beta readiness.
+
+Selecting rules: public asynchronous API rather than invented archive adoption
+(N3/N4/N8); fresh guarded side effects and no inferred recovery success (N4/N7);
+retained receipts/partial/native state and unchanged legacy consumers (N4/prune);
+exact per-file signed evidence without signing secrets or release actions (N1/N4).
+No new design or UX choice is introduced. Existing Opus TODOs in beta2-readiness
+and this document remain; no new visual output is produced.

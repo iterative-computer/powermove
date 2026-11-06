@@ -11,10 +11,12 @@ fn value() -> Value {
 fn config(root: &Path) -> KernelConfig {
     KernelConfig {
         journal_root: Some(root.join("journals")),
+        backup_root: None,
         journal: journal::JournalConfig {
             checkpoint_revisions: 1,
             ..Default::default()
         },
+        ..Default::default()
     }
 }
 fn attach(k: &mut Kernel, root: &Path) {
@@ -96,6 +98,7 @@ fn lifecycle_defer_prepare_discard_defer_200_times() {
             k.shell(ShellCall::SaveAs {
                 session: s.clone(),
                 path: root.path("project.pmv"),
+                replace: false,
             })
             .unwrap();
         }
@@ -143,6 +146,7 @@ fn dont_save(file: bool) {
         k.shell(ShellCall::SaveAs {
             session: s.clone(),
             path: root.path("project.pmv"),
+            replace: false,
         })
         .unwrap();
     }
@@ -246,7 +250,7 @@ fn discard_refuses_active_entry_pending_save_and_failed_archive() {
     )
     .unwrap();
     let save = k
-        .prepare_session_save(s.clone(), Some(root.path("pending.pmv")))
+        .prepare_session_save(s.clone(), Some(root.path("pending.pmv")), false)
         .unwrap();
     assert!(k.shell(ShellCall::DiscardClose(s.clone())).is_err());
     k.finish_session_save(save.run()).unwrap();

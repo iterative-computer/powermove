@@ -32,6 +32,11 @@ pub struct KernelConfig {
     /// journal (tests, headless tools that never edit).
     pub journal_root: Option<PathBuf>,
     pub journal: JournalConfig,
+    /// Fonts for commands that measure text. `None`: those commands refuse.
+    pub text: Option<crate::text_host::SharedTextHost>,
+    /// Previous versions (`<root>/<project id>/`). Every production host sets
+    /// this: a save without it deletes the file it replaces.
+    pub backup_root: Option<PathBuf>,
 }
 
 /// Where an opened project comes from.
@@ -139,7 +144,7 @@ impl Kernel {
             compacting: false,
             pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
-            state: Default::default(),
+            state: crate::state::StateSnapshot::seeded(),
         }
     }
 
@@ -331,6 +336,20 @@ impl Kernel {
         self.slots.remove(id).is_some()
     }
 
+    /// `ProjectFiles.commit`: a save keeps the version it replaces, whichever
+    /// format that was, so upgrading PMV3 or JSON preserves the original.
+    pub(crate) fn save_options(&self, project: &str) -> crate::SaveOptions {
+        // Project ids are validated path components at open.
+        let backups = self
+            .config
+            .backup_root
+            .as_ref()
+            .map(|root| crate::project_io::BackupPolicy::new(root.join(project)));
+        crate::SaveOptions {
+            backups,
+            ..Default::default()
+        }
+    }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()
     }
@@ -437,7 +456,7 @@ impl Kernel {
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
         slot.project
             .store_mut()
-            .set_runtime_state(self.state.clone());
+            .set_runtime_state(self.state.clone(), self.config.text.clone());
         let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
         if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
             return Err(KernelFailure::Storage(

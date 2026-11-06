@@ -108,11 +108,13 @@ fn emit(kind: &str, n: usize, phase: &str, value: &Value) {
 fn child(root: &Path) {
     let mut k = Kernel::new(KernelConfig {
         journal_root: Some(root.join("journals")),
+        backup_root: None,
         journal: JournalConfig {
             checkpoint_revisions: 3,
             max_segment_bytes: 32768,
             ..Default::default()
         },
+        ..Default::default()
     });
     k.shell(ShellCall::AttachLibrary {
         profile: root.into(),

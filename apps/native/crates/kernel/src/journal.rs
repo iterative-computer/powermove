@@ -29,7 +29,16 @@
 //!   `CHECKPOINT_REVISIONS`/`MAX_JOURNAL_BYTES`) rotate to a new segment and
 //!   write `checkpoint-<n>.json` on a background thread (temp file, full
 //!   sync, rename, directory sync). Older segments are deleted only after
-//!   the newer checkpoint is durable, so recovery always has a chain.
+//!   the newer checkpoint is durable, so recovery always has a chain. A large
+//!   document checkpoints by segment size alone: fifty edits are a few
+//!   kilobytes of journal, and rewriting 180 MB for them buys nothing.
+//!
+//! # Entries
+//!
+//! A revision's line holds the operations the edit produced, id-keyed where
+//! they can be, so a line is the size of the change. Nothing here supersedes
+//! or compacts earlier lines: recovery replays every line in order, so an
+//! operation at `layers` never has to stand in for a later whole value.
 //!
 //! # Recovery
 //!
@@ -46,7 +55,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -63,6 +72,9 @@ use crate::history::{History, HistoryRecord, HistorySnapshot};
 
 const JOURNAL_FORMAT: &str = "powermove-kernel-journal";
 const CHECKPOINT_FORMAT: &str = "powermove-kernel-checkpoint";
+
+/// A document this size or larger checkpoints by journal size (`VERIFY_MIN_CHARS`).
+const LARGE_DOCUMENT_BYTES: u64 = 4 << 20;
 
 /// Journal knobs.
 #[derive(Clone, Debug)]
@@ -143,6 +155,8 @@ enum Job {
         state: Box<CheckpointState>,
         /// Sessions this one replaces once its checkpoint is durable.
         supersedes: Vec<PathBuf>,
+        /// Told the checkpoint's size, which says whether the document is large.
+        measured: Arc<AtomicU64>,
     },
     Barrier(mpsc::Sender<()>),
 }
@@ -227,17 +241,22 @@ impl Durability {
                                 segment,
                                 state,
                                 supersedes,
+                                measured,
                             } => {
-                                if let Err(e) =
-                                    write_checkpoint(&dir, &project, &base, segment, &state)
-                                {
-                                    shared
-                                        .errors
-                                        .lock()
-                                        .expect("errors")
-                                        .push_back(format!("checkpoint {segment}: {e}"));
-                                    continue;
-                                }
+                                let bytes = match write_checkpoint(
+                                    &dir, &project, &base, segment, &state,
+                                ) {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        shared
+                                            .errors
+                                            .lock()
+                                            .expect("errors")
+                                            .push_back(format!("checkpoint {segment}: {e}"));
+                                        continue;
+                                    }
+                                };
+                                measured.store(bytes, Ordering::Release);
                                 prune_before(&dir, segment);
                                 for old in supersedes {
                                     let _ = fs::remove_dir_all(old);
@@ -335,6 +354,8 @@ impl Drop for Durability {
 
 /// One session's journal (owned by the kernel actor).
 pub struct Journal {
+    /// The last checkpoint's size: what "large" is measured by.
+    checkpoint_bytes: Arc<AtomicU64>,
     dir: PathBuf,
     project: String,
     base: String,
@@ -409,6 +430,7 @@ impl Journal {
         fs::create_dir_all(&dir)?;
         sync_dir(project_dir)?;
         let (file, target) = open_segment(durability, &dir, project, base, 0, initial.revision)?;
+        let checkpoint_bytes = Arc::new(AtomicU64::new(0));
         durability.submit(Job::Checkpoint {
             dir: dir.clone(),
             project: project.to_owned(),
@@ -416,8 +438,10 @@ impl Journal {
             segment: 0,
             state: Box::new(initial),
             supersedes,
+            measured: checkpoint_bytes.clone(),
         });
         Ok(Journal {
+            checkpoint_bytes,
             dir,
             project: project.to_owned(),
             base: base.to_owned(),
@@ -467,7 +491,10 @@ impl Journal {
         self.target.dirty.store(true, Ordering::Release);
         self.bytes += buf.len() as u64;
         let config = durability.config();
-        if self.revisions >= config.checkpoint_revisions || self.bytes >= config.max_segment_bytes {
+        let large = self.checkpoint_bytes.load(Ordering::Acquire) >= LARGE_DOCUMENT_BYTES;
+        if (!large && self.revisions >= config.checkpoint_revisions)
+            || self.bytes >= config.max_segment_bytes
+        {
             self.rotate(durability, state())?;
         }
         Ok(())
@@ -496,6 +523,7 @@ impl Journal {
             segment: next,
             state: Box::new(state),
             supersedes: Vec::new(),
+            measured: self.checkpoint_bytes.clone(),
         });
         Ok(())
     }
@@ -691,7 +719,7 @@ fn write_checkpoint(
     base: &str,
     segment: u64,
     state: &CheckpointState,
-) -> io::Result<()> {
+) -> io::Result<u64> {
     use sha2::Digest;
     let final_path = dir.join(checkpoint_name(segment));
     let tmp = dir.join(format!("{}.tmp", checkpoint_name(segment)));
@@ -733,10 +761,12 @@ fn write_checkpoint(
     out.flush()?;
     let file = out.into_inner().map_err(|e| e.into_error())?;
     full_sync(&file)?;
+    let bytes = file.metadata()?.len();
     drop(file);
     fs::remove_file(&doc_tmp)?;
     fs::rename(&tmp, &final_path)?;
-    sync_dir(dir)
+    sync_dir(dir)?;
+    Ok(bytes)
 }
 
 /// Deletes segments and checkpoints older than `segment` (its checkpoint is
@@ -1148,6 +1178,7 @@ mod durability_tests {
                 workspace: Value::Null,
             }),
             supersedes: vec![],
+            measured: Default::default(),
         });
         let error = d.barrier().unwrap_err();
         assert!(error.to_string().contains("checkpoint 0"), "{error}");

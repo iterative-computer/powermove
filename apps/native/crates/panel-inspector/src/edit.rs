@@ -239,10 +239,13 @@ impl Inspector {
             }
             Binding::Layer { layer, field } => {
                 let raw = self.layer(layer)?;
-                let value = raw
-                    .get(storage_field(field))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let value = raw.get(storage_field(field)).cloned().unwrap_or(
+                    if field == "continuousRaster" {
+                        Value::Bool(false)
+                    } else {
+                        Value::Null
+                    },
+                );
                 if value.get("kf").is_some() {
                     self.evaluate(
                         &PropertyId::new(layer, format!("l.{}", storage_field(field))),
@@ -755,44 +758,23 @@ impl Inspector {
                 PropertyAction::Reset(default) => {
                     let default = default
                         .clone()
-                        .or_else(|| self.channel_default(&id).ok().flatten());
-                    commands.push(replace(&id, time, Some(None)));
-                    if let Some(value) = default {
-                        let mut c = SetProperty::new(&id.layer, &id.path, value, time);
-                        c.mode = KeyMode::Static;
-                        c.preserve_hand_edits = false;
-                        commands.push(PropertyCommand::Set(c).into());
-                    }
+                        .or_else(|| self.effect_parameter_default(&id).ok().flatten());
+                    commands.push(
+                        PropertyCommand::Reset {
+                            layer_id: id.layer.clone(),
+                            channel: id.path.clone(),
+                            default,
+                            time,
+                        }
+                        .into(),
+                    );
                 }
             }
         }
         self.transaction(caller, commands)
     }
-    fn channel_default(&self, id: &PropertyId) -> Result<Option<Value>, InspectorError> {
+    fn effect_parameter_default(&self, id: &PropertyId) -> Result<Option<Value>, InspectorError> {
         let layer = self.layer(&id.layer)?;
-        let kind = text(&layer, "type");
-        let value = match id.path.as_str() {
-            "anchor.x" | "anchor.y" => Some(if kind == "null" { 50.0 } else { 0.0 }),
-            "position.x" => Some(if ["group", "adjustment"].contains(&kind) {
-                0.0
-            } else {
-                number(&self.composition(), "w", 0.0) / 2.0
-            }),
-            "position.y" => Some(if ["group", "adjustment"].contains(&kind) {
-                0.0
-            } else {
-                number(&self.composition(), "h", 0.0) / 2.0
-            }),
-            "scale.x" | "scale.y" | "scale.z" => Some(100.0),
-            "opacity" => Some(if kind == "null" { 0.0 } else { 100.0 }),
-            "perspective" => Some(50.0),
-            "anchor.z" | "position.z" | "rotation" | "rotation.x" | "rotation.y"
-            | "orientation.x" | "orientation.y" | "orientation.z" | "skew" => Some(0.0),
-            _ => None,
-        };
-        if let Some(v) = value {
-            return Ok(Some(v.into()));
-        }
         if let Some((effect, key)) = id.path.split_once('.') {
             let effect = array(layer.get("fx"))
                 .iter()

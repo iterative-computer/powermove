@@ -95,7 +95,7 @@ impl OverlayGeometry {
 /// It must never call GPUI, JS, or wait for the main thread.
 pub type LockedOverlayProvider =
     Arc<dyn Fn(&pm_model::Document, &str, Ticks) -> Result<OverlayGeometry> + Send + Sync>;
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct MediaCatalog {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     pub proxies: BTreeMap<String, std::path::PathBuf>,

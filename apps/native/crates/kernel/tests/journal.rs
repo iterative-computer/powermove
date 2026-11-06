@@ -28,12 +28,14 @@ const PROJECT: &str = r##"{
 
 fn config(root: &Path, checkpoint_revisions: u64) -> KernelConfig {
     KernelConfig {
+        backup_root: None,
         journal_root: Some(root.to_path_buf()),
         journal: JournalConfig {
             flush_interval: Duration::from_millis(50),
             checkpoint_revisions,
             max_segment_bytes: 4 * 1024 * 1024,
         },
+        ..Default::default()
     }
 }
 
