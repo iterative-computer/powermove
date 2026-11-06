@@ -46,7 +46,10 @@
 //! # Differences from the old app
 //!
 //! * The document's keys are in canonical (UTF-16) order; the old app used
-//!   insertion order. Readers do not care.
+//!   insertion order. Object order is otherwise invisible to its readers, but
+//!   `assets` is a list to users (`Object.values` in the Project panel), so it
+//!   is written in authored order; see [`crate::asset_order`]. Other objects
+//!   whose order an extension reads still come back sorted.
 //! * Reused index records are written with the key order of new ones; the
 //!   old app kept the previous index's key order.
 //! * The media order follows the media table (file order, then imports);
@@ -107,6 +110,9 @@ pub enum VerifyLevel {
     Full,
 }
 
+/// Room to leave beyond the file's own size when a full disk stops a save.
+const RECLAIM_MARGIN: u64 = 64 << 20;
+
 /// Test hooks that simulate failures.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +120,8 @@ pub enum WriteFault {
     /// Writes fail with "No space left on device" once this many bytes were
     /// written by the save.
     DiskFullAfter(u64),
+    /// [`DiskFullAfter`](Self::DiskFullAfter) for the first attempt only.
+    DiskFullOnce(u64),
     /// Everything is written and synced, then the save fails before publishing.
     FailBeforePublish,
 }
@@ -161,6 +169,7 @@ pub struct SavePlan {
     /// Identity of the document session (guards `finish_save`).
     pub doc_id: u64,
     pub(crate) state_token: u64,
+    pub(crate) outside_writes: u64,
     pub(crate) document: Arc<Document>,
     pub(crate) had_comps: bool,
     pub(crate) history: HistoryToWrite,
@@ -214,6 +223,7 @@ pub struct SaveReceipt {
     pub revision: u64,
     pub doc_id: u64,
     pub(crate) state_token: u64,
+    pub(crate) outside_writes: u64,
     pub size: u64,
     pub layout: SaveLayout,
     /// SHA-256 of the whole file.
@@ -566,6 +576,23 @@ impl SavePlan {
     /// [`ProjectIoError::Finalize`] and [`ProjectIoError::Conflict`] for the
     /// two cases that say otherwise).
     pub fn run(&self) -> Result<SaveReceipt, ProjectIoError> {
+        let fault = self.options.fault;
+        let error = match self.attempt(fault) {
+            Err(e) if e.is_disk_full() => e,
+            outcome => return outcome,
+        };
+        // Deleting archived generations is the last resort, not a budget: an
+        // old version must not cost the user the work they are saving now.
+        let needed = fs::metadata(&self.destination).map_or(0, |m| m.len()) + RECLAIM_MARGIN;
+        match &self.options.backups {
+            Some(policy) if durable::reclaim_archived(policy, needed) > 0 => {
+                self.attempt(fault.filter(|f| !matches!(f, WriteFault::DiskFullOnce(_))))
+            }
+            _ => Err(error),
+        }
+    }
+
+    fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         self.validate()?;
         let dest = &self.destination;
         let publish = match &self.publish {
@@ -685,8 +712,8 @@ impl SavePlan {
             (temp, file, 0, Sha256::new(), None, SaveLayout::Compacted)
         };
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
-        let limit = match self.options.fault {
-            Some(WriteFault::DiskFullAfter(n)) => Some(n),
+        let limit = match fault {
+            Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
             _ => None,
         };
         let mut out = Out {
@@ -827,7 +854,7 @@ impl SavePlan {
             &mut buf,
         )?;
         drop(file);
-        if self.options.fault == Some(WriteFault::FailBeforePublish) {
+        if fault == Some(WriteFault::FailBeforePublish) {
             return Err(ProjectIoError::Invalid(
                 "Injected failure before publishing".into(),
             ));
@@ -887,6 +914,7 @@ impl SavePlan {
             revision: self.revision,
             doc_id: self.doc_id,
             state_token: self.state_token,
+            outside_writes: self.outside_writes,
             size,
             layout,
             file_hash,

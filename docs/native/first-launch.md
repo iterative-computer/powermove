@@ -1,5 +1,13 @@
 # Native beta first launch
 
+The [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation) adds
+verified main flat-file/source-link migration and isolated checkpoint recovery.
+`recovery::restore_checkpoint` copies a verified checkpoint into a new private
+directory only; it never replaces the original profile or reverses native work.
+Earlier reverse-migration/Restore descriptions are historical requirements
+superseded by the owner's no-reverse/no-archive-Restore-UI decision.
+
+
 `apps/native/crates/first-launch` (`pm-first-launch`) coordinates migration on a
 background worker before the shell attaches a library. This is a Phase 1 beta
 bootstrap, not permission to release or cut over. The Electron profile and user

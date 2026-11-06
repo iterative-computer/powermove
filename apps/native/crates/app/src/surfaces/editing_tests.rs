@@ -786,26 +786,36 @@ fn real_kernel_animator_projection_keeps_opaque_data_and_disabled_state() {
     );
 }
 #[test]
-fn unimplemented_animator_commands_do_not_claim_success_or_change_data() {
+fn animator_and_style_commands_write_and_refuse_an_unknown_animator() {
     let (_a, k) = actor();
-    let t = target(&k, "T");
+    let reply = |request: &dyn Fn(&_) -> _| {
+        let t = target(&k, "T");
+        k.submit(&t, request(&t))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .unwrap()
+            .reply
+    };
     let before = layer(&k, "T");
-    for request in [
-        t.add_animator("a", parse(r#"{"id":"a"}"#).unwrap()),
-        t.remove_animator("ta1"),
-        t.style_text("style", parse(r#"{"start":0,"end":2}"#).unwrap()),
-    ] {
-        assert!(matches!(
-            k.submit(&t, request)
-                .unwrap()
-                .wait()
-                .unwrap()
-                .unwrap()
-                .reply,
-            Reply::Throw(_)
-        ));
-        assert_eq!(layer(&k, "T"), before);
-    }
+    assert!(matches!(
+        reply(&|t| t.remove_animator("missing")),
+        Reply::Throw(_)
+    ));
+    assert_eq!(layer(&k, "T"), before);
+    assert!(!matches!(
+        reply(&|t| t.add_animator("a", parse(r#"{"name":"Added"}"#).unwrap())),
+        Reply::Throw(_)
+    ));
+    assert!(!matches!(
+        reply(&|t| t.remove_animator("a")),
+        Reply::Throw(_)
+    ));
+    assert!(!matches!(
+        reply(&|t| t.style_text("style", parse(r#"{"start":0,"end":2}"#).unwrap())),
+        Reply::Throw(_)
+    ));
+    assert_ne!(layer(&k, "T"), before);
 }
 #[test]
 fn real_kernel_preview_cancel_restores_original_and_commit_is_one_undo() {

@@ -73,10 +73,10 @@ it made; channels are the old keys (`opacity`, `position.x`, `c.size`,
 
 ### Catalog and status
 
-Status: **done** (ported and tested), **todo** (typed and documented; it
-returns `CommandError::NotImplemented` and changes nothing). Tests:
-`tests/commands_animation.rs`, `tests/commands_layers.rs`,
-`tests/commands_project.rs`.
+Every command is ported. Tests: `tests/commands_animation.rs`,
+`tests/commands_layers.rs`, `tests/commands_project.rs`,
+`tests/commands_ported.rs`. Text geometry needs a `KernelConfig.text` host; a
+headless kernel refuses it (`Text layout needs fonts that are not loaded`).
 
 | Command | Old app | Status |
 |---|---|---|
@@ -90,12 +90,12 @@ returns `CommandError::NotImplemented` and changes nothing). Tests:
 | `Paste { comp, layers, new_ids, index, time }` | Cmd+V layers (`pasteLayers`) | done |
 | `Reorder { layer_id, index, time }` | `reorder_layer` | done |
 | `Restack { layer_ids, to }` | Cmd+[ ] and Shift (`orderLayers`) | done |
-| `TransformLayers` | `transform_layers` (generated tools) | todo |
+| `TransformLayers` | `transform_layers` (`PM.Capabilities.compile`) | done |
 | **Properties** `PropertyCommand` | | |
 | `Set(SetProperty)` | `set_property` (keys at `time` when animated) | done |
 | `SetExpression` | `set_expression` | done |
 | `ToggleStopwatch` | stopwatch (`PM.toggleStopwatch`) | done |
-| `Reset` | channel-row Reset (needs channel defaults) | todo |
+| `Reset` | channel-row Reset | done |
 | **Keyframes** `KeyframeCommand` | | |
 | `Replace(ReplaceKeyframes)` | `replace_keyframes` | done |
 | `SetEasing { key_ids, curve }` | `set_easing`, easing panel apply | done |
@@ -126,34 +126,35 @@ returns `CommandError::NotImplemented` and changes nothing). Tests:
 | `SetWorkArea`, `ResetWorkArea` | B, N, ruler menu | done |
 | `SetSceneParameter` | `set_scene_parameter` | done |
 | `Create`, `Duplicate`, `Delete` | New/Duplicate/Delete Composition | done |
-| `Precompose` | Cmd+Shift+C | todo |
+| `Precompose`, `ReleasePrecomp` | Cmd+Shift+C, Release Pre-comp | done |
 | **Effects** `EffectCommand` | | |
 | `Add(AddEffect)` | `add_effect`, effect paste | done |
 | `Remove`, `Set { patch: EffectPatch }` | `remove_effect`, `set_effect` | done |
-| `Duplicate`, `Reset` | effect stack | done |
+| `Duplicate` | effect stack | done |
 | `SetTransition` | `set_transition` | done |
 | **Masks and pen** `MaskCommand` | | |
 | `Add`, `Remove`, `Set`, `Reorder` | mask rows, `PM.mkMask` | done |
 | `AddPath`, `AddVertex`, `DeleteVertex`, `ClosePath` | pen tool (vertex drags are `PropertyCommand::Set` on `g.<path>.v.<vertex>.x`) | done |
 | **Text** `TextCommand` | | |
 | `SetText`, `SetBox` | in-place editor commit, paragraph resize | done |
-| `Split`, `AddAnimator`, `RemoveAnimator`, `SetStyleRange` | Split Text, animators, style ranges | todo |
+| `Split`, `AddAnimator`, `RemoveAnimator` | Split Text, Text Animators section | done |
+| `SetStyleRange` | none yet: no UI or MCP route reaches it | kernel only |
 | **Content** `ContentCommand::Set` | `set_content` (not extension/captions/shader code) | done |
 | **Markers** `MarkerCommand` | | |
 | `Add`, `Remove` (index), `RemoveById`, `Move`, `Rename` | `add_marker`, `remove_marker`, ruler menu | done |
 | **Captions** `CaptionCommand` | | |
-| `Add(AddCaptions)`, `Edit { edit: CaptionEdit }` | `add_captions`, `edit_captions` | todo |
+| `Add(AddCaptions)`, `Edit { edit: CaptionEdit }` | `add_captions`, `edit_captions` | done |
 | **3D** `Scene3dCommand` | | |
-| `SetData`, `Edit` | 3D `set_content`, MCP `edit_3d` | todo |
+| `SetData`, `Edit` | 3D `set_content`, MCP `edit_3d` | done |
 | **Media** `MediaCommand` | | |
 | `Replace`, `AddAsset`, `RemoveAsset`, `RenameAsset` | replace media, library | done |
-| `SetAssetFolder` | library folders | todo |
+| `SetAssetFolder` | media folder moves | done |
 | **Library** `LibraryCommand` | | |
 | `CreateSection`, `UpdateSection` | `create_section`, `update_section` | done |
 | **Transform** `TransformCommand` | | |
 | `Nudge` | arrow keys (parent space) | done |
-| `Align`, `Distribute` | alignment strip (`pm_edit::align`; not text layers yet: no fonts in the core) | done |
-| `CenterAnchor` | Cmd+Option+Home (needs bounds and fonts) | todo |
+| `Align`, `Distribute` | alignment strip (`pm_edit::align`; text layers measure through the `KernelConfig.text` host) | done |
+| `CenterAnchor` | Cmd+Option+Home | done |
 
 Copy is not an edit (the clipboard lane serializes `snapshot()` layers);
 Cut is Copy + `LayerCommand::Delete`; Lock All / Unlock All and Show/Hide

@@ -74,6 +74,8 @@ struct Entry {
 pub struct Effects {
     pub(crate) file_app_version: Option<String>,
     pub(crate) versioned_builtins: bool,
+    /// Neutral of a layer map: byte projects have a representable 128 of 255.
+    pub(crate) map_midpoint: f64,
     set: DefinitionSet,
     /// Whether any definitions were given. Without them nothing is known
     /// missing either, and effects and transitions are routed.
@@ -247,6 +249,7 @@ impl Effects {
             mips: None,
             file_app_version: None,
             versioned_builtins: false,
+            map_midpoint: 0.5,
             set: DefinitionSet::default(),
             configured: false,
             missing_ids: Default::default(),

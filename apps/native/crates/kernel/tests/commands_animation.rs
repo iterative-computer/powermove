@@ -721,22 +721,6 @@ fn native_replace_keeps_ids_and_refuses_duplicates() {
 }
 
 #[test]
-fn unported_commands_say_so_and_change_nothing() {
-    let mut s = store();
-    let e = refused(
-        &mut s,
-        PropertyCommand::Reset {
-            layer_id: "s1".into(),
-            channel: "opacity".into(),
-            time: 0.0,
-        }
-        .into(),
-        Origin::Interface,
-    );
-    assert_eq!(e, CommandError::NotImplemented("reset_property"));
-}
-
-#[test]
 fn simplify_drops_only_constant_interior_keys() {
     let mut s = store();
     let mut keys_in = Vec::new();

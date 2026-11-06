@@ -914,6 +914,7 @@ pub fn headless(profile: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()>
     std::thread::spawn(move || -> anyhow::Result<()> {
         let actor = KernelActor::spawn(KernelConfig {
             journal_root: Some(profile.join("journals")),
+            backup_root: Some(profile.join("backups")),
             ..Default::default()
         });
         let (host, _) = Host::new(actor.handle(), profile.clone());

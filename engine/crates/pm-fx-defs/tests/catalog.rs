@@ -300,5 +300,7 @@ fn owner_saving_version_policy_keeps_old_and_unknown_artwork_exact() {
         definition_for_file("gradient", Some(&json!(2)), None).unwrap(),
         main_catalog().get("gradient", 2).unwrap()
     );
+    // An effect the tag never had cannot be a tagged instance.
+    assert_eq!(definition_for_file("tint", None, None).unwrap().id, "tint");
     assert!(definition_for_file("gradient", Some(&json!(999)), Some("9.0.0")).is_err());
 }

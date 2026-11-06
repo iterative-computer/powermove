@@ -1,5 +1,88 @@
 # Beta readiness preparation — cloud beta2
 
+## Beta3 implementation preparation
+
+The historical beta2 gaps below are superseded in these owned paths:
+
+- `pm-services::media_adapter::FileMedia` reads the pinned main flat-file index
+  and source links. Metadata/unknown fields survive offline access; bounded range
+  reads verify the complete SHA-256 and descriptor identity, refuse symlinks and
+  dataless placeholders, and never hydrate or modify a source.
+- Migration imports verified linked originals into the native content store as
+  well as flat owned payloads. Durable source dispositions distinguish missing,
+  changed, denied and cloud-only input. A later delta re-evaluates availability;
+  an exact previously owned copy remains a valid fallback. Key/revision, full
+  digest and proxy provenance are checked independently; changed bytes cannot
+  re-enter through the reference's direct-path alias.
+- Import reaches the kernel by one route: worker `RetainedAsset` receipts through
+  `Call::AdmitMedia`, which admits bytes, metadata and any placed layers in one
+  transaction and one Undo step. Cloud and Figma output must materialize as a
+  local file and use the same route; neither has a caller yet.
+  Retained native original/history IDs remain reserved, and worker metadata
+  cannot select `originalVersion` without the retained-media admission path.
+  Reusing an unreferenced media ID also requires the same MIME and full SHA-256;
+  matching length and revision alone cannot replace bytes needed by Redo.
+  `SetAssetFolder` now follows main's valid-folder/root/missing-asset behavior and
+  participates in Undo/Redo. No app or panel UX was added.
+- `pm-update-policy::sparkle` provides an asynchronous cycle rather than claiming
+  external ZIP adoption. Independently retained policy bytes pass both SHA-256
+  and the bundled Sparkle archive key's exact EdDSA signature before Sparkle can
+  start its own download. The custom driver selects only the exact version,
+  full-archive URL, size and signature, refuses deltas/packages and automatic
+  downloads, and preserves normal quit barriers. A main-loop/worker channel
+  keeps archive verification and journals off the application main thread.
+- The `sparkle-macos` feature compiles/links a public-API Objective-C bridge against
+  an explicitly supplied, verified Sparkle 2.10.1 framework. No dependency download
+  happens in the build script. `MainLoop::pump` belongs to the application run
+  loop. The app must install a termination veto/import lease **before downloading**
+  and route **every** termination through the worker's fresh save/readiness barrier;
+  retaining only the ready-to-relaunch callback is insufficient. Until that host
+  guard is bound, the application must keep the updater disabled. The guard must
+  also verify the exact retained archive's candidate signature/architecture,
+  notarization and Team/DR continuity before any appcast contact. Sparkle's EdDSA
+  path permits signing-identity rotation, so framework authentication alone must
+  not be described as enforcing Powermove's stricter same-DR policy. No production
+  success implementation of this application-owned proof is supplied here.
+- Recovery receipts never certify installation. Completion requires inspecting
+  the installed bundle's exact version/id/architecture, valid nested signatures
+  and reviewed designated requirement. `installer_recovery_verified` replaces
+  the obsolete `restore_verified` policy field; it proves installer recovery,
+  never reverse data migration.
+- `pm-first-launch::recovery::restore_checkpoint` verifies and copies a sealed
+  checkpoint to a **new isolated directory**, retains interrupted attempts, and
+  refuses corrupt inputs, overlaps and foreign stages. It does not replace a
+  profile, restore archived threads/takes/presets through UI, or move native work
+  back to Electron. The old app's fileguard remains responsible for refusing an
+  unsupported native file without changing it.
+
+### Headless signing proof and owner steps
+
+`apps/native/packaging/prove-signatures.py adhoc --output "$NEW_PRIVATE_PROOF"`
+creates synthetic universal bundles and checks nested signatures, same/wrong
+requirements, reviewed entitlements and tamper rejection. It never launches its
+fixture executables or uses a Keychain identity. Ad-hoc mode cannot sign a
+production/beta bundle or count as Developer ID/notarization proof.
+
+For a real candidate, the owner must supply the complete resource/rpath inventory,
+verified framework, public feed/key configuration and reviewed exact designated
+requirement. Build with `--features pm-update-policy/sparkle-macos` and
+`PM_SPARKLE_FRAMEWORK="$VERIFIED_FRAMEWORK"`. Use the existing explicit packaging
+`sign` and `notarize` commands only when authorized, then run:
+
+```sh
+python3 apps/native/scripts/prove-signed-build.py \
+  --bundle "$SIGNED_APP" --requirements "$REVIEWED_REQUIREMENTS" \
+  --output "$NEW_PRIVATE_SIGNATURE_REPORT"
+```
+
+Real Sparkle replacement/relaunch and interruptions, signed two-DR Keychain
+consent/denial, notarization/Gatekeeper, offline/translocated/read-only operation,
+physical power-loss/disk/permission tests, architecture deployment and application
+bindings remain owner-run proof gates. No signed-candidate proof is inferred from
+synthetic tests. No release, upload, tag or workflow is introduced here.
+
+
+
 2026-11-04 (America/Chicago). Synthetic Linux evidence only. No signing,
 notarization, publishing, workflow dispatch, real profile or Keychain access.
 This lane does not declare beta/cutover readiness.

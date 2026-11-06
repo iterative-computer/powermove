@@ -69,7 +69,7 @@ fn launch(
     });
     Ok(())
 }
-fn tokens() -> Tokens {
+pub fn tokens() -> Tokens {
     let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {
         Scheme::Light
     } else if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("dark") {

@@ -364,7 +364,10 @@ impl Catalog {
         let mut composition_order: Vec<_> = compositions.keys().cloned().collect();
         composition_order
             .sort_by(|a, b| compare(&compositions[a].name, &compositions[b].name).then(a.cmp(b)));
-        let asset_order = assets.keys().cloned().collect();
+        let asset_order = pm_kernel::asset_order::keys(&root)
+            .into_iter()
+            .filter(|id| assets.contains_key(id))
+            .collect();
         Ok(Self {
             stamp,
             assets,
@@ -375,19 +378,6 @@ impl Catalog {
             root: Arc::new(root),
             children,
         })
-    }
-    /// Preserve an explicit imported enumeration supplied by the host. A
-    /// canonical object alone cannot recover JavaScript insertion order. The
-    /// hint must cover every asset exactly once; never guess chronology by id.
-    pub fn with_asset_order(mut self, ids: Vec<String>) -> Result<Self, Error> {
-        if ids.len() != self.assets.len()
-            || ids.iter().any(|id| !self.assets.contains_key(id))
-            || ids.iter().collect::<HashSet<_>>().len() != ids.len()
-        {
-            return Err(Error::InvalidTarget);
-        }
-        self.asset_order = ids;
-        Ok(self)
     }
     pub fn asset_ids(&self) -> &[String] {
         &self.asset_order

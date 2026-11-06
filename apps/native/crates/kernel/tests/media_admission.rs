@@ -110,6 +110,7 @@ impl Fixture {
                 expected_revision: store.revision(),
                 project,
                 label: "Replace Media".into(),
+                place: vec![],
                 bindings: vec![MediaBinding {
                     asset: "asset".into(),
                     expected,

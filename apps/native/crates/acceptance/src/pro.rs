@@ -126,6 +126,7 @@ impl Project {
             .shell(ShellCall::SaveAs {
                 session: self.session.clone(),
                 path: path.clone(),
+                replace: false,
             })
             .wait()
             .ok_or("actor stopped")?

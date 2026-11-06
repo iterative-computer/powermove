@@ -54,6 +54,7 @@ pub fn new_id(prefix: &str) -> String {
 pub struct Cx<'a> {
     base: &'a Node,
     pub(super) state: Option<&'a crate::state::StateSnapshot>,
+    pub(super) text: Option<&'a crate::text_host::SharedTextHost>,
     origin: Origin,
     doc: Document,
     ops: Vec<Op>,
@@ -65,6 +66,7 @@ impl<'a> Cx<'a> {
         Cx {
             base: root,
             state: None,
+            text: None,
             origin,
             doc: Document::from_root(Some(root.clone()), 0),
             ops: Vec::new(),
@@ -204,6 +206,29 @@ impl<'a> Cx<'a> {
             }
         }
         out
+    }
+
+    /// A measure for an edit kernel. Text that needs real fonts is refused
+    /// without a host; layers without text never touch the measure.
+    pub fn measure(
+        &self,
+        needs_fonts: bool,
+    ) -> Result<Box<dyn pm_eval::text_geom::TextMeasure>, CommandError> {
+        match self.text {
+            Some(host) => Ok(host.0.measure()),
+            None if needs_fonts => Err(CommandError::Invalid(
+                crate::queries::QueryError::NeedsFonts.to_string(),
+            )),
+            None => Ok(Box::new(crate::text_host::NoFonts)),
+        }
+    }
+
+    /// Refuses a plan whose measurements met a failed font registry.
+    pub fn check_fonts(&self) -> Result<(), CommandError> {
+        match self.text.and_then(|host| host.0.take_failure()) {
+            Some(why) => Err(CommandError::Invalid(format!("Fonts unavailable: {why}"))),
+            None => Ok(()),
+        }
     }
 
     /// Runs an engine edit kernel (`pm_edit`) over the scratch tree for
