@@ -74,6 +74,9 @@ impl McpSession {
             Err(e) => failure(e),
         }
     }
+    /// No schema admission, as on main: the session and memory switch refuse
+    /// first, and a JavaScript slice's lone surrogate is kept (tests/wave4.rs,
+    /// tests/main_memory.rs).
     fn project_memory(&mut self, args: &Value) -> Result<pm_model::Value> {
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
