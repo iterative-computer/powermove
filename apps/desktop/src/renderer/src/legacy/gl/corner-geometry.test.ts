@@ -242,3 +242,12 @@ describe('round pills and continuous smoothing', () => {
     }
   });
 });
+
+it('can start imported strokes at the SVG/Figma top-left edge without changing legacy outlines', () => {
+  const d = { w: 90, h: 60, radius: 12 };
+  expect(roundedRectPath(d, true).startsWith('M 12 0 L 78 0')).toBe(true);
+  expect(roundedRectPath(d).startsWith('M 78 0')).toBe(true);
+  expect(endpoint(roundedRectPath(d, true).replace(/ Z$/, ''))).toEqual({ x: 12, y: 0 });
+  const smooth = { ...d, smoothing: 60 };
+  expect(roundedRectPath(smooth, true).startsWith('M 19.2 0 L 70.8 0')).toBe(true);
+});

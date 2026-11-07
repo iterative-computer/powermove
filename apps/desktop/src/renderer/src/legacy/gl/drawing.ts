@@ -50,7 +50,18 @@ export function shapeOutline(d: any): Path2D {
     p.closePath();
     return p;
   }
-  return new Path2D(roundedRectPath(d));
+  // SVG/Figma rectangles begin at their top-left edge. The corner model starts
+  // at the top-right, which shifts the dash phase even when all radii are zero.
+  if (
+    ![d.radius, d.radiusTL, d.radiusTR, d.radiusBR, d.radiusBL].some(
+      (v) => Number(v) > 0,
+    )
+  ) {
+    const path = new Path2D();
+    path.rect(0, 0, d.w, d.h);
+    return path;
+  }
+  return new Path2D(roundedRectPath(d, true));
 }
 
 export function gradientParameter(type: string, x: number, y: number): number {
@@ -301,6 +312,18 @@ export function paintShape(
   ctx.restore();
   stroke.width = stroke.height = 0;
 }
+export function triangleCapPoints(
+  cap: string,
+  width: number,
+): Array<[number, number]> {
+  const base = width * 3,
+    length = cap === "ARROW_EQUILATERAL" ? (base * Math.sqrt(3)) / 2 : base;
+  return [
+    [0, 0],
+    [-length, -base / 2],
+    [-length, base / 2],
+  ];
+}
 function drawCap(
   c: CanvasRenderingContext2D,
   cap: string,
@@ -339,9 +362,9 @@ function drawCap(
     c.closePath();
     c.fill();
   } else {
-    c.moveTo(0, 0);
-    c.lineTo(-size, -size / 2);
-    c.lineTo(-size, size / 2);
+    triangleCapPoints(cap, w).forEach(([x, y], i) =>
+      i ? c.lineTo(x, y) : c.moveTo(x, y),
+    );
     c.closePath();
     c.fill();
   }

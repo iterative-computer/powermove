@@ -393,8 +393,10 @@ function richLayout(d: any) {
     const m = meas.measureText(text);
     return {
       width: m.width,
-      ascent: m.actualBoundingBoxAscent || style.size * 0.82,
-      descent: m.actualBoundingBoxDescent || style.size * 0.18,
+      ascent:
+        m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? style.size * 0.82,
+      descent:
+        m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? style.size * 0.18,
     };
   });
 }

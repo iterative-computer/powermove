@@ -81,3 +81,22 @@ it("retains small-cap source case and releases first-line indent on wrapped line
   expect(l.lines[1]!.width).toBeGreaterThan(22);
   expect(d.text).toBe(text);
 });
+
+it("justifies visible word gaps without distributing space into a hanging trailing blank", () => {
+  const d = {
+      ...base,
+      text: "ab cd ef",
+      align: "justify",
+      boxWidth: 32,
+      paragraphIndent: 2,
+    },
+    layout = layoutRichText(d, measure),
+    line = layout.lines[0]!;
+  expect(line.glyphs.map((g) => g.text).join("")).toBe("ab cd ");
+  expect(line.glyphs.at(-1)!.width).toBe(0);
+  const last = line.glyphs.at(-2)!;
+  expect(last.x + last.width).toBe(32);
+  expect(line.width).toBe(30);
+  expect(layout.lines[1]!.glyphs[0]!.x).toBe(0);
+  expect(d.text).toBe("ab cd ef");
+});
