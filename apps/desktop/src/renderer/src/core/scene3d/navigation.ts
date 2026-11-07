@@ -1,3 +1,4 @@
+import { isExtrudedLayer } from './extrusion-data';
 import * as THREE from 'three';
 import { compositionRuntime } from './service';
 import { layer3DRole } from './layers';
@@ -58,7 +59,7 @@ export function frameView(start:ViewPose,box:THREE.Box3,camera:THREE.Camera):Vie
 export function frameComposition(PM:any,selected=true):void {
   const world=compositionRuntime(PM),ids=new Set<string>(PM.sel?.layers || []),box=new THREE.Box3();
   for(const [id,object] of world.objects){
-    const layer=PM.L(id);if(layer3DRole(layer)!=='object')continue;
+    const layer=PM.L(id);if(layer3DRole(layer)!=='object' && !isExtrudedLayer(layer))continue;
     if(selected&&!ids.has(id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
     box.expandByObject(object);
   }
@@ -75,7 +76,7 @@ export function createSceneNavigation(PM:any,stage:HTMLElement):SceneNavigation 
   let disposed=false;
   const offs:(()=>void)[]=[],dragOffs:(()=>void)[]=[];
   const listen=(target:EventTarget,event:string,fn:EventListener,options?:boolean)=>{target.addEventListener(event,fn,options);offs.push(()=>target.removeEventListener(event,fn,options));};
-  const available=()=>!disposed&&(PM.curComp?.()||PM.proj).layers.some((l:any)=>layer3DRole(l)==='object'&&PM.active(l,PM.time));
+  const available=()=>!disposed&&(PM.curComp?.()||PM.proj).layers.some((l:any)=>(layer3DRole(l)==='object' || isExtrudedLayer(l))&&PM.active(l,PM.time));
   const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});
   const endListeners=()=>{for(const off of dragOffs.splice(0))off();};
   function cancel(){if(!gesture)return;const {start,viewMode}=gesture;gesture=null;endListeners();applyViewportPose(PM,start);setViewportMode(PM,viewMode);}

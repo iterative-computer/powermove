@@ -1,3 +1,5 @@
+import { extrusionEligible, parseExtrusion } from './extrusion-data';
+import { extrusionCommands } from './extrusion-operations';
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
 import { intrinsicPropertiesSchema } from './schema';
 import { canAssignMaterialMap,listModelMaterials } from './material-maps';
@@ -7,8 +9,8 @@ import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } f
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties';
-  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null;
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties';
+  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -27,7 +29,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
-  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map']);
+  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
@@ -76,13 +78,17 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   const selected=args.id || args.target || PM.sel?.layers?.[0];
   let layer=PM.L?.(selected);
   if(!layer && typeof selected==='string'){
-    const matches=(PM.curComp?.() || PM.proj).layers.filter((l:any)=>l.name===selected && layer3DRole(l));
+    const matches=(PM.curComp?.() || PM.proj).layers.filter((l:any)=>l.name===selected && (layer3DRole(l) || extrusionEligible(l)));
     if(matches.length>1)throw new Error('Multiple 3D layers have that name; use a layer ID');
     layer=matches[0];
   }
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);
     if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:{},environment:args.patch || {}});return {commands,id};}
+  }
+  if(layer && extrusionEligible(layer) && ['set_extrusion','set_surface_material_map','set_surface_material_properties','set_material_map','set_material_properties'].includes(args.operation)){
+    if(layer.lock || (PM.groupAncestors?.(layer) || []).some((g:any)=>g.lock))throw new Error('Unlock the 3D layer before editing it');
+    return extrusionCommands(PM,layer,args);
   }
   const role=layer3DRole(layer);
   if(!layer || !role)throw new Error('Choose a 3D model, light or camera layer');
@@ -218,6 +224,7 @@ export function validateSceneLayer(layer: any,PM?:any): void {
   const role=layer3DRole(layer);
   if(role)layer.d.data=parseLayer3DData(role,layer.d.data);
   else if(layer.d?.definition===SCENE3D_DEFINITION)layer.d.data.scene=parseScene(layer.d.data.scene);
+  else if(extrusionEligible(layer) && layer.d?.extrusion)layer.d.extrusion=parseExtrusion(layer.d.extrusion);
   else return;
   const ids=new Set<string>();
   for(const {prop} of sceneProperties(layer))for(const key of prop.kf){

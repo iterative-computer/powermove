@@ -368,6 +368,13 @@ export interface Scene3DGizmo {
   dispose():void;
 }
 export interface Scene3DAPI {
+  /** Text/shape geometry is opt-in. Enabling extrusion also enables native 3D. */
+  getExtrusion(layerId:string,time?:number):import('../core/scene3d/extrusion-data').ExtrusionState|null;
+  setExtrusion(layerId:string,patch:import('../core/scene3d/extrusion-data').ExtrusionPatch,meta?:EditMeta):EditResult;
+  listSurfaces(layerId:string):import('../core/scene3d/extrusion-data').ExtrusionSurfaceInfo[];
+  setSurfaceMaterialMap(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
+  getSurfaceMaterialProperties(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,time?:number):import('../core/scene3d/extrusion-data').SurfacePropertyState|null;
+  setSurfaceMaterialProperties(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,patch:import('../core/scene3d/extrusion-data').SurfacePropertyPatch,meta?:EditMeta):EditResult;
   /** Read-only light marker data, using the displayed comp image rectangle. */
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */

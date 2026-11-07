@@ -1,3 +1,5 @@
+import { motionBlurTimes } from '../../core/render-samples';
+import { prepareExtrusionFonts, hasExtrudedText } from '../../core/scene3d/extrusion-fonts';
 import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { useVideo } from './video-residency';
@@ -233,7 +235,13 @@ export async function prepareFrame(PM:any,time:number,project=PM.proj,options: F
   if(exact)requests.push(...PM.GL.frameVideoRequests(project,time,{...options,shutter:options.shutter??PM.proj.shutter??.5}));else visit(project,time,0);const frames=requests.length ? await prepareVideos(requests, inputs ? PM.Memory?.budget?.('textures') ?? 128 * 1024 * 1024 : Infinity, cancelled, exact, options, inputs) : new Map<string, HTMLCanvasElement>();
   // Font loading can yield after all seeks finish. Do not publish a frame
   // cancelled during that final wait, and release captures owned by this job.
-  try{await (options.videoForCapture ? withCaptureSignal(prepareFonts(PM,project),options.signal) : prepareFonts(PM,project));if(cancelled())throw new EffectInputError('Layer input frame preparation cancelled');}
+  try{
+    if(hasExtrudedText(PM,project)){
+      const blurred=options.mblur!==false && [project,...Object.values<any>(PM.proj?.comps || {})].some(comp=>(comp.layers || []).some((layer:any)=>!!evaluatedValue(PM,layer,layer.mblur,time,'l.mblur')));
+      const times=blurred?[time,...motionBlurTimes(time,project.fps,options)]:[time],seen=new Set<string>();
+      await withCaptureSignal(Promise.all(times.map(at=>prepareExtrusionFonts(PM,project,at,seen))),options.signal);
+    }
+    await (options.videoForCapture ? withCaptureSignal(prepareFonts(PM,project),options.signal) : prepareFonts(PM,project));if(cancelled())throw new EffectInputError('Layer input frame preparation cancelled');}
   catch(error){for(const frame of new Set(frames.values())){frame.width=0;frame.height=0;}throw error;}
   PM.preparedVideoFrames=frames;PM.preparedVideoExactInputs=exact?{project:PM.proj,frames}:null;PM.preparedVideoVersion=(PM.preparedVideoVersion||0)+1;
 }

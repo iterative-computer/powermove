@@ -1,3 +1,6 @@
+import { buildExtrusionGeometry } from './extrusion-geometry';
+import { EXTRUSION_SURFACES } from './extrusion-data';
+import type { ExtrusionMeshSample } from './extrusion-render';
 import { applyMaterialProperties } from './material-properties';
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
@@ -43,13 +46,14 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
   }
 }
 
+const cachedExtrusionGeometries=new WeakSet<THREE.BufferGeometry>();
 function disposeTree(object: THREE.Object3D): void {
   const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
   object.traverse((child: any)=>{
     if (child.geometry) geometries.add(child.geometry);
     for (const m of Array.isArray(child.material) ? child.material : [child.material]) if (m) materials.add(m);
   });
-  for (const g of geometries) g.dispose();
+  for (const g of geometries) if(!cachedExtrusionGeometries.has(g))g.dispose();
   for (const m of materials) m.dispose();
 }
 
@@ -63,6 +67,8 @@ export class SceneRuntime {
   private assetRefs = new Map<string,any>();
   private textures = new Map<string,{source:any;texture:THREE.Texture}>();
   private usedTextures=new Set<string>();
+  private extrusionGeometries=new Map<string,{geometry:THREE.BufferGeometry;bytes:number}>();
+  private extrusionGeometryBytes=0;
   private compositionGetter:SceneCompositionGetter=()=>null;
   private ambient = new THREE.HemisphereLight();
   private parsed?: Scene3D;
@@ -75,7 +81,7 @@ export class SceneRuntime {
 
   constructor() { this.scene.add(this.ambient); }
 
-  private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null): THREE.Texture|null {
+  private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null,nativeArtwork=false): THREE.Texture|null {
     if (!id) return null;
     if(typeof id==='object'){
       const frame=this.compositionGetter(objectId,id);if(!frame){this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
@@ -83,7 +89,7 @@ export class SceneRuntime {
       let entry=this.textures.get(key);
       if(!entry){
         const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
-        texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported;
+        texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported && !nativeArtwork;
         texture.minFilter=THREE.LinearFilter;texture.magFilter=THREE.LinearFilter;
         entry={source:null,texture};this.textures.set(key,entry);
       }
@@ -98,7 +104,7 @@ export class SceneRuntime {
       entry?.texture.dispose();
       const texture = new THREE.Texture(source);
       texture.colorSpace = colorSpace ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-      texture.flipY=!imported;texture.needsUpdate = true;texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      texture.flipY=!imported && !nativeArtwork;texture.needsUpdate = true;texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       entry = {source,texture};this.textures.set(key,entry);
     }
     this.textureCoordinates(entry.texture,original);return entry.texture;
@@ -141,13 +147,13 @@ export class SceneRuntime {
     return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshStandardMaterial());
   }
 
-  sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number,compositionGetter:SceneCompositionGetter=()=>null): void {
+  sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number,compositionGetter:SceneCompositionGetter=()=>null,extrusions:ExtrusionMeshSample[]=[]): void {
     if (this.raw !== raw) { this.parsed=alreadyValidated?raw:parseScene(raw);this.raw=raw; }
     // Channel edits mutate the original scene; retain those live channels.
     const data = raw as Scene3D;
     const validated = this.parsed!;
     this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();
-    const keep = new Set([...validated.objects,...validated.lights].map(o=>o.id));
+    const keep = new Set([...validated.objects,...validated.lights,...extrusions].map(o=>o.id));
     for (const [id,object] of this.objects) if (!keep.has(id)) this.remove(id,object);
     const values = (p:any,prefix:string) => Object.fromEntries(Object.entries<any>(p || {}).map(([k,v])=>{
       const value=evaluate(v,`${prefix}.${k}`);
@@ -231,6 +237,11 @@ export class SceneRuntime {
       });
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
     }
+    let nativeVertices=0;
+    for(const sample of extrusions){
+      this.syncExtrusion(sample);nativeVertices+=(this.objects.get(sample.id) as THREE.Mesh).geometry.getAttribute('position').count;
+      if(nativeVertices>500000)throw new Error('Native 3D artwork exceeds the 500,000 vertex composition budget; reduce geometry quality');
+    }
     // Attach after every object exists, independently of document ordering.
     for (const node of data.objects) {
       const object=this.objects.get(node.id)!,parent=node.parent?this.objects.get(node.parent)!:this.scene;
@@ -275,6 +286,61 @@ export class SceneRuntime {
     for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
   }
 
+  private syncExtrusion(sample:ExtrusionMeshSample):void {
+    let mesh=this.objects.get(sample.id) as THREE.Mesh|undefined;
+    if(!mesh || this.sources.get(sample.id)!==sample.key){
+      if(mesh)this.remove(sample.id,mesh);
+      const cacheKey=`${sample.id}:${sample.key}`;
+      let cached=this.extrusionGeometries.get(cacheKey);
+      if(!cached){
+        const geometry=buildExtrusionGeometry(sample.outlines,sample.options);
+        cachedExtrusionGeometries.add(geometry);
+        const bytes=Object.values(geometry.attributes).reduce((sum,attribute)=>sum+attribute.array.byteLength,0);
+        cached={geometry,bytes};this.extrusionGeometries.set(cacheKey,cached);this.extrusionGeometryBytes+=bytes;
+        while(this.extrusionGeometries.size>32 || this.extrusionGeometryBytes>64*1024*1024){
+          const [key,entry]=this.extrusionGeometries.entries().next().value!;
+          if(key===cacheKey)break;
+          this.extrusionGeometries.delete(key);this.extrusionGeometryBytes-=entry.bytes;
+          const inUse=[...this.objects.values()].some(object=>(object as THREE.Mesh).geometry===entry.geometry);
+          cachedExtrusionGeometries.delete(entry.geometry);if(!inUse)entry.geometry.dispose();
+        }
+      }else{this.extrusionGeometries.delete(cacheKey);this.extrusionGeometries.set(cacheKey,cached);}
+      mesh=new THREE.Mesh(cached.geometry,EXTRUSION_SURFACES.map(()=>sample.plane?new THREE.MeshBasicMaterial({side:THREE.DoubleSide,transparent:true,alphaTest:.001,toneMapped:false}):new THREE.MeshStandardMaterial({vertexColors:true,roughness:.4,metalness:0})));
+      this.objects.set(sample.id,mesh);this.sources.set(sample.id,sample.key);this.scene.add(mesh);
+    }
+    mesh.name=sample.name;mesh.userData.sceneId=sample.id;mesh.userData.layerOpacity=sample.opacity;mesh.userData.layerOccludes=true;
+    mesh.matrixAutoUpdate=false;mesh.matrix.copy(sample.matrix);mesh.matrix.decompose(mesh.position,mesh.quaternion,mesh.scale);
+    mesh.castShadow=true;mesh.receiveShadow=true;
+    if(sample.plane){
+      const key=`plane:${sample.id}`,frame=sample.plane;this.usedTextures.add(key);
+      let entry=this.textures.get(key);
+      if(!entry){const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=false;texture.minFilter=texture.magFilter=THREE.LinearFilter;entry={texture,source:null};this.textures.set(key,entry);}
+      if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.source=frame;}
+      const material=(mesh.material as THREE.MeshBasicMaterial[])[0]!;if(material.map!==entry.texture){material.map=entry.texture;material.needsUpdate=true;}
+      mesh.userData.nativePlane=true;mesh.castShadow=false;return;
+    }
+    if(mesh.userData.fillColor!==sample.color){
+      const color=new THREE.Color(sample.color),attribute=mesh.geometry.getAttribute('color');
+      for(const index of mesh.geometry.userData.defaultColorVertices || [])attribute.setXYZ(index,color.r,color.g,color.b);
+      attribute.needsUpdate=true;mesh.userData.fillColor=sample.color;
+    }
+    const materials=mesh.material as THREE.MeshStandardMaterial[];
+    EXTRUSION_SURFACES.forEach((surface,index)=>{
+      const material=materials[index]!,data=sample.surfaces[surface],maps=data?.maps || {},values=data?.values || {};
+      material.color.set(values.color || '#FFFFFF');material.emissive.set('#000000');material.emissiveIntensity=0;
+      let mapped=false;
+      for(const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const){
+        const texture=this.texture(maps[key],isColor,sample.id,false,`${surface}:${key}`,undefined,true);
+        if(material[slot]!==texture){material[slot]=texture;material.needsUpdate=true;}
+        if(key==='color' && texture){material.color.set('#FFFFFF');mapped=true;}
+        if(key==='emissive' && texture){material.emissive.set('#FFFFFF');material.emissiveIntensity=1;}
+      }
+      const vertexColors=!mapped && !values.color;
+      if(material.vertexColors!==vertexColors){material.vertexColors=vertexColors;material.needsUpdate=true;}
+      applyMaterialProperties(material,values,{opacity:1,transparent:vertexColors && mesh!.geometry.userData.hasVertexAlpha,depthWrite:!vertexColors || !mesh!.geometry.userData.hasVertexAlpha,roughness:.4,metalness:0});
+    });
+  }
+
   resizeCamera(w:number,h:number,camera=this.camera): void {
     const aspect=w/Math.max(1,h);
     if (camera instanceof THREE.PerspectiveCamera) camera.aspect=aspect;
@@ -302,7 +368,7 @@ export class SceneRuntime {
     else {
       // A shared depth prepass lets ordinary timeline layers keep their own effects,
       // opacity and masks while model intersections and shared shadows remain correct.
-      const saved=new Map<THREE.Material,{colorWrite:boolean;depthWrite:boolean;visible:boolean}>();
+      const saved=new Map<THREE.Material,{colorWrite:boolean;depthWrite:boolean;visible:boolean;alphaTest:number}>();
       const originalBackground=this.scene.background,originalAutoClear=this.renderer.autoClear;
       const autoShadow=this.renderer.shadowMap.autoUpdate;
       const depthKey=`${this.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}:${[...(depthIds || this.objects.keys())].sort().join(',')}`;
@@ -311,11 +377,12 @@ export class SceneRuntime {
           if(!child.isMesh)return;
           const id=child.userData.sceneId;
           for(const material of Array.isArray(child.material)?child.material:[child.material]){
-            if(!saved.has(material))saved.set(material,{colorWrite:material.colorWrite,depthWrite:material.depthWrite,visible:material.visible});
+            if(!saved.has(material))saved.set(material,{colorWrite:material.colorWrite,depthWrite:material.depthWrite,visible:material.visible,alphaTest:material.alphaTest});
             const old=saved.get(material)!;
             material.colorWrite=phase==='color' && id===objectId && old.colorWrite;
             material.visible=old.visible && (!depthIds || depthIds.has(id)) && (phase==='depth' || id===objectId);
             const data=this.objects.get(id)?.userData;
+            if(data?.nativePlane)material.alphaTest=phase==='depth'?.999:old.alphaTest;
             material.depthWrite=phase==='depth' && old.depthWrite && (data?.layerOpacity ?? 1)>=.999 && data?.layerOccludes!==false;
           }
         });
@@ -393,6 +460,7 @@ export class SceneRuntime {
   dispose():void {
     for(const [id,object] of this.objects)this.remove(id,object);
     for(const {texture} of this.textures.values())texture.dispose();this.textures.clear();
+    for(const {geometry} of this.extrusionGeometries.values()){cachedExtrusionGeometries.delete(geometry);geometry.dispose();}this.extrusionGeometries.clear();this.extrusionGeometryBytes=0;
     outputOwners.delete(this);
     if(outputOwners.size===0&&outputRenderer){outputRenderer.dispose();outputRenderer.forceContextLoss();outputRenderer=null;}
     this.renderer=null;

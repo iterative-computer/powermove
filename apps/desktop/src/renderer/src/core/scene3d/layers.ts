@@ -1,3 +1,4 @@
+import { extrusionProperties } from './extrusion-data';
 import { objectMapSets,mapImageId } from './material-maps';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
 
@@ -43,7 +44,7 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
 }
 export function layer3DProperties(layer: any): any[] {
   const role=layer3DRole(layer),data=layer?.d?.data;
-  if(!role)return [];
+  if(!role)return extrusionProperties(layer);
   const out:any[]=[];
   const collect=(p:any,prefix:string,group:string)=>{
     for(const [key,prop] of Object.entries<any>(p || {})) if(prop && Array.isArray(prop.kf))
@@ -85,6 +86,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
+  if(!node)return [...new Set<string>(Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any))).filter((id):id is string=>!!id))];
   return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 
@@ -128,7 +130,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   const environment=cameraLayer?{...cameraLayer.d.data.environment,p:values(cameraLayer,cameraLayer.d.data.environment.p,'environment')}:base.environment;
   // New models are immediately visible; explicit lights replace this studio preset.
   if(!lightLayers.length){
-    let id='default_sun';while(allObjectIds.has(id))id+='x';
+    let id='default_sun';while((composition?.layers || []).some((layer:any)=>layer.id===id))id+='x';
     lights.push(...parseScene({lights:[{id,type:'sun'}]}).lights);
   }
   camera.p.far!.v=Math.max(camera.p.far!.v,camera.p.near!.v+.01);

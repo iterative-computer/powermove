@@ -1,3 +1,5 @@
+import { readExtrusion, extrusionEligible, isExtrudedLayer } from './extrusion-data';
+import { listExtrusionSurfaces, readSurfaceProperties } from './extrusion-operations';
 import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
 import {lightViewerState,lightPositionFromViewer,lightViewerGuides} from './light-view';
@@ -21,22 +23,29 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
   // these events. UI consumers never need to intercept individual commands.
   let materialSignature='';
   const changed=()=>{
-    const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.type])]);
+    const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.d?.extrusion,l.threeD,l.type])]);
     if(signature===materialSignature)return;materialSignature=signature;
-    emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object).map((l:any)=>l.id) || []});
+    emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object || extrusionEligible(l)).map((l:any)=>l.id) || []});
     for(const listener of materialListeners)listener();
   };
   for(const event of ['project','layers','comps','history:project-patch'])PM.bus?.on?.(event,changed);
   const selection=()=>{
-    const ids=(PM.sel?.layers || []).filter((id:string)=>layer3DRole(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id)));
+    const ids=(PM.sel?.layers || []).filter((id:string)=>layer3DRole(PM.L?.(id)) || isExtrudedLayer(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id)));
     return {layerId:ids[0] || null,ids};
   };
   const select=(layerId:string|null,ids:string[])=>{
     const selected=ids.length?ids:layerId?[layerId]:[];
-    PM.selectLayers?.(selected.filter(id=>layer3DRole(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id))));
+    PM.selectLayers?.(selected.filter(id=>layer3DRole(PM.L?.(id)) || isExtrudedLayer(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id))));
     emit('scene3d:selection',selection());PM.bus?.emit?.('scene3d:selection');PM.invalidate?.();
   };
-  return {listMaterials:layerId=>listModelMaterials(PM,layerId),listValidCompositions:layerId=>listValidMaterialCompositions(PM,layerId),
+  return {
+    getExtrusion:(layerId,time)=>readExtrusion(PM,PM.L?.(layerId),time),
+    setExtrusion:(layerId,patch,meta)=>editScene(PM,{operation:'set_extrusion',target:layerId,patch},{origin:'interface',...meta}),
+    listSurfaces:layerId=>listExtrusionSurfaces(PM,layerId),
+    getSurfaceMaterialProperties:(layerId,surface,time)=>readSurfaceProperties(PM,layerId,surface,time),
+    setSurfaceMaterialProperties:(layerId,surface,patch,meta)=>editScene(PM,{operation:'set_surface_material_properties',target:layerId,surface,patch},{origin:'interface',...meta}),
+    setSurfaceMaterialMap:(layerId,surface,slot,map,meta)=>editScene(PM,{operation:'set_surface_material_map',target:layerId,surface,slot,map},{origin:'interface',...meta}),
+    listMaterials:layerId=>listModelMaterials(PM,layerId),listValidCompositions:layerId=>listValidMaterialCompositions(PM,layerId),
     listEligibleSourceLayers:layerId=>listEligibleMaterialLayers(PM,layerId),
     getMaterialThumbnail:(layerId,source,options)=>thumbnails.get(layerId,source,options),
     clearMaterialThumbnails:()=>thumbnails.clear(),

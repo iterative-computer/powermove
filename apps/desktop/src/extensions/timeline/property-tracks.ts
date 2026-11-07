@@ -30,12 +30,12 @@ export function keyMembers(key: any): any[] {
 }
 
 /** Position's axes are one property unless the layer separates its
- * dimensions (After Effects' Separate Dimensions). Projects without the flag
- * keep separate rows, as they always had. */
+ * dimensions (After Effects' Separate Dimensions). As in After Effects it is
+ * off unless turned on, so layers without the flag show one Position row. */
 export const positionPaths = ['position.x', 'position.y', 'position.z'];
 
 export function dimensionsSeparated(layer: any): boolean {
-  return layer?.separateDimensions !== false;
+  return layer?.separateDimensions === true;
 }
 
 /** A row key that has dimensions to separate or join. */

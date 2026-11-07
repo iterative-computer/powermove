@@ -320,8 +320,8 @@
       animated ? { label: 'Remove Animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in Graph Editor', icon: 'graph', run: showGraphEditor },
       isPosition ? {
-        label: 'Separate Dimensions', on: layer.separateDimensions !== false, disabled: locked,
-        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions === false } }, { label: layer.separateDimensions === false ? 'Separate Dimensions' : 'Join Dimensions', origin: 'inspector' })
+        label: 'Separate Dimensions', on: layer.separateDimensions === true, disabled: locked,
+        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions !== true } }, { label: layer.separateDimensions === true ? 'Join Dimensions' : 'Separate Dimensions', origin: 'inspector' })
       } : null,
       /* Easing only means something once the property has keyframes. */
       ...(animated ? ['-' as const, { header: 'Easing for All Keys' }, ...easing.map(([name, title]) => ({
