@@ -3,6 +3,8 @@ import type { ExtensionLayerDefinition, PowermoveAPI } from 'powermove';
 import { OBJ_MODEL } from './obj-model';
 import { STUDIO_CUBE } from './studio-cube';
 import LayerInspector from './LayerInspector.svelte';
+import ExtrusionInspector from './ExtrusionInspector.svelte';
+import {isExtrudable,isExtruded,installSurfaceProperty,surfaceAt} from './extrusion';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,is3DLayer,addMenuItems} from './scene-actions';
 import {PRIMITIVES,LIGHT_TYPES} from './scene-model';
 import {createSceneUiState} from './scene-state.svelte';
@@ -65,6 +67,9 @@ export default function activate(api:PowermoveAPI):void {
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),
     build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
+  // Geometry and Material Options for text and shape layers, right after Transform as in After Effects.
+  api.inspector.registerSection({id:'extrusion',title:'Geometry Options',after:'transform',when:({layerIds})=>layerIds.length===1&&isExtrudable(api.model.layer(layerIds[0]!)),
+    build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(ExtrusionInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
   const materials:MaterialsService={
     entries:layerId=>materialEntries(api,layerId),
     describe:(layerId,index,slot,map)=>describeMap(api,layerId,index,slot,map),
@@ -72,7 +77,8 @@ export default function activate(api:PowermoveAPI):void {
     openPicker:(anchor,request)=>openMaterialPicker(api,anchor,request),closePicker:closeMaterialPicker,
     properties:MATERIAL_PROPERTY_SPECS,slots:MATERIAL_SLOT_SPECS,propertyPath,propertyChannel,
     propertyValues:(layerId,index,time)=>(api.scene3d.getMaterialProperties(layerId,index,time)?.values as any) ?? null,
-    installProperty:(layerId,index,key,value,keyAt)=>installProperty(api,layerId,index,key,value,keyAt),
+    // An extruded layer's surfaces (index 0–3) install under their own names.
+    installProperty:(layerId,index,key,value,keyAt)=>isExtruded(api.model.layer(layerId))?installSurfaceProperty(api,layerId,surfaceAt(index),key,value,keyAt):installProperty(api,layerId,index,key,value,keyAt),
     thumbnail:(layerId,map)=>materialThumbnails(api).peek(layerId,map),
     onThumbnails:listener=>materialThumbnails(api).subscribe(listener),
     slotAt,canAssignLayer:(target,sourceId)=>canAssignLayer(api,target,sourceId),setLayerDropHover,

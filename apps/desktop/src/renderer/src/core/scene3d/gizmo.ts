@@ -2,6 +2,7 @@ import {viewportCamera} from './viewport';
 import * as THREE from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { layer3DRole, isModelGroup, type Layer3DRole } from './layers';
+import { isExtrudedLayer } from './extrusion-data';
 import { parent3D,world3D } from '../../legacy/core/space-3d';
 import { themeColor } from './theme';
 import type { SceneRuntime } from './runtime';
@@ -93,7 +94,8 @@ export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=
   canvas.hidden=true;stage.append(canvas);
   let live:SceneGizmo|null=null,renderer:THREE.WebGLRenderer|null=null,disposed=false;
   let selection:string[]=[];
-  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer);};
+  // Extruded text and shapes are outlined on their real mesh; they keep the viewer's own move handles.
+  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer) || isExtrudedLayer(layer);};
   return {
     update(rect,ids) {
       if(disposed)return;
@@ -149,7 +151,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
   const listen=(target:any,event:string,callback:any,options?:any)=>{target.addEventListener(event,callback,options);cleanup.push(()=>target.removeEventListener(event,callback,options));};
 
   const layer=(id:string)=>PM.L?.(id);
-  const roleOf=(l:any)=>layer3DRole(l) || (isModelGroup(PM,l)?'group':null);
+  const roleOf=(l:any)=>layer3DRole(l) || (isModelGroup(PM,l)?'group':isExtrudedLayer(l)?'artwork':null);
   const editable=(l:any)=>!!l&&!l.lock&&!(PM.groupAncestors?.(l)||[]).some((g:any)=>g.lock);
   const ev=(l:any,prop:any,path:string,fallback=0)=>prop?Number(PM.evP(l,prop,PM.time,path)):fallback;
   const channel=(l:any,path:string,fallback=0)=>ev(l,l.p?.[path],path,fallback);
@@ -161,6 +163,8 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
     const out:Target[]=[],active=activeCamera();
     for(const id of ids) {
       const l=layer(id),role=roleOf(l);
+      // Native artwork moves in pixels, so the world-unit arrows leave it to the viewer's handles.
+      if(role==='artwork')continue;
       // The active camera is the view itself; it is edited from the inspector.
       if(!role||!editable(l)||(role==='camera'&&id===active))continue;
       if(PM.active&&!PM.active(l,PM.time))continue;
@@ -221,7 +225,7 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
     const wanted=new Set<string>();
     const outlined=new Set(ids.flatMap(id=>isModelGroup(PM,layer(id))?(PM.curComp?.()||PM.proj).layers.filter((l:any)=>layer3DRole(l)==='object'&&(PM.groupAncestors?.(l)||[]).some((g:any)=>g.id===id)).map((l:any)=>l.id):[id]));
     for(const id of outlined) {
-      const object=world?.objects.get(id);if(!object||layer3DRole(layer(id))!=='object')continue;
+      const object=world?.objects.get(id);if(!object||(layer3DRole(layer(id))!=='object' && !isExtrudedLayer(layer(id))))continue;
       wanted.add(id);
       let outline=outlines.get(id);
       if(!outline){outline=new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}

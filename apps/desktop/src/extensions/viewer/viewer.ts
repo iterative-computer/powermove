@@ -867,6 +867,7 @@ let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
+const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.threeD===true&&layer.d?.extrusion?.enabled===true;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
@@ -1349,10 +1350,13 @@ function drawOverlayContent(): boolean | void {
   }
 
   const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  /* Extruded text and shapes are drawn by the scene camera, so the 3D layer
+     overlay outlines their real mesh; a flat plane outline would not line up. */
+  const meshOutlined = gizmoVisible && sels.length > 0 && sels.every(isExtrudedArtwork);
   const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
-  if (sels.length > 1 || !selection) for (const L of sels) {
+  if ((sels.length > 1 || !selection) && !meshOutlined) for (const L of sels) {
     const b = layerBounds(api, L, api.transport.time());
     if (!b) continue;
     const m = api.anim.worldMatrix(L, api.transport.time());
@@ -1373,7 +1377,7 @@ function drawOverlayContent(): boolean | void {
   // With the Anchor Point tool the marker is the thing to grab: draw it larger.
   const anchorTool = (V.temporaryTool || toolService()?.tool) === 'anchor';
   const ring = (anchorTool ? 7 : 5) * anchorUnit, arm = (anchorTool ? 11 : 8) * anchorUnit;
-  for (const layer of sels) {
+  for (const layer of meshOutlined ? [] : sels) {
     if (!layerBounds(api, layer, api.transport.time())) continue;
     const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
@@ -1420,6 +1424,7 @@ function drawOverlayContent(): boolean | void {
     c.stroke();
     c.restore();
   }
+  if (selection && meshOutlined) { c.restore(); return; }
   if (selection) {
     c.strokeStyle = selectionInk;
     c.lineWidth = 1.4 / Math.max(.02, V.shown);

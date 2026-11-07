@@ -79,13 +79,15 @@ export function materialSectionRows(api: Pick<PowermoveAPI, 'services' | 'anim' 
  * in-place edits all refresh it without a project event. */
 let usageCache: { signature: string; map: Map<string, string[]> } | null = null;
 export function materialSourceMap(api: Pick<PowermoveAPI, 'project'>): Map<string, string[]> {
-  const models = ((api.project.get() as any).layers || []).filter((layer: any) => objectOf(layer));
-  const signature = JSON.stringify(models.map((layer: any) => [layer.id, objectOf(layer).material?.maps, objectOf(layer).sourceMaterials]));
+  // Extruded text and shapes take sources on their Front, Bevel, Side and Back.
+  const surfaces = (layer: any) => layer.d?.extrusion?.enabled ? Object.values<any>(layer.d.extrusion.surfaces || {}).map(surface => surface?.maps) : [];
+  const models = ((api.project.get() as any).layers || []).filter((layer: any) => objectOf(layer) || layer.d?.extrusion?.enabled);
+  const signature = JSON.stringify(models.map((layer: any) => [layer.id, objectOf(layer)?.material?.maps, objectOf(layer)?.sourceMaterials, surfaces(layer)]));
   if (usageCache?.signature === signature) return usageCache.map;
   const map = new Map<string, string[]>();
   for (const layer of models) {
     const object = objectOf(layer);
-    for (const maps of [object.material?.maps, ...Object.values<any>(object.sourceMaterials || {})]) {
+    for (const maps of object ? [object.material?.maps, ...Object.values<any>(object.sourceMaterials || {})] : surfaces(layer)) {
       for (const value of Object.values<any>(maps || {})) {
         if (!value || typeof value !== 'object' || typeof value.layerId !== 'string') continue;
         const receivers = map.get(value.layerId) ?? [];

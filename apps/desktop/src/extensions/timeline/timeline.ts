@@ -2,6 +2,7 @@ import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMar
 import { revealedProperties } from './property-reveal';
 import { sectionedPropertyRows } from './property-sections';
 import { hasMaterialRows, isMaterialPropKey, materialSectionRows, materialSourceMap, materialsService, type MaterialSlotRef } from './material-rows';
+import { CHOICE_PROPERTIES, choiceLabel, extrusionSectionRows, hasExtrusionRows, isExtrusionPropKey } from './extrusion-rows';
 import { precompCarriesAudio } from './audio-presence';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
@@ -1084,8 +1085,10 @@ function buildRows() {
     if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
       // A model's Material Options live in its Materials group instead.
-      const materials = query ? [] : materialSectionRows(api, L, materialOpen);
-      const generic = materials.length ? props.filter((p: any) => !isMaterialPropKey(p.key)) : props;
+      // An extruded text or shape layer's Geometry Options and surfaces too.
+      const extrusion = query ? [] : extrusionSectionRows(api, L, materialOpen);
+      const materials = query ? [] : [...materialSectionRows(api, L, materialOpen), ...extrusion];
+      const generic = materials.length ? props.filter((p: any) => !isMaterialPropKey(p.key) && !(extrusion.length && isExtrusionPropKey(p.key))) : props;
       for (const row of sectionedPropertyRows(L, generic, effectLabel)) rows.push(row);
       for (const row of materials) rows.push(row);
     }
@@ -1119,7 +1122,7 @@ const effectLabel = (fx: any) => api.effects?.get?.(fx.type, fx.version ?? 1)?.l
 function layerDisclosable(r: any, fresh = false): boolean {
   if (r.L.type === 'group') return true;
   // A click asks afresh: a keyframe added a moment ago may predate the rebuild.
-  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0 || hasMaterialRows(api, r.L);
+  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0 || hasMaterialRows(api, r.L) || hasExtrusionRows(r.L);
   return r.disclosable;
 }
 
@@ -2164,7 +2167,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
       values.forEach((value, index) => {
         const column = columns[index]!;
-        const text = fittedPropertyValue(c, value, isScaleTrack(r) || percentProperty(r.key) ? '%' : '', column.width);
+        const text = fittedPropertyValue(c, choiceLabel(r.key, value) ?? value, isScaleTrack(r) || percentProperty(r.key) ? '%' : '', column.width);
         c.fillText(text, column.left, iy);
       });
       if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, iy, !!L.scaleLinked);
@@ -2335,7 +2338,7 @@ function gutterColumns() {
     propNav: 122, propStopwatch: 148.5, propLabel: 163, heading: 140,
   };
 }
-const PERCENT_PROPERTY = /(^|\.)(opacity|ambientResponse)$/;
+const PERCENT_PROPERTY = /(^|\.)(opacity|ambientResponse|holeBevelDepth)$/;
 function percentProperty(key: unknown): boolean { return PERCENT_PROPERTY.test(String(key ?? '')); }
 
 /* Layer switches, After Effects style, left of Link Layers in fixed slots:
@@ -3687,7 +3690,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
   const column = field ?? (grouped ? propertyValueColumns(T.propertyValueX, T.gut, all.length, scale ? 24 : 0)[axisIndex]! : null);
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
-    'c.fit': ['cover', 'contain', 'stretch']
+    'c.fit': ['cover', 'contain', 'stretch'], ...CHOICE_PROPERTIES
   };
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
@@ -3696,7 +3699,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
     style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${field?.top ?? rowY(rowIndex) + 3}px`,
       width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${field?.height ?? T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
-  if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
+  if (options) { options.forEach(value => input.appendChild(h('option', { value }, choiceLabel(row.key, value) ?? value))); input.value = String(values[0]); }
   else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }
   document.querySelector<HTMLElement>('#tl-canvas-wrap')?.appendChild(input); input.focus(); if (!isColor) input.select?.();
   // The OS color panel is its own window, so the swatch blurs the moment it opens:

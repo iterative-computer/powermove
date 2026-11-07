@@ -145,7 +145,8 @@ export type MaterialAssignmentCheck = {ok:true;reason?:never} | {ok:false;reason
 export function canAssignMaterialMap(PM:any,receiverId:string,materialIndex:number|null,slot:MaterialSlot,source:MaterialMap|null):MaterialAssignmentCheck {
   const fail=(reason:string):MaterialAssignmentCheck=>({ok:false,reason});
   const owner=materialOwner(PM.proj,receiverId),receiver=owner?.layers?.find((l:any)=>l.id===receiverId);
-  if(!receiver?.d?.data?.object)return fail('Choose a model layer');
+  // Extruded text and shapes take sources on their Front, Bevel, Side and Back (0–3).
+  if(!receiver?.d?.data?.object && !isExtrudedLayer(receiver))return fail('Choose a model layer');
   if(receiver.lock || (PM.groupAncestors?.(receiver) || []).some((l:any)=>l.lock))return fail('This layer is locked');
   if(!MATERIAL_SLOTS.includes(slot))return fail('Choose a material map slot');
   if(materialIndex!=null && (!Number.isInteger(materialIndex) || materialIndex<0))return fail('Invalid source material index');
