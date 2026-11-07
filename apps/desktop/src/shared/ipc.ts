@@ -622,6 +622,7 @@ export type MenuCommand =
   | 'compositionSettings'
   | 'precompose'
   | 'releasePrecomp'
+  | 'saveAnimationPreset'
   | 'newText'
   | 'newSolid'
   | 'newShape'

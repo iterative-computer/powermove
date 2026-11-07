@@ -93,8 +93,12 @@ describe('application menu', () => {
       ['New', undefined, undefined],
       ['separator', undefined, undefined],
       ['Pre-compose…', 'CommandOrControl+Shift+C', 'precompose'],
-      ['Release Pre-comp', undefined, 'releasePrecomp']
+      ['Release Pre-comp', undefined, 'releasePrecomp'],
+      ['separator', undefined, undefined],
+      ['Save Animation Preset…', undefined, 'saveAnimationPreset']
     ]);
+    (layerItems.at(-1)!.click as () => void)();
+    expect(sent.splice(0)).toEqual(['saveAnimationPreset']);
     expect(submenu(layerItems[0]!).map((item) => item.label ?? item.type)).toEqual([
       'Text', 'Solid', 'Shape Layer', 'Null Object', 'Adjustment Layer', 'separator', 'Camera', 'Light'
     ]);

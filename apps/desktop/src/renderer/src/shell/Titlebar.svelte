@@ -4,6 +4,7 @@
   import AgentLauncher from './AgentLauncher.svelte';
   import TaskPill from './TaskPill.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
+  import { workspaceMenuItems } from './workspace-actions';
 
   /* After Effects' layout: Home and the tools on the left, the document's
      name centred the way a macOS window titles itself, and what you do with
@@ -197,18 +198,10 @@
   const workspaces = $derived.by(() => {
     refreshToken;
     const all = (PM.WS?.list?.() ?? []) as Array<{ id: string; name: string }>;
-    return { bar: BAR_WORKSPACES.map((id) => all.find((item) => item.id === id)).filter((item) => !!item), all, current: PM.WS?.current?.id as string | undefined };
+    return { bar: BAR_WORKSPACES.map((id) => all.find((item) => item.id === id)).filter((item) => !!item), all, current: PM.WS?.current?.id as string | undefined, defaultId: PM.WS?.defaultId?.() as string | null | undefined };
   });
   function moreWorkspaces(event: MouseEvent): void {
-    const anchor = event.currentTarget as HTMLElement;
-    PM.menu(anchor, [
-      { header: 'Workspaces' },
-      ...workspaces.all.map((item) => ({ label: item.name, on: item.id === workspaces.current, run: () => PM.WS.activate(item.id) })),
-      '-',
-      { label: 'Reset “' + (workspaces.all.find((item) => item.id === workspaces.current)?.name ?? 'Workspace') + '” to Saved Layout', disabled: !PM.WS?.get?.(workspaces.current)?.builtin, run: () => PM.WS.resetBuiltin(workspaces.current) },
-      '-',
-      { label: 'Panel Library…', icon: 'grid', run: () => PM.LibraryUI?.open?.() },
-    ]);
+    PM.menu(event.currentTarget as HTMLElement, workspaceMenuItems(PM));
   }
 
   function zoomWindow(event: MouseEvent): void {
@@ -303,9 +296,9 @@
     <div class="tb-workspaces" role="radiogroup" aria-label="Workspace">
       {#each workspaces.bar as item (item.id)}
         <button type="button" role="radio" class:on={item.id === workspaces.current} aria-checked={item.id === workspaces.current}
-          title={`${item.name} workspace`} onclick={() => { if (item.id !== workspaces.current) PM.WS.activate(item.id); }}>{item.name}</button>
+          title={`${item.name} workspace${item.id === workspaces.defaultId ? ' (default)' : ''}`} onclick={() => { if (item.id !== workspaces.current) PM.WS.activate(item.id); }}>{item.name}</button>
       {/each}
-      <button type="button" class="tb-workspaces-more" title="More workspaces" aria-label="More workspaces" onclick={moreWorkspaces}>
+      <button type="button" class="tb-workspaces-more" title="Workspaces and layout" aria-label="More workspaces" aria-haspopup="menu" onclick={moreWorkspaces}>
         <Icon {PM} name="more" />
       </button>
     </div>

@@ -334,7 +334,10 @@
         disabled: locked,
         run: () => applyExpression(null, 'Remove expression')
       } : null,
-      { label: 'Reset', icon: 'undo', disabled: locked, run: resetChannel }
+      { label: 'Reset', icon: 'undo', disabled: locked, run: resetChannel },
+      '-',
+      /* Saves this property (or, on an effect parameter, its effect) as one of My Presets. */
+      { label: 'Save Animation Preset…', icon: 'diamond', run: () => api.commands.run('saveAnimationPreset', { layerId: layer.id, paths: channels }) }
     ];
     api.ui.menu({ x: event.clientX, y: event.clientY }, items.filter((item): item is MenuContribution => item !== null));
   }

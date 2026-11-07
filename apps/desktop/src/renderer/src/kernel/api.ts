@@ -862,7 +862,7 @@ export interface EditGestureAPI { begin(): void; write(value: unknown): void; co
 export interface EditGestureConstructor { new(binding: ControlEditBinding): EditGestureAPI }
 
 export interface AssetDragPayload { id: string; name: string; kind: string; dur?: number }
-export interface FxDragPayload { kind: 'effect' | 'transition'; id: string; label: string }
+export interface FxDragPayload { kind: 'effect' | 'transition' | 'preset'; id: string; label: string }
 
 /**
  * Drag-and-drop serializes asset/FX payloads to the canonical MIME keys and proxies the live in-process media drag. Reads are side-effect free; `startAssetDrag` writes the DataTransfer, while `applyFxDrop` performs the backing undoable edit and invalidates the viewer.

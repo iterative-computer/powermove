@@ -225,3 +225,107 @@ describe('FxBrowserPanel tree', () => {
     await unmount(component);
   });
 });
+
+describe('FxBrowserPanel My Presets', () => {
+  function presetPM(initial: Array<{ id: string; name: string }>) {
+    const listeners = new Map<string, Set<() => void>>();
+    let stored = initial.map((preset) => ({ ...preset, effects: [{ type: 'blur', parameters: { amount: { kf: [{}] } }, enabled: true }], properties: [] }));
+    const layer = { id: 'layer-1', name: 'Card', type: 'shape' };
+    const PM = basePM({
+      time: 2,
+      firstSel: () => layer,
+      L: (id: string) => (id === layer.id ? layer : null),
+      menu: vi.fn(),
+      confirm: vi.fn(async () => true),
+      cmd: vi.fn(),
+      bus: {
+        on: (event: string, listener: () => void) => {
+          if (!listeners.has(event)) listeners.set(event, new Set());
+          listeners.get(event)!.add(listener);
+          return () => listeners.get(event)!.delete(listener);
+        },
+        emit: (event: string) => listeners.get(event)?.forEach((listener) => listener())
+      },
+      Presets: {
+        list: () => stored.map((preset) => ({ ...preset })),
+        get: (id: string) => stored.find((preset) => preset.id === id) ?? null,
+        rename: vi.fn((id: string, name: string) => { stored = stored.map((preset) => preset.id === id ? { ...preset, name: name.trim() } : preset); PM.bus.emit('presets'); return true; }),
+        remove: vi.fn((id: string) => { stored = stored.filter((preset) => preset.id !== id); PM.bus.emit('presets'); return true; })
+      },
+      Edit: { apply: vi.fn(() => ({ ok: true, data: { results: [{ data: { skipped: [] } }] } })) }
+    });
+    const set = (next: Array<{ id: string; name: string }>) => { stored = next.map((preset) => ({ ...preset, effects: [], properties: [] })); PM.bus.emit('presets'); };
+    return { PM, set };
+  }
+
+  it('teaches how to save one when empty, then lists presets live as another window saves', async () => {
+    const { PM, set } = presetPM([]);
+    window.PM = PM as any;
+    const { target, component } = mountPanel();
+    expect(secs(target)[0]).toBe('My Presets');
+    expect(target.querySelector('[data-presets-empty]')?.textContent).toContain('Save Animation Preset…');
+    flushSync(() => target.querySelector<HTMLButtonElement>('[data-presets-empty] .chip')!.click());
+    expect(PM.cmd).toHaveBeenCalledWith('saveAnimationPreset');
+
+    flushSync(() => set([{ id: 'p1', name: 'Soft entrance' }, { id: 'p2', name: 'Glow pulse' }]));
+    expect(target.querySelector('[data-presets-empty]')).toBeNull();
+    expect(labels(target).slice(0, 2)).toEqual(['Soft entrance', 'Glow pulse']);
+    expect(target.querySelector('.fxb-count')?.textContent).toBe('2');
+    expect(target.querySelector<HTMLInputElement>('.fxb-search')!.placeholder).toBe('Search effects and presets');
+    await unmount(component);
+  });
+
+  it('applies by double-click or + at the playhead, and drags as a preset payload', async () => {
+    const { PM } = presetPM([{ id: 'p1', name: 'Soft entrance' }]);
+    window.PM = PM as any;
+    const { target, component } = mountPanel();
+    const row = target.querySelector<HTMLElement>('[data-kind="preset"]')!;
+    flushSync(() => row.querySelector<HTMLButtonElement>('.fxb-pick')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+    expect(PM.Edit.apply).toHaveBeenCalledWith({ type: 'apply_preset', target: 'layer-1', preset: 'p1', time: 2 }, { label: 'Apply “Soft entrance”', origin: 'fx-browser' });
+    expect(PM.toast).toHaveBeenLastCalledWith('Applied “Soft entrance” to Card', 2200, { error: false, key: 'preset-apply' });
+    flushSync(() => row.querySelector<HTMLButtonElement>('button[aria-label="Apply Soft entrance"]')!.click());
+    expect(PM.Edit.apply).toHaveBeenCalledTimes(2);
+
+    const data = new Map<string, string>();
+    const drag = new Event('dragstart', { bubbles: true }) as DragEvent;
+    Object.defineProperty(drag, 'dataTransfer', { value: { setData: (type: string, value: string) => data.set(type, value), effectAllowed: '' } });
+    row.querySelector('.fxb-pick')!.dispatchEvent(drag);
+    expect(JSON.parse(data.get('application/x-powermove-fx')!)).toEqual({ kind: 'preset', id: 'p1', label: 'Soft entrance' });
+    await unmount(component);
+  });
+
+  it('searches presets with effects, renames inline and deletes after confirming', async () => {
+    const { PM } = presetPM([{ id: 'p1', name: 'Soft entrance' }, { id: 'p2', name: 'Glow pulse' }]);
+    window.PM = PM as any;
+    const { target, component } = mountPanel();
+    flushSync(() => { fxBrowser.query = 'glow'; });
+    expect(labels(target)).toEqual(['Glow pulse', 'Glow']);
+
+    flushSync(() => { fxBrowser.query = ''; });
+    const row = target.querySelector<HTMLElement>('[data-id="preset:p1"]')!;
+    flushSync(() => row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 })));
+    const items = PM.menu.mock.calls[0][1];
+    expect(items.filter((item: any) => item.label).map((item: any) => item.label)).toEqual(['Apply to Card', 'Rename…', 'Delete…']);
+
+    items.find((item: any) => item.label === 'Rename…').run();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>('.fxb-rename')!;
+    input.value = 'Gentle entrance';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync();
+    expect(PM.Presets.rename).toHaveBeenCalledWith('p1', 'Gentle entrance');
+    expect(labels(target)[0]).toBe('Gentle entrance');
+
+    const pick = target.querySelector<HTMLButtonElement>('[data-id="preset:p2"] .fxb-pick')!;
+    pick.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync();
+    expect(PM.confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: 'Delete Preset' }));
+    expect(PM.Presets.remove).toHaveBeenCalledWith('p2');
+    expect(labels(target)).not.toContain('Glow pulse');
+    await unmount(component);
+  });
+});

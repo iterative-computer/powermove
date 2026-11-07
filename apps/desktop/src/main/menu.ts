@@ -185,7 +185,9 @@ export function appMenuTemplate(
         },
         { type: 'separator' },
         commandItem('Pre-compose…', 'CommandOrControl+Shift+C', 'precompose', send, false),
-        { id: 'releasePrecomp', label: 'Release Pre-comp', click: () => send('releasePrecomp') }
+        { id: 'releasePrecomp', label: 'Release Pre-comp', click: () => send('releasePrecomp') },
+        { type: 'separator' },
+        { id: 'saveAnimationPreset', label: 'Save Animation Preset…', click: () => send('saveAnimationPreset') }
       ]
     },
     { label: 'View', submenu: viewItems },

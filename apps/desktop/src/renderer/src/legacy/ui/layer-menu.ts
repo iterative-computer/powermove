@@ -87,6 +87,9 @@ export function installLayerMenu(PM: PMRegistry): void {
     if (selected.length === 1 && layer.type === 'precomp') items.push({ label: 'Release Pre-comp', icon: 'layers', disabled: !editable, run: () => PM.cmd('releasePrecomp', layer.id) });
     if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split Text into Layers', icon: 'type', disabled: !editable, submenu:
       ([['By Word', 'words'], ['By Character', 'characters'], ['By Line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) })) });
+    /* After Effects keeps this under Animation; here it sits with the other
+       ways of reusing a layer's look. */
+    if (selected.length === 1 && PM.Presets) items.push({ label: 'Save Animation Preset…', icon: 'diamond', run: () => PM.cmd('saveAnimationPreset', { layerId: layer.id }) });
     if (selected.length === 2) {
       const matteLayers = selected.slice().sort((a: any, b: any) => PM.proj.layers.indexOf(a) - PM.proj.layers.indexOf(b));
       const canMatte = matteLayers[0] && matteLayers[1]

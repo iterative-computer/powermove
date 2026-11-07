@@ -278,6 +278,32 @@
     dropSlot = null;
   }
 
+  /* Right-click an effect: save it (or the selected effects) as one of My
+     Presets, as After Effects' Animation ▸ Save Animation Preset does. */
+  function effectMenu(event: MouseEvent, effect: any, definition: any): void {
+    event.preventDefault();
+    if (!selected(effect)) {
+      selectedIds = [effect.id];
+      selectionAnchor = effect.id;
+      inspector()?.setEffectSelection(layer.id, selectedIds);
+    }
+    const ids = effects.map((candidate: any) => candidate.id).filter((id: string) => selectedIds.includes(id));
+    const count = ids.length;
+    api.ui.menu({ x: event.clientX, y: event.clientY }, [
+      { header: count > 1 ? `${count} Effects` : definition.label },
+      { label: 'Save Animation Preset…', icon: 'diamond', run: () => api.commands.run('saveAnimationPreset', { layerId: layer.id, effectIds: ids }) },
+      '-',
+      { label: count > 1 ? 'Reset Effects' : 'Reset', icon: 'undo', run: () => {
+        for (const id of ids) {
+          const target = effects.find((candidate: any) => candidate.id === id);
+          const targetDefinition = target && api.effects.get(target.type, target.version ?? 1);
+          if (target && targetDefinition) reset(new MouseEvent('click'), target, targetDefinition);
+        }
+      } },
+      { label: count > 1 ? 'Remove Effects' : 'Remove Effect', icon: 'trash', run: () => deleteSelected(effect) },
+    ]);
+  }
+
   function effectKeydown(event: KeyboardEvent, effect: any): void {
     const key = event.key.toLowerCase();
     const command = event.metaKey || event.ctrlKey;
@@ -331,6 +357,7 @@
         aria-selected={selected(effect)}
         aria-label={`${definition.label} effect`}
         onclick={(event) => selectEffect(event, effect)}
+        oncontextmenu={(event) => effectMenu(event, effect, definition)}
         onkeydown={(event) => effectKeydown(event, effect)}
       >
         <button
