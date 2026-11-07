@@ -67,6 +67,7 @@
     <p>In Figma: Plugins → Development → Import plugin from manifest.</p>
     <p>In the file picker, press ⌘⇧G and paste the path. You only need to add the plugin once.</p>
   {/if}
+  <p class="note">On a paid Figma team, plugins need a Full seat; free teams don't. Without one, copy layers in Figma and paste them into Powermove.</p>
   <h3 class="next">2. Connect</h3>
   {#if connection.pending}
     <p>Figma wants to connect.</p>
@@ -91,6 +92,7 @@
   h3 { margin: 0; padding: 0; font-size: inherit; font-weight: 600; color: var(--tx); }
   h3.next { margin-top: 10px; }
   p { margin: 0; line-height: 1.5; color: var(--tx-2); }
+  .note { font-size: var(--fs-sm); color: var(--tx-3); }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .connection-code { font-family: var(--f-mono); font-size: var(--fs-lg); letter-spacing: .15em; color: var(--tx); }
 </style>

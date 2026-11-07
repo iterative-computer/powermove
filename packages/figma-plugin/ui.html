@@ -111,7 +111,11 @@
         $('result').hidden = true;
         $('title').textContent = 'Send to Powermove';
         if (state === 'offline') {
-          $('message').textContent = 'Open Powermove to continue.';
+          // Without a connection, an open Powermove only listens once the
+          // user starts setup, so name the step that brings it online.
+          $('message').textContent = token
+            ? 'Open Powermove to continue.'
+            : 'Open Powermove, then choose File → Connect Figma.';
           $('primary').hidden = true;
         }
         if (state === 'disconnected') {

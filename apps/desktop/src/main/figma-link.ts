@@ -177,11 +177,15 @@ export class FigmaLink {
       this.changed();
     }
   }
+  /** Revokes every token but keeps listening until quit, so an open plugin
+   * can tell "disconnected" (Connect again) from "Powermove is closed".
+   * Without a pairing the listener does not auto-start on the next launch. */
   async disconnect(): Promise<void> {
     await this.restore();
     this.hashes.clear();
+    this.finish(403, { error: 'In Powermove, choose File → Connect Figma.' });
     await this.save();
-    await this.close();
+    this.changed();
   }
   async close(): Promise<void> {
     await this.starting?.catch(() => {});

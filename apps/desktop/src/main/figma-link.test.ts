@@ -90,6 +90,7 @@ it('persists only a hash, validates it after a restart, and revokes it on discon
   });
   expect((await restarted.post('/send', doc, token)).status).toBe(200);
   await restarted.link.disconnect();
+  expect(await (await restarted.post('/status', {}, token)).json()).toMatchObject({ reachable: true, tokenValid: false });
   await expect(readFile(storagePath)).rejects.toThrow();
   const third = await harness({ storagePath });
   expect(((await (await third.post('/status', {}, token)).json()) as any).tokenValid).toBe(false);

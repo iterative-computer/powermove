@@ -25,7 +25,7 @@ test('plugin recovers from offline, approves, tracks selection, keeps results an
   await page.setContent(await html());
   const host = (m: any) => page.evaluate((m) => window.postMessage({ pluginMessage: m }, '*'), m);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'offline');
-  await expect(page.getByText('Open Powermove to continue.')).toBeVisible();
+  await expect(page.getByText('Open Powermove, then choose File → Connect Figma.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Copy for Powermove' })).toBeVisible();
   reachable = true;
   await page.clock.runFor(2100);

@@ -161,16 +161,11 @@ test('remembers approval after relaunch and reports composition state', async ({
   await expect(session.page.getByText('Figma Connected', { exact: true })).toBeVisible();
   await session.page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(session.page.locator('.modal')).toHaveCount(0);
+  // Still listening, so an open plugin shows Connect rather than "Powermove is closed".
   await expect
-    .poll(async () => {
-      try {
-        await send('/status', {}, token);
-        return false;
-      } catch {
-        return true;
-      }
-    })
-    .toBe(true);
+    .poll(async () => ((await (await send('/status', {}, token)).json()) as any).tokenValid)
+    .toBe(false);
+  expect((await send('/send', {}, token)).status).toBe(401);
 });
 
 test('auto-start survives a busy port quietly and the setup sheet explains it', async () => {
