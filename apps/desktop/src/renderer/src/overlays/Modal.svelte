@@ -127,7 +127,7 @@
     let total = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
       + Math.max(0, children.length - 1) * (parseFloat(style.rowGap) || 0);
     if (children.length) for (const child of children) total += child.getBoundingClientRect().height;
-    else total += body.scrollHeight;
+
     for (const part of dialog.children) {
       if (part !== body) total += (part as HTMLElement).offsetHeight;
     }
@@ -150,7 +150,13 @@
 
   onMount(() => {
     if (bodyContent instanceof HTMLElement) body.appendChild(bodyContent);
-    else if (bodyContent != null) body.textContent = String(bodyContent);
+    else if (bodyContent != null) {
+      // Give plain text a natural content box. Measuring the stretched body's
+      // scrollHeight would count its padding twice and grow an empty gap.
+      const text = document.createElement('div');
+      text.textContent = String(bodyContent);
+      body.appendChild(text);
+    }
     dialog.addEventListener('keydown', keydown, true);
     dialog.addEventListener('keydown', confirmKey);
     if (typeof ResizeObserver === 'undefined' || typeof MutationObserver === 'undefined') {

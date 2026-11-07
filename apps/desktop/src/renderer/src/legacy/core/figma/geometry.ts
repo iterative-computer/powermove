@@ -1,4 +1,4 @@
-import { parseSvgPathData } from '../svg-import';
+import { parseSvgPathData } from '../../../../../shared/figma/paths';
 
 /** Figma's geometry blobs contain byte opcodes and little-endian float points. */
 export function readGeometry(bytes: Uint8Array) {
