@@ -1,3 +1,4 @@
+import { objectMapSets,mapImageId } from './material-maps';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
 
 export const LAYER3D_DEFINITIONS = {
@@ -80,7 +81,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
-  return node?[...new Set<string>([node.source?.assetId,...Object.values<string>(node.material?.maps || {})].filter(Boolean))]:[];
+  return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 
 /** Assemble a transient world for rendering; there is no scene container in project data. */

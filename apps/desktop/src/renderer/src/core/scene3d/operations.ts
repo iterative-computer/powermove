@@ -1,10 +1,12 @@
+import { MATERIAL_SLOTS,compositionById } from './material-maps';
+import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment';
-  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any;
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map';
+  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -23,7 +25,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
-  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene']);
+  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
@@ -109,6 +111,25 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
   };
   switch(args.operation){
+    case 'set_material_map':{
+      if(role!=='object')throw new Error('Choose a model layer');
+      if(!args.slot || !MATERIAL_SLOTS.includes(args.slot))throw new Error('Choose a material map slot');
+      if(args.map && typeof args.map==='object' && !compositionById(PM.proj,args.map.compositionId))throw new Error('Composition is unavailable');
+      let maps=content.object.material.maps;
+      if(args.materialIndex!=null){
+        if(!Number.isInteger(args.materialIndex) || args.materialIndex<0)throw new Error('Invalid source material index');
+        const asset=PM.assets?.get?.(content.object.source.assetId);
+        if(args.map!=null && !asset?.materials?.some((material:any)=>material.index===args.materialIndex))throw new Error('Source material is unavailable');
+        content.object.sourceMaterials ||= {};
+        maps=content.object.sourceMaterials[args.materialIndex] ||= {};
+        content.object.useSourceMaterials=true;
+      }
+      if(args.map==null)delete maps[args.slot];else maps[args.slot]=clone(args.map);
+      if(args.materialIndex!=null && !Object.keys(maps).length)delete content.object.sourceMaterials[args.materialIndex];
+      if(args.materialIndex==null && args.map!=null)content.object.useSourceMaterials=false;
+      break;
+    }
+
     case 'remove':
       if(meta.origin==='agent' && Object.keys(layer.locked_intent || {}).length)throw new Error('Preserved hand-edited 3D layer');
       commands.push({type:'delete_layers',targets:[layer.id]});break;

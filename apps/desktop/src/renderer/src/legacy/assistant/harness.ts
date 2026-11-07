@@ -1,3 +1,4 @@
+import {listModelMaterials,listValidMaterialCompositions} from '../../core/scene3d/material-maps';
 import { captureAborted } from '../core/video-frame-decode';
 import { editLayerStrips, timelineState } from './layer-strips';
 import { manageProject } from './project-tools';
@@ -674,7 +675,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === 'get_3d_scene') {
     const layers=PM.proj.layers.filter((l:any)=>layer3DRole(l));
     const state={layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
-      layers:layers.map((l:any)=>({id:l.id,name:l.name,role:layer3DRole(l),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data})),
+      layers:layers.map((l:any)=>({id:l.id,name:l.name,role:layer3DRole(l),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data,materials:listModelMaterials(PM,l.id),validCompositions:listValidMaterialCompositions(PM,l.id)})),
       channels:layers.flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
       assets:Object.values<any>(PM.proj.assets || {}).filter(a=>['model','image'].includes(a.kind)).map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
       revision:currentRevision()};

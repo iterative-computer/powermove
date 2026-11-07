@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
+import { MATERIAL_SLOTS, objectMapSets, mapImageId } from './material-maps';
 
 /** The scene is project data, never executable code or a live Three.js object. */
 export const SCENE3D_DEFINITION = 'powermove.3d.scene';
@@ -45,16 +46,22 @@ export const sourceSchema = z.union([
   z.object({ lathe: points2, segments: z.number().int().min(3).max(128).optional() }).strict(),
   z.object({ extrude: points2.refine(v => v.length >= 3), depth: num(.0001,10000), bevel: num(0,100).optional() }).strict()
 ]);
+export const materialMapSchema = z.union([z.string().min(1).max(160),z.object({compositionId:z.string().min(1).max(160)}).strict()]);
+const mapsSchema=z.object(Object.fromEntries(MATERIAL_SLOTS.map(k=>[k,materialMapSchema.optional()]))).strict().superRefine((maps,ctx)=>{
+  for(const [slot,map] of Object.entries(maps))if(typeof map==='object' && slot!=='color' && slot!=='emissive')
+    ctx.addIssue({code:'custom',message:'Composition textures support base color and emissive slots',path:[slot]});
+});
 export const materialSchema = z.object({
   p: p({ color: [color,'#C7C4FF'], roughness: [num(.02,1),.4], metalness: [num(0,1),.1],
     emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1] }).default({} as any),
-  maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
+  maps: mapsSchema.default({}),
   doubleSided: z.boolean().default(true)
 }).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
   useSourceMaterials: z.boolean().default(false),
+  sourceMaterials: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),mapsSchema).default({}),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
@@ -169,5 +176,5 @@ export function validateSceneChannel(path:string,property:unknown):void {
 }
 
 export function sceneAssetIds(scene: Scene3D): string[] {
-  return [...new Set(scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...Object.values(o.material.maps) ].filter((x): x is string => !!x)))];
+  return [...new Set(scene.objects.flatMap(o => [ ...('assetId' in o.source ? [o.source.assetId] : []), ...objectMapSets(o).flatMap(maps=>Object.values(maps).map(mapImageId)) ].filter((x): x is string => !!x)))];
 }

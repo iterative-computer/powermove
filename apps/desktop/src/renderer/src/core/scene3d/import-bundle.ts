@@ -52,7 +52,7 @@ export async function prepareModelImport(files:File[]):Promise<File> {
           map:old.map,normalMap:old.normalMap,emissiveMap:old.emissiveMap,
           roughness:THREE.MathUtils.clamp(Math.sqrt(2/(old.shininess+2)),.02,1),metalness:0});
         if(old.bumpMap&&!material.normalMap)material.normalMap=bumpNormals(old.bumpMap,old.bumpScale);
-        old.dispose();return material;
+        material.name=old.name;old.dispose();return material;
       };
       child.material=Array.isArray(child.material)?child.material.map(convert):convert(child.material);
     });

@@ -1,3 +1,5 @@
+import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { useVideo } from './video-residency';
 import { captureAborted, seekVideoFrame, VideoFrameDecodeError, withCaptureSignal } from './video-frame-decode';
 import { layerInputPlan, hasLayerInputs, EffectInputError } from '../../core/effect-inputs';
@@ -203,7 +205,29 @@ export async function prepareFrame(PM:any,time:number,project=PM.proj,options: F
   const cancelled = () => !!options.signal?.aborted || PM.Export?.busy && PM.Export.cancel || inputs && (PM.proj!==ownerProject || PM.GL?.gl!==ownerContext || PM.GL?.contextLost);
   if (cancelled()) throw new EffectInputError('Layer input frame preparation cancelled');
   const requests:VideoRequest[]=[];
-  const visit=(comp:any,t:number,depth:number)=>{if(depth>8)throw new Error('Composition nesting is too deep');PM.scope.push(comp);try{const required=hasLayerInputs(comp, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))?layerInputPlan(comp,{definition:(fx:any)=>PM.effectDef?.(fx),enabled:(l:any,fx:any)=>!!evaluatedValue(PM,l,fx.on,t,`${fx.id}.$enabled`),active:(l:any)=>!!PM.active(l,t),contentActive:(l:any)=>!!PM.active({...l,group:null},t)}).layerIds:new Set();for(const layer of comp.layers){if(layer.type!=='video'&&layer.type!=='precomp')continue;if(!PM.active(layer,t)&&!(required.has(layer.id)&&t>=layer.from-1e-6&&t<layer.from+layer.dur-1e-6))continue;if(layer.type==='video'){const asset=PM.assets.get(layer.d.asset);if(asset?.el)requests.push({layer,asset,time:t,at:videoPlaybackTime(asset,sourceTime(PM,layer,t),1/project.fps)});}else if(layer.type==='precomp'){const sub=comp.comps?.[layer.d.comp]||project.comps?.[layer.d.comp];if(sub)visit(sub,sourceTime(PM,layer,t),depth+1);}}}finally{PM.scope.pop();}};
+  const visit=(comp:any,t:number,depth:number)=>{
+    if(depth>8)throw new Error('Composition nesting is too deep');
+    PM.scope.push(comp);
+    try{
+      const required=hasLayerInputs(comp,(fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))
+        ?layerInputPlan(comp,{definition:(fx:any)=>PM.effectDef?.(fx),enabled:(l:any,fx:any)=>!!evaluatedValue(PM,l,fx.on,t,`${fx.id}.$enabled`),
+          active:(l:any)=>!!PM.active(l,t),contentActive:(l:any)=>!!PM.active({...l,group:null},t)}).layerIds:new Set();
+      for(const layer of comp.layers){
+        const materialComps=layerCompositionIds(layer);
+        if(layer.type!=='video' && layer.type!=='precomp' && !materialComps.length)continue;
+        if(!PM.active(layer,t) && !(required.has(layer.id) && t>=layer.from-1e-6 && t<layer.from+layer.dur-1e-6))continue;
+        if(layer.type==='video'){
+          const asset=PM.assets.get(layer.d.asset);
+          if(asset?.el)requests.push({layer,asset,time:t,at:videoPlaybackTime(asset,sourceTime(PM,layer,t),1/project.fps)});
+        }else if(materialComps.length){
+          for(const id of materialComps){const sample=materialCompositionSample(PM,layer,{compositionId:id},t);if(sample)visit(sample.comp,sample.time,depth+1);}
+        }else if(layer.type==='precomp'){
+          const sub=comp.comps?.[layer.d.comp] || project.comps?.[layer.d.comp];
+          if(sub)visit(sub,sourceTime(PM,layer,t),depth+1);
+        }
+      }
+    }finally{PM.scope.pop();}
+  };
   const exact=inputs&&typeof PM.GL?.frameVideoRequests==='function';
   if(exact)requests.push(...PM.GL.frameVideoRequests(project,time,{...options,shutter:options.shutter??PM.proj.shutter??.5}));else visit(project,time,0);const frames=requests.length ? await prepareVideos(requests, inputs ? PM.Memory?.budget?.('textures') ?? 128 * 1024 * 1024 : Infinity, cancelled, exact, options, inputs) : new Map<string, HTMLCanvasElement>();
   // Font loading can yield after all seeks finish. Do not publish a frame
