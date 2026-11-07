@@ -8,11 +8,11 @@ import { EFFECTS } from './effects';
 const IDS = [
   'blur', 'motionblurDir', 'sharpen', 'glow', 'color',
   'levels', 'duotone', 'grain', 'vignette', 'chroma',
-  'pixelate', 'posterize', 'displace', 'shadow', 'invert', 'gradient', 'tint', 'channelMixer', 'threshold', 'shiftChannels', 'exposure', 'levelsIndividual', 'unsharpMask', 'findEdges', 'tritone', 'colorBalanceHLS', 'brightnessContrast', 'blackWhite', 'setMatte', 'displacementMap', 'compoundBlur', 'setChannels', 'texturize', 'stroke', 'applyColorLut', 'solidComposite','arithmetic','blend','calculations','channelCombiner','colorProfileConverter','hdrCompander','echo'
+  'pixelate', 'posterize', 'displace', 'shadow', 'invert', 'gradient', 'tint', 'channelMixer', 'threshold', 'shiftChannels', 'exposure', 'levelsIndividual', 'unsharpMask', 'findEdges', 'tritone', 'colorBalanceHLS', 'brightnessContrast', 'blackWhite', 'setMatte', 'displacementMap', 'compoundBlur', 'setChannels', 'texturize', 'stroke', 'applyColorLut', 'solidComposite','arithmetic','blend','calculations','channelCombiner','colorProfileConverter','hdrCompander','echo', 'figmaShadow', 'figmaBackdropBlur', 'figmaLayerBlur', 'figmaNoise'
 ];
 
 describe('effects-basic', () => {
-  it('exports and registers all 43 real shader effects', () => {
+  it('exports and registers all 47 real shader effects', () => {
     const register = vi.fn();
     activate({ effects: { register, supportsEffectScale: true, supportsTemporalInputs: true, supportsVersions: true, supportsSpatialSampling: true, supportsLayerInputs: true, supportsInputSubframes: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true, parameterDefault: (p: any) => p.def } } as unknown as PowermoveAPI);
 
@@ -35,10 +35,10 @@ describe('effects-basic', () => {
     for (const { id, group } of EFFECTS) (groups[group] ??= []).push(id);
 
     expect(groups).toEqual({
-      'Blur & Sharpen': ['blur', 'motionblurDir', 'sharpen', 'unsharpMask', 'compoundBlur'],
-      'Light & Shadow': ['glow', 'vignette', 'shadow'],
+      'Blur & Sharpen': ['blur', 'motionblurDir', 'sharpen', 'unsharpMask', 'compoundBlur', 'figmaBackdropBlur', 'figmaLayerBlur'],
+      'Light & Shadow': ['glow', 'vignette', 'shadow', 'figmaShadow'],
       Color: ['color', 'levels', 'duotone', 'posterize', 'invert', 'tint', 'channelMixer', 'shiftChannels', 'exposure', 'levelsIndividual', 'tritone', 'colorBalanceHLS', 'brightnessContrast', 'blackWhite'],
-      Stylize: ['grain', 'pixelate', 'threshold', 'findEdges', 'texturize'],
+      Stylize: ['grain', 'pixelate', 'threshold', 'findEdges', 'texturize', 'figmaNoise'],
       Distort: ['chroma', 'displace', 'displacementMap'],
       Channel: ['setMatte', 'setChannels','solidComposite','arithmetic','blend','calculations','channelCombiner'],
       Generate: ['gradient','stroke'],
