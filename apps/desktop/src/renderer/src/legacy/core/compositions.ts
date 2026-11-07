@@ -1,6 +1,7 @@
 import { remapLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue, isProperty } from './content-properties';
 import { sourceTime } from './retiming';
+import { selectionBounds } from './selection-bounds';
 /* After Effects compositions.
  *
  * A project holds any number of compositions. Exactly one of them — the one
@@ -498,7 +499,7 @@ export function install(PM: PMRegistry): void {
    * mode 'leave': a single layer keeps its transforms, effects, masks and timing
    *   in this comp; only its source moves into a new comp the size of the source.
    */
-  const precompose = (ids: string[], options: { name?: string; mode?: 'move' | 'leave'; adjustDuration?: boolean; open?: boolean } = {}) => {
+  const precompose = (ids: string[], options: { name?: string; mode?: 'move' | 'leave'; adjustDuration?: boolean; sizeToSelection?: boolean; open?: boolean } = {}) => {
     const host = PM.proj;
     const mode = options.mode || 'move';
     const selected = PM.expandGroups ? PM.expandGroups(ids) : ids;
@@ -542,12 +543,16 @@ export function install(PM: PMRegistry): void {
       if (!safe) throw new Error('Select the whole styled group to pre-compose it without changing its appearance.');
       chain.forEach((group: any) => sharedGroups.add(group.id));
     }
+    const crop = options.sizeToSelection ? selectionBounds(PM, picked, PM.time) : null;
     let start = 0, dur = host.dur;
     if (options.adjustDuration) {
-      start = Math.min(...picked.map((layer: any) => layer.from));
-      dur = Math.max(1 / host.fps, Math.max(...picked.map((layer: any) => layer.from + layer.dur)) - start);
+      const timed = picked.filter((layer: any) => layer.type !== 'group');
+      if (timed.length) {
+        start = Math.min(...timed.map((layer: any) => layer.from));
+        dur = Math.max(1 / host.fps, Math.max(...timed.map((layer: any) => layer.from + layer.dur)) - start);
+      }
     }
-    const comp: any = blankComp({ name, w: host.w, h: host.h, fps: host.fps, dur, bg: host.bg, scene3dDefaultsVersion: host.scene3dDefaultsVersion ?? 1 });
+    const comp: any = blankComp({ name, w: crop?.w ?? host.w, h: crop?.h ?? host.h, fps: host.fps, dur, bg: host.bg, scene3dDefaultsVersion: host.scene3dDefaultsVersion ?? 1 });
     comp.name = name;
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
     let layer: any = null;
@@ -561,8 +566,21 @@ export function install(PM: PMRegistry): void {
         if (moved.matteSource && !pickedIds.has(moved.matteSource)) moved.matteSource = null;
         if (start) shiftLayer(moved, -start);
       }
+      if (crop) {
+        // One surrounding coordinate space offsets whole rigs (including expressions)
+        // without baking animation or changing the original parent/group transforms.
+        const space = PM.mkLayer('group', { name: 'Pre-comp origin', p: {
+          'position.x': -crop.x0, 'position.y': -crop.y0,
+        } }, comp);
+        for (const moved of comp.layers) if (!moved.group) moved.group = space.id;
+        comp.layers.unshift(space);
+      }
       PM.proj.comps = { ...comps(), [comp.id]: comp };
       layer = makeLayer(comp.id, host, start);
+      if (crop) {
+        layer.p['position.x'].v = crop.x0 + comp.w / 2;
+        layer.p['position.y'].v = crop.y0 + comp.h / 2;
+      }
       if (sharedGroup) layer.group = sharedGroup.id;
       layer.p['anchor.x'].v = comp.w / 2; layer.p['anchor.y'].v = comp.h / 2;
       for (const item of rest) {

@@ -51,7 +51,11 @@ const rad = (degrees: number): number => degrees * Math.PI / 180;
 
 function cornerParams(r: number, smoothing: number, budget: number): CornerParams {
   if (r <= 0) return { r: 0, a: 0, b: 0, c: 0, d: 0, p: 0, arc: 0 };
-  let s = Math.min(smoothing, Math.max(0, budget / r - 1));
+  // Preserve smoothing when adjacent corners fill an edge (including pills).
+  // Shrink the circular core instead of reducing smoothing to zero. Both
+  // branches meet continuously at r * (1 + smoothing) === budget.
+  const s = smoothing;
+  r = Math.min(r, budget / (1 + s));
   const p = Math.min((1 + s) * r, budget);
   const arcMeasure = 90 * (1 - s);
   const arc = Math.sin(rad(arcMeasure / 2)) * r * Math.SQRT2;
@@ -60,8 +64,11 @@ function cornerParams(r: number, smoothing: number, budget: number): CornerParam
   const beta = 45 * s;
   const c = p3p4 * Math.cos(rad(beta));
   const d = c * Math.tan(rad(beta));
-  const b = (p - arc - c - d) / 3;
-  return { r, a: 2 * b, b, c, d, p, arc };
+  // Match the cubic's end curvature (2*b*d / (3*|tangent|^3))
+  // to the circular arc's 1/r, as well as matching their tangents.
+  const b = d > 0 ? 1.5 * Math.hypot(c, d) ** 3 / (d * r) : 0;
+  const a = p - arc - c - d - b;
+  return { r, a, b, c, d, p, arc };
 }
 
 /** Room each corner may use along its edges, shared proportionally with its neighbours. */

@@ -64,3 +64,53 @@ describe('corner geometry', () => {
     expect(cornerInset({ w: 200, h: 100, radius: 900, smoothing: 100 })).toBe(50);
   });
 });
+
+describe('continuous capsule smoothing', () => {
+  const values = (path: string) => path.match(/-?\d*\.?\d+(?:e-?\d+)?/g)!.map(Number);
+  it.each([[520, 100], [100, 520], [100, 100]])('retains distinct smoothing at full radius for %j', (w, h) => {
+    const paths = [0, 50, 100].map(smoothing => roundedRectPath({ w, h, radius: Math.min(w, h) / 2, smoothing }));
+    expect(new Set(paths).size).toBe(3);
+    for (const path of paths) expect(values(path).every(Number.isFinite)).toBe(true);
+  });
+
+  it.each([0, 25, 50, 75, 100])('has no jump across the maximum radius at smoothing %s', smoothing => {
+    const at = (radius: number) => roundedRectPath({ w: 300, h: 100, radius, smoothing });
+    const below = values(at(49.999)), limit = values(at(50)), above = values(at(50.001));
+    expect(below).toHaveLength(limit.length);
+    below.forEach((value, i) => expect(Math.abs(value - limit[i]!)).toBeLessThan(.005));
+    expect(above).toEqual(limit);
+  });
+
+  it('changes continuously when smoothing is animated at maximum radius', () => {
+    let previous = values(roundedRectPath({ w: 300, h: 100, radius: 50, smoothing: 0 }));
+    for (let smoothing = 1; smoothing <= 100; smoothing++) {
+      const next = values(roundedRectPath({ w: 300, h: 100, radius: 50, smoothing }));
+      next.forEach((value, i) => expect(Math.abs(value - previous[i]!)).toBeLessThan(1.6));
+      previous = next;
+    }
+  });
+
+  it('meets straight edges tangentially with zero curvature when smoothing is nonzero', () => {
+    for (const smoothing of [1, 50, 100]) {
+      const path = roundedRectPath({ w: 300, h: 100, radius: 50, smoothing });
+      const first = path.match(/ c ([^a]+) a/)!;
+      const controls = values(first[1]!);
+      // Collinear first controls mean a horizontal tangent and zero edge curvature.
+      expect(controls[1]).toBe(0); expect(controls[3]).toBe(0);
+      expect(controls[0]).toBeGreaterThan(0);
+      expect(controls[4]).toBeGreaterThan(controls[2]!);
+      expect(controls[5]).toBeGreaterThanOrEqual(0);
+    }
+  });
+});
+
+
+it.each([10, 50, 90])('matches curvature at cubic/arc joins at smoothing %s', smoothing => {
+  const path = roundedRectPath({ w: 6000, h: 2000, radius: 1000, smoothing });
+  const segment = path.match(/ c ([^a]+) a ([^c]+)/)!;
+  const controls = segment[1]!.trim().split(/\s+/).map(Number);
+  const radius = Number(segment[2]!.trim().split(/\s+/)[0]);
+  const b = controls[2]! - controls[0]!, c = controls[4]! - controls[2]!, d = controls[5]!;
+  const curvature = 2 * b * d / (3 * Math.hypot(c, d) ** 3);
+  expect(curvature).toBeCloseTo(1 / radius, 6);
+});
