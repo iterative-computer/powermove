@@ -2355,7 +2355,7 @@ function switchAreaWidth(L: any): number {
 }
 /** Models, lights, cameras and model-only groups have no 2D switch. */
 const always3D = (L: any): boolean => (L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.'))
-  || (L.type === 'group' && api.scene3d.isGroup(L.id));
+  || (L.type === 'group' && !!api.scene3d?.isGroup?.(L.id));
 function rowSwitches(L: any): RowSwitch[] {
   if (!layerSupportsTransform(L.type) || T.style?.showSwitches === false) return [];
   const out: RowSwitch[] = [];

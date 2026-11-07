@@ -130,6 +130,12 @@ function commandScopes(command: any): any[][] {
   if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
+  // A group's 3D switch also sets its members (setLayer), so Undo tracks them.
+  if (path && type === 'set_layer' && layer?.type === 'group' && command.patch?.threeD != null) {
+    const container = [PM.proj, ...Object.values<any>(PM.proj.comps || {})].find((comp: any) => comp?.layers?.includes(layer)) || PM.proj;
+    const members = container.layers.filter((member: any) => (PM.groupAncestors?.(member, container.layers) || []).some((group: any) => group.id === layer.id));
+    return [path, ...members.map((member: any) => layerPath(member)).filter(Boolean)];
+  }
   return path ? [path] : [[]];
 }
 
@@ -605,6 +611,17 @@ function setLayer(command: any) {
   if (patch.threeD != null) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
+    /* A group's switch sets its members too, so one click makes (or flattens)
+       the whole group, and each member's own switch then shows the truth. */
+    if (layer.type === 'group') {
+      const container = [PM.proj, ...Object.values<any>(PM.proj.comps || {})].find((comp: any) => comp?.layers?.includes(layer)) || PM.proj;
+      for (const member of container.layers) {
+        if (!(PM.groupAncestors?.(member, container.layers) || []).some((group: any) => group.id === layer.id)) continue;
+        if (member.type === 'audio' || member.type === 'adjustment' || member.effectSpace === 'source') continue;
+        if (!patch.threeD && isAlways3DLayer(PM, member)) continue;
+        member.threeD = !!patch.threeD;
+      }
+    }
   }
   if (patch.continuousRaster != null) {
     if (layer.type !== 'precomp') throw new Error('Only pre-comp layers can be continuously rasterized');

@@ -15,6 +15,7 @@ import { normalizeExportDefaults, type ExportDefaults } from '../core/export-def
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import { migrateProjectTextTiming, migrateTextAnimatorTiming } from './core/text-animation';
+import { migrateInherited3D, SWITCH_3D_VERSION } from './core/switch-3d-migration';
 import { sanitizeMemory } from '../core/memory';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
@@ -235,6 +236,8 @@ function* hydrateSteps(p: any): Generator<void, any> {
   Object.assign(base, p);
   // Loading an old file must not inherit the new-project implicit camera.
   base.scene3dDefaultsVersion = p.scene3dDefaultsVersion === 2 ? 2 : 1;
+  // Older files let 3D groups override members' switches; migrated below.
+  base.switch3DVersion = p.switch3DVersion === SWITCH_3D_VERSION ? SWITCH_3D_VERSION : 1;
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   if (Array.isArray(p.memory)) base.memory = sanitizeMemory(p.memory);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
@@ -444,7 +447,7 @@ function* hydrateSteps(p: any): Generator<void, any> {
   for (const container of [base, ...Object.values(base.comps)] as any[]) {
     (container.layers || []).forEach((L: any) => { if (L.type === 'precomp' && !(L.d && loaded(L.d.comp))) L.d.comp = null; });
   }
-  return migrateProjectTextTiming(base);
+  return migrateInherited3D(migrateProjectTextTiming(base));
 }
 function hydrate(p: any) {
   const steps = hydrateSteps(p);

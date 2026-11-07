@@ -10,6 +10,7 @@ import { installProjectIndex } from './project-index';
 import { timelineService } from './services';
 import { normalizeCaptionsContent, presetStyle } from '../../captions/model';
 import { initializeTextAnimatorTiming, migrateProjectTextTiming } from './text-animation';
+import { migrateInherited3D, SWITCH_3D_VERSION } from './switch-3d-migration';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
@@ -191,6 +192,7 @@ PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
   colorDepth: normalizeColorDepth(o.colorDepth),
   scene3dDefaultsVersion: 2,
+  switch3DVersion: SWITCH_3D_VERSION,
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   bg: o.bg || '#000000',
@@ -283,7 +285,7 @@ PM.cloneLayer = (L: any) => {
 PM.serialize = () => JSON.stringify({ v: PM.version, proj: PM.proj, ws: PM.WS && PM.WS.current }, null, 1);
 PM.deserialize = (json: any) => {
   const o = typeof json === 'string' ? JSON.parse(json) : json;
-  return migrateProjectTextTiming(o.proj || o);
+  return migrateInherited3D(migrateProjectTextTiming(o.proj || o));
 };
 }
 
