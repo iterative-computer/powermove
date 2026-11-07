@@ -39,6 +39,8 @@ it('ships only the public-API plugin and builds it before both desktop compilati
   expect(config).toContain('beforePack: ./scripts/before-pack.mjs');
   expect(config).toContain('- dist/code.js');
   expect(manifest.enablePrivatePluginApi).toBeUndefined();
+  // Import succeeds without an ID, but real Figma then rejects clientStorage.
+  expect(manifest.id).toBe('powermove-local');
   expect(manifest.networkAccess.allowedDomains).toEqual(['http://localhost:47832']);
   expect(manifest.networkAccess.reasoning.length).toBeGreaterThan(10);
   expect(await readFile(new URL('../../electron.vite.config.ts', import.meta.url), 'utf8')).toContain(

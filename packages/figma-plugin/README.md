@@ -20,6 +20,8 @@ New connections require the app's Connect Figma sheet to be open. One request wa
 
 Each document gets a random `powermove-file-id` through the public root plugin-data API. Node IDs and that identity remain stable across sends and restarts. No private Figma API is needed. Imports from earlier development commits that used a private Figma file key may need importing once again; no shipped-project migration is involved.
 
+The development manifest uses the stable local ID `powermove-local`. Real Figma accepts a manifest without an ID but rejects client storage in that plugin, so the ID is necessary to remember pairing. The desktop host forwards sandbox messages from its top frame, through an intermediate wrapper; the UI accepts that sender only with a Figma origin, alongside the immediate parent used by other hosts.
+
 ## Building and packaging
 
 For contributors: `bun run --cwd packages/figma-plugin build` produces `dist/code.js`. The desktop Vite build and electron-builder's before-pack hook both build the plugin. `extraResources` ships only the manifest, UI and compiled code. The main process resolves development and packaged resource paths separately and checks a content fingerprint before refreshing the stable copy.
@@ -28,7 +30,7 @@ For contributors: `bun run --cwd packages/figma-plugin build` produces `dist/cod
 
 This repository does not publish the plugin automatically.
 
-- Have the owner create the plugin entry in Figma and put its assigned ID in `manifest.json`; do not invent a Community ID. Verify development import behavior with and without the assigned ID in the real desktop app.
+- Have the owner create the plugin entry in Figma and replace the development ID in `manifest.json` with its assigned Community ID. Changing IDs changes the plugin's storage namespace, so verify document identity and pair again for the published plugin.
 - Keep `http://localhost:47832` in `allowedDomains` and retain the plain reasoning sentence. Keep private APIs disabled.
 - Verify the installed app workflow, localhost resolution/CSP, public document identity, PNG export and visual fidelity in a new draft in real Figma; repeat approval, send, re-sync and both app restarts.
 - Check the packaged plugin files and refresh behavior with an installed app update.

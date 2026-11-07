@@ -1,5 +1,6 @@
 {
   "name": "Send to Powermove",
+  "id": "powermove-local",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "ui.html",

@@ -78,3 +78,30 @@ test('plugin explains a closed setup sheet and stops polling while hidden', asyn
   });
   await expect.poll(() => count).toBeGreaterThan(before);
 });
+
+test('accepts desktop Figma messages through its top frame and rejects other ancestors', async ({ page }) => {
+  await page.route('http://localhost:47832/status', route => route.fulfill({
+    json: { reachable: true, tokenValid: true, compositionOpen: true, protocolVersion: 2 },
+  }));
+  await page.setContent('<iframe></iframe>');
+  const wrapper = page.frames()[1]!;
+  await wrapper.setContent('<iframe></iframe>');
+  const ui = wrapper.childFrames()[0]!;
+  await ui.setContent(await html());
+  expect(await ui.evaluate(() => parent !== top)).toBe(true);
+  const host = (source: 'top' | 'parent' | 'self', origin: string, message: unknown) => ui.evaluate(
+    ({ source, origin, message }) => window.dispatchEvent(new MessageEvent('message', {
+      source: source === 'top' ? top : source === 'parent' ? parent : window,
+      origin,
+      data: { pluginMessage: message },
+    })), { source, origin, message },
+  );
+  await host('top', 'https://www.figma.com', { type: 'count', count: 3 });
+  await host('top', 'https://www.figma.com', { type: 'token', token: 'a'.repeat(64) });
+  await expect(ui.getByRole('button', { name: 'Send 3 Layers', exact: true })).toBeEnabled();
+  await host('top', 'https://untrusted.example', { type: 'count', count: 99 });
+  await host('self', 'https://www.figma.com', { type: 'count', count: 98 });
+  await expect(ui.getByRole('button', { name: 'Send 3 Layers', exact: true })).toBeEnabled();
+  await host('parent', 'null', { type: 'count', count: 4 });
+  await expect(ui.getByRole('button', { name: 'Send 4 Layers', exact: true })).toBeEnabled();
+});

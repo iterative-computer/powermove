@@ -263,8 +263,11 @@
         else if (count && composition) selection();
       };
       $('copy').onclick = () => selection(true);
-      window.onmessage = async ({ data, source }) => {
-        if (source !== parent) return;
+      window.onmessage = async ({ data, source, origin }) => {
+        // Desktop Figma forwards sandbox messages from its top frame through
+        // an intermediate wrapper, so the sender is not always our parent.
+        if (source !== parent &&
+            (source !== top || !['https://www.figma.com', 'https://figma.com'].includes(origin))) return;
         const m = data.pluginMessage;
         if (!m) return;
         if (m.type === 'token') {
