@@ -110,6 +110,7 @@ export interface SetExpressionCommand extends LayerTargetedCommand {
 
 export interface SetContentCommand extends LayerTargetedCommand, LockableCommand {
   type: 'set_content';
+  /** Text stagger animators use timing v2: Out delay is seconds before the Out point (default 0). */
   patch: JsonObject;
 }
 
@@ -170,6 +171,7 @@ export interface AddLayerCommand {
   name?: string;
   from?: number;
   duration?: number;
+  /** Text stagger animators default to direction-based anchors; Out delay is an end offset. */
   content?: JsonObject;
   properties?: JsonObject;
   color?: string;

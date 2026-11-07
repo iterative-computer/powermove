@@ -46,14 +46,15 @@ describe('text animators', () => {
     animator.p.duration.v = 1;
     animator.p.stagger.v = 0;
     animator.p.delay.v = 2;
+    layer.dur = 5;
     layer.d.animators = [animator];
     const opacity = (time: number) => animatedGlyphs(PM, layer, time, { size: 20 }, layout)[0].opacity;
     expect(opacity(1)).toBe(1);
     expect(opacity(2.5)).toBeCloseTo(0.5);
     expect(opacity(4)).toBe(0);
-    expect(outDelay({ duration: 1, stagger: 0.1 }, [{ text: 'ab cd' }], 'characters', 'forward', 5)).toBe(3.7);
-    // Wrapped paragraph lines count as separate lines.
-    expect(outDelay({ duration: 1, stagger: 0.5 }, [{ text: 'one two' }, { text: 'three' }], 'lines', 'forward', 5)).toBe(3.5);
+    expect(outDelay({ duration: 1, stagger: 0.1 }, [{ text: 'ab cd' }], 'characters', 'forward', 5)).toBe(0);
+    // End offsets default to zero regardless of the number of wrapped lines.
+    expect(outDelay({ duration: 1, stagger: 0.5 }, [{ text: 'one two' }, { text: 'three' }], 'lines', 'forward', 5)).toBe(0);
   });
 
   it('orders units forward, reversed, from the center and randomly but deterministically', () => {
