@@ -1,4 +1,4 @@
-import { BLEND_GLSL } from "../../shared/blend";
+import { BLEND_GLSL } from "./blend-glsl";
 import type { EffectDefinition, EffectParamDefinition } from "powermove";
 import { SPATIAL_PRE } from "./spatial";
 const number = (

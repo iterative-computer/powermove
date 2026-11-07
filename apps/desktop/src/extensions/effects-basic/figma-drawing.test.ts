@@ -18,3 +18,8 @@ it("uses the clamped finite background kernel for new imports and preserves revi
   expect(layerBlur.version).toBe(1);
   expect(layerBlur.frag).not.toContain("clamp(uv+axis*d/u_layerRes");
 });
+
+it('keeps its blend GLSL identical to the compositor copy', async () => {
+  const [{ BLEND_GLSL: local }, { BLEND_GLSL: shared }] = await Promise.all([import('./blend-glsl'), import('../../shared/blend')]);
+  expect(local).toBe(shared);
+});
