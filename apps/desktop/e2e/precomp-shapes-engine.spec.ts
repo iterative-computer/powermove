@@ -47,24 +47,85 @@ test('cropped precomp keeps parented shapes and text in place, with unchanged ti
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('pill smoothing renders the same through preview and export, with a working stroke', async ({ session }) => {
+test('pill ends stay circular through preview and export, with a working stroke', async ({ session }) => {
   const result = await session.page.evaluate(() => {
     const PM = (window as any).PM;
-    const project = PM.mkProject({ w: 600, h: 460, dur: 3, bg: '#191919' });
-    project.layers = [0, 50, 100].map((smoothing, i) => PM.mkLayer('shape', { d: { shape: 'rect', w: 500, h: 100, radius: 50, smoothing, stroke: 6, strokeColor: '#a5a2ff', color: '#e8e2cf' },
-      p: { 'position.x': 300, 'position.y': 75 + i * 145 } }, project));
-    PM.replaceProject(project); PM.time = 1;
-    const render = (exporting: boolean) => PM.GL.renderToPixels(1, 600, 460, { opaque: true, topDownOpaque: true, mblur: false, exporting });
-    const preview = render(false), exported = render(true);
-    let max = 0; for (let i = 0; i < preview.length; i++) max = Math.max(max, Math.abs(preview[i] - exported[i]));
-    const canvas = document.createElement('canvas'); canvas.width = 600; canvas.height = 460;
-    canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(exported), 600, 460), 0, 0);
-    const colorAt = (x: number, y: number) => Array.from(exported.slice((y * 600 + x) * 4, (y * 600 + x) * 4 + 3));
-    return { max, png: canvas.toDataURL(), colors: [0, 1, 2].map(i => colorAt(60, 40 + i * 145)),
-      stroke: colorAt(300, 25), fill: colorAt(300, 75) };
+    const canvas = (w: number, h: number) => {
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h; return cv;
+    };
+    const render = (smoothing: number, radius = 50, w = 500, h = 100, exporting = true) => {
+      const project = PM.mkProject({ w: 600, h: 180, dur: 3, bg: '#191919' });
+      project.layers = [PM.mkLayer('shape', { d: { shape: 'rect', w, h, radius, smoothing,
+        stroke: 6, strokeColor: '#a5a2ff', color: '#e8e2cf' },
+        p: { 'position.x': 300, 'position.y': 90 } }, project)];
+      PM.replaceProject(project);
+      return PM.GL.renderToPixels(1, 600, 180, { opaque: true, topDownOpaque: true, mblur: false, exporting }) as Uint8Array;
+    };
+    const image = (pixels: Uint8Array) => {
+      const cv = canvas(600, 180);
+      cv.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(pixels), 600, 180), 0, 0);
+      return cv;
+    };
+    const difference = (a: Uint8Array, b: Uint8Array) => {
+      let max = 0; for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i]! - b[i]!)); return max;
+    };
+    const rows = [0, 60, 100].map(smoothing => render(smoothing));
+    const images = rows.map(image);
+    const overview = canvas(600, 600), context = overview.getContext('2d')!;
+    context.fillStyle = '#191919'; context.fillRect(0, 0, 600, 600);
+    images.forEach((cv, i) => {
+      context.drawImage(cv, 0, i * 200 + 20);
+      context.fillStyle = '#ffffff'; context.font = '16px sans-serif'; context.fillText(`Smoothing ${[0, 60, 100][i]}%`, 24, i * 200 + 22);
+    });
+    const closeup = canvas(1080, 670), ctx = closeup.getContext('2d')!;
+    ctx.fillStyle = '#191919'; ctx.fillRect(0, 0, 1080, 670);
+    images.forEach((cv, i) => {
+      ctx.drawImage(cv, 490, 30, 70, 120, i * 360, 50, 350, 600);
+      ctx.save(); ctx.translate(i * 360, 50); ctx.scale(5, 5); ctx.translate(-490, -30);
+      // Analytic, true semicircle at the center of the rendered stroke.
+      ctx.beginPath(); ctx.arc(500, 90, 50, -Math.PI / 2, Math.PI / 2);
+      ctx.strokeStyle = '#42f5b0'; ctx.lineWidth = .35; ctx.setLineDash([1.2, 1.2]); ctx.stroke(); ctx.restore();
+      ctx.fillStyle = '#ffffff'; ctx.font = '16px sans-serif'; ctx.fillText(`${[0, 60, 100][i]}% — green: true semicircle`, i * 360 + 8, 24);
+    });
+    const nearPlain = render(0, 49), nearSmooth = render(60, 49);
+    const near = canvas(600, 400), nc = near.getContext('2d')!;
+    nc.fillStyle = '#191919'; nc.fillRect(0, 0, 600, 400);
+    [nearPlain, nearSmooth].forEach((pixels, i) => {
+      nc.drawImage(image(pixels), 0, i * 200 + 20);
+      nc.fillStyle = '#ffffff'; nc.font = '16px sans-serif'; nc.fillText(`Radius 49 / max 50 — smoothing ${i ? 60 : 0}%`, 24, i * 200 + 22);
+    });
+    const nearCloseup = canvas(1080, 690), ncc = nearCloseup.getContext('2d')!;
+    ncc.fillStyle = '#191919'; ncc.fillRect(0, 0, 1080, 690);
+    const heatmap = image(nearPlain), heatContext = heatmap.getContext('2d')!;
+    const heat = heatContext.getImageData(0, 0, 600, 180);
+    for (let i = 0; i < nearPlain.length; i += 4) {
+      const delta = Math.max(...[0, 1, 2].map(c => Math.abs(nearPlain[i+c]! - nearSmooth[i+c]!)));
+      heat.data[i] = Math.min(255, delta*12); heat.data[i+1] = Math.min(255, delta*6); heat.data[i+2] = 25; heat.data[i+3] = 255;
+    }
+    heatContext.putImageData(heat, 0, 0);
+    [image(nearPlain), image(nearSmooth), heatmap].forEach((cv, i) => {
+      ncc.drawImage(cv, 490, 30, 70, 120, i*360, 60, 350, 600);
+      ncc.fillStyle = '#ffffff'; ncc.font = '16px sans-serif';
+      ncc.fillText(['Radius 49: smoothing 0%', 'Radius 49: smoothing 60%', 'Difference amplified 12×'][i]!, i*360 + 8, 25);
+    });
+    const colorAt = (x: number, y: number) => Array.from(rows[1]!.slice((y * 600 + x) * 4, (y * 600 + x) * 4 + 3));
+    return { overview: overview.toDataURL(), closeup: closeup.toDataURL(), near: near.toDataURL(), nearCloseup: nearCloseup.toDataURL(),
+      pills: images.map(cv => cv.toDataURL()),
+      roundDifference: Math.max(difference(rows[0]!, rows[1]!), difference(rows[0]!, rows[2]!)),
+      previewDifference: difference(rows[1]!, render(60, 50, 500, 100, false)),
+      verticalDifference: difference(render(0, 50, 100, 160), render(100, 50, 100, 160)),
+      nearDifference: difference(nearPlain, nearSmooth), stroke: colorAt(300, 40), fill: colorAt(300, 90) };
   });
-  await save('05-after-pill-render-preview-export.png', result.png);
-  expect(result.max).toBe(0); expect(result.colors[0]).not.toEqual(result.colors[2]);
+  const prefix = process.env.POWERMOVE_CORNER_SHOT_PREFIX || '02-after';
+  await save(`${prefix}-pills-0-60-100.png`, result.overview);
+  await save(`${prefix}-semicircle-overlay.png`, result.closeup);
+  await save(`${prefix}-near-limit-radius49.png`, result.near);
+  await save(`${prefix}-near-limit-closeup.png`, result.nearCloseup);
+  for (const [i, smoothing] of [0, 60, 100].entries()) await save(`${prefix}-pill-${smoothing}.png`, result.pills[i]!);
+  expect(result.roundDifference).toBeLessThanOrEqual(2);
+  expect(result.verticalDifference).toBeLessThanOrEqual(2);
+  expect(result.previewDifference).toBe(0);
+  expect(result.nearDifference).toBeGreaterThan(2);
   expect(result.stroke).not.toEqual(result.fill);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

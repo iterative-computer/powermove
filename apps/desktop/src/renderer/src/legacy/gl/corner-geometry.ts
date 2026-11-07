@@ -51,11 +51,10 @@ const rad = (degrees: number): number => degrees * Math.PI / 180;
 
 function cornerParams(r: number, smoothing: number, budget: number): CornerParams {
   if (r <= 0) return { r: 0, a: 0, b: 0, c: 0, d: 0, p: 0, arc: 0 };
-  // Preserve smoothing when adjacent corners fill an edge (including pills).
-  // Shrink the circular core instead of reducing smoothing to zero. Both
-  // branches meet continuously at r * (1 + smoothing) === budget.
-  const s = smoothing;
-  r = Math.min(r, budget / (1 + s));
+  // Keep the requested circular radius. As adjacent corners consume the edge,
+  // reduce smoothing continuously to fit: a full-radius pill is an exact circle
+  // at its ends, while corners with enough room retain the requested smoothing.
+  const s = Math.min(smoothing, Math.max(0, budget / r - 1));
   const p = Math.min((1 + s) * r, budget);
   const arcMeasure = 90 * (1 - s);
   const arc = Math.sin(rad(arcMeasure / 2)) * r * Math.SQRT2;
