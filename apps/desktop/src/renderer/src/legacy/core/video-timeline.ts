@@ -1,4 +1,4 @@
-import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue } from './content-properties';
@@ -13,7 +13,7 @@ export type VideoClip = { layer: any; asset: any; id: string; time: number; at: 
  * A repeated precomp owns separate decoders, just as repeated media clips do. */
 export function videoClipsAt(PM: any, time: number): VideoClip[] {
   const clips: VideoClip[] = [];
-  const visit = (comp: any, at: number, prefix: string, rate: number | null, depth: number) => {
+  const visit = (comp: any, at: number, prefix: string, rate: number | null, depth: number, sourceLayerId?:string) => {
     if (depth > 8) return;
     PM.scope?.push(comp);
     try {
@@ -22,11 +22,13 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
         ? [...PM.ProjectIndex.layersOfType('video', comp), ...PM.ProjectIndex.layersOfType('precomp', comp), ...PM.ProjectIndex.layersOfType('extension',comp)]
         : comp.layers;
       for (const layer of layers) {
-        if (!PM.active(layer, at) && !(required.has(layer.id) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
-        if(layerCompositionIds(layer).length){
-          for(const compositionId of layerCompositionIds(layer)){
-            const sample=materialCompositionSample(PM,layer,{compositionId},at);
-            if(sample)visit(sample.comp,sample.time,prefix+`material:${compositionId}/`,null,depth+1);
+        if(sourceLayerId && layer.id!==sourceLayerId && !required.has(layer.id))continue;
+        if (!PM.active(layer, at) && !((required.has(layer.id) || layer.id===sourceLayerId) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
+        const materialMaps=layerMaterialMaps(layer).filter(map=>typeof map==='object');
+        if(materialMaps.length){
+          for(const map of materialMaps){
+            const sample=materialCompositionSample(PM,layer,map,at);
+            if(sample)visit(sample.comp,sample.time,prefix+(sample.sourceLayerId?`material-layer:${sample.sourceLayerId}/`:`material:${'compositionId' in map?map.compositionId:''}/`),null,depth+1,sample.sourceLayerId);
           }
           continue;
         }

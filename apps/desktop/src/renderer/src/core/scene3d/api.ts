@@ -1,5 +1,6 @@
+import { readMaterialProperties } from './material-properties';
 import {lightViewerState,lightPositionFromViewer} from './light-view';
-import {listModelMaterials,listValidMaterialCompositions} from './material-maps';
+import {listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
@@ -11,8 +12,19 @@ import { editScene } from './operations';
 import type { Scene3DAPI } from '../../kernel/api';
 import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
-export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:{layerId:string|null;ids:string[]})=>void):Scene3DAPI {
+export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:materials',payload:any)=>void):Scene3DAPI {
   let navigation:SceneNavigation|null=null;
+  const materialListeners=new Set<()=>void>();
+  // All mutation paths, reopen, composition rotation and history replay publish
+  // these events. UI consumers never need to intercept individual commands.
+  let materialSignature='';
+  const changed=()=>{
+    const signature=JSON.stringify([PM.proj?.revision,PM.proj?.compId,(PM.curComp?.() || PM.proj)?.layers?.map((l:any)=>[l.id,l.name,l.d?.data?.object?.material?.maps,l.d?.data?.object?.sourceMaterials,l.d?.data?.object?.materialProperties,l.d?.data?.object?.sourceMaterialProperties,l.type])]);
+    if(signature===materialSignature)return;materialSignature=signature;
+    emit('scene3d:materials',{layerIds:(PM.curComp?.() || PM.proj)?.layers?.filter((l:any)=>l.d?.data?.object).map((l:any)=>l.id) || []});
+    for(const listener of materialListeners)listener();
+  };
+  for(const event of ['project','layers','comps','history:project-patch'])PM.bus?.on?.(event,changed);
   const selection=()=>{
     const ids=(PM.sel?.layers || []).filter((id:string)=>layer3DRole(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id)));
     return {layerId:ids[0] || null,ids};
@@ -23,6 +35,11 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     emit('scene3d:selection',selection());PM.bus?.emit?.('scene3d:selection');PM.invalidate?.();
   };
   return {listMaterials:layerId=>listModelMaterials(PM,layerId),listValidCompositions:layerId=>listValidMaterialCompositions(PM,layerId),
+    listEligibleSourceLayers:layerId=>listEligibleMaterialLayers(PM,layerId),
+    materialLinks:layerId=>materialLayerLinks(PM,layerId),
+    getMaterialProperties:(layerId,index,time)=>readMaterialProperties(PM,layerId,index,time),
+    setMaterialProperties:(layerId,materialIndex,patch,meta)=>editScene(PM,{operation:'set_material_properties',target:layerId,materialIndex,patch},{origin:'interface',...meta}),
+    onMaterialsChange:listener=>{materialListeners.add(listener);return {dispose:()=>{materialListeners.delete(listener);}};},
     setMaterialMap:(layerId,materialIndex,slot,map,meta)=>editScene(PM,{operation:'set_material_map',target:layerId,materialIndex,slot,map},{origin:'interface',...meta}),
     getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     lightViewerState:(layerId,time,rect,view)=>lightViewerState(PM,layerId,time,rect,view),

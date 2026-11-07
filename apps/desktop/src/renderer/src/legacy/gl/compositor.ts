@@ -22,7 +22,7 @@ import { createPreviewWarmup } from './preview-warmup';
 import { PreviewFrames } from './preview-frames';
 import { previewPlan } from './preview-plan';
 import { sourceTime } from '../core/retiming';
-import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
@@ -1402,7 +1402,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   const world = scaledWorld(L, T, W, H);
   const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
   let projected = m3(M);
-  if (!c.screenSpace && is3DLayer(PM,L)) {
+  if (!c.screenSpace && is3DLayer(PM,L) && activeSourceRaster()?.layer!==L) {
     const h = planeMatrix(PM, L, T), [sx, sy] = outputScale(W, H);
     projected = new Float32Array([
       h[0]*c.w*sx,h[1]*c.w*sy,h[2]*c.w,
@@ -1749,7 +1749,7 @@ function applyPathMasks(L:any,T:number,srcF:any,W:number,H:number,masks:any[]) {
   const out=grab(W,H);bind(out);clear();const p=program('pathMaskApply',PM.GLSL_PRE+'uniform sampler2D u_cov; uniform mat3 u_covTransform; void main(){vec3 q=u_covTransform*vec3(v_px,1.0);vec2 uv=q.xy/q.z/u_res;float coverage=(uv.x<0.0||uv.y<0.0||uv.x>1.0||uv.y>1.0)?0.0:texture(u_cov,uv).a;o=texture(u_tex,v_st)*coverage;}');
   const g=use(p);
   let coverageTransform = IDENT;
-  if (is3DLayer(PM,L)) {
+  if (is3DLayer(PM,L) && activeSourceRaster()?.layer!==L) {
     const h=planeMatrix(PM,L,T),[sx,sy]=outputScale(W,H);
     const inv=inversePlane([h[0]*sx,h[1]*sy,h[2],h[3]*sx,h[4]*sy,h[5],h[6]*sx,h[7]*sy,h[8]]);
     if (inv) coverageTransform=new Float32Array([0,1,2].flatMap(i=>{
@@ -1818,7 +1818,7 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
     /* setU receives its uniform arguments as a list; keep the matrix wrapped so
        it selects uniformMatrix3fv rather than treating nine scalars as vec4. */
     let maskInverse = m3(inv);
-    if (is3DLayer(PM,L)) {
+    if (is3DLayer(PM,L) && activeSourceRaster()?.layer!==L) {
       const h = planeMatrix(PM,L,T), [sx,sy] = outputScale(W,H);
       const projectedInverse = inversePlane([h[0]*sx,h[1]*sy,h[2],h[3]*sx,h[4]*sy,h[5],h[6]*sx,h[7]*sy,h[8]]);
       if (projectedInverse) maskInverse = new Float32Array(projectedInverse);
@@ -1981,11 +1981,12 @@ GL.frameVideoRequests = (comp: any, time: number, options: any = {}) => {
       if (L.type==='video') {
         const asset=PM.assets.get(resolveContent(PM,L,at).asset),key=path+L.id+'@'+at;
         if(asset?.el){requests.set(key,{key,layer:L,time:at,asset,at:videoPlaybackTime(asset,sourceTime(PM,L,at),1/PM.proj.fps)});if(requests.size>1024)throw new EffectInputError('Temporal video requests exceed the frame request limit');}
-      } else if(layerCompositionIds(L).length){
-        for(const id of layerCompositionIds(L)){
-          const sample=materialCompositionSample(PM,L,{compositionId:id},at);if(!sample)continue;
+      } else if(layerMaterialMaps(L).some(map=>typeof map==='object')){
+        for(const map of layerMaterialMaps(L).filter(map=>typeof map==='object')){
+          const sample=materialCompositionSample(PM,L,map,at);if(!sample)continue;
           PM.scope.push(sample.comp);
-          try{visit(sample.comp,sample.time,{transparent:true,mblur:false},depth+1,path+`material:${id}/`);}
+          const prefix=sample.sourceLayerId?`material-layer:${sample.sourceLayerId}/`:`material:${'compositionId' in map?map.compositionId:''}/`;
+          try{visit(sample.comp,sample.time,{transparent:true,mblur:false,...(sample.sourceLayerId?{inputLayer:sample.sourceLayerId,inputSpace:'source'}:{})},depth+1,path+prefix);}
           finally{PM.scope.pop();}
         }
       } else if(L.type==='precomp') {
@@ -2089,6 +2090,11 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     }
   } else if (opt.inputContext) layerInputs = opt.inputContext;
   if (opt.signal?.aborted || ownsInputs && GL.contextLost) throw new EffectInputError('Layer input rendering cancelled or context lost');
+  if(opt.materialSource){
+    const layer=proj.layers.find((l:any)=>l.id===opt.materialSource);
+    if(!layer)throw new EffectInputError('Layer material source is unavailable');
+    const frame=renderInputSource(proj,layer,T,'effects',{...opt,materialSource:true});completed=true;return frame;
+  }
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
@@ -2643,13 +2649,15 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
 }
 /** Nested material capture preserves the outer compositor's FBO ownership and
  * evaluation scope. renderToPixels is a top-level capture and must not run here. */
-GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number) => {
+GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number,sourceLayerId?:string) => {
   const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews;
   let frame:any;
-  pmScopePush(comp);videoPath+=`material:${comp.compId || comp.id}/`;
+  pmScopePush(comp);videoPath+=sourceLayerId?`material-layer:${sourceLayerId}/`:`material:${comp.compId || comp.id}/`;
   PM.beginEval(time);
   try{
-    frame=GL.renderProject(comp,time,width,height,{transparent:true,mblur:false,previewReuse:false});
+    frame=GL.renderProject(comp,time,width,height,{transparent:true,mblur:false,previewReuse:false,
+      ...(sourceLayerId?{materialSource:sourceLayerId}:{})});
+    if(frame.w!==width || frame.h!==height){const scaled=copyFbo(frame,width,height);free(frame);frame=scaled;}
     bind(frame);
     const pixels=new Uint8Array(width*height*4);
     if(frame.colorDepth===8)GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);

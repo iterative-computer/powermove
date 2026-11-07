@@ -30,6 +30,7 @@ let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
+const colorChannel=(key:any)=>key==='c.color' || key==='c.strokeColor' || /^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?emissionColor$/.test(key || '');
 function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
@@ -179,7 +180,7 @@ PM.compileExpr = compile;
 function evalProp(prop: any, tLocal: any, ctx: any) {
   if (!prop || typeof prop !== 'object') return null;
   const keys = Array.isArray(prop.kf) ? prop.kf : [];
-  let v = keys.length ? evalKfs(keys, tLocal, ctx.key === 'c.color' || ctx.key === 'c.strokeColor') : prop.v;
+  let v = keys.length ? evalKfs(keys, tLocal, colorChannel(ctx.key)) : prop.v;
   if (prop.expr) {
     const c = compile(prop.expr);
     if (c && c.f) {
@@ -209,7 +210,7 @@ PM.ev = (L: any, key: any, T: any) => {
   const tl = T - L.from;
   if (!prop.expr) {
     PM.expressionErrors.delete(prop);
-    return prop.kf?.length ? evalKfs(prop.kf, tl, key === 'c.color' || key === 'c.strokeColor') : prop.v;
+    return prop.kf?.length ? evalKfs(prop.kf, tl, colorChannel(key)) : prop.v;
   }
   const comp = PM.curComp();
   return evalProp(prop, tl, {
@@ -221,7 +222,7 @@ PM.evP = (L: any, prop: any, T: any, key: any) => {
   if (!prop || typeof prop !== 'object') return null;
   if (!prop.expr) {
     PM.expressionErrors.delete(prop);
-    return prop.kf?.length ? evalKfs(prop.kf, T - L.from, key === 'c.color' || key === 'c.strokeColor') : prop.v;
+    return prop.kf?.length ? evalKfs(prop.kf, T - L.from, colorChannel(key)) : prop.v;
   }
   const comp = PM.curComp();
   return evalProp(prop, T - L.from, {
@@ -533,7 +534,7 @@ PM.allProps = (L: any) => {
   return out;
 };
 PM.findProp = (L: any, key: any) => {
-  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
+  if (/^(?:m\.[^.]+$|mi\.|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

@@ -1,4 +1,4 @@
-import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {layerMaterialMaps} from '../../core/scene3d/material-maps';
 import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { useVideo } from './video-residency';
 import { captureAborted, seekVideoFrame, VideoFrameDecodeError, withCaptureSignal } from './video-frame-decode';
@@ -205,7 +205,7 @@ export async function prepareFrame(PM:any,time:number,project=PM.proj,options: F
   const cancelled = () => !!options.signal?.aborted || PM.Export?.busy && PM.Export.cancel || inputs && (PM.proj!==ownerProject || PM.GL?.gl!==ownerContext || PM.GL?.contextLost);
   if (cancelled()) throw new EffectInputError('Layer input frame preparation cancelled');
   const requests:VideoRequest[]=[];
-  const visit=(comp:any,t:number,depth:number)=>{
+  const visit=(comp:any,t:number,depth:number,sourceLayerId?:string)=>{
     if(depth>8)throw new Error('Composition nesting is too deep');
     PM.scope.push(comp);
     try{
@@ -213,14 +213,15 @@ export async function prepareFrame(PM:any,time:number,project=PM.proj,options: F
         ?layerInputPlan(comp,{definition:(fx:any)=>PM.effectDef?.(fx),enabled:(l:any,fx:any)=>!!evaluatedValue(PM,l,fx.on,t,`${fx.id}.$enabled`),
           active:(l:any)=>!!PM.active(l,t),contentActive:(l:any)=>!!PM.active({...l,group:null},t)}).layerIds:new Set();
       for(const layer of comp.layers){
-        const materialComps=layerCompositionIds(layer);
-        if(layer.type!=='video' && layer.type!=='precomp' && !materialComps.length)continue;
-        if(!PM.active(layer,t) && !(required.has(layer.id) && t>=layer.from-1e-6 && t<layer.from+layer.dur-1e-6))continue;
+        const materialMaps=layerMaterialMaps(layer).filter(map=>typeof map==='object');
+        if(sourceLayerId && layer.id!==sourceLayerId && !required.has(layer.id))continue;
+        if(layer.type!=='video' && layer.type!=='precomp' && !materialMaps.length)continue;
+        if(!PM.active(layer,t) && !((required.has(layer.id) || layer.id===sourceLayerId) && t>=layer.from-1e-6 && t<layer.from+layer.dur-1e-6))continue;
         if(layer.type==='video'){
           const asset=PM.assets.get(layer.d.asset);
           if(asset?.el)requests.push({layer,asset,time:t,at:videoPlaybackTime(asset,sourceTime(PM,layer,t),1/project.fps)});
-        }else if(materialComps.length){
-          for(const id of materialComps){const sample=materialCompositionSample(PM,layer,{compositionId:id},t);if(sample)visit(sample.comp,sample.time,depth+1);}
+        }else if(materialMaps.length){
+          for(const map of materialMaps){const sample=materialCompositionSample(PM,layer,map,t);if(sample)visit(sample.comp,sample.time,depth+1,sample.sourceLayerId);}
         }else if(layer.type==='precomp'){
           const sub=comp.comps?.[layer.d.comp] || project.comps?.[layer.d.comp];
           if(sub)visit(sub,sourceTime(PM,layer,t),depth+1);

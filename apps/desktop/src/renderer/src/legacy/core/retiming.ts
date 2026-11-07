@@ -6,7 +6,7 @@ const integrals=new WeakMap<object,{version:number;step:number;sums:number[]}>()
 /** One source-time mapping for playback, seeking, nested comps and export. */
 export function sourceTime(PM: any, layer: any, time: number): number {
   const d=resolveContent(PM,layer,time), local=time-layer.from;
-  if (d.timeRemap && isProperty(layer.d.sourceTime)) return Number(PM.evP(layer,layer.d.sourceTime,time,'c.sourceTime')) || 0;
+  if (d.timeRemap && d.sourceTime != null) return Number(d.sourceTime) || 0;
   const speed=layer.d.speed;
   if (!isProperty(speed) || (!speed.kf.length && !speed.expr)) return local*Number(d.speed ?? 1)+Number(d.trim || 0);
   // Integrate a varying playback rate; changing a rate must not move all elapsed time.

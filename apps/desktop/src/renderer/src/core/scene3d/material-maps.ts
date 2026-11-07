@@ -1,19 +1,36 @@
-/** Image IDs retain the existing project format; composition maps are explicit. */
-export type MaterialMap = string | {compositionId:string};
+/** Asset IDs retain the old format. Layer links are local to their receiver's composition. */
+export type MaterialMap = string | {compositionId:string} | {layerId:string};
 export const MATERIAL_SLOTS = ['color','normal','roughness','metalness','emissive','ao'] as const;
 export type MaterialSlot = typeof MATERIAL_SLOTS[number];
 export type MaterialMaps = Partial<Record<MaterialSlot,MaterialMap>>;
 export interface SourceMaterialInfo {index:number;name:string;slots:MaterialSlot[];maps:MaterialMaps}
-
+export type MaterialSourceGroup = 'Comps'|'Footage'|'Solids'|'Text & Shapes';
+export interface MaterialSourceLayer {id:string;name:string;type:string;group:MaterialSourceGroup}
+export interface MaterialLayerLink {materialIndex:number|null;slot:MaterialSlot;layerId:string;status:'ready'|'missing'|'ineligible'|'cycle'}
+const sourceGroups:Record<string,MaterialSourceGroup>={precomp:'Comps',image:'Footage',video:'Footage',solid:'Solids',text:'Text & Shapes',shape:'Text & Shapes'};
+export function materialSourceEligible(layer:any):boolean {return !!sourceGroups[layer?.type] && !layer?.d?.data?.object;}
+/** Generated geometry supplies UVs; custom and imported meshes must own them. */
+export function materialReceiverHasUVs(PM:any,layer:any):boolean {
+  const source=layer?.d?.data?.object?.source;
+  if(!source)return false;
+  if(source.mesh)return !!source.mesh.uvs?.length;
+  if(source.assetId){
+    const asset=PM.assets?.get?.(source.assetId);
+    if(asset?.object3d){let hasUV=false;asset.object3d.traverse((mesh:any)=>{if(mesh.isMesh && mesh.geometry?.getAttribute('uv'))hasUV=true;});return hasUV;}
+    if(asset?.mesh)return !!asset.mesh.texcoords?.length;
+  }
+  return true;
+}
 export function objectMapSets(object:any):MaterialMaps[] {
   return [object?.material?.maps || {},...Object.values<MaterialMaps>(object?.sourceMaterials || {})];
 }
+export function layerMaterialMaps(layer:any):MaterialMap[] {
+  const objects=layer?.d?.data?.scene?.objects || (layer?.d?.data?.object?[layer.d.data.object]:[]);
+  return objects.flatMap((object:any)=>objectMapSets(object).flatMap(maps=>Object.values(maps)));
+}
 export function mapImageId(map:MaterialMap|undefined):string|undefined {return typeof map==='string'?map:undefined;}
 export function layerCompositionIds(layer:any):string[] {
-  if(!layer?.d?.data?.object && !layer?.d?.data?.scene?.objects)return [];
-  const objects=layer.d.data.scene?.objects || [layer.d.data.object];
-  return [...new Set<string>(objects.flatMap((object:any)=>objectMapSets(object).flatMap(maps=>
-    Object.values(maps).flatMap(map=>map && typeof map==='object'?[map.compositionId]:[]))))];
+  return [...new Set(layerMaterialMaps(layer).flatMap(map=>typeof map==='object' && 'compositionId' in map?[map.compositionId]:[]))];
 }
 export function compositionDependencies(comp:any):string[] {
   return [...new Set<string>((comp?.layers || []).flatMap((layer:any)=>[
@@ -25,33 +42,97 @@ export function projectCompositions(project:any):any[] {
 export function compositionById(project:any,id:string):any {
   return id===(project.compId || project.id)?project:project.comps?.[id];
 }
+export function materialOwner(project:any,layerId:string):any {
+  return projectCompositions(project).find(comp=>comp.layers?.some((layer:any)=>layer.id===layerId));
+}
 export function compositionContains(project:any,ancestor:string,target:string):boolean {
   const queue=[ancestor],seen=new Set<string>();
   while(queue.length){const id=queue.pop()!;if(id===target)return true;if(seen.has(id))continue;seen.add(id);
     queue.push(...compositionDependencies(compositionById(project,id)));}
   return false;
 }
+/** A shared graph catches layer -> precomp -> comp-material -> receiver loops,
+ * including effect/matte providers used when rasterizing the source layer. */
+function materialGraph(project:any):Map<string,string[]> {
+  const graph=new Map<string,string[]>();
+  for(const comp of projectCompositions(project)){
+    const key=(id:string)=>JSON.stringify(['layer',comp.id,id]);
+    graph.set(JSON.stringify(['comp',comp.id]),(comp.layers || []).map((l:any)=>key(l.id)));
+    const ids=new Set((comp.layers || []).map((l:any)=>l.id));
+    for(const layer of comp.layers || []){
+      const deps:string[]=[];
+      if(layer.type==='precomp' && layer.d?.comp)deps.push(JSON.stringify(['comp',layer.d.comp]));
+      for(const map of layerMaterialMaps(layer))if(typeof map==='object'){
+        if('compositionId' in map)deps.push(JSON.stringify(['comp',map.compositionId]));
+        else if(ids.has(map.layerId))deps.push(key(map.layerId));
+      }
+      // Source-space materials include masks and effects; their providers also
+      // belong to the graph, even if currently hidden or disabled.
+      for(const fx of layer.fx || [])for(const ref of Object.values<any>(fx.inputs || {}))
+        if(ref?.layerId && ids.has(ref.layerId) && ref.layerId!==layer.id)deps.push(key(ref.layerId));
+      if(layer.matteSource && ids.has(layer.matteSource))deps.push(key(layer.matteSource));
+      graph.set(key(layer.id),deps);
+    }
+  }
+  return graph;
+}
+function reaches(graph:Map<string,string[]>,start:string,target:string):boolean {
+  const pending=[start],seen=new Set<string>();
+  while(pending.length){const key=pending.pop()!;if(key===target)return true;if(seen.has(key))continue;seen.add(key);pending.push(...graph.get(key) || []);}
+  return false;
+}
+export function materialLayerStatus(project:any,receiverId:string,sourceId:string):MaterialLayerLink['status'] {
+  const owner=materialOwner(project,receiverId),source=owner?.layers?.find((l:any)=>l.id===sourceId);
+  if(!source)return 'missing';
+  if(sourceId===receiverId)return 'cycle';
+  if(!materialSourceEligible(source))return 'ineligible';
+  const key=(id:string)=>JSON.stringify(['layer',owner.id,id]);
+  return reaches(materialGraph(project),key(sourceId),key(receiverId))?'cycle':'ready';
+}
+export function listEligibleMaterialLayers(PM:any,receiverId:string):{group:MaterialSourceGroup;layers:MaterialSourceLayer[]}[] {
+  const owner=materialOwner(PM.proj,receiverId),receiver=owner?.layers.find((l:any)=>l.id===receiverId);
+  if(!materialReceiverHasUVs(PM,receiver))return [];
+  const groups:MaterialSourceGroup[]=['Comps','Footage','Solids','Text & Shapes'];
+  return groups.map(group=>({group,layers:(owner.layers || []).filter((layer:any)=>sourceGroups[layer.type]===group && materialLayerStatus(PM.proj,receiverId,layer.id)==='ready')
+    .map((layer:any)=>({id:layer.id,name:layer.name,type:layer.type,group}))}));
+}
+export function materialLayerLinks(PM:any,receiverId:string):MaterialLayerLink[] {
+  const object=materialOwner(PM.proj,receiverId)?.layers.find((l:any)=>l.id===receiverId)?.d?.data?.object;
+  const sets:[number|null,MaterialMaps][]=[[null,object?.material?.maps || {}],...Object.entries<MaterialMaps>(object?.sourceMaterials || {}).map(([index,maps]):[number,MaterialMaps]=>[Number(index),maps])];
+  return sets.flatMap(([materialIndex,maps])=>Object.entries(maps).flatMap(([slot,map])=>typeof map==='object' && 'layerId' in map
+    ?[{materialIndex,slot:slot as MaterialSlot,layerId:map.layerId,status:materialLayerStatus(PM.proj,receiverId,map.layerId)}]:[]));
+}
+export function remapMaterialLayerLinks(layer:any,ids:ReadonlyMap<string,string>):void {
+  for(const map of layerMaterialMaps(layer))if(typeof map==='object' && 'layerId' in map && ids.has(map.layerId))map.layerId=ids.get(map.layerId)!;
+}
 export function listValidMaterialCompositions(PM:any,layerId:string):{id:string;name:string;w:number;h:number;fps:number;dur:number}[] {
-  const comps=projectCompositions(PM.proj),owner=comps.find(comp=>comp.layers?.some((layer:any)=>layer.id===layerId));
+  const comps=projectCompositions(PM.proj),owner=materialOwner(PM.proj,layerId);
   if(!owner)return [];
   return comps.filter(comp=>comp.id && !compositionContains(PM.proj,comp.id,owner.id))
     .map(({id,name,w,h,fps,dur})=>({id,name,w,h,fps,dur}));
 }
-/** Missing comps are allowed on reopen/delete; live references must form a DAG. */
+/** Missing links stay serialized and are flagged by the API; rendering falls
+ * back to the original slot. Undoing deletion can therefore restore the link. */
 export function validateCompositionMaps(project:any):void {
-  const done=new Set<string>(),visiting=new Set<string>();
+  const graph=materialGraph(project),done=new Set<string>(),visiting=new Set<string>();
   const visit=(id:string)=>{
     if(visiting.has(id))throw new Error('Composition material reference would create a cycle');
     if(done.has(id))return;
-    const comp=compositionById(project,id);if(!comp)return;
-    visiting.add(id);for(const child of compositionDependencies(comp))visit(child);visiting.delete(id);done.add(id);
+    visiting.add(id);for(const child of compositionDependencies(compositionById(project,id)))visit(child);visiting.delete(id);done.add(id);
   };
   for(const comp of projectCompositions(project))if(comp.id)visit(comp.id);
+  for(const comp of projectCompositions(project))for(const layer of comp.layers || [])for(const map of layerMaterialMaps(layer))if(typeof map==='object'){
+    const receiver=JSON.stringify(['layer',comp.id,layer.id]);
+    const source='layerId' in map?JSON.stringify(['layer',comp.id,map.layerId]):JSON.stringify(['comp',map.compositionId]);
+    if(reaches(graph,source,receiver))throw new Error('Composition or layer material reference would create a cycle');
+  }
+  for(const comp of projectCompositions(project))for(const layer of comp.layers || [])for(const map of layerMaterialMaps(layer))
+    if(typeof map==='object' && 'layerId' in map){const source=comp.layers.find((l:any)=>l.id===map.layerId);if(source && !materialSourceEligible(source))throw new Error('Layer material source must be a precomp, solid, image, video, text or shape');}
 }
 export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   const layer=PM.L?.(layerId),object=layer?.d?.data?.object;
   if(!object)return [];
   const asset=object.source?.assetId && PM.assets?.get?.(object.source.assetId);
-  return (asset?.materials || []).map((material:any)=>({index:material.index,name:material.name,
+  return (asset?.materials || (!object.source?.assetId?[{index:0,name:'Material'}]:[])).map((material:any)=>({index:material.index,name:material.name,
     slots:[...MATERIAL_SLOTS],maps:{...(object.sourceMaterials?.[material.index] || {})}}));
 }

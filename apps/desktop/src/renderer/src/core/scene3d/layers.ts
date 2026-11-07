@@ -47,9 +47,13 @@ export function layer3DProperties(layer: any): any[] {
   const out:any[]=[];
   const collect=(p:any,prefix:string,group:string)=>{
     for(const [key,prop] of Object.entries<any>(p || {})) if(prop && Array.isArray(prop.kf))
-      out.push({key:`${prefix}.${key}`,prop,label:key,group});
+      out.push({key:`${prefix}.${key}`,prop,label:({opacity:'Opacity',roughness:'Roughness',metallic:'Metallic',emissionColor:'Emission Color',emissionIntensity:'Emission Intensity',ambientResponse:'Ambient Response'} as Record<string,string>)[key] || key,group});
   };
-  if(role==='object')collect(data.object?.material?.p,'m','Material');
+  if(role==='object'){
+    collect(data.object?.material?.p,'m','Material');
+    collect(data.object?.materialProperties,'mi','Material');
+    for(const [index,p] of Object.entries(data.object?.sourceMaterialProperties || {}))collect(p,`mi.${index}`,`Material ${index}`);
+  }
   if(role==='light')collect(data.light?.p,'light','Light');
   if(role==='camera'){collect(data.camera?.p,'camera','Camera');collect(data.environment?.p,'environment','Environment');}
   return out;
@@ -108,7 +112,9 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     // Native orientation is applied before the separately animated rotation.
     for(const [key,axis] of [['rx','x'],['ry','y'],['rz','z']] as const) if(layer.p[`orientation.${axis}`])p[key]!.v+=ev(layer,layer.p[`orientation.${axis}`],`orientation.${axis}`);
     return {...node,id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
-      material:{...node.material,p:values(layer,node.material.p,'m')}};
+      material:{...node.material,p:values(layer,node.material.p,'m')},
+      materialProperties:values(layer,node.materialProperties,'mi'),
+      sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)]))};
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);

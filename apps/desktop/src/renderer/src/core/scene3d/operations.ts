@@ -1,11 +1,13 @@
-import { MATERIAL_SLOTS,compositionById } from './material-maps';
+import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
+import { intrinsicPropertiesSchema } from './schema';
+import { MATERIAL_SLOTS,compositionById,materialLayerStatus,listModelMaterials,materialReceiverHasUVs } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map';
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties';
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -115,22 +117,49 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     case 'set_material_map':{
       if(role!=='object')throw new Error('Choose a model layer');
       if(!args.slot || !MATERIAL_SLOTS.includes(args.slot))throw new Error('Choose a material map slot');
-      if(args.map && typeof args.map==='object' && !compositionById(PM.proj,args.map.compositionId))throw new Error('Composition is unavailable');
+      if(args.map && typeof args.map==='object'){
+        if('compositionId' in args.map && !compositionById(PM.proj,args.map.compositionId))throw new Error('Composition is unavailable');
+        if('layerId' in args.map){
+          const status=materialLayerStatus(PM.proj,layer.id,args.map.layerId);
+          if(status==='cycle')throw new Error('Layer material reference would create a cycle');
+          if(status!=='ready')throw new Error('Choose an eligible source layer in the same composition');
+          if(!materialReceiverHasUVs(PM,layer))throw new Error('This mesh needs UV coordinates to receive a layer material');
+        }
+      }
       let maps=content.object.material.maps;
       if(args.materialIndex!=null){
         if(!Number.isInteger(args.materialIndex) || args.materialIndex<0)throw new Error('Invalid source material index');
-        const asset=PM.assets?.get?.(content.object.source.assetId);
-        if(args.map!=null && !asset?.materials?.some((material:any)=>material.index===args.materialIndex))throw new Error('Source material is unavailable');
+        if(args.map!=null && !listModelMaterials(PM,layer.id).some(material=>material.index===args.materialIndex))throw new Error('Source material is unavailable');
         content.object.sourceMaterials ||= {};
         maps=content.object.sourceMaterials[args.materialIndex] ||= {};
-        content.object.useSourceMaterials=true;
+        if(content.object.source.assetId)content.object.useSourceMaterials=true;
       }
       if(args.map==null)delete maps[args.slot];else maps[args.slot]=clone(args.map);
       if(args.materialIndex!=null && !Object.keys(maps).length)delete content.object.sourceMaterials[args.materialIndex];
-      if(args.materialIndex==null && args.map!=null)content.object.useSourceMaterials=false;
       break;
     }
 
+    case 'set_material_properties':{
+      if(role!=='object')throw new Error('Choose a model layer');
+      const index=args.materialIndex ?? null;
+      if(index!=null && (!Number.isInteger(index) || !listModelMaterials(PM,layer.id).some(material=>material.index===index)))throw new Error('Source material is unavailable');
+      if(Object.keys(patch).some(key=>!Object.hasOwn(intrinsicPropertiesSchema.shape,key)))throw new Error('Unknown intrinsic material property');
+      const current=readMaterialProperties(PM,layer.id,index)!;
+      const props=index==null?(content.object.materialProperties ||= {}):((content.object.sourceMaterialProperties ||= {})[index] ||= {});
+      for(const [key,value] of Object.entries<any>(patch)){
+        const path=materialPropertyPath(index,key as MaterialProperty);
+        if(value===null){delete props[key];continue;}
+        intrinsicPropertiesSchema.shape[key as MaterialProperty]!.unwrap().parse(value);
+        // Install a baseline before crossing the ordinary property edit boundary.
+        if(!props[key])props[key]={v:current.values[key as MaterialProperty],kf:[],expr:null};
+        if(typeof value==='object'){
+          commands.push({type:'set_property',target:layer.id,path,value:value.v,mode:'value'});
+          commands.push({type:'replace_keyframes',target:layer.id,path,keyframes:(value.kf || []).map((k:any)=>({time:k.t,value:k.v,ease:k.ease || 'linear',hold:k.hold || false})),expression:value.expr || null});
+        }else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
+      }
+      if(index!=null && !Object.keys(props).length)delete content.object.sourceMaterialProperties[index];
+      break;
+    }
     case 'remove':
       if(meta.origin==='agent' && Object.keys(layer.locked_intent || {}).length)throw new Error('Preserved hand-edited 3D layer');
       commands.push({type:'delete_layers',targets:[layer.id]});break;

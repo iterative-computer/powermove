@@ -1,3 +1,4 @@
+import { applyMaterialProperties } from './material-properties';
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { type MaterialMap } from './material-maps';
@@ -77,8 +78,8 @@ export class SceneRuntime {
   private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null): THREE.Texture|null {
     if (!id) return null;
     if(typeof id==='object'){
-      const frame=this.compositionGetter(objectId,id);if(!frame){this.warnings.push(`Missing composition texture: ${id.compositionId}`);return null;}
-      const key=`comp:${objectId}:${id.compositionId}:${imported}:${binding}`;this.usedTextures.add(key);
+      const frame=this.compositionGetter(objectId,id);if(!frame){this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
+      const key=`comp:${objectId}:${JSON.stringify(id)}:${imported}:${binding}`;this.usedTextures.add(key);
       let entry=this.textures.get(key);
       if(!entry){
         const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
@@ -86,7 +87,7 @@ export class SceneRuntime {
         texture.minFilter=THREE.LinearFilter;texture.magFilter=THREE.LinearFilter;
         entry={source:null,texture};this.textures.set(key,entry);
       }
-      if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.source=frame;}
+      if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.texture.userData.materialHasAlpha='layerId' in id && frame.hasAlpha;entry.source=frame;}
       this.textureCoordinates(entry.texture,original);return entry.texture;
     }
     const asset = this.getter(id),source = asset?.el || asset?.bitmap;
@@ -169,6 +170,8 @@ export class SceneRuntime {
       object.position.set(v.x,v.y,v.z);object.rotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'XYZ');
       object.scale.set(v.sx,v.sy,v.sz);object.visible=v.visible !== false;
       const m = values(node.material.p,`o.${node.id}.m`), maps=node.material.maps;
+      const intrinsic=values(node.materialProperties,`o.${node.id}.mi`);
+      const properties=(index:number)=>({...intrinsic,...values(node.sourceMaterialProperties?.[index],`o.${node.id}.mi.${index}`)});
       this.traverseOwned(object,(c:any)=>{
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
@@ -179,20 +182,21 @@ export class SceneRuntime {
             if(material.isMeshBasicMaterial){
               // glTF unlit screens already emit their full colour. Treat an
               // emissive override as that same self-lit map without relighting it.
-              const original=material.userData.originalMapState ||= {map:material.map,color:material.color.clone()};
-              const index=material.userData.sourceMaterialIndex,overrides=node.sourceMaterials?.[index] || {};
+              const original=material.userData.originalMapState ||= {map:material.map,color:material.color.clone(),opacity:material.opacity,transparent:material.transparent,depthWrite:material.depthWrite};
+              const index=material.userData.sourceMaterialIndex,overrides={...maps,...node.sourceMaterials?.[index]};
               const map=overrides.emissive || overrides.color;
               const texture=map?this.texture(map,true,node.id,true,`${index}:unlit`,original.map):null;
               if(material.map!==(texture || original.map)){material.map=texture || original.map;material.needsUpdate=true;}
               material.color.copy(texture?new THREE.Color(1,1,1):original.color);
+              applyMaterialProperties(material,properties(index),original);
               continue;
             }
             if(!material.isMeshStandardMaterial)continue;
             // Capture only original slot state; clear/delete restores the model exactly.
             const original=material.userData.originalMapState ||= {map:material.map,normalMap:material.normalMap,
               roughnessMap:material.roughnessMap,metalnessMap:material.metalnessMap,emissiveMap:material.emissiveMap,aoMap:material.aoMap,
-              color:material.color.clone(),emissive:material.emissive.clone(),emissiveIntensity:material.emissiveIntensity};
-            const overrides=node.sourceMaterials?.[material.userData.sourceMaterialIndex] || {};
+              color:material.color.clone(),emissive:material.emissive.clone(),emissiveIntensity:material.emissiveIntensity,roughness:material.roughness,metalness:material.metalness,opacity:material.opacity,transparent:material.transparent,depthWrite:material.depthWrite};
+            const overrides={...maps,...node.sourceMaterials?.[material.userData.sourceMaterialIndex]};
             for(const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
               ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const){
               const texture=overrides[key]?this.texture(overrides[key],isColor,node.id,true,`${material.userData.sourceMaterialIndex}:${key}`,original[slot]):null;
@@ -204,6 +208,7 @@ export class SceneRuntime {
                 material.emissiveIntensity=texture?Math.max(1,original.emissiveIntensity):original.emissiveIntensity;
               }
             }
+            applyMaterialProperties(material,properties(material.userData.sourceMaterialIndex),original);
           }
           return;
         }
@@ -219,9 +224,10 @@ export class SceneRuntime {
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
         for (const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
           ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const) {
-          const texture=this.texture(maps[key],isColor,node.id);
+          const texture=this.texture(node.sourceMaterials?.[0]?.[key] || maps[key],isColor,node.id);
           if (material[slot]!==texture) { material[slot]=texture;material.needsUpdate=true; }
         }
+        applyMaterialProperties(material,properties(0),{opacity:m.opacity,transparent:m.opacity<1,depthWrite:m.opacity>=1,roughness:m.roughness,metalness:m.metalness});
       });
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
     }

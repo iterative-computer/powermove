@@ -1,3 +1,4 @@
+import { sceneProperties } from '../../core/scene3d/schema';
 import { CHANNELS_3D } from './space-3d';
 import { normalizeColorDepth } from '../../core/color-depth';
 /* Ported from js/core/model.js — behavior-preserving. */
@@ -267,6 +268,7 @@ PM.cloneLayer = (L: any) => {
   (c.fx || []).forEach((fx: any) => { renew(fx.on); Object.values(fx.p || {}).forEach(renew); });
   (c.masks || []).forEach((mask: any) => Object.values(mask.p || {}).forEach(renew));
   Object.values(c.d || {}).forEach(renew);
+  sceneProperties(c).forEach(({prop}:any)=>renew(prop));
   renew(c.blend); renew(c.mblur); renew(c.on);
   (c.masks || []).forEach((mask: any) => { renew(mask.shape); renew(mask.mode); renew(mask.on); });
   Object.values(c.d?.uniforms || {}).forEach(renew);

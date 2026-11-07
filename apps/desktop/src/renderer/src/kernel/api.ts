@@ -366,6 +366,11 @@ export interface Scene3DAPI {
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
   lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
+  listEligibleSourceLayers(layerId:string):{group:import('../core/scene3d/material-maps').MaterialSourceGroup;layers:import('../core/scene3d/material-maps').MaterialSourceLayer[]}[];
+  materialLinks(layerId:string):import('../core/scene3d/material-maps').MaterialLayerLink[];
+  getMaterialProperties(layerId:string,materialIndex?:number|null,time?:number):import('../core/scene3d/material-properties').MaterialPropertyState|null;
+  setMaterialProperties(layerId:string,materialIndex:number|null,patch:import('../core/scene3d/material-properties').MaterialPropertyPatch,meta?:EditMeta):EditResult;
+  onMaterialsChange(listener:()=>void):Disposable;
   listValidCompositions(layerId:string):{id:string;name:string;w:number;h:number;fps:number;dur:number}[];
   /** null index = whole-model material; null map restores the original source slot. */
   setMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
@@ -1148,6 +1153,7 @@ export interface StorageAPI {
 /* ── events ──────────────────────────────────────────────── */
 
 export interface KernelEvents {
+  'scene3d:materials': {layerIds:string[]};
   'scene3d:selection': {layerId: string|null;ids: string[]};
   'inspector:changed': undefined;
   'project:changed': { kind: 'values' | 'structure' | 'project' | 'assets' | 'library' | 'history' | 'replace' };
