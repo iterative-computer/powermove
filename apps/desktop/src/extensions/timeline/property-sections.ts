@@ -11,6 +11,8 @@ export function propertySection(layer: any, row: { key: string; group?: string }
   const effects: any[] = Array.isArray(layer?.fx) ? layer.fx : [];
   const index = effects.findIndex((fx: any) => key.startsWith(fx.id + '.'));
   if (index >= 0) return { id: 'fx:' + effects[index].id, label: effectLabel(effects[index]), rank: 3 + index / 1000 };
+  // A 3D model's base material (m.roughness) is not a mask (m.<mask id>.<key>).
+  if (/^m\.[^.]+$/.test(key) && row.group === 'Material') return { id: 'material', label: 'Material', rank: 5 };
   if (key.startsWith('m.')) return { id: 'mask:' + (row.group || ''), label: row.group || 'Mask', rank: 4 };
   if (key.startsWith('l.')) return { id: 'layer', label: 'Layer', rank: 6 };
   return { id: 'other:' + (row.group || ''), label: row.group || 'Other', rank: 5 };

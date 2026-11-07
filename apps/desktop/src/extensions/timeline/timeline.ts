@@ -1,6 +1,7 @@
 import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMarker, timelineMarkerHit } from './markers';
 import { revealedProperties } from './property-reveal';
 import { sectionedPropertyRows } from './property-sections';
+import { hasMaterialRows, isMaterialPropKey, materialSectionRows, materialSourceMap, materialsService } from './material-rows';
 import { precompCarriesAudio } from './audio-presence';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
@@ -1082,7 +1083,11 @@ function buildRows() {
     rows.push({ kind: 'layer', L, i: sourceIndices.get(L), depth: ancestors.length });
     if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
-      for (const row of sectionedPropertyRows(L, props, effectLabel)) rows.push(row);
+      // A model's Material Options live in its Materials group instead.
+      const materials = query ? [] : materialSectionRows(api, L, materialOpen);
+      const generic = materials.length ? props.filter((p: any) => !isMaterialPropKey(p.key)) : props;
+      for (const row of sectionedPropertyRows(L, generic, effectLabel)) rows.push(row);
+      for (const row of materials) rows.push(row);
     }
   }
   T.rows = rows;
@@ -1093,6 +1098,14 @@ function buildRows() {
   rowsSearch = T.search;
   propertyLabelWidth = null;
   return rows;
+}
+/* Which of a model's materials are opened in the Materials group. */
+const openMaterials = new Set<string>();
+const materialOpen = (L: any, index: number | null) => openMaterials.has(`${L.id}:${index ?? 'all'}`);
+function toggleMaterialOpen(L: any, index: number | null) {
+  const key = `${L.id}:${index ?? 'all'}`;
+  if (!openMaterials.delete(key)) openMaterials.add(key);
+  rowsDirty = true; invalidate('timeline');
 }
 function visibleProps(L: any) {
   return revealedProperties(api, L, timelineProperties(api, L, space3d));
@@ -1106,7 +1119,7 @@ const effectLabel = (fx: any) => api.effects?.get?.(fx.type, fx.version ?? 1)?.l
 function layerDisclosable(r: any, fresh = false): boolean {
   if (r.L.type === 'group') return true;
   // A click asks afresh: a keyframe added a moment ago may predate the rebuild.
-  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0;
+  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0 || hasMaterialRows(api, r.L);
   return r.disclosable;
 }
 
@@ -2049,7 +2062,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       propertyReadouts.set(r, readout);
     }
     if (dynamicOnly) {
-      if (r.kind === 'heading') continue;
+      if (r.kind === 'heading' || r.kind === 'material') continue;
       if (r.kind === 'layer' && !animatedTimelineFlag(r.L.on) && !animatedTimelineFlag(r.L.mblur)) continue;
       c.fillStyle = theme.panel; c.fillRect(0, y, T.gut - 1, T.row);
     }
@@ -2088,7 +2101,10 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const audioX = embeddedAudioToggleX(L);
       const switches = rowSwitches(L);
       const nameRight = col.link - switchAreaWidth(L) - 4;
-      clipText(c, L.name, col.name + indent, iy, Math.max(0, nameRight - col.name - indent));
+      const receivers = materialSourceMap(api).get(L.id);
+      const badgeX = receivers ? materialBadgeX(L) : null;
+      clipText(c, L.name, col.name + indent, iy, Math.max(0, (badgeX != null ? badgeX - 10 : nameRight) - col.name - indent));
+      if (badgeX != null) icoMaterialBall(c, badgeX, iy, receivers!.some(id => api.selection.layers().includes(id)) || T.hoverBadge === i ? theme.accentIcon : theme.tx3);
       /* Link Layers: the pickwhip, then the parent's name or None. */
       if (hasParentControl) {
         const parent = L.parent ? api.model.layer(L.parent) : null;
@@ -2115,6 +2131,8 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       }
       /* embedded soundtrack: shown on hover/selection, and always while muted */
       if (audioX != null && (active || L.d.audioMuted === true)) icoSpeaker(c, audioX, iy, L.d.audioMuted !== true);
+    } else if (r.kind === 'material') {
+      drawMaterialRow(c, r, i, y);
     } else if (r.kind === 'heading') {
       /* Section label, as in the Properties panel, over its properties. */
       c.font = '500 11px ' + fui();
@@ -2317,7 +2335,7 @@ function gutterColumns() {
     propNav: 122, propStopwatch: 148.5, propLabel: 163, heading: 140,
   };
 }
-const PERCENT_PROPERTY = /(^|\.)opacity$/;
+const PERCENT_PROPERTY = /(^|\.)(opacity|ambientResponse)$/;
 function percentProperty(key: unknown): boolean { return PERCENT_PROPERTY.test(String(key ?? '')); }
 
 /* Layer switches, After Effects style, left of Link Layers in fixed slots:
@@ -2343,6 +2361,87 @@ function rowSwitches(L: any): RowSwitch[] {
   }
   if (L.type === 'precomp') out.push({ kind: 'raster', x: edge - SWITCH_WIDTH / 2, on: !!L.continuousRaster, label: 'Continuously rasterize' });
   return out;
+}
+/* ── Materials (Layers as Materials) ─────────────────────── */
+/** A layer used as a material wears a small ball badge left of its status dots. */
+function materialBadgeX(L: any): number {
+  const status = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
+  return gutterColumns().link - switchAreaWidth(L) - 4 - status - 4;
+}
+/** A material ball: a ring with its shaded side, as in material swatches. */
+function icoMaterialBall(c: any, x: number, y: number, color: string) {
+  c.save();
+  c.strokeStyle = color; c.fillStyle = color; c.lineWidth = 1.2;
+  c.beginPath(); c.arc(x, y, 5, 0, Math.PI * 2); c.stroke();
+  c.beginPath(); c.arc(x, y, 5, 0, Math.PI * 2); c.clip();
+  c.globalAlpha = .6;
+  c.beginPath(); c.arc(x, y, 5, 0, Math.PI * 2); c.arc(x - 1.9, y - 1.9, 4.6, 0, Math.PI * 2); c.fill('evenodd');
+  c.restore();
+}
+/** Pop-up button bounds on a material row, in canvas coordinates. */
+function materialPopup(y: number) {
+  const left = T.propertyValueX - 6, right = T.gut - 8, height = 20;
+  return { left, right, top: y + T.row / 2 - height / 2, height };
+}
+function drawMaterialRow(c: any, r: any, i: number, y: number) {
+  const col = gutterColumns(), iy = y + T.row / 2;
+  if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
+  c.textBaseline = 'middle';
+  if (r.entry) drawIcon(c, r.open ? 'chevD' : 'chev', col.propStopwatch, iy, 10, theme.tx2);
+  c.font = (r.entry ? '500 ' : '400 ') + '12px ' + fui();
+  c.fillStyle = r.entry ? theme.tx : theme.label;
+  const box = materialPopup(y);
+  clipText(c, r.label, col.propLabel, iy, box.left - col.propLabel - 8);
+  const service = materialsService(api);
+  const entry = service?.entries(r.L.id).find(item => item.index === r.index);
+  const info = service?.describe(r.L.id, r.index, r.slot, entry?.maps[r.slot as keyof typeof entry.maps]) ?? { label: 'Original', icon: null, status: 'original' };
+  const original = info.status === 'original', warn = !original && info.status !== 'ready';
+  const hovered = T.hoverRow === i && T.hoverX >= box.left;
+  c.fillStyle = hovered ? INK.tick : INK.over2;
+  roundRect(c, box.left, box.top, box.right - box.left, box.height, 5); c.fill();
+  if (warn) drawIcon(c, 'warning', box.left + 11, iy, 12, theme.accentText);
+  else if (original) icoMaterialBall(c, box.left + 11, iy, theme.tx4);
+  else if (info.icon) drawIcon(c, info.icon, box.left + 11, iy, 12, theme.tx2);
+  c.font = '400 11.5px ' + fui();
+  c.fillStyle = warn ? theme.accentText : original ? theme.tx3 : theme.tx;
+  clipText(c, warn ? `${info.label} · using original` : info.label, box.left + 22, iy, box.right - box.left - 22 - 16);
+  drawIcon(c, 'chevD', box.right - 9, iy, 8, theme.tx3);
+}
+function materialRowDown(r: any, x: number, index: number) {
+  const L = r.L;
+  if (!api.selection.layers().includes(L.id)) api.selection.select(L.id);
+  const box = materialPopup(rowY(index));
+  if (x >= box.left - 2) {
+    if (L.lock) return;
+    const rect = T.cv.getBoundingClientRect();
+    materialsService(api)?.openPicker({ left: rect.left + box.left, top: rect.top + box.top, bottom: rect.top + box.top + box.height, width: box.right - box.left },
+      { layerId: L.id, materialIndex: r.index, slot: r.slot });
+    return;
+  }
+  if (r.entry) toggleMaterialOpen(L, r.index);
+  else invalidate('timeline');
+}
+/** First edit of an inheriting Material Option installs it, then edits as usual. */
+function installVirtualProperty(r: any) {
+  materialsService(api)?.installProperty(r.L.id, r.virtual.index, r.virtual.key, r.prop.v);
+  rowsDirty = true;
+  buildRows();
+  return T.rows.find((row: any) => row.kind === 'prop' && row.L.id === r.L.id && row.key === r.key && !row.virtual) ?? null;
+}
+function virtualPropertyDown(e: any, r: any, x: number, index: number) {
+  api.selection.set({ chan: r.key });
+  if (!api.selection.layers().includes(r.L.id)) api.selection.select(r.L.id);
+  invalidate('timeline');
+  if (r.L.lock) return;
+  if (Math.abs(x - gutterColumns().propStopwatch) <= 9) {
+    materialsService(api)?.installProperty(r.L.id, r.virtual.index, r.virtual.key, r.prop.v, api.transport.time());
+    rowsDirty = true; invalidate();
+    return;
+  }
+  if (x >= T.propertyValueX - 4) {
+    const row = installVirtualProperty(r);
+    if (row) dragPropertyValue(e, row, T.rows.indexOf(row) >= 0 ? T.rows.indexOf(row) : index);
+  }
 }
 function rowSwitchAt(L: any, x: number): RowSwitch | null {
   return rowSwitches(L).find((item) => Math.abs(x - item.x) <= SWITCH_WIDTH / 2) ?? null;
@@ -2973,6 +3072,10 @@ function setHoverRow(index: number | null) {
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  // Material rows light their pop-up only under the pointer.
+  const overPopup = x >= T.propertyValueX - 8 && x < T.gut;
+  if (overPopup !== !!T.hoverPopup) { T.hoverPopup = overPopup; if (T.rows?.[T.hoverRow]?.kind === 'material') invalidate('timeline'); }
+  T.hoverX = x;
   if (onGutterEdge(x, y)) { T.cv.style.cursor = 'col-resize'; T.cv.title = 'Drag to resize the layer list'; return; }
   const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
   if (marker) {
@@ -3034,6 +3137,8 @@ function onMove(e: any) {
   const inGutter = x < T.gut && y >= T.ruler;
   const hit = inGutter ? hitRow(y) : null, row = hit?.row;
   const flip = row?.kind === 'layer' ? rowSwitchAt(row.L, x) : null;
+  const hoverBadge = row?.kind === 'layer' && materialSourceMap(api).get(row.L.id) && Math.abs(x - materialBadgeX(row.L)) <= 8 ? hit!.i : null;
+  if (hoverBadge !== (T.hoverBadge ?? null)) { T.hoverBadge = hoverBadge; invalidate('timeline'); }
   const hoverSwitch = flip && hit ? { row: hit.i, kind: flip.kind } : null;
   if (hoverSwitch?.row !== T.hoverSwitch?.row || hoverSwitch?.kind !== T.hoverSwitch?.kind) { T.hoverSwitch = hoverSwitch; invalidate('timeline'); }
   const audioX = row?.kind === 'layer' ? embeddedAudioToggleX(row.L) : null;
@@ -3044,6 +3149,17 @@ function onMove(e: any) {
     } else if (row?.kind === 'layer' && row.L.type === 'audio' && Math.abs(x - gutterColumns().eye) <= 10) {
       cur = 'pointer';
       title = evaluatedValue(row.L, row.L.on, api.transport.time(), 'l.on') ? 'Mute audio' : 'Unmute audio';
+    } else if (row?.kind === 'layer' && materialSourceMap(api).get(row.L.id) && Math.abs(x - materialBadgeX(row.L)) <= 8) {
+      cur = 'pointer';
+      const service = materialsService(api);
+      title = service ? service.usageTitle(service.usage(row.L.id), !evaluatedValue(row.L, row.L.on, api.transport.time(), 'l.on')) : 'Used as a material';
+    } else if (row?.kind === 'material') {
+      const valueHit = x >= T.propertyValueX - 4;
+      cur = valueHit || row.entry ? 'pointer' : 'default';
+      const info = materialsService(api)?.describe(row.L.id, row.index, row.slot, materialsService(api)?.entries(row.L.id).find(entry => entry.index === row.index)?.maps[row.slot as "color"]);
+      const slot = row.slot === 'color' ? 'Base Color' : 'Emissive';
+      title = valueHit ? `${row.materialName} ${slot}: ${info?.label ?? 'Original'} · Choose a layer, comp or image`
+        : row.entry ? `${row.open ? 'Hide' : 'Show'} ${row.materialName}’s Emissive source and Material Options` : '';
     } else if (flip) {
       cur = 'pointer';
       title = `${flip.label}: ${flip.on ? 'On' : 'Off'}`;
@@ -3121,7 +3237,7 @@ function onDown(e: any) {
   if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey });
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
-  if (r.kind === 'heading') return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (r.kind === 'heading' || r.kind === 'material') return marquee(e, { additive: e.shiftKey || e.metaKey });
   const L = r.L;
   const span = L.type === 'group' ? api.groups.span(L) : L;
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
@@ -3626,6 +3742,8 @@ function gutterDown(e: any, x: any, y: any) {
   if (!hr) { if (!e.shiftKey && !e.metaKey) clearTimelineSelection(); return; }
   const r = hr.row;
   if (r.kind === 'heading') return;
+  if (r.kind === 'material') { materialRowDown(r, x, hr.i); return; }
+  if (r.kind === 'prop' && r.virtual) { virtualPropertyDown(e, r, x, hr.i); return; }
   if (r.kind !== 'layer') {
     api.selection.set({ chan: r.key });
     T.focusGraph(r.L, r.key);
@@ -3653,6 +3771,13 @@ function gutterDown(e: any, x: any, y: any) {
   }
   const flip = rowSwitchAt(L, x);
   if (flip) { toggleRowSwitch(L, flip); return; }
+  const receivers = materialSourceMap(api).get(L.id);
+  if (receivers && Math.abs(x - materialBadgeX(L)) <= 8) {
+    // The badge jumps to the model that uses this layer as a material.
+    api.selection.select(receivers.filter(id => api.model.layer(id)));
+    invalidate('timeline');
+    return;
+  }
   const col = gutterColumns(), indent = Math.min(48, (r.depth || 0) * 12);
   if (layerSupportsTransform(L.type) && x >= col.link + 6) {
     const ids = api.selection.layers().includes(L.id) ? api.selection.layers() : [L.id];
@@ -4457,7 +4582,11 @@ function onDbl(e: any) {
   }
   if (x < T.gut && y > T.ruler) {
     const hr = hitRow(y);
-    if (hr?.row.kind === 'prop' && x >= T.propertyValueX - 4) { editPropertyValue(hr.row, hr.i, axisValueIndex(hr.row, x)); return; }
+    if (hr?.row.kind === 'prop' && x >= T.propertyValueX - 4) {
+      const row = hr.row.virtual ? installVirtualProperty(hr.row) : hr.row;
+      if (row) editPropertyValue(row, T.rows.indexOf(row), axisValueIndex(row, x));
+      return;
+    }
     /* Double-click opens what is inside a layer: a precomp's composition
        (AE). Any other layer's name renames in place. Enter renames any
        selected layer, precomps included (AE), as does Rename… in its menu.
