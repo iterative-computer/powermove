@@ -27,9 +27,11 @@ export function pasteFigma(PM: PMRegistry, event: ClipboardEvent): boolean {
     event.composedPath().some((t) => isFieldTarget(t) || selectableTextRoot(t as EventTarget))
   )
     return false;
+  // Some clipboard providers (and file-only pastes) expose files without getData.
   const data = event.clipboardData,
-    html = data?.getData('text/html') ?? '',
-    text = data?.getData('text/plain') ?? '';
+    read = (type: string) => (typeof data?.getData === 'function' ? data.getData(type) : '') ?? '',
+    html = read('text/html'),
+    text = read('text/plain');
   if (!html.includes('(figma)') && !text.startsWith(FIGMA_CLIPBOARD_PREFIX)) return false;
   event.preventDefault();
   const files = [

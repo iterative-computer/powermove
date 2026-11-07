@@ -137,6 +137,8 @@ describe('application menu', () => {
       'Save Project',
       'Save Project As…',
       'separator',
+      'Connect Figma…',
+      'Disconnect Figma',
       'Import Media…',
       'Import Image Sequence…',
       'Import Folder…',
@@ -152,6 +154,8 @@ describe('application menu', () => {
       'CommandOrControl+W',
       'CommandOrControl+S',
       'CommandOrControl+Shift+S',
+      undefined,
+      undefined,
       'CommandOrControl+I',
       undefined,
       undefined,
@@ -162,7 +166,7 @@ describe('application menu', () => {
       item.click?.({} as never, undefined, {} as never);
     }
     // Making and closing windows is main's own work, so neither reaches the renderer.
-    expect(sent).toEqual(['newProject', 'open', 'closeTab', 'save', 'saveAs', 'import', 'importSequence', 'importFolder', 'export']);
+    expect(sent).toEqual(['newProject', 'open', 'closeTab', 'save', 'saveAs', 'connectFigma', 'disconnectFigma', 'import', 'importSequence', 'importFolder', 'export']);
 
     const editItems = submenu(topLevel(template, 'Edit'));
     const undo = editItems.find((item) => item.label === 'Undo');
@@ -180,7 +184,7 @@ describe('application menu', () => {
     undo?.click?.({} as never, undefined, {} as never);
     redo?.click?.({} as never, undefined, {} as never);
     expect(sent).toEqual([
-      'newProject', 'open', 'closeTab', 'save', 'saveAs', 'import', 'importSequence', 'importFolder', 'export', 'contextUndo', 'contextRedo',
+      'newProject', 'open', 'closeTab', 'save', 'saveAs', 'connectFigma', 'disconnectFigma', 'import', 'importSequence', 'importFolder', 'export', 'contextUndo', 'contextRedo',
     ]);
     expect(editItems.filter((item) => item.role)).toEqual([]);
     const contextCommands = editItems.slice(3, 8);
