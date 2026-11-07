@@ -86,9 +86,11 @@ const validCommands: unknown[] = [
   { type: 'edit_captions', target: 'cap', op: 'split', id: 'c1', at: '2' },
 
   { type: 'simplify_keyframes', scope: 'properties', properties: [{ layerId: 'title', path: 'opacity' }] },
+  { type: 'apply_preset', target: 'a', preset: 'preset-1', time: 5 },
 ];
 
 const invalidCommands: unknown[] = [
+  { type: 'apply_preset', preset: '' },
   {type: 'group_layers', targets: []},
   {type: 'ungroup_layers', targets: [12]},
   {type: 'move_to_group', targets: ['a'], group: 12},
@@ -119,6 +121,7 @@ const invalidCommands: unknown[] = [
 
 const huge = 'x'.repeat(COMMAND_JSON_LIMIT + 1);
 const oversizedCommands: unknown[] = [
+  { type: 'apply_preset', preset: huge },
   { type: 'simplify_keyframes', scope: 'properties', properties: [{ layerId: 'title', path: huge }] },
   {type: 'group_layers', targets: [huge]},
   {type: 'ungroup_layers', targets: [huge]},
@@ -163,6 +166,7 @@ function exhaustivelyName(command: EditCommand): string {
     case 'add_layer': return command.type;
     case 'delete_layers': return command.type;
     case 'reorder_layer': return command.type;
+    case 'apply_preset': return command.type;
     case 'add_effect': return command.type;
     case 'remove_effect': return command.type;
     case 'set_effect': return command.type;

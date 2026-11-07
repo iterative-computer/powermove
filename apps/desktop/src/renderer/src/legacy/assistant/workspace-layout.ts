@@ -39,7 +39,7 @@ export function setPanelLayout(PM: PMRegistry, args: Record<string, unknown>) {
   }
   docks.sort((a, b) => DOCK_IDS.indexOf(a.id) - DOCK_IDS.indexOf(b.id));
   const before = PM.WS.historySnapshot();
-  const previousDefault = PM.store.get('defaultWorkspace', 'design');
+  const previousDefault = PM.store.get('defaultWorkspace', null);
   try {
     const created = PM.WS.create({ name: args.name.trim(), scope: 'global', projectId: null, hiddenPanels: [], sourceApp: args.sourceApp ?? null, layout: { docks } });
     PM.store.set('defaultWorkspace', created.id);

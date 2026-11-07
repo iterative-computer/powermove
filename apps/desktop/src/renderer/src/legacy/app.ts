@@ -1271,8 +1271,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   if (projectWorkspace) {
     if (JSON.stringify(projectWorkspace) !== JSON.stringify(PM.WS.snapshot())) PM.WS.restoreSnapshot(projectWorkspace);
   } else {
-    const preferred = PM.store.get('defaultWorkspace', 'design');
-    PM.WS.activate(PM.WS.get(preferred) ? preferred : 'design', true);
+    PM.WS.openForProject();
   }
   if (live) PM.hist.resume(live.history);
   else PM.hist.import?.(history ?? session?.history, prepared?.historyToken);

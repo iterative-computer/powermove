@@ -10,7 +10,7 @@ import { install as installTransitions } from '../gl/transitions';
 const OPERATIONS = [
   'set_property', 'replace_keyframes', 'simplify_keyframes', 'set_easing', 'set_expression',
   'set_content', 'set_layer', 'set_composition', 'add_layer',
-  'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect',
+  'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'apply_preset', 'remove_effect',
   'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'remove_marker', 'create_section',
   'update_section', 'transform_layers', 'add_captions', 'edit_captions',
 ];
@@ -31,7 +31,8 @@ const OPERATION_CONTRACT = {
     ungroup_layers: { target: 'project', fields: ['targets'] },
     move_to_group: { target: 'project', fields: ['targets', 'group'] },
 
-  add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
+  apply_preset: { target: 'layer', fields: ['preset', 'time'] },
+  add_effect: { target: 'layer', fields: ['effect', 'parameters', 'inputs'] },
   remove_effect: { target: 'layer', fields: ['effect'] },
   set_effect: { target: 'layer', fields: ['effect', 'patch'] },
   set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },

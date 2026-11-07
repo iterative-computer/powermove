@@ -34,7 +34,7 @@ const MAX_REPAIRS = 2;
 const SCENE_OPERATIONS = new Set([
   'set_property', 'replace_keyframes', 'simplify_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
-  'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
+  'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'apply_preset', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'remove_marker', 'create_section', 'update_section',
   'transform_layers', 'add_captions', 'edit_captions',
 ]);
@@ -53,6 +53,7 @@ const FIELDS: any = {
   ungroup_layers: ['type', 'targets'],
   move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
+  apply_preset: ['type', 'target', 'preset', 'time'],
   add_effect: ['type', 'target', 'effect', 'version', 'parameters', 'inputs', 'open'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],

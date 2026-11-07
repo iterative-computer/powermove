@@ -17,6 +17,7 @@ export const COMMAND_TYPES = [
   'ungroup_layers',
   'move_to_group',
   'add_effect',
+  'apply_preset',
   'remove_effect',
   'set_effect',
   'set_transition',
@@ -192,6 +193,12 @@ export interface DeleteLayersCommand extends LayerTargetedCommand {
 export interface ReorderLayerCommand extends LayerTargetedCommand {
   type: 'reorder_layer';
   index: number;
+}
+
+export interface ApplyPresetCommand extends LayerTargetedCommand {
+  type: 'apply_preset';
+  preset: string;
+  time?: number;
 }
 
 export interface AddEffectCommand extends LayerTargetedCommand {
@@ -375,6 +382,7 @@ export type EditCommand =
   | DeleteLayersCommand
   | ReorderLayerCommand
   | AddEffectCommand
+  | ApplyPresetCommand
   | RemoveEffectCommand
   | SetEffectCommand
   | SetTransitionCommand

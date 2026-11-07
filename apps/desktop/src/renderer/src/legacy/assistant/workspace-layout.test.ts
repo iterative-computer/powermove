@@ -38,7 +38,7 @@ describe('agent workspace arrangement', () => {
       { id: 'right', size: 320, panels: arrangement.docks[1]!.panels }
     ] } }));
     expect(PM.store.get('defaultWorkspace')).toBe('imported');
-    checkpoints[0].undo(); expect(getCurrent().id).toBe('original'); expect(PM.store.get('defaultWorkspace')).toBe('design');
+    checkpoints[0].undo(); expect(getCurrent().id).toBe('original'); expect(PM.store.get('defaultWorkspace', null)).toBe(null);
     checkpoints[0].redo(); expect(getCurrent().id).toBe('imported');
   });
   it('places Layer Effects below Media unless the arrangement already includes it', () => {

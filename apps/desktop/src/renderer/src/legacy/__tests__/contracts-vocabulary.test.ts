@@ -4,6 +4,7 @@ import { AGENT_COMMAND_TYPES, EDIT_COMMAND_TYPES } from '../../../../shared/edit
 import { makePM } from './make-pm';
 
 function harnessCommand(type: string): Record<string, unknown> {
+  if (type === 'apply_preset') return {type, preset: 'preset-contract'};
   if (type === 'replace_keyframes' || type === 'set_easing') {
     return { type, keyframes: [] };
   }
@@ -26,7 +27,7 @@ describe('agent edit vocabulary contract', () => {
       return cleaned.type;
     });
 
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(26);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(27);
     expect(harnessOperations).toEqual([...AGENT_COMMAND_TYPES]);
     expect(Object.keys(PM.Edit.operations)).toEqual([...EDIT_COMMAND_TYPES]);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
