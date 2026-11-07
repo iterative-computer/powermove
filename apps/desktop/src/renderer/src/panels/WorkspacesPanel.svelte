@@ -1,7 +1,7 @@
 <script lang="ts">
   import { doc } from '../state/document.svelte';
   import Icon from './Icon.svelte';
-  import { workspaceManageItems } from '../shell/workspace-actions';
+  import { deleteWorkspace, workspaceManageItems, workspaceStatus } from '../shell/workspace-actions';
   import type { PanelProps } from './registerSveltePanel';
 
   interface Workspace {
@@ -21,6 +21,9 @@
     doc.proj;
     return {
       workspaces: [...((PM.WS.all ?? []) as Workspace[])],
+      /* Live layout differs from what Reset returns to: says “Edited”, as a
+         document's title does before it is saved. */
+      edited: new Set(((PM.WS.all ?? []) as Workspace[]).filter((workspace) => workspaceStatus(PM, workspace.id).changed).map((workspace) => workspace.id)),
       currentId: PM.WS.current?.id as string | undefined,
       defaultId: (PM.WS.defaultId?.() ?? null) as string | null
     };
@@ -48,15 +51,8 @@
 
   function remove(event: MouseEvent, workspace: Workspace): void {
     event.stopPropagation();
-    void PM.confirm?.({
-      message: `Delete “${workspace.name}” workspace?`,
-      detail: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
-      confirmLabel: 'Delete Workspace'
-    })?.then((ok: boolean) => {
-      if (!ok) return;
-      PM.WS.remove(workspace.id);
-      status = `Deleted ${workspace.name}`;
-    });
+    // The same confirm and Undo toast as the titlebar menu's Delete Workspace….
+    void deleteWorkspace(PM, workspace.id).then((ok) => { if (ok) status = `Deleted ${workspace.name}`; });
   }
 
   /* Right-click a workspace for the same commands as the titlebar menu. */
@@ -87,7 +83,8 @@
         onclick={() => activate(workspace)}
       >
         <span class="nm" title={workspace.name}>{workspace.name}</span>
-        {#if workspace.id === model.defaultId}<span class="ws-default" title="New windows and projects open in this workspace">Default</span>{/if}
+        {#if model.edited.has(workspace.id)}<span class="ws-meta ws-edited" title="The layout has changed since it was saved. Right-click to save the changes or reset.">Edited</span>{/if}
+        {#if workspace.id === model.defaultId}<span class="ws-meta ws-default" title="New windows and projects open in this workspace">Default</span>{/if}
       </button>
       {#if !workspace.builtin}
         <button class="stopwatch" type="button" aria-label={`Delete ${workspace.name}`} title={`Delete ${workspace.name} workspace`} onclick={(event) => remove(event, workspace)}>
@@ -112,10 +109,11 @@
 
 <style>
   /* Meta sits right, quiet, as in the other simple list panels. */
-  .ws-default {
+  .ws-meta {
     flex: none;
-    margin-left: auto;
     color: var(--tx-3);
     font-size: var(--fs-xs);
   }
+  .ws-meta:first-of-type { margin-left: auto; }
+  .ws-edited + .ws-default::before { content: '·'; margin-right: 4px; }
 </style>

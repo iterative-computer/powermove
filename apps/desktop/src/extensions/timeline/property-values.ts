@@ -1,3 +1,4 @@
+import { extrusionMetadata } from './extrusion-rows';
 import type { PowermoveAPI } from 'powermove';
 
 function shaderUniforms(code: unknown): Array<{ name: string; min?: number; max?: number }> {
@@ -18,6 +19,8 @@ function shaderUniforms(code: unknown): Array<{ name: string; min?: number; max?
 export function propertyMetadata(api: Pick<PowermoveAPI, 'effects' | 'model'>, layer: any, path: string): any {
   if (api.model.CH?.[path]) return api.model.CH[path];
   if (path.startsWith('x.')) return api.model.layerDefinition?.(layer.d?.definition)?.params?.find((p: any) => p.k === path.slice(2)) ?? {};
+  const extrusion = extrusionMetadata(path);
+  if (extrusion) return extrusion;
   if (path.startsWith('u.')) return shaderUniforms(layer.d?.code).find((property) => property.name === path.slice(2)) ?? {};
   const effect = layer.fx?.find((fx: any) => path.startsWith(`${fx.id}.`));
   if (effect) return api.effects.get(effect.type, effect.version ?? 1)?.params.find((property) => property.k === path.slice(effect.id.length + 1)) ?? {};

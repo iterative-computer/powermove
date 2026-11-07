@@ -1,3 +1,4 @@
+import { extrusionProperties } from './extrusion-data';
 import { objectMapSets,mapImageId } from './material-maps';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
 
@@ -15,6 +16,12 @@ export function isModelGroup(PM:any,layer:any):boolean {
   const members=(PM.curComp?.() || PM.proj)?.layers?.filter((child:any)=>child.type!=='group' && child.type!=='audio'
     && (PM.groupAncestors?.(child) || []).some((group:any)=>group.id===layer.id)) || [];
   return members.length>0 && members.every((child:any)=>!!layer3DRole(child));
+}
+/** Timeline/inspector names for a part's channels. */
+export const PART_LABELS:Record<string,string>={x:'Position X',y:'Position Y',z:'Position Z',rx:'X Rotation',ry:'Y Rotation',rz:'Z Rotation',scale:'Scale',visible:'Visible'};
+/** Model-only groups cannot flatten their contents, just like models themselves. */
+export function isAlways3DLayer(PM:any,layer:any):boolean {
+  return !!layer3DRole(layer) || isModelGroup(PM,layer);
 }
 export const TRANSFORM_PATHS: Record<string,string> = {x:'position.x',y:'position.y',z:'position.z',rx:'rotation.x',ry:'rotation.y',rz:'rotation',sx:'scale.x',sy:'scale.y',sz:'scale.z'};
 const clone = (v:any) => JSON.parse(JSON.stringify(v));
@@ -43,7 +50,7 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
 }
 export function layer3DProperties(layer: any): any[] {
   const role=layer3DRole(layer),data=layer?.d?.data;
-  if(!role)return [];
+  if(!role)return extrusionProperties(layer);
   const out:any[]=[];
   const collect=(p:any,prefix:string,group:string)=>{
     for(const [key,prop] of Object.entries<any>(p || {})) if(prop && Array.isArray(prop.kf))
@@ -53,6 +60,8 @@ export function layer3DProperties(layer: any): any[] {
     collect(data.object?.material?.p,'m','Material');
     collect(data.object?.materialProperties,'mi','Material');
     for(const [index,p] of Object.entries(data.object?.sourceMaterialProperties || {}))collect(p,`mi.${index}`,`Material ${index}`);
+    for(const [key,part] of Object.entries<any>(data.object?.parts || {}))for(const [field,prop] of Object.entries<any>(part?.p || {}))
+      if(prop && Array.isArray(prop.kf))out.push({key:`pt.${key}.${field}`,prop,label:PART_LABELS[field] || field,group:part.name || 'Part'});
   }
   if(role==='light')collect(data.light?.p,'light','Light');
   if(role==='camera'){collect(data.camera?.p,'camera','Camera');collect(data.environment?.p,'environment','Environment');}
@@ -85,6 +94,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
+  if(!node)return [...new Set<string>(Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values(surface.maps || {}).map(map=>mapImageId(map as any))).filter((id):id is string=>!!id))];
   return node?[...new Set<string>([node.source?.assetId,...objectMapSets(node).flatMap(maps=>Object.values(maps).map(mapImageId))].filter((id):id is string=>!!id))]:[];
 }
 
@@ -114,7 +124,8 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     return {...node,id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
       material:{...node.material,p:values(layer,node.material.p,'m')},
       materialProperties:values(layer,node.materialProperties,'mi'),
-      sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)]))};
+      sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)])),
+      parts:Object.fromEntries(Object.entries<any>(node.parts || {}).map(([key,part])=>[key,{name:part.name,p:values(layer,part.p,`pt.${key}`)}]))};
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);
@@ -128,7 +139,7 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   const environment=cameraLayer?{...cameraLayer.d.data.environment,p:values(cameraLayer,cameraLayer.d.data.environment.p,'environment')}:base.environment;
   // New models are immediately visible; explicit lights replace this studio preset.
   if(!lightLayers.length){
-    let id='default_sun';while(allObjectIds.has(id))id+='x';
+    let id='default_sun';while((composition?.layers || []).some((layer:any)=>layer.id===id))id+='x';
     lights.push(...parseScene({lights:[{id,type:'sun'}]}).lights);
   }
   camera.p.far!.v=Math.max(camera.p.far!.v,camera.p.near!.v+.01);

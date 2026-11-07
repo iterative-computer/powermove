@@ -298,6 +298,8 @@ export interface LockedIntentEntry {
 }
 
 interface LayerBase<T extends LayerType, D extends object> {
+  /** Optional, additive v1 Figma provenance; older projects need no migration. */
+  figmaSource?: import('../../../../shared/figma/convert').FigmaSource;
   id: string;
   type: T;
   name: string;
@@ -483,6 +485,8 @@ export interface Comp {
   shutter?: number;
   /** Absent/1 retains the original angled implicit 3D camera; 2 faces the comp origin. */
   scene3dDefaultsVersion?: 1 | 2;
+  /** Absent/1: saved before each layer owned its 3D switch (members of 3D groups are upgraded on open). */
+  switch3DVersion?: 1 | 2;
   /** Composition output level (linear, 0–4; absent is unity). Applied to the
    * mix wherever the composition plays: preview, export, and when nested. */
   audioGain?: number;

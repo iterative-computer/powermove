@@ -34,6 +34,7 @@ export const STATIC_KEYS = [
   'renderQueue',
   'renderPresets',
   'animationPresets',
+  'precomposeOptions',
   'bootVersion',
   'autosave',
   'projectsSection',

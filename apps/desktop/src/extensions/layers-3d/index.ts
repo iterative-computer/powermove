@@ -3,10 +3,14 @@ import type { ExtensionLayerDefinition, PowermoveAPI } from 'powermove';
 import { OBJ_MODEL } from './obj-model';
 import { STUDIO_CUBE } from './studio-cube';
 import LayerInspector from './LayerInspector.svelte';
+import ExtrusionInspector from './ExtrusionInspector.svelte';
+import {isExtrudable,isExtruded,installSurfaceProperty,surfaceAt} from './extrusion';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,is3DLayer,addMenuItems} from './scene-actions';
 import {PRIMITIVES,LIGHT_TYPES} from './scene-model';
 import {createSceneUiState} from './scene-state.svelte';
 import {openMaterialPicker,closeMaterialPicker} from './material-picker';
+import {materialThumbnails,disposeMaterialThumbnails} from './material-thumbnails';
+import {canAssignLayer,dropLayer,setLayerDropHover,slotAt,type SlotHover,type SlotRef,type AssignCheck} from './layer-drop.svelte';
 import {materialEntries,describeMap,materialUsage,usageTitle,installProperty,propertyChannel,propertyPath,MATERIAL_PROPERTY_SPECS,MATERIAL_SLOT_SPECS,type MaterialEntry} from './materials';
 
 /** Shared with the Timeline so its Materials rows match the inspector. */
@@ -23,6 +27,15 @@ export interface MaterialsService {
   propertyChannel:typeof propertyChannel;
   propertyValues:(layerId:string,index:number|null,time:number)=>Record<string,unknown>|null;
   installProperty:(layerId:string,index:number|null,key:any,value:unknown,keyAt?:number)=>unknown;
+  /** A source's cached preview (PNG data URL), or null for the placeholder; asks the engine when missing. */
+  thumbnail:(layerId:string,map:any)=>string|null;
+  /** Called when previews arrive. */
+  onThumbnails:(listener:()=>void)=>()=>void;
+  /** Layer drags from the Timeline: the Properties slot under a point, the engine's preflight, the hover highlight, and the drop. */
+  slotAt:(x:number,y:number)=>SlotRef|null;
+  canAssignLayer:(target:SlotRef,sourceId:string)=>AssignCheck;
+  setLayerDropHover:(hover:SlotHover|null)=>void;
+  dropLayer:(target:SlotRef,sourceId:string)=>boolean;
 }
 
 export default function activate(api:PowermoveAPI):void {
@@ -54,6 +67,9 @@ export default function activate(api:PowermoveAPI):void {
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),
     build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
+  // Geometry and Material Options for text and shape layers, right after Transform as in After Effects.
+  api.inspector.registerSection({id:'extrusion',title:'Geometry Options',after:'transform',when:({layerIds})=>layerIds.length===1&&isExtrudable(api.model.layer(layerIds[0]!)),
+    build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(ExtrusionInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
   const materials:MaterialsService={
     entries:layerId=>materialEntries(api,layerId),
     describe:(layerId,index,slot,map)=>describeMap(api,layerId,index,slot,map),
@@ -61,10 +77,15 @@ export default function activate(api:PowermoveAPI):void {
     openPicker:(anchor,request)=>openMaterialPicker(api,anchor,request),closePicker:closeMaterialPicker,
     properties:MATERIAL_PROPERTY_SPECS,slots:MATERIAL_SLOT_SPECS,propertyPath,propertyChannel,
     propertyValues:(layerId,index,time)=>(api.scene3d.getMaterialProperties(layerId,index,time)?.values as any) ?? null,
-    installProperty:(layerId,index,key,value,keyAt)=>installProperty(api,layerId,index,key,value,keyAt)
+    // An extruded layer's surfaces (index 0–3) install under their own names.
+    installProperty:(layerId,index,key,value,keyAt)=>isExtruded(api.model.layer(layerId))?installSurfaceProperty(api,layerId,surfaceAt(index),key,value,keyAt):installProperty(api,layerId,index,key,value,keyAt),
+    thumbnail:(layerId,map)=>materialThumbnails(api).peek(layerId,map),
+    onThumbnails:listener=>materialThumbnails(api).subscribe(listener),
+    slotAt,canAssignLayer:(target,sourceId)=>canAssignLayer(api,target,sourceId),setLayerDropHover,
+    dropLayer:(target,sourceId)=>dropLayer(api,target,sourceId)
   };
   const service=api.services?.register?.('materials',materials);
-  if(service)api.onDispose?.(()=>{closeMaterialPicker();service.dispose();});
+  api.onDispose?.(()=>{closeMaterialPicker();setLayerDropHover(null);disposeMaterialThumbnails();service?.dispose();});
   // A submenu at the pointer, rather than a second menu opened elsewhere.
   // Empty canvas and empty timeline only.
   api.menus.contribute('timeline:context',(ctx:any)=>ctx?.kind&&ctx.kind!=='empty'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);

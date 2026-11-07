@@ -45,8 +45,18 @@ export interface MaterialEntry {
 const objectOf = (layer: Layer | null | undefined): any => (layer?.d as any)?.data?.object;
 export const isModelLayer = (layer: Layer | null | undefined): boolean => !!objectOf(layer);
 
+/** An extruded text or shape layer's Front, Bevel, Side and Back, indexed 0–3 as
+ * setMaterialMap takes them, so the picker and the Timeline treat them like materials. */
+function surfaceMaterialEntries(layer: Layer | null): MaterialEntry[] | null {
+  const extrusion = (layer?.d as any)?.extrusion;
+  if ((layer?.type !== 'text' && layer?.type !== 'shape') || !(layer as any).threeD || extrusion?.enabled !== true) return null;
+  return (['front', 'bevel', 'side', 'back'] as const).map((surface, index) => ({ index, name: surface[0]!.toUpperCase() + surface.slice(1), maps: { ...(extrusion.surfaces?.[surface]?.maps || {}) } }));
+}
+
 export function materialEntries(api: PowermoveAPI, layerId: string): MaterialEntry[] {
   const layer = api.model.layer(layerId), object = objectOf(layer);
+  const surfaces = surfaceMaterialEntries(layer);
+  if (surfaces) return surfaces;
   if (!object) return [];
   const whole: MaterialMapValue | any = object.material?.maps || {};
   if (!object.source?.assetId) return [{ index: null, name: 'Material', maps: { ...whole } }];
@@ -121,7 +131,7 @@ const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: 
 ];
 
 /** Why a layer of this kind can never be a material. */
-function wrongTypeReason(layer: Layer): string {
+export function wrongTypeReason(layer: Layer): string {
   if (isModelLayer(layer) || String((layer.d as any)?.definition ?? '').startsWith('powermove.3d.')) return '3D layers can’t be painted onto a model';
   if (layer.type === 'audio') return 'Audio has no picture';
   if (layer.type === 'group') return 'Pre-compose the group to use it';
@@ -188,6 +198,12 @@ export function materialUsage(api: PowermoveAPI, sourceId: string): MaterialUse[
   const out: MaterialUse[] = [];
   for (const layer of api.project.get().layers as Layer[]) {
     const object = objectOf(layer);
+    const surfaces = surfaceMaterialEntries(layer);
+    if (surfaces && layer.id !== sourceId) {
+      const uses = surfaces.flatMap(entry => Object.entries<any>(entry.maps).filter(([, map]) => map && typeof map === 'object' && map.layerId === sourceId).map(([slot]) => `${entry.name} · ${slotSpec(slot as MaterialSlot)?.label ?? slot}`));
+      if (uses.length) out.push({ layerId: layer.id, name: layer.name, uses });
+      continue;
+    }
     if (!object || layer.id === sourceId) continue;
     const sets: Array<[number | null, any]> = [[null, object.material?.maps || {}], ...Object.entries<any>(object.sourceMaterials || {}).map(([index, maps]): [number, any] => [Number(index), maps])];
     const uses: string[] = [];

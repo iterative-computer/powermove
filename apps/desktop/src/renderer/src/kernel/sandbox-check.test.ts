@@ -119,3 +119,16 @@ it('skips a full-access manifest without running the fixture', async () => {
   expect(report).toMatchObject({ ok: true, skipped: 'full-access', activation: 'ok' });
   expect(activate).not.toHaveBeenCalled();
 });
+
+it('keeps effect scale hints as advice without failing the check', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const report = await harness(api => {
+    api.effects.register({ id: 'check-fixture-blur', label: 'Pixel Blur', group: 'Blur', params: [],
+      frag: 'uniform sampler2D u_tex; uniform vec2 u_texel; varying vec2 v_uv; void main(){ gl_FragColor = texture2D(u_tex, v_uv + vec2(4.0) * u_texel); }' } as any);
+    api.effects.register({ id: 'check-fixture-tint', label: 'Tint', group: 'Color', params: [],
+      frag: 'uniform sampler2D u_tex; varying vec2 v_uv; void main(){ gl_FragColor = texture2D(u_tex, v_uv); }' } as any);
+  });
+  warn.mockRestore();
+  expect(report.ok).toBe(true);
+  expect(report.effectWarnings).toEqual([expect.objectContaining({ effectId: 'check-fixture.check-fixture-blur', label: 'Pixel Blur', code: 'effect-pixel-scale' })]);
+});

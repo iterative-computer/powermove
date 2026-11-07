@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../registry';
 import { splitTextLayers, type TextSplitMode } from '../core/split-text';
+import { isAlways3DLayer } from '../../core/scene3d/layers';
 import { evaluatedValue } from '../core/content-properties';
 import { validMatteSource } from '../core/matte';
 
@@ -129,7 +130,7 @@ export function installLayerMenu(PM: PMRegistry): void {
       { label: visible ? 'Hide' : 'Show', icon: visible ? 'eyeoff' : 'eye', disabled: !editable, run: () => patch({ visible: !visible }, 'Visibility') },
       { label: layer.solo ? 'Unsolo' : 'Solo', icon: 'headphones', disabled: !editable, run: () => patch({ solo: !layer.solo }, 'Solo layers') },
       { label: lockedGroup ? 'Unlock Group' : layer.lock ? 'Unlock' : 'Lock', icon: 'lock', run: () => lockedGroup ? apply({type:'set_layer',target:lockedGroup.id,patch:{locked:false}}, 'Unlock group') : patch({ locked: !layer.lock }, 'Lock layers') });
-    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D Layer', icon: 'cube', on: toggleAll('threeD'), disabled: !editable, run: () => patch({threeD: !toggleAll('threeD')}, '3D layer') });
+    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment' && !isAlways3DLayer(PM,item))) items.push({ label: '3D Layer', icon: 'cube', on: toggleAll('threeD'), disabled: !editable, run: () => patch({threeD: !toggleAll('threeD')}, '3D layer') });
     if (selected.every((item: any) => item.type === 'precomp')) items.push({ label: 'Continuously Rasterize', icon: 'sun', on: toggleAll('continuousRaster'), disabled: !editable,
       run: () => patch({ continuousRaster: !toggleAll('continuousRaster') }, 'Continuously rasterize') });
     items.push('-', { label: 'Delete', icon: 'trash', kb: '⌫', disabled: !editable, run: () => PM.cmd('delete') });

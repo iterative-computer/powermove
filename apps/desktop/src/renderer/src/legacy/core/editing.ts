@@ -1,3 +1,4 @@
+import { extrusionEligible, parseExtrusion } from '../../core/scene3d/extrusion-data';
 import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
 import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
 import { parseEditCommand, ValidationError } from '../../core/validate/commands';
@@ -13,7 +14,7 @@ import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
 import { initializeTextAnimatorTiming } from './text-animation';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
-import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
+import { layer3DRole, isAlways3DLayer, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateCompositionMaps } from '../../core/scene3d/material-maps';
 import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
@@ -129,6 +130,12 @@ function commandScopes(command: any): any[][] {
   if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
+  // A group's 3D switch also sets its members (setLayer), so Undo tracks them.
+  if (path && type === 'set_layer' && layer?.type === 'group' && command.patch?.threeD != null) {
+    const container = [PM.proj, ...Object.values<any>(PM.proj.comps || {})].find((comp: any) => comp?.layers?.includes(layer)) || PM.proj;
+    const members = container.layers.filter((member: any) => (PM.groupAncestors?.(member, container.layers) || []).some((group: any) => group.id === layer.id));
+    return [path, ...members.map((member: any) => layerPath(member)).filter(Boolean)];
+  }
   return path ? [path] : [[]];
 }
 
@@ -286,7 +293,7 @@ function setProperty(command: any, presets?: KeyPresets) {
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,{...prop,v:value});
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
@@ -332,7 +339,7 @@ function replaceKeyframes(command: any) {
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
     return { time, value, ease: key.ease || 'linear', hold: !!key.hold, id: key.id, temporal: key.temporal, spring: key.spring, handles: key.handles };
   });
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer))){
     const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
     if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
     validate3DChannel(layer,channel,candidate);
@@ -369,7 +376,7 @@ function replaceKeyframes(command: any) {
     PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   }
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
-  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || extrusionEligible(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
@@ -445,6 +452,14 @@ function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  if(patch.extrusion!==undefined){
+    if(!extrusionEligible(layer))throw new Error('Only text and shape layers can be extruded');
+    patch.extrusion=parseExtrusion(patch.extrusion);
+    if(isGeneratedOrigin(meta.origin)){
+      const future=new Map(sceneProperties({...layer,d:{...layer.d,extrusion:patch.extrusion}}).map(p=>[p.key,p.prop]));
+      for(const {key,prop} of sceneProperties(layer))if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))throw new Error(`Preserved hand-edited ${key}`);
+    }
+  }
   const role3d=layer3DRole(layer);
   if(role3d && patch.data){
     patch.data=parseLayer3DData(role3d,{...layer.d.data,...patch.data});
@@ -592,10 +607,21 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
-  if (patch.threeD === false && layer3DRole(layer)) throw new Error('Models, lights and cameras are always 3D layers');
+  if (patch.threeD === false && isAlways3DLayer(PM,layer)) throw new Error('Models, lights, cameras and model-only groups are always 3D layers');
   if (patch.threeD != null) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
+    /* A group's switch sets its members too, so one click makes (or flattens)
+       the whole group, and each member's own switch then shows the truth. */
+    if (layer.type === 'group') {
+      const container = [PM.proj, ...Object.values<any>(PM.proj.comps || {})].find((comp: any) => comp?.layers?.includes(layer)) || PM.proj;
+      for (const member of container.layers) {
+        if (!(PM.groupAncestors?.(member, container.layers) || []).some((group: any) => group.id === layer.id)) continue;
+        if (member.type === 'audio' || member.type === 'adjustment' || member.effectSpace === 'source') continue;
+        if (!patch.threeD && isAlways3DLayer(PM, member)) continue;
+        member.threeD = !!patch.threeD;
+      }
+    }
   }
   if (patch.continuousRaster != null) {
     if (layer.type !== 'precomp') throw new Error('Only pre-comp layers can be continuously rasterized');
@@ -1397,8 +1423,18 @@ const Edit: any = {
     const selection: any = clone(PM.sel);
     const guarded = ['agent', 'import'].includes(meta.origin);
     const keysBefore = guarded ? snapshotKeyframes(PM) : null;
+    // Durable media import prepares image records asynchronously. Only fresh,
+    // explicitly declared records may join a trusted import's layer transaction.
+    const importedAssets = meta.origin === 'import' && meta.importedAssets && typeof meta.importedAssets === 'object'
+      ? meta.importedAssets : {};
+    const importedAssetIds = Object.keys(importedAssets);
+    if (importedAssetIds.some(id => ['__proto__', 'constructor', 'prototype'].includes(id)
+      || Object.hasOwn(PM.proj.assets, id) || importedAssets[id]?.id !== id || importedAssets[id]?.kind !== 'image')) {
+      return fail('An import may only add new image assets');
+    }
     const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
+      Object.assign(PM.proj.assets, importedAssets);
       const result: any = action();
       validateInputGraphs();
       PM.ProjectIndex?.invalidate();
@@ -1410,6 +1446,7 @@ const Edit: any = {
       const withoutTree: any = (project: any) => {
         const source: any = clone(project);
         delete source.layers; delete source.comps; delete source.revision; delete source.edits;
+        for (const id of importedAssetIds) delete source.assets[id];
         return source;
       };
       if (JSON.stringify(withoutTree(previous)) !== JSON.stringify(withoutTree(PM.proj))) {
@@ -1422,6 +1459,7 @@ const Edit: any = {
         summary: ['replace project layer tree'],
         structural: {
           format: 'powermove-layer-tree-v1',
+          ...(importedAssetIds.length ? { importedAssets: clone(importedAssets) } : {}),
           layers: clone(PM.proj.layers || []),
           comps: clone(PM.proj.comps || {}),
         },

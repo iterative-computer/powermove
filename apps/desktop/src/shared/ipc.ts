@@ -9,6 +9,14 @@ import type { AgentTask } from './agent-orchestration';
  */
 
 export const IPC = {
+  figmaStart: 'figma:start',
+  figmaStop: 'figma:stop',
+  figmaCloseSetup: 'figma:close-setup',
+  figmaApprove: 'figma:approve',
+  figmaPluginAction: 'figma:plugin-action',
+  figmaState: 'figma:state',
+  figmaReceive: 'figma:receive',
+  figmaResult: 'figma:result',
   ping: 'app:ping',
   inputKey: 'input:key',
   storeSandboxFocus: 'store:sandbox-focus',
@@ -636,6 +644,8 @@ export type MenuCommand =
   | 'import'
   | 'importSequence'
   | 'importFolder'
+  | 'connectFigma'
+  | 'disconnectFigma'
   | 'export'
   | 'contextUndo'
   | 'contextRedo'
@@ -696,6 +706,7 @@ export interface PowermoveExtensionsBridge extends ExtensionsBridge {
 export interface RemoteMediaInfo { token: string; size: number; name: string; type: string; kind: 'image' | 'video' | 'audio' }
 
 export interface PowermoveBridge {
+  figmaLink?: import('./figma-link').FigmaLinkBridge;
   onInputKey?(cb: (input: SandboxInputKey) => void): () => void;
   sandboxFocus?(focus: { focused: boolean; field: boolean; extensionId: string }): void;
   /** Kills the OS processes that run only this extension's sandbox (never an editor's); resolves to how many. */

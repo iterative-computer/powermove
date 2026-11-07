@@ -1,3 +1,5 @@
+import { compositionExtrusions } from './extrusion-render';
+import { isExtrudedLayer, isShared3DPlane } from './extrusion-data';
 import {mapImageId} from './material-maps';
 import {compositionTextureFrame,clearCompositionTextures} from './composition-textures';
 import * as THREE from 'three';
@@ -28,7 +30,11 @@ function scanReferences(PM:any,comp:any,scan:ReferenceScan):void {
     if(!(i in layers))continue; // flatMap snapshots length and skips sparse holes.
     const layer=layers[i];
     localCount=0;
-    const node=layer?.d?.data?.object;if(!node)continue;
+    const node=layer?.d?.data?.object;if(!node){
+      if(isShared3DPlane(comp,layer))append(layer.d?.asset);
+      for(const surface of Object.values<any>(layer?.d?.extrusion?.surfaces || {}))for(const map of Object.values<any>(surface.maps || {})){const id=mapImageId(map);if(id)append(id);}
+      maxLocalCount=Math.max(maxLocalCount,localCount);continue;
+    }
     append(node.source?.assetId);
     const maps=node.material?.maps;
     // Object.values snapshots keys and rechecks enumerability as getters run.
@@ -75,11 +81,11 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
   try {
   scanReferences(PM,comp,scan);
   const assetsChanged=!cached || cached.references.size!==scan.size || scan.records.some(entry=>entry.scan===scan.generation&&cached.references.get(entry.id)!==entry.asset);
-  if(assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
+  if(runtime.materialsPending || assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
     const references=new Map<string,any>();
     for(const id of scan.ids)references.set(id,scan.byId.get(id)!.asset);
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
-    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);return layer?compositionTextureFrame(PM,layer,map,time):null;});
+    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;});return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
     // Use exactly the native layer hierarchy, orientation and anchor matrices.
     // Flattening the evaluated world avoids applying parent transforms twice.
@@ -115,7 +121,7 @@ export function compositionDepthIds(PM:any,layer:any,time:number):Set<string> {
   const layers=PM._renderComposition3DPass || source.filter((l:any)=>l.type!=='group');
   const index=layers.indexOf(layer),ids=new Set<string>(),solo=source.some((l:any)=>l.solo);
   const visit=(i:number)=>{const l=layers[i];if(!l)return false;if(!PM.active(l,time))return true;
-    const role=layer3DRole(l);if(!role)return false;
+    const role=layer3DRole(l) || (isExtrudedLayer(l) || isShared3DPlane(PM._renderComposition3D || PM.curComp?.() || PM.proj,l)?'object':null);if(!role)return false;
     if(role==='object' && (!solo || l.solo || (PM.groupAncestors?.(l,layers) || []).some((g:any)=>g.solo)) && (!PM.worldOpacity || PM.worldOpacity(l,time)>.001))ids.add(l.id);
     return true;};
   for(let i=index;i>=0 && visit(i);i--){}
@@ -139,11 +145,12 @@ export function modelGroupBounds(PM:any,group:any,time:number):any {
 }
 /** Transparent models sort in the shared camera's depth, keeping every 2D stack boundary. */
 export function compositionOrderedLayers(PM:any,layers:any[],time:number,camera?:THREE.Camera):any[] {
-  if(!layers.some(layer3DRole))return depthOrderedLayers(PM,layers,time);
+  const shared=(layer:any)=>!!layer3DRole(layer) || isExtrudedLayer(layer) || isShared3DPlane(PM._renderComposition3D || PM.curComp?.() || PM.proj,layer);
+  if(!layers.some(shared))return depthOrderedLayers(PM,layers,time);
   const world=compositionRuntime(PM,time),result:any[]=[],position=new THREE.Vector3();
   for(let start=0;start<layers.length;){
-    const modelBlock=!!layer3DRole(layers[start]);let end=start+1;
-    while(end<layers.length && !!layer3DRole(layers[end])===modelBlock)end++;
+    const modelBlock=shared(layers[start]);let end=start+1;
+    while(end<layers.length && shared(layers[end])===modelBlock)end++;
     const block=layers.slice(start,end);
     if(modelBlock){
       const depth=(l:any)=>{const object=world.objects.get(l.id);return object?object.getWorldPosition(position).applyMatrix4((camera||world.camera).matrixWorldInverse).z:0;};

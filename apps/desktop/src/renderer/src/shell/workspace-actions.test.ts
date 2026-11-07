@@ -67,6 +67,16 @@ describe('workspace actions', () => {
     expect(row(items, 'Rename Workspace…').disabled).toBe(false);
   });
 
+  it('reads an edited copy of a built-in as resettable from its first edit, and Unchanged once reset', () => {
+    const { PM, custom } = fakePM();
+    // The engine forks the first edit into a copy whose saved layout is the built-in one.
+    custom.savedState = { layout: { docks: [{ id: 'left', size: 300 }] }, hiddenPanels: [] };
+    custom.layout = { docks: [{ id: 'left', size: 377 }] };
+    expect(row(workspaceMenuItems(PM), 'Reset to Saved Layout')).toMatchObject({ disabled: false, kb: null });
+    custom.layout = { docks: [{ id: 'left', size: 300 }] };
+    expect(row(workspaceMenuItems(PM), 'Reset to Saved Layout')).toMatchObject({ disabled: true, kb: 'Unchanged' });
+  });
+
   it('keeps built-ins from being saved over, renamed or deleted', () => {
     const { PM, builtin } = fakePM();
     PM.WS.current = builtin;

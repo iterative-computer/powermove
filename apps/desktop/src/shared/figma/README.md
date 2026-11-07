@@ -1,0 +1,16 @@
+# FigmaDoc v1
+
+`doc.ts` defines and validates the portable input. `convert.ts` translates it into declarative `add_layer` edits. These modules use no renderer, registry, DOM, Electron or Svelte APIs. `paths.ts` is the shared pure SVG path parser. The desktop adapter only creates host IDs, property channels, media assets and a single history transaction. A future native host can consume the same commands.
+
+- `format: "powermove-figma"`, `version: 1`, `source: "plugin" | "clipboard"`.
+- `nodes`: bottom-to-top node trees. Each node has a stable source `fileKey` and `id`, pixel `w`/`h`, and `absoluteTransform: [a,b,c,d,tx,ty]`. Children also use absolute transforms. The clipboard worker resolves its relative matrices before returning a FigmaDoc.
+- Paint lists are top-to-bottom, with normalized RGBA colors, opacity, gradient stops and a Figma `gradientTransform` (normalized node space to paint space). Image bytes live in `images[imageHash]` as base64, deduplicated by hash.
+- Effects, stroke geometry, corner radii, clipping, masks and text runs are explicit data. Unsupported source details can add an `unsupported` reason; they cannot inject host commands.
+- `raster` is optional PNG base64 plus its **absolute render bounds**, including effects. Plugin exports are 2×. PNG opacity and transforms are already baked. The host applies only the enclosing group's transform and its own animation.
+- Commands use local `ref`/`group`/`matte` references. Hosts resolve these to their own IDs. Content and static property values are separate. Effects carry a pinned engine version. Import provenance travels separately from content.
+
+Call `unsupportedReasons` before exporting. A nonempty result rasterizes that node's entire subtree; supported siblings remain editable. Two opaque gradient stops map to the existing Gradient Ramp effect (circular radial ramps only). Drop shadow without spread and uniform layer blur map to versioned built-in effects. Alpha masks and single clipping frames use track mattes. Color-only text ranges map to the existing text style system. Other text metrics or effects, compound paths with holes, complex gradients and unsupported stroke styles flatten. Font rendering uses the host's installed font family.
+
+Clipboard has only a composite preview. An isolated unsupported node can crop it. If its bounds overlap another node or a painted ancestor, promote to the smallest enclosing subtree; overlapping roots require the whole composite. The host reports the reason and recommends the plugin. Composite previews cannot recover original isolated pixels or precise effect padding that Figma did not include in its clipboard data.
+
+`figmaSource` is optional additive layer metadata; older projects need no migration. It survives normal project serialization and validation. Re-sync matches `(fileKey, nodeId, role)` within the active composition, preserves animated channels and expressions, keeps user effects and parent links, updates unanimated values and original names, and never deletes absent layers. Synthetic paint/clip roles remain stable. Importing a separate copy creates fresh host IDs. Only the Electron host owns consent, pairing, file writes and undo.

@@ -98,6 +98,24 @@ export function readableSandboxError(message: string): string {
   return [prefix, ...sentences].filter(Boolean).join(' ');
 }
 
+export interface SandboxAdvice { title: string; message: string; fix: string }
+
+/* Effect validation hints, one per effect: advice for the author, shown under
+   the result whether or not the check passed. */
+export function sandboxAdviceLines(report: SandboxCheckReport): SandboxAdvice[] {
+  if (report.skipped) return [];
+  const byEffect = new Map<string, SandboxAdvice>();
+  for (const warning of report.effectWarnings ?? []) {
+    if (byEffect.has(warning.effectId)) continue;
+    byEffect.set(warning.effectId, {
+      title: warning.code === 'effect-pixel-scale' ? `“${warning.label}” may change size when zooming` : `“${warning.label}”`,
+      message: warning.message,
+      fix: warning.fix
+    });
+  }
+  return [...byEffect.values()];
+}
+
 /** One sentence per problem, most actionable first. Empty when the report is clean or skipped. */
 export function sandboxCheckLines(report: SandboxCheckReport): string[] {
   if (report.skipped || report.ok) return [];

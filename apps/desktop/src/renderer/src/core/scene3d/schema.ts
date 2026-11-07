@@ -1,6 +1,8 @@
+import { validateExtrusionChannel } from './extrusion-data';
 import { z } from 'zod';
 import { layer3DProperties } from './layers';
 import { MATERIAL_SLOTS, objectMapSets, mapImageId } from './material-maps';
+import { PART_KEY, PART_PATH } from './model-parts';
 
 /** The scene is project data, never executable code or a live Three.js object. */
 export const SCENE3D_DEFINITION = 'powermove.3d.scene';
@@ -62,6 +64,11 @@ export const intrinsicPropertiesSchema = z.object({
   opacity: channel(num(0,100)).optional(), roughness: channel(num(0,1)).optional(), metallic: channel(num(0,1)).optional(),
   emissionColor: channel(color).optional(), emissionIntensity: channel(num(0,100)).optional(), ambientResponse: channel(num(0,100)).optional()
 }).strict();
+/** Sparse part offsets; absent parts keep the model file's own pose. */
+export const partTransformSchema = p({ x:[num(),0], y:[num(),0], z:[num(),0],
+  rx:[num(-360_000,360_000),0], ry:[num(-360_000,360_000),0], rz:[num(-360_000,360_000),0],
+  scale:[num(0,10000),100], visible:[z.boolean(),true] });
+export const partSchema = z.object({ name: z.string().min(1).max(160).default('Part'), p: partTransformSchema.default({} as any) }).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
@@ -69,6 +76,7 @@ export const objectSchema = z.object({
   materialProperties: intrinsicPropertiesSchema.default({}),
   sourceMaterialProperties: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),intrinsicPropertiesSchema).default({}),
   sourceMaterials: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),mapsSchema).default({}),
+  parts: z.record(z.string().regex(PART_KEY),partSchema).default({}),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
@@ -103,7 +111,8 @@ export function parseScene(raw: unknown): Scene3D {
   if ((JSON.stringify(raw)?.length ?? 0) > 8_000_000) throw new Error('3D scene exceeds the 8 MB geometry budget');
   const scene = schema.parse(raw);
   // Zod's default bypasses transforms; parse nested defaults explicitly.
-  scene.objects = scene.objects.map(o => ({...o,p:objectTransform.parse(o.p || {}),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
+  scene.objects = scene.objects.map(o => ({...o,p:objectTransform.parse(o.p || {}),
+    parts:Object.fromEntries(Object.entries(o.parts || {}).map(([key,part])=>[key,{...part,p:partTransformSchema.parse(part.p || {})}])),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
   scene.camera = cameraSchema.parse({...scene.camera,p:cameraSchema.shape.p.parse(scene.camera.p || {})});
   scene.environment = environmentSchema.parse({...scene.environment,p:environmentSchema.shape.p.parse(scene.environment.p || {})});
   scene.lights = scene.lights.map(l => lightSchema.parse({...l,p:lightSchema.shape.p.parse(l.p || {})}));
@@ -167,6 +176,9 @@ export function sceneProperties(layer: any): any[] {
 }
 
 export function validateSceneChannel(path:string,property:unknown):void {
+  if(validateExtrusionChannel(path,property))return;
+  const part=PART_PATH.exec(path.replace(/^o\.[^.]+\./,''));
+  if(part){partTransformSchema.shape[part[2] as keyof typeof partTransformSchema.shape]!.parse(property);return;}
   const intrinsic=/^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?([^.]+)$/.exec(path);
   if(intrinsic){const field=intrinsicPropertiesSchema.shape[intrinsic[1]! as keyof typeof intrinsicPropertiesSchema.shape];if(!field)throw new Error(`Unknown material property: ${path}`);field.unwrap().parse(property);return;}
   if(/^m\.[^.]+$/.test(path)) { const field=materialSchema.shape.p.unwrap().shape[path.slice(2)]; if(!field)throw new Error(`Unknown 3D channel: ${path}`); field.parse(property); return; }

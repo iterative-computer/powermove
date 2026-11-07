@@ -1,0 +1,330 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 20px;
+        font:
+          12px/1.5 Inter,
+          system-ui,
+          sans-serif;
+        background: var(--figma-color-bg, #fff);
+        color: var(--figma-color-text, #222);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      p {
+        margin: 10px 0;
+        color: var(--figma-color-text-secondary, #777);
+      }
+      button {
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 4px;
+        background: var(--figma-color-bg-brand, #0d99ff);
+        color: var(--figma-color-text-onbrand, #fff);
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button:focus-visible {
+        outline: 2px solid var(--figma-color-border-brand, #0d99ff);
+        outline-offset: 2px;
+      }
+      #primary {
+        width: 100%;
+        margin-top: 6px;
+      }
+      #copy {
+        display: block;
+        background: transparent;
+        color: var(--figma-color-text-brand, #0d99ff);
+        padding: 4px 0;
+        margin-top: 12px;
+      }
+      #code {
+        font-size: 24px;
+        letter-spacing: 0.15em;
+        font-variant-numeric: tabular-nums;
+        color: var(--figma-color-text, #222);
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body data-state="offline">
+    <h1 id="title">Send to Powermove</h1>
+    <p id="message" role="status">Open Powermove to continue.</p>
+    <p id="code" hidden aria-label="Connection code"></p>
+    <button id="primary" hidden>Connect</button>
+    <p id="result" hidden role="status"></p>
+    <button id="copy" hidden>Copy for Powermove</button>
+    <script>
+      const endpoint = 'http://localhost:47832',
+        $ = (id) => document.getElementById(id),
+        post = (pluginMessage) => parent.postMessage({ pluginMessage }, '*');
+      let token = '',
+        count = 0,
+        reachable = false,
+        composition = false,
+        checking = false,
+        pairing = false,
+        sending = false,
+        preparing = false,
+        copying = false,
+        connectionFailed = false,
+        lastDoc = null,
+        lastResult = '',
+        notice = '',
+        code = '',
+        timer;
+      function render() {
+        let state = !reachable
+          ? 'offline'
+          : pairing
+            ? 'approval'
+            : !token
+              ? 'disconnected'
+              : !composition
+                ? 'composition'
+                : count === 0
+                  ? 'empty'
+                  : 'ready';
+        document.body.dataset.state = state;
+        $('primary').hidden = false;
+        $('primary').disabled = false;
+        $('code').hidden = true;
+        $('result').hidden = true;
+        $('title').textContent = 'Send to Powermove';
+        if (state === 'offline') {
+          // Without a connection, an open Powermove only listens once the
+          // user starts setup, so name the step that brings it online.
+          $('message').textContent = token
+            ? 'Open Powermove to continue.'
+            : 'Open Powermove, then choose File → Connect Figma.';
+          $('primary').hidden = true;
+        }
+        if (state === 'disconnected') {
+          $('message').textContent = notice || 'Connect to Powermove to send your layers.';
+          $('primary').textContent = 'Connect';
+        }
+        if (state === 'approval') {
+          $('message').textContent = 'Click Allow in Powermove.';
+          $('code').textContent = code;
+          $('code').hidden = false;
+          $('primary').hidden = true;
+        }
+        if (state === 'composition') {
+          $('message').textContent = 'Open a composition in Powermove.';
+          $('primary').hidden = true;
+        }
+        if (state === 'empty') {
+          $('message').textContent = 'Select layers in Figma';
+          $('primary').textContent = 'Select layers in Figma';
+          $('primary').disabled = true;
+        }
+        if (state === 'ready') {
+          $('message').textContent = 'Ready to send.';
+          $('primary').textContent = `Send ${count} ${count === 1 ? 'Layer' : 'Layers'}`;
+        }
+        if (sending || preparing) {
+          $('primary').disabled = true;
+          $('message').textContent = preparing ? 'Preparing selection…' : 'Sending…';
+        }
+        if (lastResult && token && !pairing) {
+          $('result').hidden = false;
+          $('result').textContent = lastResult;
+        }
+        $('copy').hidden = !connectionFailed;
+        $('copy').disabled = count === 0 || preparing || sending || pairing;
+      }
+      async function request(path, data, authenticated = false, timeout = 8000) {
+        const controller = new AbortController(),
+          timeoutId = setTimeout(() => controller.abort(), timeout);
+        try {
+          const response = await fetch(endpoint + path, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authenticated && token ? { Authorization: 'Bearer ' + token } : {}),
+            },
+            body: JSON.stringify(data),
+            signal: controller.signal,
+          });
+          const value = await response.json();
+          if (!response.ok) {
+            const error = new Error(value.error || 'Could not connect.');
+            error.status = response.status;
+            throw error;
+          }
+          return value;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+      function forgetToken() {
+        token = '';
+        post({ type: 'token', token: null });
+        lastResult = '';
+      }
+      function schedule() {
+        clearTimeout(timer);
+        if (!document.hidden) timer = setTimeout(check, 2000);
+      }
+      async function check() {
+        if (checking || document.hidden) {
+          schedule();
+          return;
+        }
+        checking = true;
+        try {
+          const checkedToken = token;
+          const s = await request('/status', {}, true);
+          if (s.protocolVersion !== 2) throw new Error('Update Powermove to connect.');
+          reachable = true;
+          composition = s.compositionOpen;
+          if (token && checkedToken === token && !s.tokenValid) {
+            forgetToken();
+            notice = 'Connect to Powermove again.';
+          }
+          connectionFailed = false;
+        } catch (e) {
+          reachable = false;
+          connectionFailed = true;
+        } finally {
+          checking = false;
+          render();
+          schedule();
+        }
+      }
+      async function connect() {
+        if (pairing) return;
+        pairing = true;
+        notice = '';
+        code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+        render();
+        try {
+          const value = await request('/pair', { code }, false, 65000);
+          token = value.token;
+          post({ type: 'token', token });
+          connectionFailed = false;
+          notice = '';
+        } catch (e) {
+          notice = e.message;
+          connectionFailed = !e.status;
+        } finally {
+          pairing = false;
+          await check();
+          render();
+        }
+      }
+      function selection(copy = false) {
+        copying = copy;
+        preparing = true;
+        render();
+        post({ type: 'send' });
+      }
+      async function copyDoc() {
+        if (!lastDoc) {
+          selection(true);
+          return;
+        }
+        const text = 'POWERMOVE_FIGMA_V1\n' + JSON.stringify(lastDoc);
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          const field = document.createElement('textarea');
+          field.value = text;
+          document.body.appendChild(field);
+          field.select();
+          const ok = document.execCommand('copy');
+          field.remove();
+          if (!ok) {
+            notice = 'Click Copy for Powermove again.';
+            render();
+            return;
+          }
+        }
+        notice = 'Copied. Paste in Powermove.';
+        $('message').textContent = notice;
+      }
+      $('primary').onclick = () => {
+        if (!token) void connect();
+        else if (count && composition) selection();
+      };
+      $('copy').onclick = () => selection(true);
+      window.onmessage = async ({ data, source, origin }) => {
+        // Desktop Figma forwards sandbox messages from its top frame through
+        // an intermediate wrapper, so the sender is not always our parent.
+        if (source !== parent &&
+            (source !== top || !['https://www.figma.com', 'https://figma.com'].includes(origin))) return;
+        const m = data.pluginMessage;
+        if (!m) return;
+        if (m.type === 'token') {
+          token = m.token || '';
+          void check();
+        }
+        if (m.type === 'count') {
+          count = m.count;
+          render();
+        }
+        if (m.type === 'error') {
+          preparing = false;
+          sending = false;
+          notice = m.text;
+          lastResult = m.text;
+          render();
+          $('message').textContent = m.text;
+        }
+        if (m.type === 'selection') {
+          lastDoc = m.doc;
+          preparing = false;
+          if (copying) {
+            copying = false;
+            await copyDoc();
+            return;
+          }
+          sending = true;
+          render();
+          try {
+            const result = await request('/send', m.doc, true, 125000);
+            lastResult = `Sent ${result.layers} layers · ${result.flattened} flattened`;
+            connectionFailed = false;
+          } catch (e) {
+            lastResult = e.message;
+            if (e.status === 401) {
+              forgetToken();
+              notice = 'Connect to Powermove again.';
+            } else if (!e.status) {
+              connectionFailed = true;
+              reachable = false;
+            }
+          } finally {
+            sending = false;
+            render();
+          }
+        }
+      };
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) clearTimeout(timer);
+        else void check();
+      });
+      post({ type: 'ready' });
+      void check();
+    </script>
+  </body>
+</html>

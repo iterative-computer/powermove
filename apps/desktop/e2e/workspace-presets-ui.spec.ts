@@ -195,12 +195,11 @@ test('My Presets: save from a layer, apply by double-click and drag, rename and 
   await expect(browser.locator('[data-kind="preset"] .fxb-name')).toHaveText('Gentle entrance');
   expect(await page.evaluate(() => (window as any).PM.Presets.list()[0].name)).toBe('Gentle entrance');
 
-  // Context menu, then Delete after confirming.
+  // Context menu ▸ Delete: no confirmation, Undo lives in the toast.
   await browser.locator('[data-kind="preset"]').click({ button: 'right' });
   await shot(page, '02-after-preset-context-menu-dark');
   await page.evaluate(() => (window as any).PM.closeMenus());
-  await page.evaluate(() => { (window as any).PM.confirm = async () => true; });
-  await chooseNativeMenu(session, 'Delete…', () => browser.locator('[data-kind="preset"]').click({ button: 'right' }));
+  await chooseNativeMenu(session, 'Delete', () => browser.locator('[data-kind="preset"]').click({ button: 'right' }));
   await expect(browser.locator('[data-kind="preset"]')).toHaveCount(0);
   await expect(browser.locator('[data-presets-empty]')).toBeVisible();
   expect(session.diagnostics.pageErrors).toEqual([]);

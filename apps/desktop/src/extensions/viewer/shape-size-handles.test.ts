@@ -114,3 +114,12 @@ it('formats the live dimension badge', () => {
   expect(formatShapeSize({ w: 310, h: 90.04 })).toBe('310 × 90');
   expect(formatShapeSize({ w: 120.25, h: 64.5 })).toBe('120.3 × 64.5');
 });
+
+it('words the forced-Scale badge, with one value when both axes agree', async () => {
+  const { formatScaleReadout, handleForcesScale } = await import('./viewer');
+  expect(formatScaleReadout({ x: 125, y: 125.02 })).toBe('Scale 125%');
+  expect(formatScaleReadout({ x: 140.04, y: 87.5 })).toBe('Scale 140% × 87.5%');
+  expect(handleForcesScale({ metaKey: true })).toBe(true);
+  expect(handleForcesScale({ ctrlKey: true })).toBe(true);
+  expect(handleForcesScale({ shiftKey: true, altKey: true } as any)).toBe(false);
+});

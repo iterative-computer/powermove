@@ -1,3 +1,4 @@
+import { extrusionEligible, isExtrudedLayer, EXTRUSION_SURFACES, type ExtrusionSurface } from './extrusion-data';
 /** Asset IDs retain the old format. Layer links are local to their receiver's composition. */
 export type MaterialMap = string | {compositionId:string} | {layerId:string};
 export const MATERIAL_SLOTS = ['color','normal','roughness','metalness','emissive','ao'] as const;
@@ -6,12 +7,13 @@ export type MaterialMaps = Partial<Record<MaterialSlot,MaterialMap>>;
 export interface SourceMaterialInfo {index:number;name:string;slots:MaterialSlot[];maps:MaterialMaps}
 export type MaterialSourceGroup = 'Comps'|'Footage'|'Solids'|'Text & Shapes';
 export interface MaterialSourceLayer {id:string;name:string;type:string;group:MaterialSourceGroup}
-export interface MaterialLayerLink {materialIndex:number|null;slot:MaterialSlot;layerId:string;status:'ready'|'missing'|'ineligible'|'cycle'}
+export interface MaterialLayerLink {surface?:ExtrusionSurface;materialIndex:number|null;slot:MaterialSlot;layerId:string;status:'ready'|'missing'|'ineligible'|'cycle'}
 const sourceGroups:Record<string,MaterialSourceGroup>={precomp:'Comps',image:'Footage',video:'Footage',solid:'Solids',text:'Text & Shapes',shape:'Text & Shapes'};
 export function materialSourceEligible(layer:any):boolean {return !!sourceGroups[layer?.type] && !layer?.d?.data?.object;}
 /** Generated geometry supplies UVs; custom and imported meshes must own them. */
 export function materialReceiverHasUVs(PM:any,layer:any):boolean {
   const source=layer?.d?.data?.object?.source;
+  if(isExtrudedLayer(layer))return true;
   if(!source)return false;
   if(source.mesh)return !!source.mesh.uvs?.length;
   if(source.assetId){
@@ -26,7 +28,7 @@ export function objectMapSets(object:any):MaterialMaps[] {
 }
 export function layerMaterialMaps(layer:any):MaterialMap[] {
   const objects=layer?.d?.data?.scene?.objects || (layer?.d?.data?.object?[layer.d.data.object]:[]);
-  return objects.flatMap((object:any)=>objectMapSets(object).flatMap(maps=>Object.values(maps)));
+  return [...objects.flatMap((object:any)=>objectMapSets(object).flatMap(maps=>Object.values(maps))),...Object.values<any>(layer?.d?.extrusion?.surfaces || {}).flatMap(surface=>Object.values<MaterialMap>(surface.maps || {}))];
 }
 export function mapImageId(map:MaterialMap|undefined):string|undefined {return typeof map==='string'?map:undefined;}
 export function layerCompositionIds(layer:any):string[] {
@@ -97,10 +99,10 @@ export function listEligibleMaterialLayers(PM:any,receiverId:string):{group:Mate
     .map((layer:any)=>({id:layer.id,name:layer.name,type:layer.type,group}))}));
 }
 export function materialLayerLinks(PM:any,receiverId:string):MaterialLayerLink[] {
-  const object=materialOwner(PM.proj,receiverId)?.layers.find((l:any)=>l.id===receiverId)?.d?.data?.object;
-  const sets:[number|null,MaterialMaps][]=[[null,object?.material?.maps || {}],...Object.entries<MaterialMaps>(object?.sourceMaterials || {}).map(([index,maps]):[number,MaterialMaps]=>[Number(index),maps])];
+  const layer=materialOwner(PM.proj,receiverId)?.layers.find((l:any)=>l.id===receiverId),object=layer?.d?.data?.object;
+  const sets:[number|null,MaterialMaps][]=extrusionEligible(layer)?EXTRUSION_SURFACES.map((surface,index)=>[index,layer.d?.extrusion?.surfaces?.[surface]?.maps || {}]):[[null,object?.material?.maps || {}],...Object.entries<MaterialMaps>(object?.sourceMaterials || {}).map(([index,maps]):[number,MaterialMaps]=>[Number(index),maps])];
   return sets.flatMap(([materialIndex,maps])=>Object.entries(maps).flatMap(([slot,map])=>typeof map==='object' && 'layerId' in map
-    ?[{materialIndex,slot:slot as MaterialSlot,layerId:map.layerId,status:materialLayerStatus(PM.proj,receiverId,map.layerId)}]:[]));
+    ?[{materialIndex,...(extrusionEligible(layer)?{surface:EXTRUSION_SURFACES[materialIndex!]}:{}),slot:slot as MaterialSlot,layerId:map.layerId,status:materialLayerStatus(PM.proj,receiverId,map.layerId)}]:[]));
 }
 export function remapMaterialLayerLinks(layer:any,ids:ReadonlyMap<string,string>):void {
   for(const map of layerMaterialMaps(layer))if(typeof map==='object' && 'layerId' in map && ids.has(map.layerId))map.layerId=ids.get(map.layerId)!;
@@ -131,8 +133,37 @@ export function validateCompositionMaps(project:any):void {
 }
 export function listModelMaterials(PM:any,layerId:string):SourceMaterialInfo[] {
   const layer=PM.L?.(layerId),object=layer?.d?.data?.object;
+  if(isExtrudedLayer(layer))return EXTRUSION_SURFACES.map((surface,index)=>({index,name:surface[0]!.toUpperCase()+surface.slice(1),slots:[...MATERIAL_SLOTS],maps:{...layer.d.extrusion.surfaces?.[surface]?.maps}}));
   if(!object)return [];
   const asset=object.source?.assetId && PM.assets?.get?.(object.source.assetId);
   return (asset?.materials || (!object.source?.assetId?[{index:0,name:'Material'}]:[])).map((material:any)=>({index:material.index,name:material.name,
     slots:[...MATERIAL_SLOTS],maps:{...(object.sourceMaterials?.[material.index] || {})}}));
+}
+
+export type MaterialAssignmentCheck = {ok:true;reason?:never} | {ok:false;reason:string};
+/** Read-only drag-over validation. The setter runs the same checks again at drop time. */
+export function canAssignMaterialMap(PM:any,receiverId:string,materialIndex:number|null,slot:MaterialSlot,source:MaterialMap|null):MaterialAssignmentCheck {
+  const fail=(reason:string):MaterialAssignmentCheck=>({ok:false,reason});
+  const owner=materialOwner(PM.proj,receiverId),receiver=owner?.layers?.find((l:any)=>l.id===receiverId);
+  // Extruded text and shapes take sources on their Front, Bevel, Side and Back (0–3).
+  if(!receiver?.d?.data?.object && !isExtrudedLayer(receiver))return fail('Choose a model layer');
+  if(receiver.lock || (PM.groupAncestors?.(receiver) || []).some((l:any)=>l.lock))return fail('This layer is locked');
+  if(!MATERIAL_SLOTS.includes(slot))return fail('Choose a material map slot');
+  if(materialIndex!=null && (!Number.isInteger(materialIndex) || materialIndex<0))return fail('Invalid source material index');
+  if(source!==null && materialIndex!=null && !listModelMaterials(PM,receiverId).some(m=>m.index===materialIndex))return fail('Source material is unavailable');
+  if(source===null)return {ok:true};
+  if(typeof source==='string')return source.length?{ok:true}:fail('Choose an image asset');
+  if(!source || typeof source!=='object' || Object.keys(source).length!==1)return fail('Choose a material source');
+  if(slot!=='color' && slot!=='emissive')return fail('Composition and layer textures support base color and emissive slots');
+  if('layerId' in source){
+    const status=materialLayerStatus(PM.proj,receiverId,source.layerId);
+    if(status==='cycle')return fail('Layer material reference would create a cycle');
+    if(status!=='ready')return fail('Choose an eligible source layer in the same composition');
+  }else if('compositionId' in source){
+    if(!compositionById(PM.proj,source.compositionId))return fail('Composition is unavailable');
+    if(reaches(materialGraph(PM.proj),JSON.stringify(['comp',source.compositionId]),JSON.stringify(['layer',owner.id,receiverId])))
+      return fail('Composition material reference would create a cycle');
+  }else return fail('Choose a material source');
+  if(!materialReceiverHasUVs(PM,receiver))return fail('This mesh needs UV coordinates to receive a layer material');
+  return {ok:true};
 }

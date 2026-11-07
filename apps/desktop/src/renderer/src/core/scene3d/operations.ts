@@ -1,14 +1,19 @@
+import { extrusionEligible, parseExtrusion } from './extrusion-data';
+import { extrusionCommands } from './extrusion-operations';
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
-import { intrinsicPropertiesSchema } from './schema';
-import { MATERIAL_SLOTS,compositionById,materialLayerStatus,listModelMaterials,materialReceiverHasUVs } from './material-maps';
+import { intrinsicPropertiesSchema, partTransformSchema } from './schema';
+import { PART_DEFAULTS, PART_FIELDS, PART_KEY, listLayerParts, partPath, type PartField } from './model-parts';
+import { canAssignMaterialMap,listModelMaterials } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties';
-  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null;
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part';
+  target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
+  /** set_part: the part's key from listParts; patch null removes its offsets. */
+  part?:string;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -27,7 +32,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
-  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map']);
+  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
@@ -76,13 +81,17 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   const selected=args.id || args.target || PM.sel?.layers?.[0];
   let layer=PM.L?.(selected);
   if(!layer && typeof selected==='string'){
-    const matches=(PM.curComp?.() || PM.proj).layers.filter((l:any)=>l.name===selected && layer3DRole(l));
+    const matches=(PM.curComp?.() || PM.proj).layers.filter((l:any)=>l.name===selected && (layer3DRole(l) || extrusionEligible(l)));
     if(matches.length>1)throw new Error('Multiple 3D layers have that name; use a layer ID');
     layer=matches[0];
   }
   if(args.operation==='set_camera' || args.operation==='set_environment'){
     if(layer3DRole(layer)!=='camera')layer=(PM.curComp?.() || PM.proj).layers.find((l:any)=>layer3DRole(l)==='camera' && l.on!==false);
     if(!layer){const id=add('camera',args.operation==='set_camera'?{camera:args.patch || {}}:{camera:{},environment:args.patch || {}});return {commands,id};}
+  }
+  if(layer && extrusionEligible(layer) && ['set_extrusion','set_surface_material_map','set_surface_material_properties','set_material_map','set_material_properties'].includes(args.operation)){
+    if(layer.lock || (PM.groupAncestors?.(layer) || []).some((g:any)=>g.lock))throw new Error('Unlock the 3D layer before editing it');
+    return extrusionCommands(PM,layer,args);
   }
   const role=layer3DRole(layer);
   if(!layer || !role)throw new Error('Choose a 3D model, light or camera layer');
@@ -115,17 +124,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   };
   switch(args.operation){
     case 'set_material_map':{
-      if(role!=='object')throw new Error('Choose a model layer');
-      if(!args.slot || !MATERIAL_SLOTS.includes(args.slot))throw new Error('Choose a material map slot');
-      if(args.map && typeof args.map==='object'){
-        if('compositionId' in args.map && !compositionById(PM.proj,args.map.compositionId))throw new Error('Composition is unavailable');
-        if('layerId' in args.map){
-          const status=materialLayerStatus(PM.proj,layer.id,args.map.layerId);
-          if(status==='cycle')throw new Error('Layer material reference would create a cycle');
-          if(status!=='ready')throw new Error('Choose an eligible source layer in the same composition');
-          if(!materialReceiverHasUVs(PM,layer))throw new Error('This mesh needs UV coordinates to receive a layer material');
-        }
-      }
+      const check=canAssignMaterialMap(PM,layer.id,args.materialIndex ?? null,args.slot!,args.map ?? null);
+      if(!check.ok)throw new Error(check.reason);
       let maps=content.object.material.maps;
       if(args.materialIndex!=null){
         if(!Number.isInteger(args.materialIndex) || args.materialIndex<0)throw new Error('Invalid source material index');
@@ -134,7 +134,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
         maps=content.object.sourceMaterials[args.materialIndex] ||= {};
         if(content.object.source.assetId)content.object.useSourceMaterials=true;
       }
-      if(args.map==null)delete maps[args.slot];else maps[args.slot]=clone(args.map);
+      if(args.map==null)delete maps[args.slot!];else maps[args.slot!]=clone(args.map);
       if(args.materialIndex!=null && !Object.keys(maps).length)delete content.object.sourceMaterials[args.materialIndex];
       break;
     }
@@ -158,6 +158,28 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
         }else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
       }
       if(index!=null && !Object.keys(props).length)delete content.object.sourceMaterialProperties[index];
+      break;
+    }
+    case 'set_part':{
+      if(role!=='object')throw new Error('Choose a model layer');
+      const key=String(args.part ?? '');
+      if(!PART_KEY.test(key))throw new Error('Choose a part of the model');
+      const parts=(content.object.parts ||= {});
+      if(args.patch===null){delete parts[key];break;}
+      const info=listLayerParts(PM,layer).find(part=>part.key===key);
+      if(!info && !parts[key])throw new Error('That part is not in this model');
+      if(Object.keys(patch).some(field=>!(PART_FIELDS as readonly string[]).includes(field)))throw new Error('Unknown part property');
+      // The first edit installs every channel at its neutral value.
+      if(!parts[key])parts[key]={name:info!.name,p:Object.fromEntries(PART_FIELDS.map(field=>[field,{v:PART_DEFAULTS[field],kf:[],expr:null}]))};
+      for(const [field,value] of Object.entries<any>(patch)){
+        const path=partPath(key,field as PartField);
+        if(value===undefined)continue;
+        partTransformSchema.shape[field as PartField]!.parse(typeof value==='object' && value!==null?value:{v:value,kf:[],expr:null});
+        if(typeof value==='object' && value!==null){
+          commands.push({type:'set_property',target:layer.id,path,value:value.v,mode:'value'});
+          commands.push({type:'replace_keyframes',target:layer.id,path,keyframes:(value.kf || []).map((k:any)=>({time:k.t,value:k.v,ease:k.ease || 'linear',hold:k.hold || false})),expression:value.expr || null});
+        }else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
+      }
       break;
     }
     case 'remove':
@@ -197,8 +219,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
     default:throw new Error('Unknown 3D operation');
   }
-  if(args.patch?.name!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{name:args.patch.name}});
-  if(args.patch?.parent!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{parent:args.patch.parent}});
+  if(args.operation!=='set_part' && args.patch?.name!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{name:args.patch.name}});
+  if(args.operation!=='set_part' && args.patch?.parent!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{parent:args.patch.parent}});
   const checked=parseLayer3DData(role,content);
   // Validate channel values against their schema before executing any part of a batch.
   const candidate=clone(layer);candidate.d.data=clone(checked);
@@ -227,6 +249,7 @@ export function validateSceneLayer(layer: any,PM?:any): void {
   const role=layer3DRole(layer);
   if(role)layer.d.data=parseLayer3DData(role,layer.d.data);
   else if(layer.d?.definition===SCENE3D_DEFINITION)layer.d.data.scene=parseScene(layer.d.data.scene);
+  else if(extrusionEligible(layer) && layer.d?.extrusion)layer.d.extrusion=parseExtrusion(layer.d.extrusion);
   else return;
   const ids=new Set<string>();
   for(const {prop} of sceneProperties(layer))for(const key of prop.kf){

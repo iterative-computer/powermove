@@ -331,6 +331,8 @@ type ViewerRuntime = ViewerService & {
   activePath: string | null;
   /** Live Width × Height while a handle drag edits a shape's own Size. */
   sizeReadout?: { w: number; h: number } | null;
+  /** Live Scale while ⌘ (Ctrl) forces a parametric shape's handles to scale instead of resizing. */
+  scaleReadout?: { x: number; y: number } | null;
   finishCanvasText?: (() => void) | null;
   textSelection?: { layer: string; start: number; end: number } | null;
   textSession?: TextEditSession | null;
@@ -614,6 +616,17 @@ export function formatShapeSize(size: { w: number; h: number }): string {
   return `${value(size.w)} × ${value(size.h)}`;
 }
 
+/** The badge while ⌘ forces Scale: one value when both axes agree. */
+export function formatScaleReadout(scale: { x: number; y: number }): string {
+  const value = (n: number) => `${Math.round(n * 10) / 10}%`;
+  return Math.abs(scale.x - scale.y) < .05 ? `Scale ${value(scale.x)}` : `Scale ${value(scale.x)} × ${value(scale.y)}`;
+}
+
+/** Holding ⌘ (Ctrl elsewhere) while dragging a parametric shape's handle scales the layer instead of changing its Size. */
+export function handleForcesScale(event: { metaKey?: boolean; ctrlKey?: boolean } | null | undefined): boolean {
+  return !!(event?.metaKey || event?.ctrlKey);
+}
+
 export interface ShapeSizeDrag {
   /** Width/height and the edit commands for a pointer delta (composition px) from the gesture start. */
   resize(delta: Point, modifiers: { shift?: boolean; alt?: boolean }): { width: number; height: number; commands: EditCommand[] } | null;
@@ -854,6 +867,7 @@ let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
+const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.d?.extrusion?.enabled===true&&layer.threeD===true;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
@@ -1270,7 +1284,7 @@ function drawOverlayContent(): boolean | void {
   const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
   sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
   sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
-  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object');
+  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object' || isExtrudedArtwork(l));
   for(const host of [gizmoToolbarHost,gizmoViewHost])if(host)host.style.display=has3D?'flex':'none';
 
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -1336,10 +1350,13 @@ function drawOverlayContent(): boolean | void {
   }
 
   const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  /* Extruded text and shapes are drawn by the scene camera, so the 3D layer
+     overlay outlines their real mesh; a flat plane outline would not line up. */
+  const meshOutlined = gizmoVisible && sels.length > 0 && sels.every(isExtrudedArtwork);
   const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
-  if (sels.length > 1 || !selection) for (const L of sels) {
+  if ((sels.length > 1 || !selection) && !meshOutlined) for (const L of sels) {
     const b = layerBounds(api, L, api.transport.time());
     if (!b) continue;
     const m = api.anim.worldMatrix(L, api.transport.time());
@@ -1360,7 +1377,7 @@ function drawOverlayContent(): boolean | void {
   // With the Anchor Point tool the marker is the thing to grab: draw it larger.
   const anchorTool = (V.temporaryTool || toolService()?.tool) === 'anchor';
   const ring = (anchorTool ? 7 : 5) * anchorUnit, arm = (anchorTool ? 11 : 8) * anchorUnit;
-  for (const layer of sels) {
+  for (const layer of meshOutlined ? [] : sels) {
     if (!layerBounds(api, layer, api.transport.time())) continue;
     const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
@@ -1407,6 +1424,7 @@ function drawOverlayContent(): boolean | void {
     c.stroke();
     c.restore();
   }
+  if (selection && meshOutlined) { c.restore(); return; }
   if (selection) {
     c.strokeStyle = selectionInk;
     c.lineWidth = 1.4 / Math.max(.02, V.shown);
@@ -1440,7 +1458,8 @@ function drawOverlayContent(): boolean | void {
       c.fillRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
       c.strokeRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
     });
-    if (V.sizeReadout) drawSizeReadout(c, selection, V.sizeReadout);
+    if (V.sizeReadout) drawSizeReadout(c, selection, formatShapeSize(V.sizeReadout));
+    else if (V.scaleReadout) drawSizeReadout(c, selection, formatScaleReadout(V.scaleReadout));
   }
   c.restore();
 }
@@ -1449,11 +1468,10 @@ const MOVE_DRAG_THRESHOLD_PX = 3;
 
 /* Figma-style dimension badge: while a handle edits Size, the new Width ×
    Height sits centred under the box, upright and a constant screen size. */
-function drawSizeReadout(c: any, selection: SelectionGeometry, size: { w: number; h: number }) {
+function drawSizeReadout(c: any, selection: SelectionGeometry, text: string) {
   const unit = 1 / Math.max(.02, V.shown);
   const bottom = Math.max(...selection.corners.map((point) => point.y));
   const centerX = selection.corners.reduce((sum, point) => sum + point.x, 0) / selection.corners.length;
-  const text = formatShapeSize(size);
   c.save();
   c.font = `500 ${11 * unit}px ui-monospace, "SF Mono", Menlo, monospace`;
   c.textAlign = 'center';
@@ -1861,6 +1879,21 @@ function bindStage(stage: any, inner: any): () => void {
       e.stopPropagation();
       api.commands.run('openComposition', hit.d.comp);
       return;
+    }
+    /* Double-clicking an imported model picks the part under the pointer
+       (outer part first, then a level deeper each time), so the 3D handles
+       move that part, like entering a group in a design tool. */
+    if (hit?.d?.definition === 'powermove.3d.object' && api.scene3d?.pickPart) {
+      const part = api.scene3d.pickPart(hit.id, x, y);
+      if (part) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!api.selection.layers().includes(hit.id) || api.selection.layers().length !== 1) selectLayers(hit.id);
+        api.scene3d.setActivePart(hit.id, part);
+        refreshInspector();
+        invalidate();
+        return;
+      }
     }
     /* Double-clicking a 3D scene layer opens it in the 3D Scene editor; a
        legacy OBJ layer is first converted to a scene (one Undo). */
@@ -2651,14 +2684,38 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
     setOrKey(L, path, value, T);
     applied[key] = value;
   };
-  api.edit.begin(hit.rotate ? 'Rotate layer' : sizeDrag || lineContent0 ? 'Resize shape' : textContent0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
+  /* ⌘ (Ctrl) switches a shape's handles from Size to Scale, live: the gesture
+     restarts from its snapshot in the other mode, so the result is one clean
+     undo step either way, with no stray keys from the mode it left. */
+  let scaling = !!sizeDrag && handleForcesScale(e);
+  const label = () => hit.rotate ? 'Rotate layer' : sizeDrag && !scaling || lineContent0 ? 'Resize shape' : textContent0 == null ? 'Scale layer' : 'Resize text';
+  api.edit.begin(label(), { origin: 'canvas' });
   let moved = false;
-  const endSize = () => { if (V.sizeReadout) { V.sizeReadout = null; invalidate(); } };
-  beginDrag(e, {
-    cursor: cursorForHit(selection, hit),
-    move: (dx: any, dy: any, ev: any) => {
+  let lastMove: { dx: any; dy: any; ev: any } | null = null;
+  const endSize = () => { if (V.sizeReadout || V.scaleReadout) { V.sizeReadout = null; V.scaleReadout = null; invalidate(); } };
+  const switchMode = (ev: any) => {
+    const next = !!sizeDrag && handleForcesScale(ev);
+    if (next === scaling) return;
+    scaling = next;
+    api.edit.cancel();
+    api.edit.begin(label(), { origin: 'canvas' });
+    Object.assign(applied, { sx: s0.sx, sy: s0.sy, x: s0.x, y: s0.y });
+    V.sizeReadout = null; V.scaleReadout = null;
+  };
+  // Pressing or releasing ⌘ without moving still switches the mode.
+  const modifierChange = (key: KeyboardEvent) => {
+    if (!lastMove || (key.key !== 'Meta' && key.key !== 'Control')) return;
+    const ev = lastMove.ev;
+    move(lastMove.dx, lastMove.dy, { clientX: ev.clientX, clientY: ev.clientY, offsetX: ev.offsetX, offsetY: ev.offsetY, target: ev.target,
+      shiftKey: key.shiftKey, altKey: key.altKey, metaKey: key.metaKey, ctrlKey: key.ctrlKey });
+  };
+  if (sizeDrag) { window.addEventListener('keydown', modifierChange, true); window.addEventListener('keyup', modifierChange, true); }
+  const stopModifiers = () => { window.removeEventListener('keydown', modifierChange, true); window.removeEventListener('keyup', modifierChange, true); };
+  const move = (dx: any, dy: any, ev: any) => {
       moved = true;
-      if (sizeDrag) {
+      lastMove = { dx, dy, ev };
+      if (sizeDrag) switchMode(ev);
+      if (sizeDrag && !scaling) {
         const pointer = pointerComp(ev);
         const next = sizeDrag.resize({ x: pointer.x - pointerStart.x, y: pointer.y - pointerStart.y }, { shift: ev.shiftKey, alt: ev.altKey });
         if (!next) return;
@@ -2721,6 +2778,7 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
         } else {
           applyValue('scale.x', api.util.round(next.scaleX, 3), 'sx');
           applyValue('scale.y', api.util.round(next.scaleY, 3), 'sy');
+          if (sizeDrag) V.scaleReadout = { x: applied.sx, y: applied.sy };
         }
         /* Every move starts from the gesture snapshot. This prevents the
            previous correction from accumulating as the pointer changes. */
@@ -2735,9 +2793,12 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
         applyValue('position.y', api.util.round(s0.y + positionDy, 3), 'y');
       }
       invalidate();
-    },
-    up: () => { endSize(); moved ? api.edit.commit() : api.edit.cancel(); refreshInspector(); },
-    cancel: () => { endSize(); api.edit.cancel(); refreshInspector(); },
+  };
+  beginDrag(e, {
+    cursor: cursorForHit(selection, hit),
+    move,
+    up: () => { stopModifiers(); endSize(); moved ? api.edit.commit() : api.edit.cancel(); refreshInspector(); },
+    cancel: () => { stopModifiers(); endSize(); api.edit.cancel(); refreshInspector(); },
   });
 }
 

@@ -1,3 +1,5 @@
+import { openFigmaConnect } from '../../overlays/figma/connect';
+import { receiveFigma } from '../core/figma/paste';
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
@@ -13,8 +15,26 @@ export function install(PM: PMRegistry): void {
 
   const bridge = (hostBridge() as any);
   const encoder = new window.TextEncoder();
+  PM.openFigmaConnect = () => {
+    if (bridge.figmaLink) openFigmaConnect(PM, bridge.figmaLink);
+  };
+  bridge.figmaLink?.onReceive(async ({ id, doc }: any) => {
+    try {
+      bridge.figmaLink.result(id, await receiveFigma(PM, doc));
+    } catch (e) {
+      bridge.figmaLink.result(id, { error: e instanceof Error ? e.message : 'Could not import Figma layers' });
+    }
+  });
   // File commands cannot wait for local-font enumeration or its permission prompt.
   bridge.onMenuCommand((command: any) => {
+    if (command === 'connectFigma') {
+      if (bridge.figmaLink) openFigmaConnect(PM, bridge.figmaLink);
+      return;
+    }
+    if (command === 'disconnectFigma') {
+      void bridge.figmaLink?.stop().then(() => PM.toast('Figma disconnected'));
+      return;
+    }
     const editorCommand = command === 'copy' ? 'copyLayers' : command === 'paste' ? 'pasteLayers' : command;
     PM.cmd?.(editorCommand);
   });

@@ -73,3 +73,31 @@ it('leaves the size alone unless asked, and dims the option when it cannot apply
   expect([...app.sizeRow().querySelectorAll('button')].every(button => (button as HTMLButtonElement).disabled)).toBe(true);
   expect(app.sizeRow().title).toContain('visual layer');
 });
+
+it('remembers the last-used options for the next Pre-compose, and only after confirming', () => {
+  const app = editor(), { PM, a, b, audio } = app;
+  const prefs = new Map<string, unknown>();
+  PM.store = { get: (key: string, fallback: unknown) => prefs.has(key) ? prefs.get(key) : fallback, set: (key: string, value: unknown) => { prefs.set(key, value); } };
+  const openRow = () => [...document.querySelectorAll<HTMLElement>('.new-project-field')].find(row => row.textContent?.startsWith('Open new'))!;
+  const on = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('button[aria-checked="true"]')?.textContent;
+  // Cancelled choices are not remembered.
+  precomposeDialog(PM, [a.id, b.id]); flushSync();
+  app.choose(app.durationRow(), 'On');
+  [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(item => item.textContent === 'Cancel')!.click(); flushSync();
+  expect(PM.store.get('precomposeOptions', null)).toBeNull();
+
+  precomposeDialog(PM, [a.id, b.id]); flushSync();
+  expect(on(app.durationRow())).toBe('Off');
+  app.choose(app.durationRow(), 'On'); app.choose(app.sizeRow(), 'On'); app.choose(openRow(), 'On');
+  app.confirm();
+  expect(PM.store.get('precomposeOptions', null)).toEqual({ mode: 'move', adjustDuration: true, sizeToSelection: true, open: true });
+
+  // The next dialog opens with them, and the summary already reflects them.
+  PM.Comps.open(PM.Comps.list().find((comp: any) => !PM.Comps.users(comp.id).length && comp.id !== PM.Comps.active())?.id ?? PM.Comps.active());
+  precomposeDialog(PM, [audio.id]); flushSync();
+  expect(on(app.durationRow())).toBe('On');
+  expect(on(openRow())).toBe('On');
+  // Fit size can't measure audio: dimmed, but the remembered choice is kept for next time.
+  expect(app.sizeRow().classList.contains('is-dim')).toBe(true);
+  expect(on(app.sizeRow())).toBe('On');
+});

@@ -1,3 +1,6 @@
+import { figmaPluginSource, installFigmaPlugin } from './figma-plugin';
+import { FIGMA_COMMUNITY_URL } from '../shared/figma-link';
+import { FigmaLink } from './figma-link';
 import { createEditorClosePreparation } from './editor-close';
 import { watchMemoryPressure } from './memory-pressure';
 import { registerFontsIpc } from './fonts';
@@ -13,6 +16,9 @@ import { registerExportSidecar } from './export-sidecar';
 import {
   app,
   BrowserWindow,
+  Menu,
+  clipboard,
+  ClipboardItem,
   dialog,
   ipcMain,
   net,
@@ -628,7 +634,133 @@ function readProjectId(payload: unknown, channel: string): string | null {
   return value;
 }
 
+let figmaSetupOwner: WebContents | null = null;
+let figmaSetupGeneration = 0;
+const setupWindows = new WeakSet<WebContents>();
+let pluginInstall: Promise<string> | undefined;
+const ensureFigmaPlugin = () =>
+  (pluginInstall ??= installFigmaPlugin(
+    figmaPluginSource(app.getAppPath(), process.resourcesPath, app.isPackaged),
+    app.getPath('userData'),
+  ).finally(() => {
+    pluginInstall = undefined;
+  }));
+const figmaLink = new FigmaLink(
+  async (doc) => {
+    const target = currentEditor();
+    if (!target || target.isDestroyed() || !openReadyEditors.has(target.webContents))
+      throw new Error('Open a composition in Powermove first');
+    const id = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        clearTimeout(timer);
+        ipcMain.off(IPC.figmaResult, listener);
+        target.off('closed', closed);
+      };
+      const closed = () => {
+        finish();
+        reject(new Error('The editor was closed'));
+      };
+      const listener = (event: Electron.IpcMainEvent, value: any) => {
+        if (event.sender !== target.webContents || !isTrustedSender(event) || value?.id !== id) return;
+        finish();
+        if (value.result?.error) reject(new Error(String(value.result.error)));
+        else resolve(value.result);
+      };
+      const timer = setTimeout(() => {
+        finish();
+        reject(new Error('Figma import timed out'));
+      }, 120000);
+      ipcMain.on(IPC.figmaResult, listener);
+      target.once('closed', closed);
+      target.webContents.send(IPC.figmaReceive, { id, doc });
+    });
+  },
+  {
+    storagePath: path.join(app.getPath('userData'), 'figma-link.json'),
+    compositionOpen: async () => {
+      const target = currentEditor();
+      if (!target || target.isDestroyed() || !openReadyEditors.has(target.webContents)) return false;
+      try {
+        return !!(await target.webContents.executeJavaScript(
+          'Boolean(window.PM?.proj?.compId && !window.PM?.ProjectsScreen?.isOpen)',
+        ));
+      } catch {
+        return false;
+      }
+    },
+    changed: (state) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById('disconnectFigma');
+      if (item) item.visible = state.paired;
+      if (figmaSetupOwner && !figmaSetupOwner.isDestroyed()) figmaSetupOwner.send(IPC.figmaState, state);
+    },
+  },
+);
+app.on('before-quit', () => {
+  void figmaLink.close();
+});
+
 function registerWindowIpc(): void {
+  ipcMain.handle(IPC.figmaStart, async (event) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (figmaSetupOwner && figmaSetupOwner !== event.sender) figmaLink.closeSetup(String(figmaSetupOwner.id));
+    const generation = ++figmaSetupGeneration;
+    figmaSetupOwner = event.sender;
+    figmaLink.openSetup(String(event.sender.id));
+    if (!setupWindows.has(event.sender)) {
+      setupWindows.add(event.sender);
+      event.sender.once('destroyed', () => {
+        figmaLink.closeSetup(String(event.sender.id));
+        if (figmaSetupOwner === event.sender) figmaSetupOwner = null;
+      });
+    }
+    let manifestPath: string | undefined;
+    try {
+      manifestPath = await ensureFigmaPlugin();
+      if (generation !== figmaSetupGeneration || figmaSetupOwner !== event.sender)
+        return { ...figmaLink.state, manifestPath };
+      await figmaLink.start();
+    } catch {
+      return {
+        ...figmaLink.state,
+        manifestPath,
+        error: figmaLink.state.error ?? 'Could not prepare the Figma plugin. Try again.',
+      };
+    }
+    return { ...figmaLink.state, manifestPath };
+  });
+  ipcMain.handle(IPC.figmaCloseSetup, (event) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    figmaLink.closeSetup(String(event.sender.id));
+    if (figmaSetupOwner === event.sender) figmaSetupOwner = null;
+  });
+  ipcMain.handle(IPC.figmaApprove, async (event, value: unknown) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      typeof (value as any).id !== 'string' ||
+      typeof (value as any).allow !== 'boolean'
+    )
+      throw new Error('Invalid connection decision');
+    await figmaLink.approve(String(event.sender.id), (value as any).id, (value as any).allow);
+  });
+  ipcMain.handle(IPC.figmaPluginAction, async (event, action: unknown) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!['copy', 'show', 'community'].includes(action as string)) throw new Error('Invalid plugin action');
+    if (action === 'community') {
+      if (FIGMA_COMMUNITY_URL) await shell.openExternal(FIGMA_COMMUNITY_URL);
+      return;
+    }
+    const manifest = await ensureFigmaPlugin();
+    if (action === 'copy') await clipboard.write([new ClipboardItem({ 'text/plain': manifest })]);
+    else shell.showItemInFolder(manifest);
+  });
+  ipcMain.handle(IPC.figmaStop, async (event) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    ++figmaSetupGeneration;
+    await figmaLink.disconnect();
+  });
   const senderWindow = (event: { sender: WebContents }): BrowserWindow | null => {
     const window = BrowserWindow.fromWebContents(event.sender);
     return window && editors.has(window) ? window : null;
@@ -1451,6 +1583,11 @@ if (!hasSingleInstanceLock) {
       newWindow: () => createWindow(),
       closeWindow: () => currentEditor()?.close()
     });
+    await figmaLink.restore();
+    const disconnectFigma = Menu.getApplicationMenu()?.getMenuItemById('disconnectFigma');
+    if (disconnectFigma) disconnectFigma.visible = figmaLink.paired;
+    if (figmaLink.paired && (!isBackgroundTest || process.env.POWERMOVE_TEST_FIGMA_AUTOSTART === '1'))
+      void figmaLink.start().catch(() => {});
     if (!isBackgroundTest) installUpdates(menu);
     if (!isBackgroundTest || process.env['POWERMOVE_WHATS_NEW_SINCE']) installWhatsNew(ipcMain, whatsNewOptions(process.env));
 

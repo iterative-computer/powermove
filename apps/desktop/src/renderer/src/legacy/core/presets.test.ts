@@ -17,6 +17,33 @@ function editor() {
   return {PM, source, target, blur, tint, definitions};
 }
 describe('user animation presets', () => {
+  it('restores a deleted preset with its identity, animation and order without losing newer records', () => {
+    const {PM, blur} = editor(); blur.p.amount.kf = [PM.KF(0, 8), PM.KF(1, 32)];
+    const a = PM.Presets.save({name: 'First'}), b = PM.Presets.save({name: 'Second', includeAnimation: true});
+    const c = PM.Presets.save({name: 'Third'}), events = vi.fn(); PM.bus.on('presets', events);
+    const receipt = PM.Presets.removeWithUndo(b.id);
+    expect(receipt).toEqual({preset: b, index: 1});
+    // Simulate a library update delivered by another window while Undo is visible.
+    const d = {...a, id: 'external', name: 'Elsewhere'};
+    PM.store.set('animationPresets', [...PM.Presets.list(), d]);
+    PM.bus.emit('store:external', ['animationPresets']);
+    expect(PM.Presets.restore(receipt.preset, receipt.index)).toBe(true);
+    expect(PM.Presets.list()).toEqual([a, b, c, d]);
+    receipt.preset.name = 'Detached'; expect(PM.Presets.get(b.id)).toEqual(b);
+    expect(PM.Presets.restore(b, 1)).toBe(false);
+    expect(PM.Presets.removeWithUndo('missing')).toBeNull();
+    expect(events).toHaveBeenCalledTimes(3);
+    install(PM); expect(PM.Presets.list()).toEqual([a, b, c, d]);
+  });
+  it('undoes rename and refuses to overwrite a newer cross-window rename', () => {
+    const {PM} = editor(), preset = PM.Presets.save({name: 'Before'});
+    expect(PM.Presets.rename(preset.id, 'After')).toBe(true);
+    expect(PM.Presets.rename(preset.id, preset.name, 'After')).toBe(true);
+    expect(PM.Presets.get(preset.id).name).toBe('Before');
+    PM.Presets.rename(preset.id, 'Another window');
+    expect(PM.Presets.rename(preset.id, 'Before', 'After')).toBe(false);
+    expect(PM.Presets.get(preset.id).name).toBe('Another window');
+  });
   it('persists selected effects in stack order, snapshots evaluated values, and supports list/rename/delete', () => {
     const {PM, source, blur, tint} = editor(), events = vi.fn(); PM.bus.on('presets', events);
     PM.animate(source, 'rotation', [{t: 0, v: 0}, {t: 6, v: 60}]);

@@ -45,6 +45,22 @@ function nextCompName(PM: PMRegistry): string {
   for (let n = 1; ; n++) if (!taken.has(`Comp ${n}`)) return `Comp ${n}`;
 }
 
+export const PRECOMPOSE_OPTIONS_KEY = 'precomposeOptions';
+export interface PrecomposeOptions { mode: 'move' | 'leave'; adjustDuration: boolean; sizeToSelection: boolean; open: boolean }
+
+/** The Pre-compose dialog's last-used choices, from the app's preference store. */
+export function readPrecomposeOptions(PM: PMRegistry): PrecomposeOptions {
+  let saved: any = null;
+  try { saved = PM.store?.get?.(PRECOMPOSE_OPTIONS_KEY, null); } catch { saved = null; }
+  const flag = (value: unknown) => value === true;
+  return {
+    mode: saved?.mode === 'leave' ? 'leave' : 'move',
+    adjustDuration: flag(saved?.adjustDuration),
+    sizeToSelection: flag(saved?.sizeToSelection),
+    open: flag(saved?.open),
+  };
+}
+
 /** Layer ▸ Pre-compose (⇧⌘C). */
 export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers): void {
   const layers = ids.map((layerId: string) => PM.L(layerId)).filter(Boolean);
@@ -65,10 +81,13 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
   const name = h('input.settings-input.is-wide', { type: 'text', value: `Pre-comp ${n}`, 'aria-label': 'New composition name', spellcheck: false });
   /* AE's two modes as one segmented choice, with a line that says what the
      selected one does. Keeping attributes needs a single layer with a source. */
-  let mode: 'move' | 'leave' = 'move';
-  let adjustDuration = false;
-  let sizeToSelection = false;
-  let openAfter = false;
+  /* The last choices come back next time, as After Effects remembers them.
+     Keep on layer only returns where it is available. */
+  const remembered = readPrecomposeOptions(PM);
+  let mode: 'move' | 'leave' = remembered.mode === 'leave' && canLeave ? 'leave' : 'move';
+  let adjustDuration = remembered.adjustDuration;
+  let sizeToSelection = remembered.sizeToSelection;
+  let openAfter = remembered.open;
   /* What “Move layers” would create, measured the same way the engine does,
      so the dialog can say the new size before anything changes. */
   const picked = (() => {
@@ -156,6 +175,8 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
           open: openAfter,
         });
         if (!created) throw new Error('These layers could not be pre-composed');
+        // Remember what was asked for, even where this selection could not use it.
+        PM.store?.set?.(PRECOMPOSE_OPTIONS_KEY, { mode, adjustDuration, sizeToSelection, open: openAfter } satisfies PrecomposeOptions);
       } },
     ],
   });

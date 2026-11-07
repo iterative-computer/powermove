@@ -30,7 +30,7 @@ let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
-const colorChannel=(key:any)=>key==='c.color' || key==='c.strokeColor' || /^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?emissionColor$/.test(key || '');
+const colorChannel=(key:any)=>/^ms\.(front|bevel|side|back)\.(color|emissionColor)$/.test(key || '') || key==='c.color' || key==='c.strokeColor' || /^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?emissionColor$/.test(key || '');
 function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
@@ -534,7 +534,7 @@ PM.allProps = (L: any) => {
   return out;
 };
 PM.findProp = (L: any, key: any) => {
-  if (/^(?:m\.[^.]+$|mi\.|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
+  if (/^(?:m\.[^.]+$|mi\.|pt\.|geo\.|ms\.|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

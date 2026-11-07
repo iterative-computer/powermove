@@ -29,6 +29,23 @@ function editor(){
 }
 
 describe('layers as materials',()=>{
+  it('checks drag-over without mutation and returns the same eligibility/cycle errors as drop',()=>{
+    const {PM,source,add}=editor(),api=makeScene3DAPI(PM,vi.fn()),before=PM.serialize();
+    expect(api.canAssignMaterialMap('model',0,'color',{layerId:'paint'})).toEqual({ok:true});
+    expect(PM.serialize()).toBe(before);
+    const check=(map:any,slot:any='color',index:any=0)=>{
+      const result=api.canAssignMaterialMap('model',index,slot,map);
+      expect(result.ok).toBe(false);
+      expect(api.setMaterialMap('model',index,slot,map)).toMatchObject({ok:false,message:result.reason});
+    };
+    check({layerId:'model'});check({layerId:'missing'});check({layerId:'paint'},'normal');check({layerId:'paint'},'color',99);
+    add('null','null');check({layerId:'null'});
+    source.fx=[{inputs:{provider:{layerId:'model'}}}];check({layerId:'paint'});source.fx=[];
+    const sub=PM.Comps.create({name:'Loop'},{open:false});PM.proj.comps[sub].layers.push({id:'nested',type:'precomp',d:{comp:PM.proj.compId}});
+    check({compositionId:sub});
+    PM.L('model').d.data.object.source={mesh:{positions:[0,0,0,1,0,0,0,1,0]}};check({layerId:'paint'});
+    expect(api.canAssignMaterialMap('model',null,'color',null)).toEqual({ok:true});
+  });
   it('groups same-comp sources, includes hidden artwork, excludes nonvisual layers and receiver',()=>{
     const {PM,add}=editor();
     for(const type of ['precomp','image','video','text','shape','adjustment','null','audio'])add(type,type);

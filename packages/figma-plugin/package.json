@@ -1,0 +1,13 @@
+{
+  "name": "@powermove/figma-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "bun build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "1.126.0",
+    "typescript": "5.9.3"
+  }
+}

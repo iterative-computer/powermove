@@ -368,6 +368,13 @@ export interface Scene3DGizmo {
   dispose():void;
 }
 export interface Scene3DAPI {
+  /** Text/shape geometry is opt-in. Enabling extrusion also enables native 3D. */
+  getExtrusion(layerId:string,time?:number):import('../core/scene3d/extrusion-data').ExtrusionState|null;
+  setExtrusion(layerId:string,patch:import('../core/scene3d/extrusion-data').ExtrusionPatch,meta?:EditMeta):EditResult;
+  listSurfaces(layerId:string):import('../core/scene3d/extrusion-data').ExtrusionSurfaceInfo[];
+  setSurfaceMaterialMap(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
+  getSurfaceMaterialProperties(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,time?:number):import('../core/scene3d/extrusion-data').SurfacePropertyState|null;
+  setSurfaceMaterialProperties(layerId:string,surface:import('../core/scene3d/extrusion-data').ExtrusionSurface,patch:import('../core/scene3d/extrusion-data').SurfacePropertyPatch,meta?:EditMeta):EditResult;
   /** Read-only light marker data, using the displayed comp image rectangle. */
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
@@ -376,6 +383,12 @@ export interface Scene3DAPI {
   lightViewerGuides(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerGuides|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
   listEligibleSourceLayers(layerId:string):{group:import('../core/scene3d/material-maps').MaterialSourceGroup;layers:import('../core/scene3d/material-maps').MaterialSourceLayer[]}[];
+  /** Asynchronous picker preview. Show a placeholder until resolved; null means unavailable/busy.
+   * 64 CSS px maximum, pixelRatio capped at 2; cache/pending queues bounded to 64 entries. */
+  getMaterialThumbnail(layerId:string,source:import('../core/scene3d/material-maps').MaterialMap,options?:import('../core/scene3d/material-thumbnails').MaterialThumbnailOptions):Promise<import('../core/scene3d/material-thumbnails').MaterialThumbnail|null>;
+  clearMaterialThumbnails():void;
+  /** Pure eligibility/cycle check for drag-over; reason is suitable for a tooltip. */
+  canAssignMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,source:import('../core/scene3d/material-maps').MaterialMap|null):import('../core/scene3d/material-maps').MaterialAssignmentCheck;
   materialLinks(layerId:string):import('../core/scene3d/material-maps').MaterialLayerLink[];
   getMaterialProperties(layerId:string,materialIndex?:number|null,time?:number):import('../core/scene3d/material-properties').MaterialPropertyState|null;
   setMaterialProperties(layerId:string,materialIndex:number|null,patch:import('../core/scene3d/material-properties').MaterialPropertyPatch,meta?:EditMeta):EditResult;
@@ -384,6 +397,18 @@ export interface Scene3DAPI {
   /** null index = whole-model material; null map restores the original source slot. */
   setMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
   isGroup(layerId:string):boolean;
+  /** Parts of an imported model (its file's node tree), in tree order. */
+  listParts(layerId:string):import('../core/scene3d/model-parts').ModelPart[];
+  /** A part's evaluated offsets; installed is false until it is first edited. */
+  getPart(layerId:string,key:string,time?:number):{installed:boolean;channels:Record<string,any>|null;values:import('../core/scene3d/model-parts').PartValues;paths:Record<keyof import('../core/scene3d/model-parts').PartValues,string>};
+  /** Edit a part's offsets (values or channels); null removes them. */
+  setPart(layerId:string,key:string,patch:Partial<Record<keyof import('../core/scene3d/model-parts').PartValues,unknown>>|null,meta?:EditMeta):EditResult;
+  /** The part the viewer gizmo and Properties are editing, per model layer. */
+  getActivePart(layerId:string):string|null;
+  setActivePart(layerId:string,key:string|null):void;
+  onActivePartChange(listener:()=>void):Disposable;
+  /** The part under a composition point (double-click: outer part first, then deeper). */
+  pickPart(layerId:string,x:number,y:number):string|null;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;

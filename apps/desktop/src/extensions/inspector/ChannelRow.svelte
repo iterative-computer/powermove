@@ -31,7 +31,8 @@
     prefix,
     pairWith,
     thirdWith,
-    visual = !!property
+    visual = !!property,
+    toChannel
   }: {
     layer: any;
     channel: string;
@@ -54,6 +55,8 @@
     /** A third channel after the pair, for X / Y / Z in one row. */
     thirdWith?: string;
     visual?: boolean;
+    /** The field shows a derived value (getValue); this turns an edited one back into the channel's own, so keys and expressions stay on the original channel. */
+    toChannel?: (displayed: number) => number;
   } = $props();
 
   const instance = `channel-${++instanceSequence}`;
@@ -110,7 +113,7 @@
         type: 'set_property',
         target: layer.id,
         path: channel,
-        value: next as any,
+        value: (toChannel && typeof next === 'number' ? toChannel(next) : next) as any,
         time: transport.time,
         mode: 'auto',
         preserveHandEdits: false
@@ -317,8 +320,8 @@
       animated ? { label: 'Remove Animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in Graph Editor', icon: 'graph', run: showGraphEditor },
       isPosition ? {
-        label: 'Separate Dimensions', on: layer.separateDimensions !== false, disabled: locked,
-        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions === false } }, { label: layer.separateDimensions === false ? 'Separate Dimensions' : 'Join Dimensions', origin: 'inspector' })
+        label: 'Separate Dimensions', on: layer.separateDimensions === true, disabled: locked,
+        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions !== true } }, { label: layer.separateDimensions === true ? 'Join Dimensions' : 'Separate Dimensions', origin: 'inspector' })
       } : null,
       /* Easing only means something once the property has keyframes. */
       ...(animated ? ['-' as const, { header: 'Easing for All Keys' }, ...easing.map(([name, title]) => ({

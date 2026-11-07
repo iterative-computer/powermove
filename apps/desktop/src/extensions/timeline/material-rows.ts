@@ -21,7 +21,15 @@ export interface MaterialsServiceLike {
   propertyPath(index: number | null, key: string): string;
   propertyValues(layerId: string, index: number | null, time: number): Record<string, unknown> | null;
   installProperty(layerId: string, index: number | null, key: string, value: unknown, keyAt?: number): unknown;
+  /* Added with the 3D Layers 1.3 built-in; optional so an older one still works. */
+  thumbnail?(layerId: string, map: unknown): string | null;
+  onThumbnails?(listener: () => void): () => void;
+  slotAt?(x: number, y: number): MaterialSlotRef | null;
+  canAssignLayer?(target: MaterialSlotRef, sourceId: string): { ok: true } | { ok: false; reason: string };
+  setLayerDropHover?(hover: (MaterialSlotRef & { sourceId: string; ok: boolean; reason: string | null }) | null): void;
+  dropLayer?(target: MaterialSlotRef, sourceId: string): boolean;
 }
+export interface MaterialSlotRef { layerId: string; materialIndex: number | null; slot: Slot }
 
 export function materialsService(api: Pick<PowermoveAPI, 'services'>): MaterialsServiceLike | null {
   return (api.services?.get?.('materials') as MaterialsServiceLike | null) ?? null;
@@ -71,13 +79,15 @@ export function materialSectionRows(api: Pick<PowermoveAPI, 'services' | 'anim' 
  * in-place edits all refresh it without a project event. */
 let usageCache: { signature: string; map: Map<string, string[]> } | null = null;
 export function materialSourceMap(api: Pick<PowermoveAPI, 'project'>): Map<string, string[]> {
-  const models = ((api.project.get() as any).layers || []).filter((layer: any) => objectOf(layer));
-  const signature = JSON.stringify(models.map((layer: any) => [layer.id, objectOf(layer).material?.maps, objectOf(layer).sourceMaterials]));
+  // Extruded text and shapes take sources on their Front, Bevel, Side and Back.
+  const surfaces = (layer: any) => layer.d?.extrusion?.enabled ? Object.values<any>(layer.d.extrusion.surfaces || {}).map(surface => surface?.maps) : [];
+  const models = ((api.project.get() as any).layers || []).filter((layer: any) => objectOf(layer) || layer.d?.extrusion?.enabled);
+  const signature = JSON.stringify(models.map((layer: any) => [layer.id, objectOf(layer)?.material?.maps, objectOf(layer)?.sourceMaterials, surfaces(layer)]));
   if (usageCache?.signature === signature) return usageCache.map;
   const map = new Map<string, string[]>();
   for (const layer of models) {
     const object = objectOf(layer);
-    for (const maps of [object.material?.maps, ...Object.values<any>(object.sourceMaterials || {})]) {
+    for (const maps of object ? [object.material?.maps, ...Object.values<any>(object.sourceMaterials || {})] : surfaces(layer)) {
       for (const value of Object.values<any>(maps || {})) {
         if (!value || typeof value !== 'object' || typeof value.layerId !== 'string') continue;
         const receivers = map.get(value.layerId) ?? [];

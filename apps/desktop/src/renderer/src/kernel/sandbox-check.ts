@@ -20,6 +20,7 @@
 import type { ExtensionPermission, ExtensionRecord } from '../../../shared/extensions';
 import type { EditResult, ProjectAPI, StorageAPI } from './api';
 import type { HostDeps } from './host';
+import { effectValidationWarnings } from './glsl';
 import { panelFrameOf } from './panel-frame';
 import { createKernel, type Kernel } from './registries';
 import { createSandboxRuntime, type SandboxObserver, type SandboxRuntime, type SandboxRuntimeOptions } from './sandbox-host';
@@ -28,6 +29,8 @@ export interface SandboxPermissionHit { namespace: string; member: string; count
 export interface SandboxCspHit { directive: string; blockedUri: string }
 export interface SandboxAsyncHit { member: string; count: number }
 export interface SandboxPanelResult { id: string; mounted: boolean; error?: string }
+/** Advice from effect validation (effectValidationWarnings). Never blocks publishing. */
+export interface SandboxEffectWarning { effectId: string; label: string; code: string; message: string; fix: string }
 
 export interface SandboxCheckReport {
   ok: boolean;
@@ -44,6 +47,8 @@ export interface SandboxCheckReport {
   panels: SandboxPanelResult[];
   /** Anything else that threw while it ran. */
   runtimeErrors: string[];
+  /** Effects it registered that may change size with zoom or preview resolution. Advisory: `ok` ignores them. */
+  effectWarnings?: SandboxEffectWarning[];
   durationMs: number;
 }
 
@@ -218,6 +223,12 @@ export async function runSandboxCheck(record: ExtensionRecord, options: SandboxC
       }
       const settle = options.settleMs ?? DEFAULT_SETTLE_MS;
       if (settle > 0) await new Promise((resolve) => setTimeout(resolve, settle));
+      /* The same hints registerEffect logs to the console, kept with the
+         report so the Store can show them. Only this extension registers here. */
+      report.effectWarnings = registry.effects.list().flatMap((def) => {
+        try { return effectValidationWarnings(def).map((warning) => ({ effectId: def.id, label: def.label || def.id, ...warning })); }
+        catch { return []; }
+      });
     }
   } finally {
     try { runtime?.dispose(); } catch (error) { errors.add(messageOf(error)); }

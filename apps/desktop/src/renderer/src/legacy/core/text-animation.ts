@@ -238,6 +238,16 @@ export function staggerDelayForOffset(animator: any, values: any, count: number,
     ? animator.legacyStartDuration - offset - staggerLength(values, count, order) : offset;
 }
 
+/** Adapter for the existing timing field. Write to the original delay channel
+ * using toChannelValue; never replace it with a new, unanimated channel. Values
+ * must be evaluated at the playhead; count includes preserved unitTotal/offset. */
+export function staggerTimingControl(animator:any,values:any,count:number,order:TextAnimatorOrder|undefined=animator?.order) {
+  const out=animatorAnchor(animator)==='out';
+  return {label:textAnimatorLabel('delay',animator),
+    value:out?staggerEndOffset(animator,values,count,order):num(values.delay),
+    toChannelValue:(value:number)=>out?staggerDelayForOffset(animator,values,count,value,order):value};
+}
+
 /** Window in seconds from the layer's In point. Overlapping entrances/exits
  * remain independent and compose normally; short layers do not retime them. */
 export function staggerWindow(values: any, count: number, order?: TextAnimatorOrder, layer?: any, animator?: any) {

@@ -232,6 +232,10 @@ describe('agent harness oracle', () => {
     expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 36 });
     expect(result.changed).not.toBe(true);
     expect(JSON.stringify(PM.proj)).toBe(before);
+    definition.frag = 'o = src(v_st + 4. * u_texel);';
+    const warned = await call();
+    expect(JSON.parse(warned.content[0].text)).toMatchObject({valid:true,warnings:[{code:'effect-pixel-scale',fix:expect.stringContaining('u_effectScale')}]});
+    expect(JSON.stringify(PM.proj)).toBe(before);
     definition.params[1]!.k = definition.params[0]!.k;
     await expect(call()).rejects.toThrow('duplicate param key');
   });
