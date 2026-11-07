@@ -1,6 +1,9 @@
+import { networkStrokePaths, parseSvgPathData } from '../../apps/desktop/src/shared/figma/paths';
 import { figmaFileId } from './identity';
 import { fallbackScopes } from '../../apps/desktop/src/shared/figma/convert';
 import {
+  inverse,
+  mul,
   MAX_PAYLOAD,
   validateFigmaDoc,
   type FigmaDoc,
@@ -9,7 +12,8 @@ import {
   type Paint,
 } from '../../apps/desktop/src/shared/figma/doc';
 figma.showUI(__html__, { width: 300, height: 230, themeColors: true });
-const selectionChanged = () => figma.ui.postMessage({ type: 'count', count: figma.currentPage.selection.length });
+const selectionChanged = () =>
+  figma.ui.postMessage({ type: 'count', count: figma.currentPage.selection.length });
 figma.on('selectionchange', selectionChanged);
 selectionChanged();
 const matrix = (m: Transform): Matrix => [m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]];
@@ -56,6 +60,8 @@ export async function serializeSelection(): Promise<FigmaDoc> {
       base.imageHash = p.imageHash ?? undefined;
       base.scaleMode = p.scaleMode;
       if (p.imageTransform) base.imageTransform = matrix(p.imageTransform);
+      base.scalingFactor = p.scalingFactor;
+      base.rotation = p.rotation;
       if (p.imageHash && !seen.has(p.imageHash)) {
         seen.add(p.imageHash);
         const image = figma.getImageByHash(p.imageHash);
@@ -94,12 +100,35 @@ export async function serializeSelection(): Promise<FigmaDoc> {
         offset: e.offset,
         color: e.color,
         blendMode: e.blendMode,
+        blurType: e.blurType,
+        startRadius: e.startRadius,
+        startOffset: e.startOffset,
+        endOffset: e.endOffset,
+        noiseType: e.noiseType,
+        noiseSize: e.noiseSize,
+        density: e.density,
+        opacity: e.opacity,
+        secondaryColor: e.secondaryColor,
+        clipToShape: e.clipToShape,
+        lightIntensity: e.lightIntensity,
+        lightAngle: e.lightAngle,
+        refraction: e.refraction,
+        depth: e.depth,
+        dispersion: e.dispersion,
       })),
       strokeWeight: typeof n.strokeWeight === 'number' ? n.strokeWeight : undefined,
       strokeAlign: n.strokeAlign,
       dashes: n.dashPattern,
       cap: typeof n.strokeCap === 'string' ? n.strokeCap : undefined,
       join: typeof n.strokeJoin === 'string' ? n.strokeJoin : undefined,
+      miterLimit: n.strokeMiterLimit,
+      ...(typeof n.strokeTopWeight === 'number'
+        ? {
+            strokeWeights: [n.strokeTopWeight, n.strokeRightWeight, n.strokeBottomWeight, n.strokeLeftWeight],
+          }
+        : {}),
+      pointCount: n.pointCount,
+      booleanOperation: n.booleanOperation,
       radii: [
         n.topLeftRadius ?? (typeof n.cornerRadius === 'number' ? n.cornerRadius : 0),
         n.topRightRadius ?? (typeof n.cornerRadius === 'number' ? n.cornerRadius : 0),
@@ -110,7 +139,12 @@ export async function serializeSelection(): Promise<FigmaDoc> {
       clipsContent: n.clipsContent,
       isMask: n.isMask,
       maskType: n.maskType,
-      paths: n.vectorPaths?.map((p: VectorPath) => ({ data: p.data, windingRule: p.windingRule })),
+      paths: (
+        n.vectorPaths ??
+        (['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'REGULAR_POLYGON'].includes(n.type)
+          ? n.fillGeometry
+          : undefined)
+      )?.map((p: VectorPath) => ({ data: p.data, windingRule: p.windingRule })),
       children: [],
       unsupported: [],
     };
@@ -126,6 +160,11 @@ export async function serializeSelection(): Promise<FigmaDoc> {
         'textCase',
         'letterSpacing',
         'lineHeight',
+        'paragraphSpacing',
+        'paragraphIndent',
+        'listOptions',
+        'listSpacing',
+        'indentation',
       ]);
       const first = segments[0],
         size = first?.fontSize ?? 16;
@@ -142,10 +181,30 @@ export async function serializeSelection(): Promise<FigmaDoc> {
             fills: await paints(s.fills),
             decoration: s.textDecoration,
             textCase: s.textCase,
+            tracking:
+              s.letterSpacing?.unit === 'PERCENT'
+                ? (s.fontSize * s.letterSpacing.value) / 100
+                : s.letterSpacing?.value,
+            leading:
+              s.lineHeight?.unit === 'PIXELS'
+                ? s.lineHeight.value
+                : s.lineHeight?.unit === 'PERCENT'
+                  ? (s.fontSize * s.lineHeight.value) / 100
+                  : s.fontSize * 1.2,
+            paragraphSpacing: s.paragraphSpacing,
+            paragraphIndent: s.paragraphIndent,
+            listSpacing: s.listSpacing,
+            indentation: s.indentation,
+            listType: s.listOptions?.type,
           })),
         ),
         align: n.textAlignHorizontal,
         autoResize: n.textAutoResize,
+        verticalAlign: n.textAlignVertical,
+        paragraphSpacing: typeof n.paragraphSpacing === 'number' ? n.paragraphSpacing : undefined,
+        paragraphIndent: typeof n.paragraphIndent === 'number' ? n.paragraphIndent : undefined,
+        truncation: n.textTruncation,
+        maxLines: n.maxLines ?? undefined,
         leading:
           first?.lineHeight.unit === 'PIXELS'
             ? first.lineHeight.value
@@ -168,10 +227,56 @@ export async function serializeSelection(): Promise<FigmaDoc> {
         ),
       };
     }
-    if (typeof n.strokeWeight === 'symbol' || typeof n.strokeCap === 'symbol' || typeof n.strokeJoin === 'symbol')
-      out.unsupported!.push('mixed strokes');
-    // Instances expose resolved children, including their overrides, directly.
-    if ('children' in n) for (const child of n.children) out.children.push(await serialize(child, depth + 1));
+    if (n.vectorNetwork && !out.fills.length) out.paths = networkStrokePaths(n.vectorNetwork);
+    const needsOutline =
+      (typeof n.strokeWeight === 'symbol' && !out.strokeWeights) ||
+      typeof n.strokeJoin === 'symbol' ||
+      (n.variableWidthStrokeProperties && n.variableWidthStrokeProperties.widthProfile !== 'UNIFORM') ||
+      (n.complexStrokeProperties?.type && n.complexStrokeProperties.type !== 'BASIC');
+    if (needsOutline && out.strokes.length) {
+      let outlined: any;
+      try {
+        outlined = n.outlineStroke?.();
+        if (outlined) {
+          const local = mul(inverse(out.absoluteTransform), matrix(outlined.absoluteTransform));
+          const point = (x: number, y: number) => [
+            local[0] * x + local[2] * y + local[4],
+            local[1] * x + local[3] * y + local[5],
+          ];
+          out.strokePaths = (outlined.fillGeometry ?? outlined.vectorPaths ?? []).map((path: VectorPath) => ({
+            windingRule: path.windingRule,
+            data: parseSvgPathData(path.data)
+              .map((p) => {
+                const vs = p.vertices;
+                if (!vs.length) return '';
+                let d = 'M ' + point(vs[0]!.x, vs[0]!.y).join(' ');
+                for (let i = 0; i < vs.length - (p.closed ? 0 : 1); i++) {
+                  const a = vs[i]!,
+                    b = vs[(i + 1) % vs.length]!;
+                  d +=
+                    ' C ' +
+                    [
+                      ...point(a.x + a.outX, a.y + a.outY),
+                      ...point(b.x + b.inX, b.y + b.inY),
+                      ...point(b.x, b.y),
+                    ].join(' ');
+                }
+                return d + (p.closed ? ' Z' : '');
+              })
+              .join(' '),
+          }));
+        }
+      } catch {
+        // Failure to compute an outline is a per-node fallback, not a failed send.
+      } finally {
+        outlined?.remove();
+      }
+      if (!out.strokePaths?.length) out.unsupported!.push('missing computed stroke geometry');
+    }
+    // Boolean vectorPaths already contain the computed contour. Instances and
+    // auto-layout expose resolved children at their final absolute positions.
+    if ('children' in n && n.type !== 'BOOLEAN_OPERATION')
+      for (const child of n.children) out.children.push(await serialize(child, depth + 1));
     return out;
   };
   // Remove descendants when their ancestor is also selected. Page order is paint order.
@@ -208,9 +313,10 @@ export async function serializeSelection(): Promise<FigmaDoc> {
     if ('children' in n) n.children.forEach(index);
   };
   roots.forEach(index);
-  for (const { node: n } of fallbackScopes({ nodes })) {
+  for (const { node: n } of fallbackScopes({ nodes, images })) {
     const source = raw.get(n.id)!;
-    const b = ('absoluteRenderBounds' in source ? source.absoluteRenderBounds : null) ?? source.absoluteBoundingBox;
+    const b =
+      ('absoluteRenderBounds' in source ? source.absoluteRenderBounds : null) ?? source.absoluteBoundingBox;
     if (!b) throw new Error(`No render bounds for ${n.name}`);
     n.raster = {
       png: b64(await source.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } })),

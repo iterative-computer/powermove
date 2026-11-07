@@ -56,7 +56,8 @@ function arcCubics(
     cy1 = (factor * -ry * x1) / rx;
   const cx = cos * cx1 - sin * cy1 + (start.x + end.x) / 2;
   const cy = sin * cx1 + cos * cy1 + (start.y + end.y) / 2;
-  const angle = (ux: number, uy: number, vx: number, vy: number) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const angle = (ux: number, uy: number, vx: number, vy: number) =>
+    Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
   let theta = angle(1, 0, (x1 - cx1) / rx, (y1 - cy1) / ry);
   let delta = angle((x1 - cx1) / rx, (y1 - cy1) / ry, (-x1 - cx1) / rx, (-y1 - cy1) / ry);
   if (!sweep && delta > 0) delta -= Math.PI * 2;
@@ -238,4 +239,62 @@ export function parseSvgPathData(data: string): Array<{ vertices: Vertex[]; clos
   }
   finish(false);
   return result;
+}
+
+export type VectorNetworkData = {
+  vertices: Array<{ x: number; y: number; strokeCap?: string; strokeJoin?: string; cornerRadius?: number }>;
+  segments: Array<{ start: number; end: number; tangentStart?: Point; tangentEnd?: Point }>;
+};
+/** Walk final open/closed network strokes, retaining endpoint decoration.
+ * Region fills use Figma's already-computed vectorPaths, including booleans. */
+export function networkStrokePaths(
+  network: VectorNetworkData,
+): Array<{ data: string; windingRule: string; startCap?: string; endCap?: string }> {
+  const edges = network.segments,
+    used = new Set<number>(),
+    adj = new Map<number, number[]>();
+  edges.forEach((e, i) => {
+    for (const v of [e.start, e.end]) adj.set(v, [...(adj.get(v) ?? []), i]);
+  });
+  const output: Array<{ data: string; windingRule: string; startCap?: string; endCap?: string }> = [];
+  const walk = (start: number, index: number) => {
+    const first = network.vertices[start];
+    if (!first) return;
+    let vertex = start,
+      edge = index,
+      data = `M ${first.x} ${first.y}`;
+    while (!used.has(edge)) {
+      used.add(edge);
+      const e = edges[edge]!,
+        forward = e.start === vertex,
+        next = forward ? e.end : e.start,
+        a = network.vertices[vertex]!,
+        b = network.vertices[next];
+      if (!b) throw new Error('Invalid vector network');
+      const ta = (forward ? e.tangentStart : e.tangentEnd) ?? { x: 0, y: 0 },
+        tb = (forward ? e.tangentEnd : e.tangentStart) ?? { x: 0, y: 0 };
+      data += ` C ${a.x + ta.x} ${a.y + ta.y} ${b.x + tb.x} ${b.y + tb.y} ${b.x} ${b.y}`;
+      vertex = next;
+      if (vertex === start) {
+        data += ' Z';
+        break;
+      }
+      if ((adj.get(vertex)?.length ?? 0) !== 2) break;
+      const candidate = adj.get(vertex)!.find((i) => !used.has(i));
+      if (candidate === undefined) break;
+      edge = candidate;
+    }
+    output.push({
+      data,
+      windingRule: 'NONZERO',
+      startCap: first.strokeCap,
+      endCap: network.vertices[vertex]?.strokeCap,
+    });
+  };
+  for (const [v, indices] of adj)
+    if (indices.length !== 2) for (const i of indices) if (!used.has(i)) walk(v, i);
+  edges.forEach((e, i) => {
+    if (!used.has(i)) walk(e.start, i);
+  });
+  return output;
 }

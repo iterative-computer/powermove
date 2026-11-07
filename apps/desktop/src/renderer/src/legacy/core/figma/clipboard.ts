@@ -1,9 +1,10 @@
+import { clipboardImages } from './images';
 import { ByteBuffer, decodeBinarySchema } from '@open-pencil/kiwi/schema-runtime';
 import type { FigmaMessage, NodeChange } from '@open-pencil/kiwi/fig/codec';
 import { Decompress } from 'fzstd';
 import { readFigmaMessage } from './message';
 
-export type FigmaSelection = { nodes: NodeChange[]; blobs: Uint8Array[] };
+export type FigmaSelection = { nodes: NodeChange[]; blobs: Uint8Array[]; images?:Record<string,Uint8Array> };
 export const MAX_CLIPBOARD_CHARS = 32 * 1024 * 1024;
 const MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 
@@ -59,7 +60,7 @@ export async function decodeFigmaClipboard(html: string): Promise<FigmaSelection
   const message = readFigmaMessage(schema, await expand(chunks[1]!, MAX_EXPANDED_BYTES)) as FigmaMessage;
   if (!Array.isArray(message.nodeChanges) || !message.nodeChanges.length) throw new Error('No layers were found in the Figma selection.');
   if (message.nodeChanges.length > 5000) throw new Error('Copy up to 5,000 Figma layers at a time.');
-  return { nodes: message.nodeChanges, blobs: (message.blobs ?? []).map(blob => blob.bytes) };
+  const selection:FigmaSelection={nodes:message.nodeChanges,blobs:(message.blobs??[]).map(blob=>blob.bytes)};const images=await clipboardImages(selection);if(Object.keys(images).length)selection.images=images;return selection;
 }
 
 async function expand(bytes: Uint8Array, limit: number): Promise<Uint8Array> {

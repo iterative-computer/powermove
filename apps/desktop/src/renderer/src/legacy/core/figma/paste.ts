@@ -149,7 +149,7 @@ export async function receiveFigma(
     compId: PM.proj.compId,
     at: PM.time,
   },
-): Promise<{ layers: number; flattened: number; missing: string[] }> {
+): Promise<{ layers: number; flattened: number; missing: string[]; warnings?: import('../../../../../shared/figma/convert').Issue[] }> {
   if (!current(PM, source) || PM.ProjectsScreen?.isOpen) throw new Error('Open a composition in Powermove first');
   PM.dismissToast?.(FIGMA_NOTICE);
   const neutral = convertFigma(doc, PM.proj),
@@ -186,11 +186,13 @@ export async function receiveFigma(
     for (let i = 0; i < neutral.commands.length; i++) {
       const command = neutral.commands[i]!;
       if (command.layerType !== 'image') continue;
-      if (!command.raster) throw new Error(`${command.name} needs a preview. Use Send to Powermove in Figma.`);
-      const png = Uint8Array.from(atob(command.raster.png), (c) => c.charCodeAt(0));
-      if (png.length < 8 || png[0] !== 137 || png[1] !== 80 || png[2] !== 78 || png[3] !== 71)
-        throw new Error('Invalid Figma PNG');
-      const result = (await PM.assets.importBatch([new File([png], `${command.name}.png`, { type: 'image/png' })]))[0];
+      if (!command.raster && !command.imageHash) throw new Error(`${command.name} needs a preview. Use Send to Powermove in Figma.`);
+      const png = Uint8Array.from(atob(command.imageHash ? doc.images[command.imageHash]! : command.raster!.png), (c) => c.charCodeAt(0));
+      const mime = png[0]===137&&png[1]===80&&png[2]===78&&png[3]===71 ? 'image/png'
+        : png[0]===255&&png[1]===216 ? 'image/jpeg' : png[0]===71&&png[1]===73&&png[2]===70 ? 'image/gif'
+        : png[0]===82&&png[1]===73&&png[8]===87&&png[9]===69 ? 'image/webp' : undefined;
+      if (!mime) throw new Error('Invalid Figma PNG');
+      const result = (await PM.assets.importBatch([new File([png], `${command.name}.${mime.split('/')[1]}`, { type: mime })]))[0];
       if (!result || result.status === 'failed') throw new Error('Could not import Figma preview');
       plan.layers[i].d.asset = result.asset.id;
       if (!existingAssets.has(result.asset.id))
@@ -224,7 +226,7 @@ export async function receiveFigma(
         : {}),
     },
   );
-  return { layers: plan.layers.length, flattened, missing };
+  return { layers: plan.layers.length, flattened, missing, warnings:plan.warnings??[] };
 }
 function inlinePng(html: string): File | undefined {
   const data = /<img\b[^>]*\bsrc\s*=\s*["']data:image\/png;base64,([A-Za-z0-9+/=]+)["']/i.exec(html)?.[1];

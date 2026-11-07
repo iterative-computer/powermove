@@ -107,10 +107,10 @@ test('unsupported clipboard layers flatten independently without a confirmation 
   const html = await figmaHtml([
     figmaNode(1, 'RECTANGLE', { name: 'Editable card' }),
     figmaNode(2, 'RECTANGLE', {
-      name: 'Inner shadow',
+      name: 'Glass optical effect',
       transform: { m00: 1, m01: 0, m02: 200, m10: 0, m11: 1, m12: 0 },
       effects: [
-        { type: 'INNER_SHADOW', visible: true, radius: 6, color: { r: 0, g: 0, b: 0, a: 0.5 }, offset: { x: 0, y: 4 } },
+        { type: 'GLASS', visible: true, radius: 6 } as any,
       ],
     }),
   ]);

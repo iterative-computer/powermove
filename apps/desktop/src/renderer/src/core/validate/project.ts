@@ -510,6 +510,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
           nodeId: source.figmaSource.nodeId.slice(0, 300),
           role: source.figmaSource.role.slice(0, 300),
           name: source.figmaSource.name.slice(0, 1000),
+          importedContentKeys: Array.isArray(source.figmaSource.importedContentKeys) ? source.figmaSource.importedContentKeys.filter((v):v is string=>typeof v==='string').slice(0,200).map(v=>v.slice(0,200)) : undefined,
           importedMatteId: typeof source.figmaSource.importedMatteId === 'string' ? source.figmaSource.importedMatteId : null,
           importedEffectIds: Array.isArray(source.figmaSource.importedEffectIds)
             ? source.figmaSource.importedEffectIds.filter((v): v is string => typeof v === 'string').slice(0, 100) : [],

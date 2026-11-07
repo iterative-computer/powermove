@@ -56,7 +56,7 @@ describe('native Figma paste', () => {
   });
   it('explains a missing per-node preview without blocking or mutating the project', async () => {
     const { PM, source } = editor();
-    read.mockResolvedValue({ nodes: [figmaNode(1, 'RECTANGLE', { effects: [{ type: 'INNER_SHADOW' }] })], blobs: [] });
+    read.mockResolvedValue({ nodes: [figmaNode(1, 'RECTANGLE', { effects: [{ type: 'GLASS' } as any] })], blobs: [] });
     await runFigmaPaste(PM, { ...source, image: undefined }, read);
     expect(PM.confirm).not.toHaveBeenCalled();
     expect(PM.toast.mock.calls[0][0]).toContain('Send to Powermove');

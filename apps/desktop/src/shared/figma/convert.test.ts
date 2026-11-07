@@ -50,7 +50,7 @@ describe('host-independent Figma commands', () => {
       expect(c.blend).not.toBeUndefined();
     }
   });
-  it.each(['GRADIENT_LINEAR', 'GRADIENT_RADIAL'])('maps a %s through the existing ramp effect', (type) => {
+  it.each(['GRADIENT_LINEAR', 'GRADIENT_RADIAL', 'GRADIENT_ANGULAR', 'GRADIENT_DIAMOND'])('maps a %s as shape paint data', (type) => {
     const p = plan(
       node({
         fills: [
@@ -66,11 +66,8 @@ describe('host-independent Figma commands', () => {
       }),
     );
     expect(p.issues).toEqual([]);
-    expect(p.commands[0]!.effects[0]).toMatchObject({
-      type: 'gradient',
-      version: 2,
-      params: { endX: 100, endY: 50, rampShape: type === 'GRADIENT_RADIAL' ? 1 : 0 },
-    });
+    expect(p.commands[0]!.effects).toEqual([]);
+    expect(p.commands[0]!.content.fillGradient).toMatchObject({type:type.slice(9).toLowerCase(),transform:[1,0,0,1,0,0],stops:[{position:0,color:'#FF0000FF'},{position:1,color:'#0000FFFF'}]});
   });
   it('maps shadow and layer blur in authored order', () => {
     const p = plan(
@@ -82,8 +79,8 @@ describe('host-independent Figma commands', () => {
       }),
     );
     expect(p.issues).toEqual([]);
-    expect(p.commands[0]!.effects.map((e) => e.type)).toEqual(['shadow', 'blur']);
-    expect(p.commands[0]!.effects[0]!.params).toMatchObject({ distance: 5, softness: 8, opacity: 50 });
+    expect(p.commands[0]!.effects.map((e) => e.type)).toEqual(['figmaShadow', 'blur']);
+    expect(p.commands[0]!.effects[0]!.params).toMatchObject({ offsetX: 3, offsetY: 4, radius: 8, opacity: 50 });
   });
   it('creates rounded clipping mattes for overflowing children and keeps instances editable', () => {
     const p = plan(
@@ -155,21 +152,13 @@ describe('host-independent Figma commands', () => {
       }),
     );
     expect(p.issues).toEqual([]);
-    expect(p.commands[0]!.content.styles[0]).toMatchObject({ start: 4, end: 8, values: { color: '#0000FFFF' } });
+    expect(p.commands[0]!.content.runs[1]).toMatchObject({ start: 4, end: 8, color: '#0000FFFF' });
   });
   it.each([
-    { effects: [{ type: 'INNER_SHADOW' }] },
-    { effects: [{ type: 'BACKGROUND_BLUR', radius: 4 }] },
-    { strokeAlign: 'INSIDE' },
-    { strokeAlign: 'OUTSIDE' },
-    { dashes: [2, 3] },
-    { cap: 'ROUND' },
-    { join: 'BEVEL' },
-    { fills: [{ type: 'IMAGE', imageHash: 'hash' }] },
-    { blendMode: 'COLOR_BURN' },
-    { arc: { start: 0, end: 2, inner: 0 } },
+    {effects:[{type:'GLASS'}]}, {effects:[{type:'TEXTURE'}]},
     { fills: [{ type: 'GRADIENT_ANGULAR' }] },
     { type: 'VECTOR', paths: [] },
+    { type:'UNKNOWN' }, {blendMode:'FUTURE_BLEND'},
   ] as Partial<FigmaNode>[])('flattens just the unsupported node: %j', (patch) => {
     const n = node({
       strokes: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 } }],
@@ -184,19 +173,19 @@ describe('host-independent Figma commands', () => {
     expect(p.commands.map((c) => c.layerType)).toEqual(['shape', 'image']);
     expect(p.commands[1]!.raster?.png).toBe(n.raster!.png);
   });
-  it('falls back for mixed text metrics and nested matte intersections', () => {
+  it('requires actual text styles while allowing nested matte intersections', () => {
     expect(unsupportedReasons(node({ type: 'TEXT', text: { characters: 'a', runs: [] } }))).toContain(
       'missing text styles',
     );
     expect(
       unsupportedReasons(node({ type: 'FRAME', clipsContent: true, children: [node({ clipsContent: true })] })),
-    ).toContain('nested clipping');
+    ).toEqual([]);
   });
   it('promotes unsafe clipboard crops to the smallest enclosing subtree', () => {
     const root = node({
       type: 'GROUP',
       children: [
-        node({ id: 'a', effects: [{ type: 'INNER_SHADOW' }] }),
+        node({ id: 'a', effects: [{ type: 'GLASS' }] }),
         node({ id: 'b', absoluteTransform: [1, 0, 0, 1, 40, 0] }),
       ],
     });
@@ -208,7 +197,7 @@ describe('host-independent Figma commands', () => {
     expect(prepared.nodes[0]!.unsupported).toContain('overlapping clipboard preview');
   });
   it('uses a whole composite only when no safe enclosing selected subtree exists', () => {
-    expect(clipboardFallbacks(doc([node({ effects: [{ type: 'INNER_SHADOW' }] }), node({ id: 'b' })])).whole).toBe(
+    expect(clipboardFallbacks(doc([node({ effects: [{ type: 'GLASS' }] }), node({ id: 'b' })])).whole).toBe(
       true,
     );
   });
@@ -222,12 +211,12 @@ describe('host-independent Figma commands', () => {
   });
 });
 it('promotes clipboard crops that would bake a painted ancestor into an animated child', () => {
-  const root = node({ type: 'FRAME', children: [node({ id: 'child', effects: [{ type: 'INNER_SHADOW' }] })] });
+  const root = node({ type: 'FRAME', children: [node({ id: 'child', effects: [{ type: 'GLASS' }] })] });
   const prepared = clipboardFallbacks({ ...doc([root]), source: 'clipboard' });
   expect(prepared.nodes[0]!.unsupported).toContain('overlapping clipboard preview');
   expect(prepared.whole).toBe(false);
 });
-it('flattens a clip nested under a sibling mask, preserving the outer matte', () => {
+it('keeps a clip nested under a sibling mask editable', () => {
   const clipped = node({
     id: 'frame',
     type: 'FRAME',
@@ -236,8 +225,9 @@ it('flattens a clip nested under a sibling mask, preserving the outer matte', ()
     raster: { png: 'iVBORw0KGgo=', bounds: { x: 0, y: 0, w: 100, h: 100 } },
   });
   const p = convertFigma(doc([node({ id: 'mask', isMask: true, maskType: 'ALPHA' }), clipped]), { w: 640, h: 360 });
-  expect(p.commands[0]).toMatchObject({ layerType: 'image', matte: 'mask:node' });
-  expect(p.issues[0]!.reason).toContain('nested clipping');
+  expect(p.commands[0]).toMatchObject({ layerType: 'group', matte: 'mask:node' });
+  expect(p.issues).toEqual([]);
+  expect(p.commands.find(c=>c.ref==='child:node')!.matte).toBe('frame:clip');
 });
 
 it.each([

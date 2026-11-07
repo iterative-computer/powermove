@@ -27,11 +27,13 @@ const paintSchema = z
     gradientTransform: matrixSchema.optional(),
     gradientStops: z
       .array(z.object({ position: unit, color: colorSchema }).strict())
-      .max(32)
+      .max(5000)
       .optional(),
     imageHash: z.string().max(200).optional(),
     scaleMode: z.string().max(80).optional(),
     imageTransform: matrixSchema.optional(),
+    scalingFactor: size.optional(),
+    rotation: n.optional(),
   })
   .strict();
 const effectSchema = z
@@ -43,6 +45,21 @@ const effectSchema = z
     offset: z.object({ x: n, y: n }).strict().optional(),
     color: colorSchema.optional(),
     blendMode: z.string().max(80).optional(),
+    blurType: z.string().max(40).optional(),
+    startRadius: size.optional(),
+    startOffset: z.object({ x: n, y: n }).strict().optional(),
+    endOffset: z.object({ x: n, y: n }).strict().optional(),
+    noiseType: z.string().max(40).optional(),
+    noiseSize: size.optional(),
+    density: unit.optional(),
+    opacity: unit.optional(),
+    secondaryColor: colorSchema.optional(),
+    clipToShape: z.boolean().optional(),
+    lightIntensity: unit.optional(),
+    lightAngle: n.optional(),
+    refraction: unit.optional(),
+    depth: size.optional(),
+    dispersion: unit.optional(),
   })
   .strict();
 const runSchema = z
@@ -56,6 +73,13 @@ const runSchema = z
     fills: z.array(paintSchema).max(32),
     decoration: z.string().max(80).optional(),
     textCase: z.string().max(80).optional(),
+    tracking: n.optional(),
+    leading: size.optional(),
+    paragraphSpacing: size.optional(),
+    paragraphIndent: n.optional(),
+    listSpacing: size.optional(),
+    indentation: size.optional(),
+    listType: z.string().max(40).optional(),
   })
   .strict();
 const rectSchema = z.object({ x: n, y: n, w: size, h: size }).strict();
@@ -79,13 +103,41 @@ const baseNodeSchema = z.object({
   dashes: z.array(size).max(100).optional(),
   cap: z.string().max(80).optional(),
   join: z.string().max(80).optional(),
+  startCap: z.string().max(80).optional(),
+  endCap: z.string().max(80).optional(),
+  miterLimit: size.optional(),
+  strokeWeights: z.tuple([size, size, size, size]).optional(),
+  pointCount: z.number().int().min(3).max(1000).optional(),
+  booleanOperation: z.string().max(40).optional(),
   radii: z.tuple([size, size, size, size]).optional(),
   smoothing: unit.optional(),
   clipsContent: z.boolean().optional(),
   isMask: z.boolean().optional(),
   maskType: z.string().max(80).optional(),
   paths: z
-    .array(z.object({ data: z.string().max(2e6), windingRule: z.string().max(80) }).strict())
+    .array(
+      z
+        .object({
+          data: z.string().max(2e6),
+          windingRule: z.string().max(80),
+          startCap: z.string().max(80).optional(),
+          endCap: z.string().max(80).optional(),
+        })
+        .strict(),
+    )
+    .max(1000)
+    .optional(),
+  strokePaths: z
+    .array(
+      z
+        .object({
+          data: z.string().max(2e6),
+          windingRule: z.string().max(80),
+          startCap: z.string().max(80).optional(),
+          endCap: z.string().max(80).optional(),
+        })
+        .strict(),
+    )
     .max(1000)
     .optional(),
   text: z
@@ -98,6 +150,11 @@ const baseNodeSchema = z.object({
       tracking: n.optional(),
       baseline: n.optional(),
       advanced: z.boolean().optional(),
+      verticalAlign: z.string().max(40).optional(),
+      paragraphSpacing: size.optional(),
+      paragraphIndent: n.optional(),
+      truncation: z.string().max(40).optional(),
+      maxLines: z.number().int().min(0).max(10000).optional(),
     })
     .strict()
     .optional(),
@@ -158,7 +215,14 @@ export const mul = (a: Matrix, b: Matrix): Matrix => [
 export function inverse(m: Matrix): Matrix {
   const d = m[0] * m[3] - m[1] * m[2];
   if (Math.abs(d) < 1e-10) throw new Error('Singular Figma transform');
-  return [m[3] / d, -m[1] / d, -m[2] / d, m[0] / d, (m[2] * m[5] - m[3] * m[4]) / d, (m[1] * m[4] - m[0] * m[5]) / d];
+  return [
+    m[3] / d,
+    -m[1] / d,
+    -m[2] / d,
+    m[0] / d,
+    (m[2] * m[5] - m[3] * m[4]) / d,
+    (m[1] * m[4] - m[0] * m[5]) / d,
+  ];
 }
 export function bounds(node: FigmaNode): Rect {
   const m = node.absoluteTransform;

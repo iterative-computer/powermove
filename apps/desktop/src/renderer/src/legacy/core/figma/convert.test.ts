@@ -126,9 +126,8 @@ describe('Figma layer conversion', () => {
     expect(plan.layers[0].d.paths[0].p.closed.v).toBe(true);
   });
   it.each([
-    { effects: [{ type: 'DROP_SHADOW' }] },
+    { effects: [{ type: 'GLASS' }] },
     { fillPaints: [{ type: 'GRADIENT_LINEAR' }] },
-    { strokePaints: [{ type: 'SOLID' }], strokeAlign: 'INSIDE' },
     { type: 'TEXT', textData: { characters: 'Mixed', characterStyleIDs: [0, 1] } },
     { type: 'VECTOR', fillGeometry: [{ commandsBlob: 9 }] },
   ])('requires fallback before applying unsupported features: %j', (patch) => {
@@ -149,7 +148,7 @@ describe('Figma layer conversion', () => {
   });
 });
 
-it('maps clipboard gradient stop records into the shared ramp command', () => {
+it('maps clipboard gradient stop records into the editable shape paint', () => {
   const PM = editor();
   PM.mkEffect = (type: string, version: number) => ({ id: 'effect', type, version, on: true, p: {} });
   const plan = planFigmaImport(
@@ -175,11 +174,8 @@ it('maps clipboard gradient stop records into the shared ramp command', () => {
     0,
   );
   expect(plan.issues).toEqual([]);
-  expect(plan.layers[0].fx[0]).toMatchObject({
-    type: 'gradient',
-    version: 2,
-    p: { startColor: { v: '#FF0000' }, endColor: { v: '#0000FF' } },
-  });
+  expect(plan.layers[0].fx).toEqual([]);
+  expect(plan.layers[0].d.fillGradient).toMatchObject({type:'linear',stops:[{position:0,color:'#FF0000FF'},{position:1,color:'#0000FFFF'}]});
 });
 
 it.each([
