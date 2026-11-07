@@ -26,6 +26,22 @@ function editor(){
   return {PM,api};
 }
 describe('native text and shape extrusion',()=>{
+  it('keeps the 3D switch off when editing saved extrusion settings until Extrude is explicitly enabled',()=>{
+    const {PM,api}=editor();
+    expect(api.setExtrusion('title',{enabled:true,depth:40}).ok).toBe(true);
+    expect(PM.Edit.apply({type:'set_layer',target:'title',patch:{threeD:false}}).ok).toBe(true);
+    expect(compositionRuntime(PM).objects.has('title')).toBe(false);
+    expect(api.setExtrusion('title',{depth:80}).ok).toBe(true);
+    expect(PM.L('title').threeD).toBe(false);
+    expect(isExtrudedLayer(PM.L('title'))).toBe(false);
+    expect(compositionRuntime(PM).objects.has('title')).toBe(false);
+    expect(api.getExtrusion('title')!.values.depth).toBe(80);
+    expect(api.setExtrusion('title',{enabled:true}).ok).toBe(true);
+    expect(isExtrudedLayer(PM.L('title'))).toBe(true);
+    PM.hist.undo();expect(PM.L('title').threeD).toBe(false);
+    PM.hist.redo();expect(isExtrudedLayer(PM.L('title'))).toBe(true);
+    disposeSceneRuntimes(PM);
+  });
   it.each(['B','8','%'])('triangulates %s with intact counters and positive cap normals',(text)=>{
     const outlines=fontOutlines(font,{text,size:100,font:'Inter',weight:500});
     expect(outlines.reduce((n,o)=>n+o.holes.length,0)).toBe(2);

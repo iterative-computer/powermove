@@ -30,7 +30,7 @@ export function extrusionCommands(PM:any,layer:any,args:Scene3DEdit):{commands:a
     if(Object.keys(patch).some(key=>key!=='enabled' && !Object.hasOwn(geometryFields,key)))throw new Error('Unknown extrusion property');
     if(patch.enabled!==undefined){if(typeof patch.enabled!=='boolean')throw new Error('Extrusion enabled must be a boolean');data.enabled=patch.enabled;}
     for(const key of Object.keys(geometryFields))if(patch[key]!==undefined){(geometryFields as any)[key].parse(patch[key]);write(`geo.${key}`,patch[key]);}
-    if(data.enabled && !layer.threeD)commands.push({type:'set_layer',target:layer.id,patch:{threeD:true}});
+    if(patch.enabled===true && !layer.threeD)commands.push({type:'set_layer',target:layer.id,patch:{threeD:true}});
   }else{
     const surface=args.surface ?? (args.materialIndex==null?'front':EXTRUSION_SURFACES[args.materialIndex]);
     if(!surface || !EXTRUSION_SURFACES.includes(surface))throw new Error('Choose Front, Bevel, Side or Back');

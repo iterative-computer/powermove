@@ -4,7 +4,7 @@ import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
 import { evaluatedValue } from '../core/content-properties';
 import { createObject } from '../../core/scene3d/schema';
-import { LAYER3D_DEFINITIONS } from '../../core/scene3d/layers';
+import { LAYER3D_DEFINITIONS, isAlways3DLayer } from '../../core/scene3d/layers';
 import { materializeSvgPaths } from '../core/svg-import';
 import { temporalKeys } from '../core/temporal-bridge';
 import { inspectorService, timelineService, toolService, viewerService } from '../core/services';
@@ -475,7 +475,7 @@ const toggleLayerSwitch = (field: 'threeD' | 'continuousRaster', label: string, 
   return PM.Edit.apply(layers.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { [field]: on } })), { label, origin: 'command-palette' });
 };
 def('toggle3DLayer', '3D Layer', null, () => toggleLayerSwitch('threeD', '3D layer',
-  (layer: any) => PM.TYPE_META[layer.type]?.transform !== false && layer.type !== 'audio' && layer.type !== 'adjustment'), 'Layer');
+  (layer: any) => PM.TYPE_META[layer.type]?.transform !== false && layer.type !== 'audio' && layer.type !== 'adjustment' && !isAlways3DLayer(PM,layer)), 'Layer');
 def('toggleContinuousRaster', 'Continuously Rasterize', null, () => toggleLayerSwitch('continuousRaster', 'Continuously rasterize',
   (layer: any) => layer.type === 'precomp'), 'Layer');
 def('renameLayer', 'Rename Layer', '↩', () => PM.renameSelectedLayer?.() ?? false, 'Layer', preserveFalse);

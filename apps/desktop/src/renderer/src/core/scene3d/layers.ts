@@ -19,6 +19,10 @@ export function isModelGroup(PM:any,layer:any):boolean {
 }
 /** Timeline/inspector names for a part's channels. */
 export const PART_LABELS:Record<string,string>={x:'Position X',y:'Position Y',z:'Position Z',rx:'X Rotation',ry:'Y Rotation',rz:'Z Rotation',scale:'Scale',visible:'Visible'};
+/** Model-only groups cannot flatten their contents, just like models themselves. */
+export function isAlways3DLayer(PM:any,layer:any):boolean {
+  return !!layer3DRole(layer) || isModelGroup(PM,layer);
+}
 export const TRANSFORM_PATHS: Record<string,string> = {x:'position.x',y:'position.y',z:'position.z',rx:'rotation.x',ry:'rotation.y',rz:'rotation',sx:'scale.x',sy:'scale.y',sz:'scale.z'};
 const clone = (v:any) => JSON.parse(JSON.stringify(v));
 

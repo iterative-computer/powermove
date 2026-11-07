@@ -106,9 +106,10 @@ export function world3D(PM: any, L: any, T: number, positioning = false): Mat4 {
     return multiply(parent3D(PM,L,T),own);
 }
 
-/** Groups supply one shared 3D coordinate space without changing member switches. */
-export function is3DLayer(PM: any, layer: any): boolean {
-    return !!layer.threeD || (PM.groupAncestors?.(layer) || []).some((group: any) => group.threeD);
+/** Each layer owns its 3D switch. Groups only supply depth/tilt to 3D members;
+ * switched-off artwork keeps the ordinary screen-space affine hierarchy. */
+export function is3DLayer(_PM: any, layer: any): boolean {
+    return layer.threeD === true;
 }
 
 /** The outermost enabled group owns the lens for its entire flat artwork. */

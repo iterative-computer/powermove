@@ -38,16 +38,9 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
     await page.locator('#gl').evaluate((canvas:HTMLCanvasElement)=>{canvas.toDataURL();});
     await page.screenshot({path:`/tmp/powermove-3d-group-${theme}.png`});
   }
-  await page.evaluate(id=>{
-    const PM=(window as any).PM;PM.Edit.apply([{type:'set_layer',target:id,patch:{threeD:false}},
-      ...['x','y'].flatMap((axis,i)=>['position','anchor'].map(key=>({type:'set_property',target:id,path:`${key}.${axis}`,value:i?540:960})))]);PM.invalidate();
-  },initial.id);
-  await expect.poll(()=>page.evaluate(({x,y})=>(window as any).PM.Kernel.services.get('viewer').sceneGizmo.hover(x,y),handle)).toBe(true);
-  await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.cx,handle.cy+90,{steps:8});await page.mouse.up();
-  const upgraded=await page.evaluate(id=>{const l=(window as any).PM.L(id);return {threeD:l.threeD,anchor:[l.p['anchor.x'].v,l.p['anchor.y'].v]};},initial.id);
-  expect(upgraded.threeD).toBe(true);upgraded.anchor.forEach(v=>expect(v).toBeCloseTo(0));
-  await page.evaluate(()=>(window as any).PM.hist.undo());
-  expect(await page.evaluate(id=>(window as any).PM.L(id).p['anchor.x'].v,initial.id)).toBe(960);
+  // Model-only groups have no meaningful 2D state; reject it just like a model.
+  expect(await page.evaluate(id=>(window as any).PM.Edit.apply({type:'set_layer',target:id,patch:{threeD:false}}).ok,initial.id)).toBe(false);
+  expect(await page.evaluate(id=>(window as any).PM.L(id).threeD,initial.id)).toBe(true);
   expect(await page.evaluate(()=>[...(window as any).PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})])).toEqual(initial.pixels);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
