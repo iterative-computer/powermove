@@ -21,7 +21,15 @@ export interface MaterialsServiceLike {
   propertyPath(index: number | null, key: string): string;
   propertyValues(layerId: string, index: number | null, time: number): Record<string, unknown> | null;
   installProperty(layerId: string, index: number | null, key: string, value: unknown, keyAt?: number): unknown;
+  /* Added with the 3D Layers 1.3 built-in; optional so an older one still works. */
+  thumbnail?(layerId: string, map: unknown): string | null;
+  onThumbnails?(listener: () => void): () => void;
+  slotAt?(x: number, y: number): MaterialSlotRef | null;
+  canAssignLayer?(target: MaterialSlotRef, sourceId: string): { ok: true } | { ok: false; reason: string };
+  setLayerDropHover?(hover: (MaterialSlotRef & { sourceId: string; ok: boolean; reason: string | null }) | null): void;
+  dropLayer?(target: MaterialSlotRef, sourceId: string): boolean;
 }
+export interface MaterialSlotRef { layerId: string; materialIndex: number | null; slot: Slot }
 
 export function materialsService(api: Pick<PowermoveAPI, 'services'>): MaterialsServiceLike | null {
   return (api.services?.get?.('materials') as MaterialsServiceLike | null) ?? null;

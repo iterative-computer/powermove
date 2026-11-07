@@ -70,3 +70,23 @@ it('turns schema validation JSON into a sentence', () => {
   ]);
   expect(readableSandboxError('x is not defined')).toBe('x is not defined');
 });
+
+it('shows effect scale hints as advice under a passing check, once per effect', async () => {
+  const target = document.createElement('div');
+  document.body.append(target);
+  const warning = { code: 'effect-pixel-scale', message: 'Pixel coordinates or radii may change size with viewer zoom or preview resolution.', fix: 'Use effectPixel().' };
+  const passed = report({ ok: true, effectWarnings: [
+    { effectId: 'blur', label: 'Pixel Blur', ...warning }, { effectId: 'blur', label: 'Pixel Blur', ...warning }, { effectId: 'glow', label: 'Glow', ...warning }
+  ] });
+  const component = mount(SandboxCheckStatus, { target, props: { state: { status: 'done', report: passed } } });
+  flushSync();
+  expect(target.querySelector('[data-sandbox="ok"]')).not.toBeNull();
+  expect(target.querySelector('[data-sandbox="advice"]')?.textContent).toContain('2 suggestions');
+  const rows = [...target.querySelectorAll('[data-sandbox="effect-warning"]')].map(row => row.textContent?.replace(/\s+/g, ' ').trim());
+  expect(rows).toEqual([
+    '“Pixel Blur” may change size when zooming. Pixel coordinates or radii may change size with viewer zoom or preview resolution. Use effectPixel().',
+    '“Glow” may change size when zooming. Pixel coordinates or radii may change size with viewer zoom or preview resolution. Use effectPixel().'
+  ]);
+  await unmount(component);
+  target.remove();
+});

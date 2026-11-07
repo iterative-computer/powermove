@@ -49,6 +49,7 @@ export function openMaterialPicker(api: PowermoveAPI, anchor: HTMLElement | Pick
     target,
     props: {
       api,
+      layerId: request.layerId,
       rect: { left: box.left, top: box.top, bottom: box.bottom, width: box.width },
       slot: request.slot,
       materialName: entry.name,

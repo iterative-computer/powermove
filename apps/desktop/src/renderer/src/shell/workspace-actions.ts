@@ -54,6 +54,8 @@ export function workspaceStatus(PM: PMLike, id: string | undefined = PM.WS?.curr
   const builtin = !!workspace.builtin;
   // The window's live copy can be newer than the library entry while docks are mounted.
   const live: WorkspaceLike = WS.current?.id === workspace.id ? WS.current : workspace;
+  /* The first edit of a built-in forks an “(edited)” copy whose saved layout
+     is the built-in arrangement, so its Reset is live from that first edit. */
   const saved = workspace.savedState;
   const changed = !!saved && SAVED_KEYS.some((key) => stable(live[key]) !== stable(saved[key]));
   return {

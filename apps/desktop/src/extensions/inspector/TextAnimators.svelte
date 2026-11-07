@@ -5,7 +5,7 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import Icon from './Icon.svelte';
   import SectionHeading from './SectionHeading.svelte';
-  import { structuredProperties } from 'powermove';
+  import { countTextUnits, staggerTimingControl, structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
   import { isInspectorLayerEditable } from './multi-edit';
   import {
@@ -66,6 +66,18 @@
   });
   const path = (animator: any, key: string) => `ta.${animator.id}.${key}`;
   const value = (animator: any, key: string) => api.anim.evP(layer, animator.p[key], transport.time, path(animator, key));
+  /* Stagger timing as the engine reads it: exits (migrated ones included)
+     show and edit End offset, entrances Start. Rebuilt at each read so it
+     follows the playhead, the timing values and the text's unit count. */
+  function timing(animator: any) {
+    const time = transport.time;
+    const values = Object.fromEntries(['delay', 'duration', 'stagger'].map((key) => [key, Number(value(animator, key)) || 0]));
+    const lines = api.render.textLayout(layer, time)?.lines
+      ?? String(api.anim.evP(layer, layer.d.text, time, 'c.text') ?? '').split('\n').map((text) => ({ text }));
+    const unit = animator.unit ?? (animator.p?.unit?.v === 'words' || animator.p?.unit?.v === 'lines' ? animator.p.unit.v : 'characters');
+    const count = Math.max(countTextUnits(lines, unit) + Math.max(0, Math.floor(Number(animator.unitOffset) || 0)), Math.floor(Number(animator.unitTotal) || 0), 1);
+    return staggerTimingControl(animator, values, count, animator.order);
+  }
   const fontSize = () => Number(api.anim.evP(layer, layer.d.size, transport.time, 'c.size')) || 64;
 
   function addPreset(preset: AnimatorPreset) {
@@ -234,8 +246,11 @@
           {@render segmented([{ v: 'in', label: 'In' }, { v: 'out', label: 'Out' }], view.direction, 'Direction', (direction) => setDirection(animator, direction))}
         </Row>
         <!-- Exits are timed back from the layer's out point, so trimming the end carries them.
-             Migrated legacy exits keep their original start-based channel until re-timed. -->
-        {@render number(animator, 'delay', view.direction === 'out' && !animator.legacyStartDuration ? 'End offset' : 'Start', 's', { step: 0.01, precision: 2 })}
+             Migrated legacy exits keep their start-based channel (and its keys and expression);
+             the field converts, so every exit reads and edits as End offset. -->
+        {@const control = (doc.tick.values, doc.tick.history, transport.time, timing(animator))}
+        <ChannelRow {layer} channel={path(animator, 'delay')} property={animator.p.delay} label={control.label} unit="s" step={0.01} precision={2}
+          getValue={() => timing(animator).value} toChannel={(displayed) => timing(animator).toChannelValue(displayed)} />
         {@render number(animator, 'duration', 'Duration', 's', { step: 0.01, min: 0, precision: 2 })}
         {@render number(animator, 'stagger', 'Stagger', 's', { step: 0.005, min: 0, precision: 3 })}
         <fieldset disabled={!editable}><Row {api} label="Easing">

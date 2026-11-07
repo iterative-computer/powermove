@@ -110,3 +110,7 @@
 .st-withdraw-actions{flex:none;display:flex;gap:6px}
 .st-withdraw-actions .btn{height:28px;padding:0 12px;border-radius:var(--r-pill)}
 .st-kv>b>.st-change-why{display:block;margin-top:2px;font:var(--fs-xs)/14px var(--f-ui);font-style:normal;color:var(--tx-4)}
+/* Effect validation advice: the problem list's shape, amber, never blocking. */
+.pub-advice-line::before{background:var(--warning)}
+.pub-advice-title{color:var(--tx);font-weight:var(--fw-medium,500)}
+.pub-advice-fix{display:block;margin-top:2px;color:var(--tx-3)}

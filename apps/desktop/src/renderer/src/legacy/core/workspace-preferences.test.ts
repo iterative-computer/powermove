@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { workspaceStatus } from '../../shell/workspace-actions';
 import { describe, expect, it } from 'vitest';
 import { makePM } from '../__tests__/make-pm';
 function editor(saved = new Map<string, any>()) {
@@ -8,6 +9,15 @@ function editor(saved = new Map<string, any>()) {
   PM.Layout = { apply() {} }; PM.perf = {}; PM.proj = {id: 'project'}; PM.WS.init(); return PM;
 }
 describe('workspace preferences', () => {
+  it('offers Reset from the first edit of a built-in, and reads Unchanged after it', () => {
+    const PM = editor();
+    PM.WS.reset('design');
+    PM.WS.mutate((w: any) => { w.layout.docks[0].size = 377; });
+    expect(workspaceStatus(PM)).toMatchObject({ builtin: false, changed: true, canReset: true });
+    PM.WS.reset();
+    expect(workspaceStatus(PM)).toMatchObject({ changed: false, canReset: false });
+  });
+
   it('resets the first built-in edit to its pre-edit baseline across restart', () => {
     const saved = new Map<string, any>(), PM = editor(saved);
     PM.WS.reset('design');

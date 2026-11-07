@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { SANDBOX_OK, SANDBOX_SKIPPED, sandboxCheckLines, type SandboxCheckState } from './sandbox-check';
+  import { SANDBOX_OK, SANDBOX_SKIPPED, sandboxAdviceLines, sandboxCheckLines, type SandboxCheckState } from './sandbox-check';
 
   /* The sandbox check as Settings rows: a title and a line under it, the
      state at the right edge (a spinner, a tick, or Check Again). A failure
@@ -10,6 +10,9 @@
   } = $props();
 
   const lines = $derived(state.status === 'done' ? sandboxCheckLines(state.report) : []);
+  /* Effect validation hints never block publishing; they follow the result
+     as advice, amber rather than red, with the exact fix to copy. */
+  const advice = $derived(state.status === 'done' ? sandboxAdviceLines(state.report) : []);
 </script>
 
 <div class="sg-group pub-group pub-sandbox" aria-live="polite" aria-busy={state.status === 'running'}>
@@ -49,6 +52,19 @@
     <ul class="pub-sandbox-problems">
       {#each lines as line, index (index)}
         <li class="pub-sandbox-line" data-sandbox="problem">{line}</li>
+      {/each}
+    </ul>
+  {/if}
+  {#if advice.length}
+    <div class="settings-row pub-row pub-advice-head" data-sandbox="advice">
+      <span class="settings-copy"><b>{advice.length === 1 ? 'One suggestion' : `${advice.length} suggestions`}</b><span>They don’t block publishing.</span></span>
+    </div>
+    <ul class="pub-sandbox-problems pub-advice">
+      {#each advice as item, index (index)}
+        <li class="pub-sandbox-line pub-advice-line" data-sandbox="effect-warning">
+          <span class="pub-advice-title">{item.title}.</span> {item.message}
+          <span class="pub-advice-fix">{item.fix}</span>
+        </li>
       {/each}
     </ul>
   {/if}

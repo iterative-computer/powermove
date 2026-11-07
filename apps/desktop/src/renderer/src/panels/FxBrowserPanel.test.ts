@@ -249,8 +249,18 @@ describe('FxBrowserPanel My Presets', () => {
       Presets: {
         list: () => stored.map((preset) => ({ ...preset })),
         get: (id: string) => stored.find((preset) => preset.id === id) ?? null,
-        rename: vi.fn((id: string, name: string) => { stored = stored.map((preset) => preset.id === id ? { ...preset, name: name.trim() } : preset); PM.bus.emit('presets'); return true; }),
-        remove: vi.fn((id: string) => { stored = stored.filter((preset) => preset.id !== id); PM.bus.emit('presets'); return true; })
+        rename: vi.fn((id: string, name: string, expected?: string) => { if (expected !== undefined && stored.find((preset) => preset.id === id)?.name !== expected) return false; stored = stored.map((preset) => preset.id === id ? { ...preset, name: name.trim() } : preset); PM.bus.emit('presets'); return true; }),
+        remove: vi.fn((id: string) => { stored = stored.filter((preset) => preset.id !== id); PM.bus.emit('presets'); return true; }),
+        removeWithUndo: vi.fn((id: string) => {
+          const index = stored.findIndex((preset) => preset.id === id);
+          if (index < 0) return null;
+          const [preset] = stored.splice(index, 1); stored = [...stored]; PM.bus.emit('presets');
+          return { preset: { ...preset }, index };
+        }),
+        restore: vi.fn((preset: any, index: number) => {
+          if (stored.some((item) => item.id === preset.id)) return false;
+          stored = [...stored]; stored.splice(Math.min(index, stored.length), 0, preset); PM.bus.emit('presets'); return true;
+        })
       },
       Edit: { apply: vi.fn(() => ({ ok: true, data: { results: [{ data: { skipped: [] } }] } })) }
     });
@@ -294,7 +304,7 @@ describe('FxBrowserPanel My Presets', () => {
     await unmount(component);
   });
 
-  it('searches presets with effects, renames inline and deletes after confirming', async () => {
+  it('searches presets with effects, renames and deletes with Undo in the toast', async () => {
     const { PM } = presetPM([{ id: 'p1', name: 'Soft entrance' }, { id: 'p2', name: 'Glow pulse' }]);
     window.PM = PM as any;
     const { target, component } = mountPanel();
@@ -305,7 +315,7 @@ describe('FxBrowserPanel My Presets', () => {
     const row = target.querySelector<HTMLElement>('[data-id="preset:p1"]')!;
     flushSync(() => row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 })));
     const items = PM.menu.mock.calls[0][1];
-    expect(items.filter((item: any) => item.label).map((item: any) => item.label)).toEqual(['Apply to Card', 'Rename…', 'Delete…']);
+    expect(items.filter((item: any) => item.label).map((item: any) => item.label)).toEqual(['Apply to Card', 'Rename…', 'Delete']);
 
     items.find((item: any) => item.label === 'Rename…').run();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -318,14 +328,30 @@ describe('FxBrowserPanel My Presets', () => {
     flushSync();
     expect(PM.Presets.rename).toHaveBeenCalledWith('p1', 'Gentle entrance');
     expect(labels(target)[0]).toBe('Gentle entrance');
+    // Rename offers Undo, guarded by the name it applied.
+    const renamed = PM.toast.mock.calls.at(-1);
+    expect(renamed[0]).toBe('Renamed “Soft entrance” to “Gentle entrance”');
+    flushSync(() => renamed[2].action.run());
+    expect(PM.Presets.rename).toHaveBeenLastCalledWith('p1', 'Soft entrance', 'Gentle entrance');
+    expect(labels(target)[0]).toBe('Soft entrance');
 
     const pick = target.querySelector<HTMLButtonElement>('[data-id="preset:p2"] .fxb-pick')!;
     pick.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     flushSync();
-    expect(PM.confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: 'Delete Preset' }));
-    expect(PM.Presets.remove).toHaveBeenCalledWith('p2');
+    // No confirmation: it goes at once, and the toast can put it back in place.
+    expect(PM.confirm).not.toHaveBeenCalled();
+    expect(PM.Presets.removeWithUndo).toHaveBeenCalledWith('p2');
     expect(labels(target)).not.toContain('Glow pulse');
+    const deleted = PM.toast.mock.calls.at(-1);
+    expect(deleted[0]).toBe('Deleted “Glow pulse”');
+    expect(deleted[2].action.label).toBe('Undo');
+    flushSync(() => deleted[2].action.run());
+    expect(PM.Presets.restore).toHaveBeenCalledWith(expect.objectContaining({ id: 'p2' }), 1);
+    expect(labels(target).slice(0, 2)).toEqual(['Soft entrance', 'Glow pulse']);
+    // A stale second Undo never duplicates it.
+    flushSync(() => deleted[2].action.run());
+    expect(labels(target).filter((label) => label === 'Glow pulse')).toHaveLength(1);
     await unmount(component);
   });
 });

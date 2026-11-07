@@ -1,7 +1,7 @@
 import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMarker, timelineMarkerHit } from './markers';
 import { revealedProperties } from './property-reveal';
 import { sectionedPropertyRows } from './property-sections';
-import { hasMaterialRows, isMaterialPropKey, materialSectionRows, materialSourceMap, materialsService } from './material-rows';
+import { hasMaterialRows, isMaterialPropKey, materialSectionRows, materialSourceMap, materialsService, type MaterialSlotRef } from './material-rows';
 import { precompCarriesAudio } from './audio-presence';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
@@ -943,7 +943,7 @@ function setMode(next: unknown) {
   api.storage.set('mode', mode);
   /* The two views have unrelated row geometry; keep only the time viewport. */
   T.scrollY = 0; T.trackScrollY = 0;
-  T.trackDrag = null; T.trackDrop = null; T.trackHover = null; T.reorder = null; T.drop = null; T.dropRow = null;
+  T.trackDrag = null; T.trackDrop = null; T.trackHover = null; T.reorder = null; T.materialDrop = null; T.layerDragging = false; T.drop = null; T.dropRow = null;
   rowsDirty = true;
   syncGraphControls();
   /* Paint now: gutter width and lane geometry are resolved while drawing, and
@@ -1336,7 +1336,7 @@ function timelineBackdropKey(): unknown[] | null {
   // Curves, their editable handles, and the timeline describe fixed times.
   // Retain one bounded viewport bitmap; moving readouts are painted afterward.
   // Active edits and expression curves keep their conservative drawing path.
-  if (T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || T.graphDragBounds || T.graphReadout || !api.uiState.timelineVersion
+  if (T.drop || T.reorder || T.materialDrop || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || T.graphDragBounds || T.graphReadout || !api.uiState.timelineVersion
       || (tracksMode() && trackView.unfolded())
       || (T.graph && T._graph?.series?.some((axis: any) => axis.prop.expr))
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
@@ -2397,15 +2397,65 @@ function drawMaterialRow(c: any, r: any, i: number, y: number) {
   const info = service?.describe(r.L.id, r.index, r.slot, entry?.maps[r.slot as keyof typeof entry.maps]) ?? { label: 'Original', icon: null, status: 'original' };
   const original = info.status === 'original', warn = !original && info.status !== 'ready';
   const hovered = T.hoverRow === i && T.hoverX >= box.left;
-  c.fillStyle = hovered ? INK.tick : INK.over2;
+  /* A layer dragged over this pop-up: accent when it fits, muted when not. */
+  const drop = T.materialDrop?.row === i ? T.materialDrop : null;
+  c.fillStyle = drop?.ok ? theme.accentWash : hovered ? INK.tick : INK.over2;
   roundRect(c, box.left, box.top, box.right - box.left, box.height, 5); c.fill();
+  if (drop) {
+    c.save();
+    c.strokeStyle = drop.ok ? theme.accent : theme.tx4; c.lineWidth = drop.ok ? 1.5 : 1;
+    if (!drop.ok) c.setLineDash([3, 2]);
+    roundRect(c, box.left + .75, box.top + .75, box.right - box.left - 1.5, box.height - 1.5, 4.5); c.stroke();
+    c.restore();
+  }
+  if (drop && !drop.ok) c.globalAlpha = .5;
+  const picture = !warn && !original ? materialThumbnailImage(r.L.id, entry?.maps[r.slot as keyof typeof entry.maps]) : null;
   if (warn) drawIcon(c, 'warning', box.left + 11, iy, 12, theme.accentText);
   else if (original) icoMaterialBall(c, box.left + 11, iy, theme.tx4);
+  else if (picture) drawMaterialThumbnail(c, picture, box.left + 11, iy, 14);
   else if (info.icon) drawIcon(c, info.icon, box.left + 11, iy, 12, theme.tx2);
   c.font = '400 11.5px ' + fui();
   c.fillStyle = warn ? theme.accentText : original ? theme.tx3 : theme.tx;
   clipText(c, warn ? `${info.label} · using original` : info.label, box.left + 22, iy, box.right - box.left - 22 - 16);
   drawIcon(c, 'chevD', box.right - 9, iy, 8, theme.tx3);
+  c.globalAlpha = 1;
+}
+/* Source previews from the materials service, decoded once per picture and
+   drawn like the inspector's: cropped square, rounded, with a hairline. */
+const thumbnailImages = new Map<string, HTMLImageElement>();
+let thumbnailSubscription: (() => void) | null = null;
+function materialThumbnailImage(layerId: string, map: unknown): HTMLImageElement | null {
+  const service = materialsService(api);
+  if (!service?.thumbnail || map == null) return null;
+  if (!thumbnailSubscription && service.onThumbnails) {
+    thumbnailSubscription = service.onThumbnails(() => invalidate('timeline'));
+    runtimeCleanups.push(() => { thumbnailSubscription?.(); thumbnailSubscription = null; thumbnailImages.clear(); });
+  }
+  const url = service.thumbnail(layerId, map);
+  if (!url) return null;
+  let image = thumbnailImages.get(url);
+  if (!image) {
+    image = new Image();
+    image.onload = () => invalidate('timeline');
+    image.src = url;
+    thumbnailImages.set(url, image);
+    while (thumbnailImages.size > 96) thumbnailImages.delete(thumbnailImages.keys().next().value!);
+  }
+  return image.complete && image.naturalWidth ? image : null;
+}
+function drawMaterialThumbnail(c: any, image: HTMLImageElement, x: number, y: number, size: number) {
+  const w = image.naturalWidth, h = image.naturalHeight, side = Math.min(w, h);
+  const left = x - size / 2, top = y - size / 2, radius = size * .22;
+  c.save();
+  roundRect(c, left, top, size, size, radius); c.clip();
+  c.fillStyle = INK.over2; c.fillRect(left, top, size, size);
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(image, (w - side) / 2, (h - side) / 2, side, side, left, top, size, size);
+  c.restore();
+  c.save();
+  c.strokeStyle = INK.tick; c.lineWidth = .5;
+  roundRect(c, left + .25, top + .25, size - .5, size - .5, radius); c.stroke();
+  c.restore();
 }
 function materialRowDown(r: any, x: number, index: number) {
   const L = r.L;
@@ -2443,6 +2493,36 @@ function virtualPropertyDown(e: any, r: any, x: number, index: number) {
     if (row) dragPropertyValue(e, row, T.rows.indexOf(row) >= 0 ? T.rows.indexOf(row) : index);
   }
 }
+const MATERIAL_SLOT_LABEL: Record<string, string> = { color: 'Base Color', emissive: 'Emissive', normal: 'Normal', roughness: 'Roughness', metalness: 'Metalness', ao: 'Occlusion' };
+/* The drag badge beside the pointer while a layer is over a material slot,
+   like the label macOS shows under a dragged item: what the drop will do,
+   or, dimmed, why it can't. */
+let layerDragBadge: HTMLDivElement | null = null;
+function showLayerDragBadge(ev: PointerEvent, text: string, ok: boolean) {
+  if (!layerDragBadge) {
+    layerDragBadge = document.createElement('div');
+    layerDragBadge.className = 'pm-layer-drag-badge';
+    layerDragBadge.setAttribute('role', 'status');
+    layerDragBadge.style.cssText = 'position:fixed;z-index:10000;pointer-events:none;display:flex;align-items:center;gap:6px;max-width:300px;'
+      + 'padding:4px 9px 4px 7px;border-radius:7px;font:500 12px/16px var(--f-ui, system-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+      + 'background:var(--bg-float);color:var(--tx);box-shadow:0 0 0 .5px rgb(var(--ink-rgb, 0 0 0) / .16),0 6px 18px rgb(0 0 0 / .18)';
+    document.body.append(layerDragBadge);
+  }
+  const glyph = ok
+    ? '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="var(--accent)"/><path d="M8 4.5v7M4.5 8h7" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>'
+    : '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.8 12.2l8.4-8.4" stroke="currentColor" stroke-width="1.5"/></svg>';
+  if (layerDragBadge.dataset.text !== text || layerDragBadge.dataset.ok !== String(ok)) {
+    layerDragBadge.dataset.text = text; layerDragBadge.dataset.ok = String(ok);
+    layerDragBadge.innerHTML = `${glyph}<span style="overflow:hidden;text-overflow:ellipsis"></span>`;
+    layerDragBadge.querySelector('span')!.textContent = text;
+    layerDragBadge.style.color = ok ? 'var(--tx)' : 'var(--tx-2)';
+  }
+  const x = Math.min(ev.clientX + 14, window.innerWidth - layerDragBadge.offsetWidth - 8);
+  layerDragBadge.style.left = `${Math.max(8, x)}px`;
+  layerDragBadge.style.top = `${Math.min(ev.clientY + 18, window.innerHeight - 30)}px`;
+}
+function hideLayerDragBadge() { layerDragBadge?.remove(); layerDragBadge = null; }
+runtimeCleanups.push(hideLayerDragBadge);
 function rowSwitchAt(L: any, x: number): RowSwitch | null {
   return rowSwitches(L).find((item) => Math.abs(x - item.x) <= SWITCH_WIDTH / 2) ?? null;
 }
@@ -3071,6 +3151,8 @@ function setHoverRow(index: number | null) {
   invalidate('timeline');
 }
 function onMove(e: any) {
+  // A layer dragged toward a material slot shows its own badge; no hover tooltips meanwhile.
+  if (T.layerDragging) { if (T.cv.title) T.cv.title = ''; return; }
   const x = e.offsetX, y = e.offsetY;
   // Material rows light their pop-up only under the pointer.
   const overPopup = x >= T.propertyValueX - 8 && x < T.gut;
@@ -3811,29 +3893,81 @@ function gutterDown(e: any, x: any, y: any) {
     invalidate('timeline');
     return;
   }
-  if (!selectLayerForPointer(L, e)) return;
-  const selected = api.selection.layers().slice();
+  /* Dragging a layer can also land on a material slot (a Materials row here,
+     or the model's slot in Properties). While a model is the one layer in
+     Properties, pressing another layer holds the selection until release,
+     so its Materials stay put to drop on; a click still selects. */
+  const materials = materialsService(api);
+  const inspected = api.selection.layers();
+  const holdSelection = !!materials?.slotAt && !e.shiftKey && !e.metaKey && !e.ctrlKey
+    && inspected.length === 1 && !inspected.includes(L.id) && hasMaterialRows(api, api.model.layer(inspected[0]!));
+  if (!holdSelection && !selectLayerForPointer(L, e)) return;
+  const selected = holdSelection ? [L.id] : api.selection.layers().slice();
   const moving = api.groups.expand(selected) || selected;
-  if (moving.some((id: string) => {
+  const locked = moving.some((id: string) => {
     const layer = api.model.layer(id);
     return !layer || layer.lock || api.groups.ancestors(layer).some((group) => group.lock);
-  })) return;
+  });
+  // A locked layer can't be reordered, but it can still be used as a material.
+  if (locked && !materials?.canAssignLayer) return;
   let active = false;
-  const clear = () => { T.reorder = null; invalidate('timeline'); };
+  let slot: (MaterialSlotRef & { row: number | null; ok: boolean; reason: string | null }) | null = null;
+  const clear = () => {
+    T.reorder = null; T.materialDrop = null; T.layerDragging = false; slot = null;
+    materials?.setLayerDropHover?.(null); hideLayerDragBadge();
+    invalidate('timeline');
+  };
+  const slotUnder = (ev: PointerEvent, rect: DOMRect): (MaterialSlotRef & { row: number | null }) | null => {
+    if (!materials?.canAssignLayer) return null;
+    const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+    if (px >= 0 && px < T.gut && py >= T.ruler && py < rect.height) {
+      const hit = hitRow(py), row = hit?.row;
+      return row?.kind === 'material' && px >= T.propertyValueX - 8 ? { layerId: row.L.id, materialIndex: row.index, slot: row.slot, row: hit!.i } : null;
+    }
+    const inside = px >= 0 && py >= 0 && px < rect.width && py < rect.height;
+    const ref = inside ? null : materials.slotAt?.(ev.clientX, ev.clientY);
+    return ref ? { ...ref, row: null } : null;
+  };
   beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: number, dy: number, ev: PointerEvent) => {
       if (!active && Math.hypot(dx, dy) < 5) return;
+      // A hover tooltip left over from before the press would sit beside the badge.
+      if (!active) { T.cv.title = ''; T.layerDragging = true; }
       active = true;
       const rect = T.cv.getBoundingClientRect(), py = ev.clientY - rect.top;
+      const over = slotUnder(ev, rect);
+      if (over) {
+        if (!slot || slot.layerId !== over.layerId || slot.materialIndex !== over.materialIndex || slot.slot !== over.slot) {
+          const check = materials!.canAssignLayer!(over, L.id);
+          slot = { ...over, ok: check.ok, reason: check.ok ? null : check.reason };
+          materials!.setLayerDropHover?.({ layerId: over.layerId, materialIndex: over.materialIndex, slot: over.slot, sourceId: L.id, ok: slot.ok, reason: slot.reason });
+        }
+        slot.row = over.row;
+        T.reorder = null;
+        T.materialDrop = slot.row != null ? { row: slot.row, ok: slot.ok } : null;
+        showLayerDragBadge(ev, slot.ok ? `Use “${L.name}” as ${MATERIAL_SLOT_LABEL[slot.slot] ?? 'material'}` : slot.reason ?? 'Can’t use this layer here', slot.ok);
+        invalidate('timeline');
+        return;
+      }
+      if (slot) { slot = null; T.materialDrop = null; materials?.setLayerDropHover?.(null); hideLayerDragBadge(); }
+      if (locked) { invalidate('timeline'); return; }
       const drop = layerDrop(T.rows, (py - T.ruler + T.scrollY) / T.row, ev.clientX - rect.left);
       const target = drop && api.model.layer(drop.target);
       T.reorder = drop && target && !moving.includes(drop.target) && !target.lock && !api.groups.ancestors(target).some((g: any) => g.lock) ? drop : null;
       invalidate('timeline');
     },
     up: () => {
-      const drop = T.reorder; clear();
+      const material = slot, drop = T.reorder; clear();
+      if (!active) { if (holdSelection) selectLayerForPointer(L, e); return; }
+      if (material) {
+        // One undo step; the model stays selected, since that is what changed.
+        if (material.ok) materials?.dropLayer?.(material, L.id);
+        invalidate();
+        return;
+      }
       if (!drop) return;
+      if (holdSelection) selectLayerForPointer(L, e);
       const roots = api.project.get().layers.filter((layer: any) => selected.includes(layer.id) && !api.groups.ancestors(layer).some((g: any) => selected.includes(g.id)));
       api.edit.mutate('Move layers', () => {
         const changing = roots.filter((layer: any) => (layer.group || null) !== drop.group);

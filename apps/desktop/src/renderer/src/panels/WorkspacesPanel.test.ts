@@ -36,8 +36,10 @@ function fakePM(initial: Workspace[]) {
     bus,
     modal: vi.fn(),
     confirm: vi.fn(async () => true),
+    toast: vi.fn(),
     WS: {
       all: [...initial],
+      get: (id: string) => PM.WS.all.find((workspace: Workspace) => workspace.id === id),
       current: initial[0],
       activate,
       remove: vi.fn(),
@@ -119,8 +121,11 @@ describe('WorkspacesPanel', () => {
       confirmLabel: 'Delete Workspace'
     });
     await PM.confirm.mock.results[0].value;
+    await Promise.resolve();
     flushSync();
     expect(PM.WS.remove).toHaveBeenCalledWith('custom');
+    // The same Undo toast as the titlebar menu's Delete Workspace….
+    expect(PM.toast).toHaveBeenCalledWith('Deleted “My workspace”', 5000, expect.objectContaining({ action: expect.objectContaining({ label: 'Undo' }) }));
 
     flushSync(() => buttonWithText(target, 'Save current').click());
     flushSync(() => buttonWithText(target, 'JSON').click());

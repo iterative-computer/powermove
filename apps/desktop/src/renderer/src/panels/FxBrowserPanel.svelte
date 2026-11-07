@@ -142,7 +142,21 @@
     renamingId = null;
     if (commit && preset && renameValue.trim() && renameValue.trim() !== preset.name) {
       try {
-        if (PM.Presets.rename(id, renameValue)) status = `Renamed to ${renameValue.trim()}`;
+        const before = preset.name;
+        if (PM.Presets.rename(id, renameValue)) {
+          const applied = (PM.Presets.get(id) as StoredPreset | null)?.name ?? renameValue.trim();
+          status = `Renamed to ${applied}`;
+          /* Presets live outside project history, so Undo is the toast's.
+             The expected name keeps it from undoing a later rename made in
+             another window. */
+          PM.toast?.(`Renamed “${before}” to “${applied}”`, 5000, {
+            icon: 'diamond', key: 'preset-status',
+            action: { label: 'Undo', run: () => {
+              if (PM.Presets.rename(id, before, applied)) status = `Renamed back to ${before}`;
+              else PM.toast?.(`“${applied}” was changed again, so it keeps its newer name.`, 3200, { key: 'preset-status' });
+            } }
+          });
+        }
       } catch (error) {
         PM.toast?.(error instanceof Error ? error.message : String(error), 3200, { kind: 'alert' });
       }
@@ -151,14 +165,29 @@
     list?.querySelector<HTMLElement>(`[data-id="preset:${CSS.escape(id)}"] .fxb-pick`)?.focus();
   }
 
+  /* Deletes at once, with Undo in the toast, as Delete Workspace does: the
+     receipt holds the whole preset, and Undo puts it back in its place in
+     every window. Layers it was applied to are untouched either way. */
   function deletePreset(preset: StoredPreset): void {
-    void PM.confirm?.({
-      message: `Delete “${preset.name}”?`,
-      detail: 'The preset is removed from My Presets in every window. Layers it was applied to keep their effects and keyframes.',
-      confirmLabel: 'Delete Preset'
-    })?.then((ok: boolean) => {
-      if (!ok) return;
-      if (PM.Presets.remove(preset.id)) status = `Deleted ${preset.name}`;
+    const receipt = PM.Presets.removeWithUndo?.(preset.id) ?? null;
+    if (!receipt) return;
+    status = `Deleted ${preset.name}`;
+    // Keyboard focus moves to the row that took its place, as in Finder.
+    const remaining = PM.Presets.list() as StoredPreset[];
+    const next = remaining[receipt.index] ?? remaining[receipt.index - 1];
+    void tick().then(() => {
+      if (next) list?.querySelector<HTMLElement>(`[data-id="preset:${CSS.escape(next.id)}"] .fxb-pick`)?.focus();
+    });
+    PM.toast?.(`Deleted “${preset.name}”`, 6000, {
+      icon: 'trash', key: 'preset-status',
+      action: { label: 'Undo', run: () => {
+        if (!PM.Presets.restore(receipt.preset, receipt.index)) {
+          PM.toast?.(`“${preset.name}” is already back in My Presets.`, 3200, { key: 'preset-status' });
+          return;
+        }
+        status = `Restored ${preset.name}`;
+        selectedId = `preset:${preset.id}`;
+      } }
     });
   }
 
@@ -172,7 +201,7 @@
       { label: layer ? `Apply to ${layer.name}` : 'Apply to Selected Layer', disabled: !layer, run: () => applyPresetRow(preset) },
       '-',
       { label: 'Rename…', run: () => { void startRename(preset); } },
-      { label: 'Delete…', icon: 'trash', run: () => deletePreset(preset) },
+      { label: 'Delete', icon: 'trash', run: () => deletePreset(preset) },
     ], at);
   }
 

@@ -121,7 +121,7 @@ const GROUP_TYPES: Array<{ id: string; label: string; types: string[]; filters: 
 ];
 
 /** Why a layer of this kind can never be a material. */
-function wrongTypeReason(layer: Layer): string {
+export function wrongTypeReason(layer: Layer): string {
   if (isModelLayer(layer) || String((layer.d as any)?.definition ?? '').startsWith('powermove.3d.')) return '3D layers can’t be painted onto a model';
   if (layer.type === 'audio') return 'Audio has no picture';
   if (layer.type === 'group') return 'Pre-compose the group to use it';

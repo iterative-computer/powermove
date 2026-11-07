@@ -8,7 +8,9 @@
   import type { Layer, PowermoveAPI } from 'powermove';
   import type { SceneUiState } from './scene-state.svelte';
   import MaterialProperty from './MaterialProperty.svelte';
+  import MaterialThumb from './MaterialThumb.svelte';
   import { openMaterialPicker } from './material-picker';
+  import { layerDrop } from './layer-drop.svelte';
   import {
     MATERIAL_PROPERTY_SPECS, MATERIAL_SLOT_SPECS, assignMap, describeMap, materialEntries, materialKey, overrideCount,
     resetMaterial, slotSpec, statusNote, type MaterialEntry, type MaterialSlot
@@ -60,7 +62,11 @@
   {@const info = describeMap(api, layer.id, entry.index, slot, entry.maps[slot])}
   {@const note = statusNote(info.status)}
   {@const id = `${entry.index ?? 'all'}:${slot}`}
-  <div class="mat-slot" class:drop={dropTarget === id} title={spec.tip} data-material-slot={id}
+  {@const hover = layerDrop.hover && layerDrop.hover.layerId === layer.id && layerDrop.hover.materialIndex === entry.index && layerDrop.hover.slot === slot ? layerDrop.hover : null}
+  <!-- data-material-* address the slot for layer drags from the Timeline. -->
+  <div class="mat-slot" class:is-drop={dropTarget === id || hover?.ok} class:is-refused={hover && !hover.ok} title={hover && !hover.ok ? hover.reason : spec.tip}
+    data-material-slot={id} data-material-layer={layer.id} data-material-slot-index={entry.index ?? 'all'} data-material-slot-name={slot}
+    data-layer-drop={hover ? (hover.ok ? 'valid' : 'invalid') : undefined}
     role="group" aria-label={`${entry.name} ${spec.label}`}
     ondragover={(event) => slotOver(event, id)} ondragleave={() => { if (dropTarget === id) dropTarget = null; }}
     ondrop={(event) => slotDrop(event, entry, slot)}>
@@ -70,6 +76,10 @@
         data-tip={note ?? ''}
         onclick={(event) => openMaterialPicker(api, event.currentTarget as HTMLElement, { layerId: layer.id, materialIndex: entry.index, slot })}>
         {#if note}<span class="mat-source-icon warn" aria-hidden="true">{@html api.ui.icon('warning')}</span>
+        {:else if info.status === 'ready'}
+          <MaterialThumb {api} layerId={layer.id} map={entry.maps[slot]} refresh={ui.version}>
+            {#snippet placeholder()}<span class="mat-source-icon" aria-hidden="true">{@html api.ui.icon(info.icon ?? 'image')}</span>{/snippet}
+          </MaterialThumb>
         {:else if info.icon}<span class="mat-source-icon" aria-hidden="true">{@html api.ui.icon(info.icon)}</span>
         {:else}<span class="mat-source-icon mat-ball" aria-hidden="true"></span>{/if}
         <span class="pm-select-label">{note ? `${info.label} · using original` : info.label}</span>
@@ -144,13 +154,18 @@
   .mat-options :global(.row.split) { padding-left: 0; }
 
   .mat-slot { border-radius: 7px; transition: box-shadow var(--dur-1); }
-  .mat-slot.drop { box-shadow: inset 0 0 0 1.5px var(--accent); background: var(--accent-dim); }
-  .mat-source { width: 100%; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 22px 0 7px; border: 0; border-radius: 6px; background: var(--bg-field); color: var(--tx-value); font-family: var(--f-ui); font-size: 12px; }
+  /* Never the bare class "drop": closing a menu removes every .drop element. */
+  .mat-slot.is-drop { box-shadow: inset 0 0 0 1.5px var(--accent); background: var(--accent-dim); }
+  /* A layer that can't go here: the slot says no without shouting. */
+  .mat-slot.is-refused { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tx-3) 60%, transparent); background: rgb(var(--ink-rgb) / .04); }
+  .mat-slot.is-refused :global(.mat-source) { opacity: .55; }
+  .mat-source { width: 100%; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 22px 0 4px; border: 0; border-radius: 6px; background: var(--bg-field); color: var(--tx-value); font-family: var(--f-ui); font-size: 12px; }
   .mat-source:hover { background: color-mix(in srgb, var(--bg-field) 80%, var(--tx) 6%); }
   .mat-source.original { color: var(--tx-3); }
   .mat-source.warn { color: var(--warning); }
   .mat-source :global(.pm-select-chevron) { right: 6px; width: 10px; height: 10px; margin-top: -5px; }
-  .mat-source-icon { display: grid; place-items: center; width: 13px; height: 13px; flex: none; color: var(--tx-2); }
+  /* A 16px leading box for icon, ball or picture alike, so the label never moves. */
+  .mat-source-icon { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--tx-2); }
   .mat-source-icon :global(svg) { width: 13px; height: 13px; }
   .mat-source-icon.warn { color: var(--warning); }
   .mat-ball::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgb(255 255 255 / .95), rgb(var(--ink-rgb) / .32) 72%); box-shadow: inset 0 0 0 .5px rgb(var(--ink-rgb) / .28); }

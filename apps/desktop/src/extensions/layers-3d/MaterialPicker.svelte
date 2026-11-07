@@ -1,14 +1,16 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { PowermoveAPI } from 'powermove';
+  import MaterialThumb from './MaterialThumb.svelte';
   import { filterGroups, sameMap, slotSpec, type MaterialMapValue, type MaterialSlot, type SourceFilter, type SourceGroup, type SourceOption } from './materials';
 
   /* The Material source menu: an AppKit-style pop-up sheet with a search
      field, an All / Comps / Footage filter (as in After Effects), grouped
      sources, the current one checked at the leading edge, and sources that
      can't be used shown dimmed with the reason underneath. */
-  let { api, rect, slot, materialName, groups, current, onPick, onImage, onClose }: {
+  let { api, layerId, rect, slot, materialName, groups, current, onPick, onImage, onClose }: {
     api: PowermoveAPI;
+    layerId: string;
     rect: { left: number; top: number; bottom: number; width: number };
     slot: MaterialSlot;
     materialName: string;
@@ -140,7 +142,14 @@
           onkeydown={(event) => { if (event.key === ' ') { event.preventDefault(); pick(option); } }}
         >
           <svg class="pm-menu-check" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {#if option.icon}<span class="pm-menu-icon mp-icon" aria-hidden="true">{@html api.ui.icon(option.icon)}</span>{:else}<span class="pm-menu-icon mp-icon mp-original" aria-hidden="true"></span>{/if}
+          {#if option.map != null && !option.disabled}
+            <!-- The source's picture, once the engine has drawn it. -->
+            <span class="pm-menu-icon mp-icon mp-thumb" aria-hidden="true">
+              <MaterialThumb {api} {layerId} map={option.map}>
+                {#snippet placeholder()}{@html api.ui.icon(option.icon ?? 'image')}{/snippet}
+              </MaterialThumb>
+            </span>
+          {:else if option.icon}<span class="pm-menu-icon mp-icon" aria-hidden="true">{@html api.ui.icon(option.icon)}</span>{:else}<span class="pm-menu-icon mp-icon mp-original" aria-hidden="true"></span>{/if}
           {#if option.detail}
             <span class="pm-menu-text"><span class="pm-menu-label">{option.label}</span><span class="pm-menu-detail">{option.detail}</span></span>
           {:else}
@@ -189,6 +198,8 @@
   .mp-item[data-active] .mp-tag { background: rgb(255 255 255 / .2); color: #fff; }
   .mp-icon :global(svg) { width: 14px; height: 14px; }
   .mp-icon { display: grid; place-items: center; }
+  /* On the highlighted row the picture keeps a light rim against the accent. */
+  .mp-item[data-active] .mp-thumb :global(img) { box-shadow: 0 0 0 1px rgb(255 255 255 / .55); }
   .mp-original::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgb(255 255 255 / .9), rgb(var(--ink-rgb) / .35) 70%); box-shadow: inset 0 0 0 .5px rgb(var(--ink-rgb) / .3); }
   .mp-empty, .mp-note { margin: 6px 11px 4px; color: var(--menu-tx-2); font-size: 11.5px; line-height: 1.4; white-space: normal; }
 </style>
