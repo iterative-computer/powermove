@@ -404,6 +404,20 @@ describe('legacy app install', () => {
     expect(restored.comps.nested.layers[0].from).toBe(-6);
   });
 
+  it('preserves implicit 3D camera versions when reopening old and new compositions', () => {
+    const { PM } = appRegistry();
+    const source = { ...PM.proj, comps: {
+      legacy: { ...PM.proj }, modern: { ...PM.proj, scene3dDefaultsVersion: 2 },
+    } };
+    delete source.scene3dDefaultsVersion;
+    delete source.comps.legacy.scene3dDefaultsVersion;
+    const old = PM.hydrateProject(source);
+    expect(old.scene3dDefaultsVersion).toBe(1);
+    expect(old.comps.legacy.scene3dDefaultsVersion).toBe(1);
+    expect(old.comps.modern.scene3dDefaultsVersion).toBe(2);
+    expect(PM.hydrateProject({ ...source, scene3dDefaultsVersion: 2 }).scene3dDefaultsVersion).toBe(2);
+  });
+
   it('compacts oversized provenance when reopening without removing source', () => {
     const { PM } = appRegistry();
     const source = { ...PM.proj, edits: [{ id: 'bulk', summary: ['Cut out subject'], operations: [{ value: 'x'.repeat(200_000) }] }] };

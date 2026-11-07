@@ -187,6 +187,7 @@ PM.normalizeFill = (value: any, fallback = '#000000') => {
 PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
   colorDepth: normalizeColorDepth(o.colorDepth),
+  scene3dDefaultsVersion: 2,
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   bg: o.bg || '#000000',

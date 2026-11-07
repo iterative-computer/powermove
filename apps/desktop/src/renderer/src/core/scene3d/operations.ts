@@ -44,7 +44,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       if(visibility!.kf.length || visibility!.expr)throw new Error('Animated visibility is not supported; use light intensity');
       visible=visibility!.v;
     }else{
-      const parsed=parseScene({camera:node.camera || node,environment:node.environment});
+      const camera=node.camera || node;
+      const parsed=parseScene({camera:{...camera,p:{x:0,y:0,z:6,...camera.p}},environment:node.environment});
       const {x,y,z,...p}=parsed.camera.p;data={camera:{projection:parsed.camera.projection,p},environment:parsed.environment};props=nativeProperties({x,y,z});
     }
     commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?'Light':'Camera'),
@@ -158,7 +159,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
   }
   parseLayer3DData(role,candidate.d.data);
-  if(JSON.stringify(checked)!==JSON.stringify(layer.d.data))commands.push({type:'set_content',target:layer.id,patch:{data:checked}});
+  // Install structural content first so it cannot overwrite channel edits in this batch.
+  if(JSON.stringify(checked)!==JSON.stringify(layer.d.data))commands.unshift({type:'set_content',target:layer.id,patch:{data:checked}});
   return {commands,id:layer.id};
 }
 
