@@ -1,7 +1,7 @@
 {
   "effects-basic": {
-    "version": "1.13.0",
-    "treeSha": "9e28780905d3c390b03db03ba41546d15a1cd284"
+    "version": "1.13.1",
+    "treeSha": "8c43177cc65dbc4ab81b8f98c25d8be78b73b397"
   },
   "inspector": {
     "version": "1.7.1",
@@ -36,7 +36,7 @@
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.0.19",
-    "treeSha": "fbb45bd49ab6b38fca5a4c4197d0001fb6b18c4b"
+    "version": "1.0.20",
+    "treeSha": "b5536f6050feb63160cf77b3b1a5a7d8816bb47e"
   }
 }

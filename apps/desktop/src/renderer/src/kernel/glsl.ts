@@ -74,6 +74,8 @@ export function validateEffect(def: EffectDefinition): EffectDefinition {
   const passes = def.passes ?? 1;
   if (!Number.isInteger(passes) || passes < 1 || passes > MAX_PASSES) throw new Error(`${what}: "passes" must be an integer 1..${MAX_PASSES}`);
   validateParams(def.params, what);
+  if (def.params.some(param => ['pixelScale', 'effectScale', 'effectOrigin'].includes(param.k)))
+    throw new Error(`${what}: reserved effect scale uniform name`);
   const generated = def.params.filter(p => referenceParam(p)).flatMap(p => [p.k+'UV',p.k+'FromUV',p.k+'Res',p.k+'Midpoint',p.k+'DomainMin',p.k+'DomainMax',p.k+'Size']);
   if('coordinates' in def&&def.coordinates==='layer'||def.params.some(p=>referenceParam(p)))generated.push('layerUV','ownerFromUV','layerRes');
   if (def.params.some(p => generated.includes(p.k))) throw new Error(`${what}: layer input uniform name collision`);

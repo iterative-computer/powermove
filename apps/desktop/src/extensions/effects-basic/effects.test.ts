@@ -14,7 +14,7 @@ const IDS = [
 describe('effects-basic', () => {
   it('exports and registers all 43 real shader effects', () => {
     const register = vi.fn();
-    activate({ effects: { register, supportsTemporalInputs: true, supportsVersions: true, supportsSpatialSampling: true, supportsLayerInputs: true, supportsInputSubframes: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true, parameterDefault: (p: any) => p.def } } as unknown as PowermoveAPI);
+    activate({ effects: { register, supportsEffectScale: true, supportsTemporalInputs: true, supportsVersions: true, supportsSpatialSampling: true, supportsLayerInputs: true, supportsInputSubframes: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true, parameterDefault: (p: any) => p.def } } as unknown as PowermoveAPI);
 
     expect(EFFECTS.map((definition) => definition.id)).toEqual(IDS);
     expect(EFFECTS.slice(0, 28).every((definition) => definition.rawShader === true)).toBe(true);

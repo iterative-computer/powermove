@@ -422,6 +422,7 @@ export function createExtensionAPI(
   const effects: EffectsAPI = {
     supportsVersions: true,
     supportsSpatialSampling: true,
+    supportsEffectScale: true,
     supportsLayerInputs: true,
     supportsInputSubframes: true,
     supportsTemporalInputs: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true,

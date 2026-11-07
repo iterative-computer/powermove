@@ -217,10 +217,15 @@ export type EffectParamDefinition = ParameterPresentation & {
  * Additional uniforms include `u_pass` (int), `u_orig` when `keepOrig`, and
  * `u_backdrop` when `backdrop` is enabled. `u_backdrop` contains the pixels
  * accumulated beneath the layer before the effect is applied.
- * `v_uv` is composition-normalized and `v_px` is in composition pixels even
- * when the editor is rendering a cropped high-zoom viewport; `u_coordRes` is
- * the full composition size in those pixels. Within source-space Effects
- * processing these coordinates describe the selected native source raster.
+ * `v_uv` is composition-normalized. `v_px` and `u_coordRes` use virtual raster
+ * pixels, including viewport zoom and preview downsampling; `u_pxOrigin` is
+ * the cropped raster origin. `u_pixelScale` converts composition/source pixels
+ * to raster pixels. `effectPixel()` returns stable composition/source pixels,
+ * including an expanded source raster's `u_effectOrigin`. Use it to seed noise.
+ * `u_effectScale` additionally projects layer axes for `sampling.space:'layer'`.
+ * Multiply pixel offsets by `u_effectScale * u_texel` before texture sampling.
+ * Raw shaders can declare these same vec2 uniforms explicitly. Layer matrices
+ * continue to consume `v_px` so perspective and source references stay aligned.
  * Output is `o` (vec4). Provide only the body of `main()` in `frag`, or a full
  * shader with `void main` when `rawShader` is true (legacy positional u_p<i>
  * uniforms remain supported for raw shaders).
@@ -291,6 +296,8 @@ export interface EffectsAPI {
   readonly supportsTemporalInputs?:boolean;
   readonly supportsVersions?: boolean;
   readonly supportsSpatialSampling?: boolean;
+  /** Logical effect pixels and raster scale uniforms, including generated shaders. */
+  readonly supportsEffectScale?: boolean;
   readonly supportsLayerInputs?: boolean;
   readonly supportsInputSubframes?: boolean;
   readonly supportsSourceRasters?: boolean;
@@ -822,6 +829,8 @@ export interface RenderAPI {
     init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
     resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
     compileError(key: string): string | null;
+    /** Working-precision limits for cropped effect previews; wider support can use the full-frame path. */
+    previewLimits?(): { maxPixels: number; maxSize: number } | undefined;
     readonly previewViewport: PreviewViewport | null;
     readonly context: WebGL2RenderingContext | null;
   };
