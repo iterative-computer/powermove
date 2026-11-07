@@ -14,10 +14,14 @@
   function dragStop(node: HTMLElement, id: string) {
     if (!edit) return {};
     // Bind directly to the fill's transaction; all stops remain one value.
-    return visualDrag(node,{api,edit,get,value:(event)=>{
+    // The action's parameter is the stop id: an update renames the stop, it
+    // must not replace the drag's options.
+    let current = id;
+    const drag = visualDrag(node,{api,edit,get,value:(event)=>{
       const bounds=node.parentElement!.getBoundingClientRect();
-      return get().map(stop=>stop.id===id ? {...stop,position:clamp((event.clientX-bounds.left)/bounds.width*100)} : {...stop});
+      return get().map(stop=>stop.id===current ? {...stop,position:clamp((event.clientX-bounds.left)/bounds.width*100)} : {...stop});
     }});
+    return { update(next: string) { current = next; }, destroy: drag.destroy };
   }
   function key(event:KeyboardEvent, stop:FillStop) {
     if (!edit || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;

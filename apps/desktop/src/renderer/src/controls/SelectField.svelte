@@ -63,7 +63,8 @@
   onchange={change}
   onpointerdown={(event) => event.stopPropagation()}
 >
-  {#if isMixed}<option value="-1" hidden>Mixed</option>{:else if selectedIndex === -1}<option value="-1" hidden>{String(value)}</option>{/if}
+  <!-- A numeric value: Svelte matches the select's value (-1) to options by identity. -->
+  {#if isMixed}<option value={-1} hidden>Mixed</option>{:else if selectedIndex === -1}<option value={-1} hidden>{String(value)}</option>{/if}
   {#each options as option, index}
     <option value={index}>{optionLabel(option)}</option>
   {/each}
