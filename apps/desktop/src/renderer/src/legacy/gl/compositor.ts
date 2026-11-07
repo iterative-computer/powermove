@@ -22,6 +22,8 @@ import { createPreviewWarmup } from './preview-warmup';
 import { PreviewFrames } from './preview-frames';
 import { previewPlan } from './preview-plan';
 import { sourceTime } from '../core/retiming';
+import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
@@ -1979,6 +1981,13 @@ GL.frameVideoRequests = (comp: any, time: number, options: any = {}) => {
       if (L.type==='video') {
         const asset=PM.assets.get(resolveContent(PM,L,at).asset),key=path+L.id+'@'+at;
         if(asset?.el){requests.set(key,{key,layer:L,time:at,asset,at:videoPlaybackTime(asset,sourceTime(PM,L,at),1/PM.proj.fps)});if(requests.size>1024)throw new EffectInputError('Temporal video requests exceed the frame request limit');}
+      } else if(layerCompositionIds(L).length){
+        for(const id of layerCompositionIds(L)){
+          const sample=materialCompositionSample(PM,L,{compositionId:id},at);if(!sample)continue;
+          PM.scope.push(sample.comp);
+          try{visit(sample.comp,sample.time,{transparent:true,mblur:false},depth+1,path+`material:${id}/`);}
+          finally{PM.scope.pop();}
+        }
       } else if(L.type==='precomp') {
         const sub=PM.compOf(L);if(!sub)return;
         PM.scope.push(sub);
@@ -2632,6 +2641,36 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
     bind(null);
   }
 }
+/** Nested material capture preserves the outer compositor's FBO ownership and
+ * evaluation scope. renderToPixels is a top-level capture and must not run here. */
+GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number) => {
+  const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews;
+  let frame:any;
+  pmScopePush(comp);videoPath+=`material:${comp.compId || comp.id}/`;
+  PM.beginEval(time);
+  try{
+    frame=GL.renderProject(comp,time,width,height,{transparent:true,mblur:false,previewReuse:false});
+    bind(frame);
+    const pixels=new Uint8Array(width*height*4);
+    if(frame.colorDepth===8)GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
+    else{
+      const floats=new Float32Array(pixels.length);GL.gl.readPixels(0,0,width,height,GL.gl.RGBA,GL.gl.FLOAT,floats);
+      for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+    }
+    // GPU FBOs are bottom-up/premultiplied. glTF textures need top-down,
+    // straight-alpha sRGB bytes (v=0 at the top), without an extra UV flip.
+    const result=new Uint8Array(pixels.length);
+    for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+      const src=((height-1-y)*width+x)*4,dst=(y*width+x)*4,alpha=pixels[src+3]!;
+      for(let c=0;c<3;c++)result[dst+c]=alpha?Math.min(255,Math.round(pixels[src+c]!*255/alpha)):0;
+      result[dst+3]=alpha;
+    }
+    return result;
+  }finally{
+    if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;
+    PM.beginEval(outerTime);bind(target);
+  }
+};
 GL.renderToPixels = renderToPixels;
 GL.createOpaqueReadback = (W: number, H: number) => {
   const gl = GL.gl;

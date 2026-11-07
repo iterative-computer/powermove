@@ -365,6 +365,10 @@ export interface Scene3DAPI {
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
   lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
+  listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
+  listValidCompositions(layerId:string):{id:string;name:string;w:number;h:number;fps:number;dur:number}[];
+  /** null index = whole-model material; null map restores the original source slot. */
+  setMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
   isGroup(layerId:string):boolean;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;

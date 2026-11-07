@@ -13,6 +13,7 @@ import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
+import { validateCompositionMaps } from '../../core/scene3d/material-maps';
 import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
@@ -49,6 +50,7 @@ const LAYER_FIELDS: any = new Set([
 let live: any = null;
 
 const validateInputGraphs = (commands?: any[]) => {
+  if(!commands || commands.some(command=>['add_layer','set_content'].includes(command.type)))validateCompositionMaps(PM.proj);
   // Scalar drags cannot change texture dependencies. Keep graph validation off
   // their critical path, and allow ordinary edits to imported invalid data.
   if (commands && !commands.some(command => ['add_effect','apply_preset','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
@@ -496,7 +498,12 @@ function extensionParamValue(definition: any, value: any) {
 }
 
 function setExtensionContent(layer: any, patch: any) {
-  const allowed = new Set(['definition', 'version', 'w', 'h', 'data', 'parameters']);
+  const timing=layer3DRole(layer)==='object'?['trim','speed','timeRemap','sourceTime']:[];
+  const allowed = new Set(['definition', 'version', 'w', 'h', 'data', 'parameters',...timing]);
+  for(const key of timing)if(Object.hasOwn(patch,key)){
+    if(key==='timeRemap'){if(typeof patch[key]!=='boolean')throw new Error('Time remap must be a boolean');layer.d[key]=patch[key];}
+    else {const value=finite(patch[key],key);layer.d[key]=key==='sourceTime'?PM.P(value):value;}
+  }
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Extension layer content field “${key}” is not editable`);
   if (patch.definition != null && patch.definition !== layer.d.definition) throw new Error('An extension layer definition cannot be changed in place');
   const definition: any = PM.layerDefinition?.(layer.d.definition);

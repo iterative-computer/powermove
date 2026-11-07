@@ -11,7 +11,7 @@ export const contentFields: Record<string, string[]> = {
   video: ['fit', 'w', 'h', 'trim', 'speed', 'timeRemap', 'sourceTime', 'audioGain'],
   audio: ['trim', 'gain', 'fadeIn', 'fadeOut'],
   shader: ['w', 'h'],
-  extension: ['w', 'h'],
+  extension: ['w', 'h', 'trim', 'speed', 'timeRemap', 'sourceTime'],
   precomp: ['w', 'h', 'trim', 'sourceTime', 'timeRemap', 'audioGain']
 };
 

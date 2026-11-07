@@ -1,3 +1,5 @@
+import {layerCompositionIds} from '../../core/scene3d/material-maps';
+import {materialCompositionSample} from '../../core/scene3d/composition-textures';
 import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue } from './content-properties';
 import { sequenceStreamTime } from '../../../../shared/image-sequence';
@@ -17,10 +19,17 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
     try {
       const required = hasLayerInputs(comp, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type)) ? layerInputPlan(comp, { assets:PM.assets, definition: (fx: any) => PM.effectDef?.(fx), enabled: (l: any, fx: any) => !!evaluatedValue(PM,l,fx.on,at,`${fx.id}.$enabled`), active: (l: any) => !!PM.active(l,at), contentActive: (l: any) => !!PM.active({...l,group:null},at) }).layerIds : new Set();
       const layers = PM.ProjectIndex?.layersOfType
-        ? [...PM.ProjectIndex.layersOfType('video', comp), ...PM.ProjectIndex.layersOfType('precomp', comp)]
+        ? [...PM.ProjectIndex.layersOfType('video', comp), ...PM.ProjectIndex.layersOfType('precomp', comp), ...PM.ProjectIndex.layersOfType('extension',comp)]
         : comp.layers;
       for (const layer of layers) {
         if (!PM.active(layer, at) && !(required.has(layer.id) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
+        if(layerCompositionIds(layer).length){
+          for(const compositionId of layerCompositionIds(layer)){
+            const sample=materialCompositionSample(PM,layer,{compositionId},at);
+            if(sample)visit(sample.comp,sample.time,prefix+`material:${compositionId}/`,null,depth+1);
+          }
+          continue;
+        }
         if (layer.type !== 'video' && layer.type !== 'precomp') continue;
         const d = resolveContent(PM, layer, at);
         const variable = d.timeRemap || layer.d.speed?.kf?.length || layer.d.speed?.expr;

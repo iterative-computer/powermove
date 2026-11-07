@@ -44,3 +44,13 @@ it('restores composition scope even when a frame mapping fails', () => {
   expect(() => videoClipsAt(PM, 0)).toThrow('bad asset');
   expect(PM.scope).toEqual([]);
 });
+
+it('seeks video inside a composition material on the source frame grid, with the material capture path',()=>{
+  const {PM,video}=registry();
+  PM.proj.compId='main';PM.proj.comps.screen={id:'screen',w:128,h:128,fps:24,dur:5,layers:[video]};
+  const model={id:'model',type:'extension',from:.5,dur:5,d:{speed:2,trim:.25,data:{object:{sourceMaterials:{0:{emissive:{compositionId:'screen'}}}}}}};
+  PM.proj.layers=[model];
+  const clips=videoClipsAt(PM,.75);
+  expect(clips.map(({id,at,rate})=>({id,at,rate}))).toEqual([{id:'material:screen/video',at:.75,rate:null}]);
+  expect(PM.scope).toEqual([]);
+});

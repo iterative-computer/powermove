@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /** Self-contained glTF only: imports must never fetch untrusted remote dependencies. */
-export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number}> {
+export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number;materials:{index:number;name:string}[]}> {
   if(blob.size>128*1024*1024)throw new Error('GLB models must be smaller than 128 MB');
   const data=await blob.arrayBuffer();
   const bytes=new Uint8Array(data),view=new DataView(data);
@@ -47,6 +47,10 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   let vertices=0,triangles=0;
   scene.traverse((object:any)=>{
     if(!object.isMesh)return;
+    for(const material of Array.isArray(object.material)?object.material:[object.material]){
+      const index=result.parser.associations.get(material)?.materials;
+      if(index!==undefined)material.userData={...material.userData,sourceMaterialIndex:index,sourceMaterialName:json.materials?.[index]?.name || `Material ${index+1}`};
+    }
     const geometry=object.geometry;
     vertices+=geometry.attributes.position?.count || 0;
     triangles+=(geometry.index?.count || geometry.attributes.position?.count || 0)/3;
@@ -58,7 +62,7 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   const normalization=new THREE.Group(),root=new THREE.Group();
   normalization.add(scene);normalization.scale.setScalar(1/radius);scene.position.sub(center);
   root.add(normalization);
-  return {object3d:root,animations:result.animations,vertices,triangles:Math.ceil(triangles)};
+  return {object3d:root,animations:result.animations,vertices,triangles:Math.ceil(triangles),materials:(json.materials || []).map((material:any,index:number)=>({index,name:material.name || `Material ${index+1}`}))};
 }
 export function disposeModel(root:THREE.Object3D):void {
   const textures=new Set<THREE.Texture>(),geometries=new Set<THREE.BufferGeometry>(),materials=new Set<THREE.Material>();

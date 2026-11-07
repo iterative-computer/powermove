@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { type MaterialMap } from './material-maps';
+import type { CompositionTextureFrame } from './composition-textures';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
 export type SceneEvaluator = (property: any,path: string) => any;
+export type SceneCompositionGetter = (objectId:string,map:MaterialMap)=>CompositionTextureFrame|null;
 export type SceneAssetGetter = (id: string) => any;
 const radians = THREE.MathUtils.degToRad;
 let outputRenderer:THREE.WebGLRenderer|null=null;
@@ -58,6 +61,8 @@ export class SceneRuntime {
   private sources = new Map<string,string>();
   private assetRefs = new Map<string,any>();
   private textures = new Map<string,{source:any;texture:THREE.Texture}>();
+  private usedTextures=new Set<string>();
+  private compositionGetter:SceneCompositionGetter=()=>null;
   private ambient = new THREE.HemisphereLight();
   private parsed?: Scene3D;
   private raw: any;
@@ -69,20 +74,41 @@ export class SceneRuntime {
 
   constructor() { this.scene.add(this.ambient); }
 
-  private texture(id: string|undefined,colorSpace: boolean): THREE.Texture|null {
+  private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null): THREE.Texture|null {
     if (!id) return null;
+    if(typeof id==='object'){
+      const frame=this.compositionGetter(objectId,id);if(!frame){this.warnings.push(`Missing composition texture: ${id.compositionId}`);return null;}
+      const key=`comp:${objectId}:${id.compositionId}:${imported}:${binding}`;this.usedTextures.add(key);
+      let entry=this.textures.get(key);
+      if(!entry){
+        const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
+        texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported;
+        texture.minFilter=THREE.LinearFilter;texture.magFilter=THREE.LinearFilter;
+        entry={source:null,texture};this.textures.set(key,entry);
+      }
+      if(entry.source!==frame){entry.texture.image={data:frame.pixels,width:frame.width,height:frame.height};entry.texture.needsUpdate=true;entry.source=frame;}
+      this.textureCoordinates(entry.texture,original);return entry.texture;
+    }
     const asset = this.getter(id),source = asset?.el || asset?.bitmap;
     if (!source || asset.kind !== 'image') { this.warnings.push(`Missing texture: ${id}`);return null; }
-    const key = `${id}:${colorSpace}`;
+    const key = `${id}:${colorSpace}:${imported}:${binding}`;this.usedTextures.add(key);
     let entry = this.textures.get(key);
     if (!entry || entry.source !== source) {
       entry?.texture.dispose();
       const texture = new THREE.Texture(source);
       texture.colorSpace = colorSpace ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-      texture.needsUpdate = true;texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      texture.flipY=!imported;texture.needsUpdate = true;texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       entry = {source,texture};this.textures.set(key,entry);
     }
-    return entry.texture;
+    this.textureCoordinates(entry.texture,original);return entry.texture;
+  }
+
+  private textureCoordinates(texture:THREE.Texture,original?:THREE.Texture|null):void {
+    if(!original)return;
+    if(texture.wrapS!==original.wrapS || texture.wrapT!==original.wrapT)texture.needsUpdate=true;
+    texture.channel=original.channel;texture.wrapS=original.wrapS;texture.wrapT=original.wrapT;
+    texture.offset.copy(original.offset);texture.repeat.copy(original.repeat);texture.center.copy(original.center);
+    texture.rotation=original.rotation;texture.matrixAutoUpdate=original.matrixAutoUpdate;texture.matrix.copy(original.matrix);
   }
 
   private makeObject(node: SceneObject): THREE.Object3D {
@@ -114,12 +140,12 @@ export class SceneRuntime {
     return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshStandardMaterial());
   }
 
-  sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number): void {
+  sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number,compositionGetter:SceneCompositionGetter=()=>null): void {
     if (this.raw !== raw) { this.parsed=alreadyValidated?raw:parseScene(raw);this.raw=raw; }
     // Channel edits mutate the original scene; retain those live channels.
     const data = raw as Scene3D;
     const validated = this.parsed!;
-    this.getter=assets;this.evaluation=evaluate;this.warnings=[];
+    this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();
     const keep = new Set([...validated.objects,...validated.lights].map(o=>o.id));
     for (const [id,object] of this.objects) if (!keep.has(id)) this.remove(id,object);
     const values = (p:any,prefix:string) => Object.fromEntries(Object.entries<any>(p || {}).map(([k,v])=>{
@@ -147,7 +173,40 @@ export class SceneRuntime {
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
-        if (c.userData.missing || node.useSourceMaterials) return;
+        if (c.userData.missing) return;
+        if(node.useSourceMaterials){
+          for(const material of Array.isArray(c.material)?c.material:[c.material]){
+            if(material.isMeshBasicMaterial){
+              // glTF unlit screens already emit their full colour. Treat an
+              // emissive override as that same self-lit map without relighting it.
+              const original=material.userData.originalMapState ||= {map:material.map,color:material.color.clone()};
+              const index=material.userData.sourceMaterialIndex,overrides=node.sourceMaterials?.[index] || {};
+              const map=overrides.emissive || overrides.color;
+              const texture=map?this.texture(map,true,node.id,true,`${index}:unlit`,original.map):null;
+              if(material.map!==(texture || original.map)){material.map=texture || original.map;material.needsUpdate=true;}
+              material.color.copy(texture?new THREE.Color(1,1,1):original.color);
+              continue;
+            }
+            if(!material.isMeshStandardMaterial)continue;
+            // Capture only original slot state; clear/delete restores the model exactly.
+            const original=material.userData.originalMapState ||= {map:material.map,normalMap:material.normalMap,
+              roughnessMap:material.roughnessMap,metalnessMap:material.metalnessMap,emissiveMap:material.emissiveMap,aoMap:material.aoMap,
+              color:material.color.clone(),emissive:material.emissive.clone(),emissiveIntensity:material.emissiveIntensity};
+            const overrides=node.sourceMaterials?.[material.userData.sourceMaterialIndex] || {};
+            for(const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
+              ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const){
+              const texture=overrides[key]?this.texture(overrides[key],isColor,node.id,true,`${material.userData.sourceMaterialIndex}:${key}`,original[slot]):null;
+              const next=texture || original[slot];
+              if(material[slot]!==next){material[slot]=next;material.needsUpdate=true;}
+              if(key==='color')material.color.copy(texture?new THREE.Color(1,1,1):original.color);
+              if(key==='emissive'){
+                material.emissive.copy(texture?new THREE.Color(1,1,1):original.emissive);
+                material.emissiveIntensity=texture?Math.max(1,original.emissiveIntensity):original.emissiveIntensity;
+              }
+            }
+          }
+          return;
+        }
         if (!(c.material instanceof THREE.MeshStandardMaterial) || Array.isArray(c.material)) {
           for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();
           c.material=new THREE.MeshStandardMaterial();
@@ -160,7 +219,7 @@ export class SceneRuntime {
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
         for (const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
           ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const) {
-          const texture=this.texture(maps[key],isColor);
+          const texture=this.texture(maps[key],isColor,node.id);
           if (material[slot]!==texture) { material[slot]=texture;material.needsUpdate=true; }
         }
       });
@@ -207,8 +266,7 @@ export class SceneRuntime {
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
-    const textureKeys=new Set(data.objects.flatMap(o=>Object.entries(o.material.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`)));
-    for(const [key,entry] of this.textures)if(!textureKeys.has(key)){entry.texture.dispose();this.textures.delete(key);}
+    for(const [key,entry] of this.textures)if(!this.usedTextures.has(key)){entry.texture.dispose();this.textures.delete(key);}
   }
 
   resizeCamera(w:number,h:number,camera=this.camera): void {

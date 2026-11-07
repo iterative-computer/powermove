@@ -1,3 +1,4 @@
+import { compositionDependencies } from '../../core/scene3d/material-maps';
 import { remapLayerInputs } from '../../core/effect-inputs';
 import { evaluatedValue, isProperty } from './content-properties';
 import { sourceTime } from './retiming';
@@ -189,9 +190,7 @@ export function install(PM: PMRegistry): void {
   };
 
   /** Composition ids a comp nests, directly. */
-  const children = (id: string) => [...new Set(layersOf(id)
-    .filter((layer: any) => layer.type === 'precomp' && layer.d?.comp && exists(layer.d.comp))
-    .map((layer: any) => layer.d.comp as string))];
+  const children = (id: string) => compositionDependencies({layers:layersOf(id)}).filter(exists);
   /** Does composition `ancestor` contain `id` anywhere below it (or equal it)? */
   const contains = (ancestor: string, id: string): boolean => {
     const seen = new Set<string>(), queue = [ancestor];
