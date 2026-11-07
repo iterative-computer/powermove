@@ -18,8 +18,9 @@ test('moves the Preview canvas through the shared panel drag affordance', async 
       shadow: style.boxShadow
     };
   })).toEqual({
-    left: '8px',
-    top: '7px',
+    // The grip runs down the left edge of the viewer header strip.
+    left: '0px',
+    top: '0px',
     transform: 'none',
     background: 'rgba(0, 0, 0, 0)',
     border: '0px',
