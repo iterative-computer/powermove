@@ -32,6 +32,26 @@ describe('host-independent Figma commands', () => {
       content: { color: '#FF0000FF' },
     });
   });
+  it('keeps equal Figma side widths as a uniform editable stroke', () => {
+    const stroke = { type: 'SOLID', color: { r: 0, g: 0, b: 1 } };
+    const uniform = plan(node({
+      strokes: [stroke],
+      strokeWeight: 10,
+      strokeWeights: [10, 10, 10, 10],
+      strokeAlign: 'INSIDE',
+      dashes: [18, 10],
+    })).commands[0]!;
+    expect(uniform.content.stroke).toBe(10);
+    expect(uniform.content.strokeStyle).toMatchObject({ align: 'inside', dashes: [18, 10] });
+    expect(uniform.content.strokeStyle).not.toHaveProperty('weights');
+    const independent = plan(node({
+      strokes: [stroke],
+      strokeWeights: [2, 4, 6, 8],
+      strokeAlign: 'INSIDE',
+    })).commands[0]!;
+    expect(independent.content.stroke).toBe(8);
+    expect(independent.content.strokeStyle).toMatchObject({ weights: [2, 4, 6, 8] });
+  });
   it('maps opacity and every engine blend mode', () => {
     for (const mode of [
       'NORMAL',

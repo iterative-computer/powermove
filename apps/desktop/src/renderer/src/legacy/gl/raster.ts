@@ -880,23 +880,27 @@ function rasterDrawing(d: any, geometry: any, paths: any[] | null, crop?: Raster
   const cv = getCanvas(crop?.width ?? width,crop?.height ?? height), ctx=cv.getContext('2d')!;
   if(crop)ctx.translate(-crop.x,-crop.y);
   ctx.scale(density,density);ctx.translate(-x0,-y0);
-  const outline = primitive ? shapeOutline(d) : new Path2D(), ends:any[]=[],fills=new Map<string,{path:Path2D;rule:string}>();
+  const outline = primitive ? shapeOutline(d) : new Path2D(), ends:any[]=[],strokeOutlines:any[]=[],fills=new Map<string,{path:Path2D;rule:string}>();
   if(paths)for(const record of paths) {
     const v=record.values,vs=v.vertices,p=new Path2D(); if(!vs.length)continue;
     p.moveTo(vs[0].x,vs[0].y);
     for(let i=0;i<vs.length-(v.closed?0:1);i++){const a=vs[i],b=vs[(i+1)%vs.length];p.bezierCurveTo(a.x+a.outX,a.y+a.outY,b.x+b.inX,b.y+b.inY,b.x,b.y);}
     if(v.closed)p.closePath();
-    outline.addPath(p,new DOMMatrix(record.matrix));
+    const transformed = new Path2D(), recordEnds:any[]=[];
+    transformed.addPath(p,new DOMMatrix(record.matrix));
+    outline.addPath(transformed);
     const key=String(v.fillGroup??'0'),fill=fills.get(key)??{path:new Path2D(),rule:v.fillRule??d.fillRule};fill.path.addPath(p,new DOMMatrix(record.matrix));fills.set(key,fill);
     if(!v.closed&&vs.length>1)for(const [index,next,start] of [[0,1,true],[vs.length-1,vs.length-2,false]] as const){
       const a=vs[index],b=vs[next],tx=start?a.outX:a.inX,ty=start?a.outY:a.inY;
       const tangent=Math.hypot(tx,ty)>1e-8?[tx,ty]:[b.x-a.x,b.y-a.y];
       const angle=Math.atan2(tangent[1],tangent[0])+Math.PI;
-      const m=record.matrix; ends.push({x:m[0]*a.x+m[2]*a.y+m[4],y:m[1]*a.x+m[3]*a.y+m[5],angle:Math.atan2(m[1]*Math.cos(angle)+m[3]*Math.sin(angle),m[0]*Math.cos(angle)+m[2]*Math.sin(angle)),cap:start?(v.startCap??d.strokeStyle?.startCap):(v.endCap??d.strokeStyle?.endCap)});
+      const m=record.matrix; const end={x:m[0]*a.x+m[2]*a.y+m[4],y:m[1]*a.x+m[3]*a.y+m[5],angle:Math.atan2(m[1]*Math.cos(angle)+m[3]*Math.sin(angle),m[0]*Math.cos(angle)+m[2]*Math.sin(angle)),cap:start?(v.startCap??d.strokeStyle?.startCap):(v.endCap??d.strokeStyle?.endCap)};
+      ends.push(end);recordEnds.push(end);
     }
+    strokeOutlines.push({path:transformed,ends:recordEnds});
   }
-  if(paths&&fills.size>1){for(const fill of fills.values())paintShape(ctx,fill.path,{...d,stroke:0,fillRule:fill.rule},{x:x0,y:y0,w,h});paintShape(ctx,outline,{...d,color:'#00000000',fillGradient:undefined},{x:x0,y:y0,w,h},ends);}
-  else paintShape(ctx,outline,d,{x:x0,y:y0,w,h},ends);
+  if(paths&&fills.size>1){for(const fill of fills.values())paintShape(ctx,fill.path,{...d,stroke:0,fillRule:fill.rule},{x:x0,y:y0,w,h});paintShape(ctx,outline,{...d,color:'#00000000',fillGradient:undefined},{x:x0,y:y0,w,h},ends,strokeOutlines);}
+  else paintShape(ctx,outline,d,{x:x0,y:y0,w,h},ends,strokeOutlines);
   return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:geometry.selection??{x0,y0,x1:x0+w,y1:y0+h,w,h},
     ...(crop?{uv:[-crop.x/crop.width,-crop.y/crop.height,width/crop.width,height/crop.height]}:{})};
 }

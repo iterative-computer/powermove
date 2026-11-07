@@ -80,7 +80,7 @@ const shadow: EffectDefinition = {
  }
 `,
 };
-const backdrop: EffectDefinition = {
+const backdropLegacy: EffectDefinition = {
   id: "figmaBackdropBlur",
   label: "Background Blur",
   group: "Blur & Sharpen",
@@ -113,6 +113,17 @@ const backdrop: EffectDefinition = {
       "uniform sampler2D u_backdrop; uniform sampler2D u_sourceShape;",
     ),
 };
+// Native Figma exports clamp the background sample at the blur owner's box
+// and use a finite radius (two sigma). Retain revision 1 for saved artwork.
+const backdrop: EffectDefinition = {
+  ...backdropLegacy,
+  version: 2,
+  legacy: [backdropLegacy],
+  frag: backdropLegacy.frag
+    .replace("3.*sigma/32.", "2.*sigma/32.")
+    .replace("abs(d)>sigma*3.", "abs(d)>sigma*2.")
+    .replace("uv+axis*d/u_layerRes,inv", "clamp(uv+axis*d/u_layerRes,.5/u_layerRes,1.-.5/u_layerRes),inv"),
+};
 const noise: EffectDefinition = {
   id: "figmaNoise",
   label: "Shape Noise",
@@ -143,14 +154,14 @@ const noise: EffectDefinition = {
 `,
 };
 const layerBlur: EffectDefinition = {
-  ...backdrop,
+  ...backdropLegacy,
   id: "figmaLayerBlur",
   viewportSafe: true,
   viewportPadding: ["radius", "startRadius"],
   viewportPaddingFactor: 2,
   label: "Progressive Blur",
   backdrop: false,
-  frag: backdrop.frag
+  frag: backdropLegacy.frag
     .replace(
       "u_pass==0?sampleBackdrop(px):samplePixel(px,0.)",
       "samplePixel(px,0.)",

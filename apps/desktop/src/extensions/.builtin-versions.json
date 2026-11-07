@@ -1,11 +1,11 @@
 {
   "effects-basic": {
-    "version": "1.14.0",
-    "treeSha": "7d76a355fe8c9aedc37bafdc3c9f229e12180ec6"
+    "version": "1.14.1",
+    "treeSha": "6513d53948cc536547460a4408d1df0caf2bc5c5"
   },
   "inspector": {
     "version": "1.7.6",
-    "treeSha": "f6b9709ce6be1d03ebd9ce763c66c5998603a9ab"
+    "treeSha": "19a2f726b3e9be9648f092734e648f66dca437c3"
   },
   "keymap-default": {
     "version": "1.0.5",

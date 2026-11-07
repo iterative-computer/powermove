@@ -573,7 +573,11 @@ export function convertFigma(
           endCap: node.endCap ?? node.cap ?? "NONE",
           join: (node.join ?? "MITER").toLowerCase(),
           miterLimit: node.miterLimit ?? 4,
-          ...(node.strokeWeights ? { weights: node.strokeWeights } : {}),
+          // Figma reports all four side weights even for a uniform stroke.
+          // Retain independent sides only when they actually differ.
+          ...(node.strokeWeights && new Set(node.strokeWeights).size > 1
+            ? { weights: node.strokeWeights }
+            : {}),
         };
       if (node.paths?.length) {
         d.compound = true;
@@ -912,7 +916,7 @@ export function convertFigma(
           bg.effects = [
             {
               type: "figmaBackdropBlur",
-              version: 1,
+              version: 2,
               params: blurParameters(e),
             },
           ];
@@ -1002,7 +1006,7 @@ export function convertFigma(
         );
         bg.blend = "normal";
         bg.effects = [
-          { type: "figmaBackdropBlur", version: 1, params: blurParameters(e) },
+          { type: "figmaBackdropBlur", version: 2, params: blurParameters(e) },
         ];
       }
     effectCommands(c);

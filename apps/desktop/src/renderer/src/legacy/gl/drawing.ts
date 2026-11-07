@@ -71,9 +71,11 @@ export function gradientParameter(type: string, x: number, y: number): number {
     return (((Math.atan2(y - 0.5, x - 0.5) / (Math.PI * 2)) % 1) + 1) % 1;
   return x;
 }
-/** Alpha interpolation is premultiplied, matching Canvas/CSS gradients. */
+/** Canvas/CSS gradients interpolate premultiplied alpha. Figma diamond paints
+ * interpolate unassociated channels, as confirmed by its native PNG export. */
 export function gradientSampler(
   stops: Array<{ position: number; color: string }>,
+  premultiplied = true,
 ): (t: number) => number[] {
   const colors = [...stops]
     .sort((a, b) => a.position - b.position)
@@ -107,7 +109,11 @@ export function gradientSampler(
       alpha = c[3]! * (1 - f) + d[3]! * f;
     return [0, 1, 2]
       .map((k) =>
-        alpha ? (c[k]! * c[3]! * (1 - f) + d[k]! * d[3]! * f) / alpha : 0,
+        !premultiplied
+          ? c[k]! * (1 - f) + d[k]! * f
+          : alpha
+            ? (c[k]! * c[3]! * (1 - f) + d[k]! * d[3]! * f) / alpha
+            : 0,
       )
       .concat(alpha);
   };
@@ -131,7 +137,7 @@ export function gradientStyle(
   if (paint.type === "diamond") {
     // Canvas lacks diamond gradients. Generate a resolution-independent paint
     // cache at the current display density; the editable source is still stops.
-    const at = gradientSampler(paint.stops);
+    const at = gradientSampler(paint.stops, false);
     const m = paint.transform as Matrix,
       current = ctx.getTransform();
     const density = Math.max(
@@ -218,12 +224,16 @@ export function gradientStyle(
   return pattern;
 }
 
+type StrokeEnd = { x: number; y: number; angle: number; cap?: string };
+export type StrokeOutline = { path: Path2D; ends: StrokeEnd[] };
+
 export function paintShape(
   ctx: CanvasRenderingContext2D,
   path: Path2D,
   d: any,
   extent: { x: number; y: number; w: number; h: number },
-  ends: Array<{ x: number; y: number; angle: number; cap?: string }> = [],
+  ends: StrokeEnd[] = [],
+  strokeOutlines?: StrokeOutline[],
 ) {
   const rule: CanvasFillRule = d.fillRule === "evenodd" ? "evenodd" : "nonzero";
   ctx.fillStyle = d.fillGradient
@@ -292,6 +302,33 @@ export function paintShape(
       c.stroke(path);
       c.restore();
     }
+  } else if (
+    strokeOutlines?.some((part) =>
+      part.ends.some((end) => (end.cap ?? style.cap) === "ARROW_EQUILATERAL"),
+    )
+  ) {
+    for (const part of strokeOutlines) {
+      c.save();
+      for (const end of part.ends) {
+        if ((end.cap ?? style.cap) !== "ARROW_EQUILATERAL") continue;
+        // Figma ends the shaft at the triangle's base. Clipping each contour
+        // separately leaves other crossing contours intact and retains curves.
+        const length = width * 5;
+        const reach =
+          Math.hypot(extent.w, extent.h) +
+          Math.hypot(extent.x - end.x, extent.y - end.y) +
+          length * 2;
+        const local = new Path2D();
+        local.rect(-reach, -reach, reach - length, reach * 2);
+        const clip = new Path2D(),
+          cs = Math.cos(end.angle),
+          sn = Math.sin(end.angle);
+        clip.addPath(local, new DOMMatrix([cs, sn, -sn, cs, end.x, end.y]));
+        c.clip(clip);
+      }
+      c.stroke(part.path);
+      c.restore();
+    }
   } else c.stroke(path);
   for (const end of ends)
     drawCap(c, end.cap ?? style.cap, end.x, end.y, end.angle, width);
@@ -316,8 +353,10 @@ export function triangleCapPoints(
   cap: string,
   width: number,
 ): Array<[number, number]> {
-  const base = width * 3,
-    length = cap === "ARROW_EQUILATERAL" ? (base * Math.sqrt(3)) / 2 : base;
+  // A real Figma strokeGeometry export places the base five stroke widths
+  // behind the tip, with an equilateral triangle (base = 10w / sqrt(3)).
+  const length = cap === "ARROW_EQUILATERAL" ? width * 5 : width * 3,
+    base = cap === "ARROW_EQUILATERAL" ? (length * 2) / Math.sqrt(3) : length;
   return [
     [0, 0],
     [-length, -base / 2],
@@ -385,6 +424,21 @@ export function rasterImageFill(
   cv.height = Math.max(1, Math.min(8192, Math.ceil(h * density)));
   const c = cv.getContext("2d")!;
   c.scale(cv.width / w, cv.height / h);
+  // Figma magnifies source texels without bilinear smoothing. Keep normal
+  // filtering when shrinking an image so photos do not acquire aliasing.
+  let sampleScale =
+    mapping.mode === "fit"
+      ? Math.min(w / sw, h / sh)
+      : Math.max(w / sw, h / sh);
+  if (mapping.mode === "tile") sampleScale = mapping.scale ?? 1;
+  else if (mapping.mode === "crop" && mapping.transform) {
+    const inv = inverse(mapping.transform);
+    sampleScale = Math.min(
+      Math.hypot((w * inv[0]) / sw, (h * inv[1]) / sw),
+      Math.hypot((w * inv[2]) / sh, (h * inv[3]) / sh),
+    );
+  }
+  c.imageSmoothingEnabled = Math.abs(sampleScale) * density < 1;
   if (mapping.mode === "crop" && mapping.transform) {
     c.scale(w, h);
     c.transform(...inverse(mapping.transform));

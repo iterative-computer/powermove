@@ -1,6 +1,7 @@
 import { it, expect } from "vitest";
 import {
   gradientParameter,
+  gradientSampler,
   sampleGradient,
   linearBurnPixel,
   triangleCapPoints,
@@ -50,3 +51,19 @@ it.each([0.5, 4, 17])(
     expect(points[1]![0]).toBeLessThan(0);
   },
 );
+
+it("uses Figma's unassociated color interpolation for transparent diamond stops", () => {
+  const stops = [
+    { position: 0, color: "#FF000000" },
+    { position: 1, color: "#00FF0080" },
+  ];
+  expect(gradientSampler(stops, false)(0.5)).toEqual([127.5, 127.5, 0, 64]);
+  expect(gradientSampler(stops)(0.5)).toEqual([0, 255, 0, 64]);
+});
+
+it("matches the five-width equilateral head from a real Figma strokeGeometry export", () => {
+  const points = triangleCapPoints("ARROW_EQUILATERAL", 8);
+  expect(points[1]![0]).toBe(-40);
+  expect(points[2]![0]).toBe(-40);
+  expect(points[2]![1] - points[1]![1]).toBeCloseTo(46.188021535, 8);
+});

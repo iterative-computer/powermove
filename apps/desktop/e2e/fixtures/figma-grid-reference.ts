@@ -221,13 +221,8 @@ async function polarGradient(n: FigmaNode, p: Paint) {
           alpha = (a.color.a ?? 1) * (1 - f) + (b.color.a ?? 1) * f;
         d.data.set(
           [
-            ...(["r", "g", "b"] as const).map((key) =>
-              alpha
-                ? (255 *
-                    (a.color[key] * (a.color.a ?? 1) * (1 - f) +
-                      b.color[key] * (b.color.a ?? 1) * f)) /
-                  alpha
-                : 0,
+            ...(["r", "g", "b"] as const).map(
+              (key) => 255 * (a.color[key] * (1 - f) + b.color[key] * f),
             ),
             255 * alpha * (p.opacity ?? 1),
           ],
@@ -290,6 +285,13 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
     } else if (p.type === "IMAGE") {
       const url = "data:image/png;base64," + doc.images[p.imageHash!]!,
         i = await image(url);
+      // Native Figma magnification uses texel boundaries rather than bilinear
+      // interpolation. The native-export regression spec covers that choice.
+      const magnified =
+        p.scaleMode === "TILE"
+          ? (p.scalingFactor ?? 1) >= 1
+          : Math.min(n.w / i.width, n.h / i.height) >= 1;
+      const sampling = magnified ? ' image-rendering="pixelated"' : "";
       let content = "";
       if (p.scaleMode === "TILE") {
         const scale = p.scalingFactor ?? 1;
@@ -300,7 +302,9 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
             i.width * scale +
             '" height="' +
             i.height * scale +
-            '"><image width="' +
+            '"><image' +
+            sampling +
+            ' width="' +
             i.width * scale +
             '" height="' +
             i.height * scale +
@@ -316,7 +320,9 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
           [1 / n.w, 0, 0, 1 / n.h, 0, 0],
         );
         content =
-          '<image width="' +
+          "<image" +
+          sampling +
+          ' width="' +
           n.w +
           '" height="' +
           n.h +
@@ -327,7 +333,9 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
           '"/>';
       } else
         content =
-          '<image width="' +
+          "<image" +
+          sampling +
+          ' width="' +
           n.w +
           '" height="' +
           n.h +
@@ -422,6 +430,7 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
         continue;
       }
       let attributes = "",
+        strokeDashes = n.dashes?.join(" ") ?? "none",
         doubled = false;
       if (n.strokeAlign === "INSIDE") {
         const key = id();
@@ -451,12 +460,24 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
       }
       if (n.cap === "ARROW_EQUILATERAL") {
         const key = id();
+        // SVG markers reproduce the five-width head measured from Figma's
+        // native strokeGeometry. SVG computes the fixture shaft length.
+        const measured = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path",
+        );
+        measured.setAttribute("d", n.paths![0]!.data);
+        strokeDashes =
+          Math.max(0, measured.getTotalLength() - width * 10) + " 1000000";
+        attributes += ' stroke-dashoffset="' + -width * 5 + '"';
         defs.push(
           '<marker id="' +
             key +
-            '" markerUnits="strokeWidth" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto-start-reverse"><path d="M3 2L' +
-            (3 - (3 * Math.sqrt(3)) / 2) +
-            ' .5V3.5Z" fill="' +
+            '" markerUnits="strokeWidth" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse"><path d="M6 3.5L1 ' +
+            (3.5 - 5 / Math.sqrt(3)) +
+            "V" +
+            (3.5 + 5 / Math.sqrt(3)) +
+            'Z" fill="' +
             color +
             '"/></marker>',
         );
@@ -477,7 +498,7 @@ export async function gridReference(doc: FigmaDoc, w = 930, h = 680) {
         '" stroke-miterlimit="' +
         (n.miterLimit ?? 4) +
         '" stroke-dasharray="' +
-        (n.dashes?.join(" ") ?? "none") +
+        strokeDashes +
         '"' +
         attributes +
         ">" +
