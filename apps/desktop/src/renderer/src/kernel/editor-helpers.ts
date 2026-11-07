@@ -15,3 +15,6 @@ export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from '../
 export { mountOverlayOnBody, anchorPicker } from '../controls/overlay';
 export { TEXT_ANIMATOR_PROPERTIES, animatorMode, countTextUnits, staggerLength, staggerWindow } from '../legacy/core/text-animation';
 export type { TextAnimatorMode, TextAnimatorOrder, TextAnimatorProperty, TextAnimatorUnit } from '../legacy/core/text-animation';
+/* Parametric shape geometry: commands are applied by the caller's edit transaction. */
+export { resizeParametricShape } from '../legacy/core/parametric-shapes';
+export type { ShapeHandle, ShapeResizeContext } from '../legacy/core/parametric-shapes';

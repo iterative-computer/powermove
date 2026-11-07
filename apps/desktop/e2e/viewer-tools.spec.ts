@@ -89,10 +89,12 @@ test.describe('@viewer After Effects tool behavior', () => {
     });
     expect(shape.count).toBe(1);
     expect(shape.type).toBe('shape');
-    expect(shape.content).toMatchObject({ shape: 'rect', w: 100, h: 100 });
+    expect(shape.content.shape).toBe('rect');
+    expect(shape.content.w).toBeCloseTo(200, 3);
+    expect(shape.content.h).toBeCloseTo(120, 3);
     // Pointer-to-composition mapping is exact to well under a pixel.
     shape.position.forEach((value: number, index: number) => expect(value).toBeCloseTo([200, 160][index]!, 3));
-    shape.scale.forEach((value: number, index: number) => expect(value).toBeCloseTo([200, 120][index]!, 3));
+    shape.scale.forEach((value: number) => expect(value).toBe(100));
     expect(shape.selected).toHaveLength(1);
     expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
     expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(0);

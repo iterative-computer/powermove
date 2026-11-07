@@ -2,6 +2,7 @@ import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core
 import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
 import { parseEditCommand, ValidationError } from '../../core/validate/commands';
 import { captureFontAnchor } from './font-anchor';
+import { drawnShapeCommand } from './parametric-shapes';
 import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
 import { validMatteSource } from './matte';
@@ -1045,7 +1046,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
 
 function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
   const policy: any = policyCommand(sourceCommand, meta);
-  const command: any = policy.command;
+  const command: any = drawnShapeCommand(policy.command, meta.origin);
   const fontLayer = findLayer(command.target || command.layer || command.targetId);
   captureFontAnchor(PM, fontLayer, command);
   captureSizeAnchor(PM, fontLayer, command);
