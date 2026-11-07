@@ -211,10 +211,12 @@ describe('hardware H.264', () => {
 it('acknowledges queued frames at once but waits while FFmpeg is two frames behind', async () => {
  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-encoder-queue-'));
  const stalled = path.join(folder, 'ffmpeg-stalled');
+ const ready = path.join(folder, 'ready');
  // An encoder that never reads its input, then dies when told to.
  await writeFile(stalled, `#!/usr/bin/env node
 process.stdin.pause();
 process.on('SIGUSR2', () => { process.stderr.write('Encoder gave up', () => process.exit(3)); });
+require('node:fs').writeFileSync(${JSON.stringify(ready)}, 'ready');
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
  const service = new RenderEncoder(stalled, folder);
@@ -225,7 +227,9 @@ setInterval(() => {}, 1000);
   await service.write(token, 1, frame);
   let third = 'pending';
   const waiting = service.write(token, 1, frame).then(() => { third = 'written'; }, error => { third = error.message; });
-  await new Promise(resolve => setTimeout(resolve, 200));
+  // Signals are meaningful only after the fixture installs its handler.
+  await vi.waitFor(async () => expect(await readFile(ready, 'utf8')).toBe('ready'));
+  await new Promise(resolve => setImmediate(resolve));
   expect(third).toBe('pending');
   service.job(token, 1).process.kill('SIGUSR2');
   await waiting;

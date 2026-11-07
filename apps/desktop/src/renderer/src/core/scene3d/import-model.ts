@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PARTS_ROOT_FLAG } from './model-parts';
 
 /** Self-contained glTF only: imports must never fetch untrusted remote dependencies. */
 export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number;materials:{index:number;name:string}[]}> {
@@ -59,6 +60,8 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   const bounds=new THREE.Box3().setFromObject(scene),center=bounds.getCenter(new THREE.Vector3());
   const radius=bounds.getSize(new THREE.Vector3()).length()/2;
   if(!Number.isFinite(radius)||radius<1e-10){disposeModel(scene);throw new Error('GLB model has no measurable size');}
+  // Parts are addressed by child-index paths under this node.
+  scene.userData[PARTS_ROOT_FLAG]=true;
   const normalization=new THREE.Group(),root=new THREE.Group();
   normalization.add(scene);normalization.scale.setScalar(1/radius);scene.position.sub(center);
   root.add(normalization);

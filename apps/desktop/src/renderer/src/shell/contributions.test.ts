@@ -29,6 +29,9 @@ function fakePM(kernel: ReturnType<typeof createKernel>) {
   } as any;
 }
 
+// bf26d9b3e also uses this class for the built-in save-history button.
+const extensionStatus = '.status-contribution:not([aria-label="Save status and version history"])';
+
 let disposeSignals: { dispose(): void } | null = null;
 
 afterEach(() => {
@@ -65,7 +68,7 @@ describe('StatusBar kernel status items', () => {
     kernel.status.register('ext', { id: 'maybe', text: () => null });
     const { target } = render(StatusBar, fakePM(kernel));
 
-    expect(target.querySelector('.status-contribution')).toBeNull();
+    expect(target.querySelector(extensionStatus)).toBeNull();
   });
 
   it('re-evaluates text() on the status tick', () => {
@@ -74,12 +77,12 @@ describe('StatusBar kernel status items', () => {
     let value = 'one';
     kernel.status.register('ext', { id: 'counter', text: () => value });
     const { target } = render(StatusBar, fakePM(kernel));
-    expect(target.querySelector('.status-contribution')?.textContent).toBe('one');
+    expect(target.querySelector(extensionStatus)?.textContent).toBe('one');
 
     value = 'two';
     flushSync(() => frameBus.emit('status'));
 
-    expect(target.querySelector('.status-contribution')?.textContent).toBe('two');
+    expect(target.querySelector(extensionStatus)?.textContent).toBe('two');
   });
 
   it('renders a clickable item as a button and calls onClick', () => {
@@ -88,7 +91,7 @@ describe('StatusBar kernel status items', () => {
     const onClick = vi.fn();
     kernel.status.register('ext', { id: 'go', text: () => 'GO', title: 'Go somewhere', onClick });
     const { target } = render(StatusBar, fakePM(kernel));
-    const button = target.querySelector<HTMLButtonElement>('button.status-contribution');
+    const button = target.querySelector<HTMLButtonElement>(`button${extensionStatus}`);
 
     expect(button?.title).toBe('Go somewhere');
     flushSync(() => button?.click());
@@ -99,11 +102,11 @@ describe('StatusBar kernel status items', () => {
     const kernel = createKernel();
     disposeSignals = installKernelSignals(kernel);
     const { target } = render(StatusBar, fakePM(kernel));
-    expect(target.querySelector('.status-contribution')).toBeNull();
+    expect(target.querySelector(extensionStatus)).toBeNull();
 
     flushSync(() => void kernel.status.register('ext', { id: 'late', text: () => 'LATE' }));
 
-    expect(target.querySelector('.status-contribution')?.textContent).toBe('LATE');
+    expect(target.querySelector(extensionStatus)?.textContent).toBe('LATE');
   });
 });
 

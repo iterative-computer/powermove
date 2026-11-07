@@ -92,17 +92,21 @@ R.recover = (proj: any, thumb: any) => {
   return meta;
 };
 
-/** Playback-safe checkpoint. Explicit save/close still uses the synchronous
- * barrier in put, which supersedes any in-progress background checkpoint. */
-R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
+/** Playback-safe recovery. Explicit Save requests a full checkpoint so
+ * direct edits absent from the compact journal are also durable. */
+R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean, forceCheckpoint = false) => {
   if (!proj?.id || !isCurrent()) return false;
-  if (!PM.store.setSnapshotAsync) { R.recover(proj, thumb); return true; }
+  if (!PM.store.setSnapshotAsync) {
+    if (forceCheckpoint) R.put(proj, thumb);
+    else R.recover(proj, thumb);
+    return true;
+  }
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
   const entries = journal(proj.id);
-  if (PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
+  if (!forceCheckpoint && PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
       && Number(proj.revision || 0) % CHECKPOINT_REVISIONS !== 0) return true;
   const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', recoverySequence: sequence(proj.id), proj }, isCurrent);
   if (!saved) return false;

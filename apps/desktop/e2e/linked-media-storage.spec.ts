@@ -52,7 +52,16 @@ test('links originals through import, save, restart, missing-source recovery and
     await session.page.waitForFunction(id => (window as any).PM.proj.assets[id]?.sourcePath?.endsWith('/Moved.mp4'), asset.id);
     expect(await session.page.evaluate(id => Boolean((window as any).PM.assets.get(id)?.el), asset.id)).toBe(true);
     expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
-    expect(await readdir(path.join(session.userData, 'backups', saved.document.proj.id))).toEqual([]);
+    // bf26d9b3e adds automatic file saves and retained save history. Older
+    // versions must stay metadata-only too; linked originals are never copied.
+    const backupRoot = path.join(session.userData, 'backups', saved.document.proj.id);
+    const versions = await Promise.all((await readdir(backupRoot)).map(async file => decodeProjectContainer(await readFile(path.join(backupRoot, file)))));
+    expect(versions).toHaveLength(2);
+    for (const version of versions) {
+      expect(version.media).toEqual([]);
+      expect(version.document.proj.assets[asset.id].sourcePath).toBe(original);
+    }
+    expect(versions.map(version => version.document.proj.layers[0].name).sort()).toEqual(['Original.mp4', 'Recovered edit']);
 
     const portable = path.join(directory, 'Portable.pmv');
     await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, portable);
@@ -60,5 +69,9 @@ test('links originals through import, save, restart, missing-source recovery and
     const packed = decodeProjectContainer(await readFile(portable));
     expect(Buffer.from(packed.media.find(item => item.id === asset.id)!.data)).toEqual(await readFile(moved));
     expect(session.diagnostics.pageErrors).toEqual([]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    // Finish normal guarded saves while this linked-source fixture still exists.
+    try { await session.close(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
 });

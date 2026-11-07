@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { expectPixelsEqual } from './helpers/pixels';
 import { expect, test, repoRoot } from './helpers/app';
 
 test('idle preparation leaves the canvas and playhead alone, then normal Play reuses accurate frames', async ({ session }) => {
@@ -14,6 +15,9 @@ test('idle preparation leaves the canvas and playhead alone, then normal Play re
     PM.proj.layers = [layer];
     PM.animate(layer, 'rotation', [{ t: 0, v: 0 }, { t: 1, v: 90 }]);
     PM.touch(); PM.bus.emit('project'); PM.setPreviewResolution('0.25'); PM.setTime(0);
+    // Apply the requested preview size before taking the reference pixels.
+    // Deferred layout would otherwise compare the old full canvas to quarter size.
+    PM.Kernel.services.get('viewer').layout();
     const gl = PM.GL.gl;
     (window as any).__readPreview = () => {
       const pixels = new Uint8Array(PM.GL.canvas.width * PM.GL.canvas.height * 4);
@@ -32,7 +36,7 @@ test('idle preparation leaves the canvas and playhead alone, then normal Play re
     before: (window as any).__idleFirst, after: (window as any).__readPreview(),
     memory: (window as any).PM.Memory.stats().preview,
   }));
-  expect(idle.time).toBe(0); expect(idle.after).toEqual(idle.before);
+  expect(idle.time).toBe(0); expectPixelsEqual(idle.after, idle.before);
   expect(idle.memory.bytes).toBeLessThanOrEqual(idle.memory.budget);
   const parity = await session.page.evaluate(() => {
     const PM = (window as any).PM, options = { mblur: true, mbSamples: 6, shutter: .5, hideShy: false };
@@ -43,7 +47,7 @@ test('idle preparation leaves the canvas and playhead alone, then normal Play re
     const prepared = (window as any).__readPreview(), hit = PM.GL.stats.previewHit;
     return { direct, prepared, hit };
   });
-  expect(parity.hit).toBe(true); expect(parity.prepared).toEqual(parity.direct);
+  expect(parity.hit).toBe(true); expectPixelsEqual(parity.prepared, parity.direct);
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     (window as any).__automaticHits = [];
@@ -81,7 +85,12 @@ test('prepared display frames preserve 8, 16 and 32-bit HDR and translucent outp
       return Array.from(pixels);
     };
     const results = [];
-    for (const depth of GL.supportedColorDepths) {
+    // 921687251 made preparation yield for GPU completion. Hold ordinary
+    // playhead paints while checking a different timestamp's displayed pixels;
+    // all explicit renders below still use the real renderer and cache.
+    const render = GL.render;
+    GL.render = () => false;
+    try { for (const depth of GL.supportedColorDepths) {
       PM.proj = PM.mkProject({ name: 'Prepared color parity', w: 128, h: 72, fps: 24, dur: 2, colorDepth: depth });
       PM.proj.colorDepth = depth;
       const shape = PM.mkLayer('shape', { d: { w: 80, h: 40, color: '#ec7347' },
@@ -90,19 +99,19 @@ test('prepared display frames preserve 8, 16 and 32-bit HDR and translucent outp
         code: 'void main(){fragColor=vec4(1.6+uv.x,0.17+iTime*0.03,0.07,0.6);}', uniforms: {} } }, PM.proj);
       PM.proj.layers = [shape, shader]; PM.touch(); GL.resize(128, 72, null);
       const options = { mblur: true, mbSamples: 6, shutter: .5, hideShy: false };
-      GL.render(.25, { ...options, exporting: true }); const original = read();
+      render(.25, { ...options, exporting: true }); const original = read();
       const oldTime = PM.time;
       const prepared = await GL.preparePreviewFrame(.25, options, new Map(), () => true);
-      const unchanged = read(); GL.render(.25, options);
+      const unchanged = read(); render(.25, options);
       results.push({ depth, prepared, original, unchanged, cached: read(), hit: GL.stats.previewHit,
         timeUnchanged: PM.time === oldTime, memory: PM.Memory.stats().preview, error: gl.getError() });
-    }
+    } } finally { GL.render = render; }
     return results;
   });
   expect(results.length).toBeGreaterThan(0);
   for (const result of results) {
     expect(result.prepared).toBe(true); expect(result.hit).toBe(true);
-    expect(result.unchanged).toEqual(result.original); expect(result.cached).toEqual(result.original);
+    expectPixelsEqual(result.unchanged, result.original); expectPixelsEqual(result.cached, result.original);
     expect(result.timeUnchanged).toBe(true); expect(result.error).toBe(0);
     expect(result.memory.bytes).toBe(128 * 72 * 4);
   }
@@ -221,7 +230,7 @@ for (const matte of [false, true]) test(`automatic video preparation preserves l
     return { pixels: Array.from(pixels), error: gl.getError(), privateTextures: [...PM.GL.texes.keys()]
       .filter((key: string) => key.startsWith('idle-video:')).length, staging: PM.AutomaticPreview.stagingBytes };
   });
-  expect(direct.pixels).toEqual(prepared.pixels);
+  expectPixelsEqual(direct.pixels, prepared.pixels);
   expect(direct.error).toBe(0); expect(direct.privateTextures).toBe(0); expect(direct.staging).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

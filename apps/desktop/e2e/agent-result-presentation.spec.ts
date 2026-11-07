@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { test, expect } from './helpers/app';
+import { test, expect, expandAgentWork } from './helpers/app';
 
 test('agent results preserve work above the reply and omit file and external activity panels', async ({ session }, testInfo) => {
   await session.openEditor(); await session.openAgent();
@@ -112,15 +112,16 @@ test('a completed response stays visible when the user sends a follow-up', async
     run.resolve({ text: JSON.stringify({ summary: 'The composition is ready for review.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] });
   });
   await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe('result');
+  await expandAgentWork(page);
   const response = page.locator('.agent-trace.is-archived');
   await expect(response.getByText('The clip is placed full-frame, 0–22 s, centered.', { exact: true })).toBeVisible();
   await expect(response.getByText('The composition is ready for review.', { exact: true })).toBeVisible();
-  const before = await response.innerText();
+  const before = await response.allInnerTexts();
   await composer.fill('Make it as editable layers');
   await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__responseRuns.length)).toBe(2);
   await expect(response.getByText('The clip is placed full-frame, 0–22 s, centered.', { exact: true })).toBeVisible();
   await expect(response.getByText('The composition is ready for review.', { exact: true })).toBeVisible();
-  expect(await response.innerText()).toBe(before);
+  expect(await response.allInnerTexts()).toEqual(before);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

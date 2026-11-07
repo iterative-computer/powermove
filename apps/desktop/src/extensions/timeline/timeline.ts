@@ -2,6 +2,7 @@ import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMar
 import { revealedProperties } from './property-reveal';
 import { sectionedPropertyRows } from './property-sections';
 import { hasMaterialRows, isMaterialPropKey, materialSectionRows, materialSourceMap, materialsService, type MaterialSlotRef } from './material-rows';
+import { CHOICE_PROPERTIES, choiceLabel, extrusionSectionRows, hasExtrusionRows, isExtrusionPropKey } from './extrusion-rows';
 import { precompCarriesAudio } from './audio-presence';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
@@ -818,7 +819,9 @@ function buildHead(head: any) {
   const moveHandles = [...head.children].filter((node: any) => node.classList?.contains('panel-move-handle'));
   head.replaceChildren(...moveHandles);
   const btn = (icon: any, fn: any, title: any) => {
-    const button = h('button.iconbtn', { type: 'button', title }, iconNode(api, icon));
+    // The shared tooltip temporarily removes title on hover. Keep the control's
+    // accessible name stable while the pointer remains over Play / Pause.
+    const button = h('button.iconbtn', { type: 'button', title, 'aria-label': title }, iconNode(api, icon));
     listen(button, 'click', fn, undefined, headCleanups);
     return button;
   };
@@ -1084,8 +1087,10 @@ function buildRows() {
     if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
       // A model's Material Options live in its Materials group instead.
-      const materials = query ? [] : materialSectionRows(api, L, materialOpen);
-      const generic = materials.length ? props.filter((p: any) => !isMaterialPropKey(p.key)) : props;
+      // An extruded text or shape layer's Geometry Options and surfaces too.
+      const extrusion = query ? [] : extrusionSectionRows(api, L, materialOpen);
+      const materials = query ? [] : [...materialSectionRows(api, L, materialOpen), ...extrusion];
+      const generic = materials.length ? props.filter((p: any) => !isMaterialPropKey(p.key) && !(extrusion.length && isExtrusionPropKey(p.key))) : props;
       for (const row of sectionedPropertyRows(L, generic, effectLabel)) rows.push(row);
       for (const row of materials) rows.push(row);
     }
@@ -1119,7 +1124,7 @@ const effectLabel = (fx: any) => api.effects?.get?.(fx.type, fx.version ?? 1)?.l
 function layerDisclosable(r: any, fresh = false): boolean {
   if (r.L.type === 'group') return true;
   // A click asks afresh: a keyframe added a moment ago may predate the rebuild.
-  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0 || hasMaterialRows(api, r.L);
+  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0 || hasMaterialRows(api, r.L) || hasExtrusionRows(r.L);
   return r.disclosable;
 }
 
@@ -1182,8 +1187,8 @@ const refreshTheme = () => {
     accent: css('--accent') || '#F0580A', tx: css('--tx') || '#1C1C1F',
     tx2: css('--tx-2') || '#5D5D65', tx3: css('--tx-3') || '#8B8B93',
     tx4: css('--tx-4') || '#A9A9AE',
-    /* Both timeline surfaces stay in the panel family: chrome (gutter/ruler)
-       on --bg-panel, tracks one step down on --bg-panel-2. Never --bg-sunken:
+    /* Gutter and tracks share the same panel material; selected rows carry
+       their own tone across both. Never --bg-sunken:
        in dark themes it sits below the window color, so the gutter would
        dissolve into the app background instead of reading as a panel. */
     panel: css(reversed ? '--bg-panel-2' : '--bg-panel') || '#FCFCFD',
@@ -2164,7 +2169,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
       values.forEach((value, index) => {
         const column = columns[index]!;
-        const text = fittedPropertyValue(c, value, isScaleTrack(r) || percentProperty(r.key) ? '%' : '', column.width);
+        const text = fittedPropertyValue(c, choiceLabel(r.key, value) ?? value, isScaleTrack(r) || percentProperty(r.key) ? '%' : '', column.width);
         c.fillText(text, column.left, iy);
       });
       if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, iy, !!L.scaleLinked);
@@ -2335,7 +2340,7 @@ function gutterColumns() {
     propNav: 122, propStopwatch: 148.5, propLabel: 163, heading: 140,
   };
 }
-const PERCENT_PROPERTY = /(^|\.)(opacity|ambientResponse)$/;
+const PERCENT_PROPERTY = /(^|\.)(opacity|ambientResponse|holeBevelDepth)$/;
 function percentProperty(key: unknown): boolean { return PERCENT_PROPERTY.test(String(key ?? '')); }
 
 /* Layer switches, After Effects style, left of Link Layers in fixed slots:
@@ -2350,8 +2355,9 @@ function switchAreaWidth(L: any): number {
   const needed = (T.style?.showSwitches === false ? 0 : SWITCH_WIDTH * 2) + audio + status;
   return clamp(T.gut - 386, needed, Math.max(needed, 108));
 }
-/** Models, lights and cameras are always 3D; they have no switch to flip. */
-const always3D = (L: any): boolean => L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.');
+/** Models, lights, cameras and model-only groups have no 2D switch. */
+const always3D = (L: any): boolean => (L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.'))
+  || (L.type === 'group' && !!api.scene3d?.isGroup?.(L.id));
 function rowSwitches(L: any): RowSwitch[] {
   if (!layerSupportsTransform(L.type) || T.style?.showSwitches === false) return [];
   const out: RowSwitch[] = [];
@@ -3687,7 +3693,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
   const column = field ?? (grouped ? propertyValueColumns(T.propertyValueX, T.gut, all.length, scale ? 24 : 0)[axisIndex]! : null);
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
-    'c.fit': ['cover', 'contain', 'stretch']
+    'c.fit': ['cover', 'contain', 'stretch'], ...CHOICE_PROPERTIES
   };
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
@@ -3696,7 +3702,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
     style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${field?.top ?? rowY(rowIndex) + 3}px`,
       width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${field?.height ?? T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
-  if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
+  if (options) { options.forEach(value => input.appendChild(h('option', { value }, choiceLabel(row.key, value) ?? value))); input.value = String(values[0]); }
   else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }
   document.querySelector<HTMLElement>('#tl-canvas-wrap')?.appendChild(input); input.focus(); if (!isColor) input.select?.();
   // The OS color panel is its own window, so the swatch blurs the moment it opens:

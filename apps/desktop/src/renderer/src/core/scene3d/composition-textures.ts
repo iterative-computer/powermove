@@ -28,7 +28,7 @@ export function materialCompositionSample(PM:any,layer:any,map:MaterialMap,time:
   const key=`${map.compositionId}:${frame}:${width}x${height}:${PM.proj.revision || 0}:${PM._scene3dRevision || 0}`;
   return {comp,time:frame/fps,width,height,key};
 }
-export function compositionTextureFrame(PM:any,layer:any,map:MaterialMap,time:number):CompositionTextureFrame|null {
+export function compositionTextureFrame(PM:any,layer:any,map:MaterialMap,time:number,onLoading?:()=>void):CompositionTextureFrame|null {
   const sample=materialCompositionSample(PM,layer,map,time);if(!sample || !PM.GL?.renderMaterialComposition)return null;
   let cache=caches.get(PM);if(!cache){cache=new Map();caches.set(PM,cache);}
   const cached=cache.get(sample.key);if(cached)return cached;
@@ -38,7 +38,7 @@ export function compositionTextureFrame(PM:any,layer:any,map:MaterialMap,time:nu
   active.add(id);
   try{
     const pixels=PM.GL.renderMaterialComposition(sample.comp,sample.time,sample.width,sample.height,time,sample.sourceLayerId);
-    if(!pixels)return null;
+    if(!pixels){onLoading?.();return null;}
     let hasAlpha=false;for(let i=3;i<pixels.length;i+=4)if(pixels[i]!==255){hasAlpha=true;break;}
     const result={pixels,width:sample.width,height:sample.height,key:sample.key,hasAlpha};
     // At most 32 RGBA frames (128 MiB at the maximum resolution), per editor.

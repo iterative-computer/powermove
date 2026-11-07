@@ -1,8 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { planeMatrix, projectPoint, planeContains, depthOrderedLayers, CHANNELS_3D, affinePlane, local3D } from './space-3d';
+import { planeMatrix, projectPoint, planeContains, depthOrderedLayers, CHANNELS_3D, affinePlane, local3D, is3DLayer } from './space-3d';
 const layer = (id = 'a', p: any = {}) => ({ id, threeD: true, p: { ...CHANNELS_3D, 'position.x': 320, 'position.y': 180, 'scale.x': 100, 'scale.y': 100, ...p } });
 const pm = (layers: any[] = []) => ({ proj: { w: 640, h: 360 }, L: (id: string) => layers.find(l => l.id === id), ev: (l: any, k: string) => l.p[k] ?? 0, worldMatrix: () => [1, 0, 0, 1, 320, 180], localMatrix: () => [1, 0, 0, 1, 320, 180] });
 describe('2.5D planes', () => {
+    it.each([false, undefined])('keeps a layer with 3D %s affine inside nested 3D groups', (threeD) => {
+        const outer = layer('outer', { 'rotation.x': 25, 'position.z': 500 });
+        const group = layer('group', { 'rotation.y': 55 });
+        const child = { ...layer('child'), threeD };
+        const PM = { ...pm([outer, group, child]), groupAncestors: () => [group, outer] };
+        expect(is3DLayer(PM, child)).toBe(false);
+        expect(planeMatrix(PM, child, 0)).toEqual([1, 0, 0, 0, 1, 0, 320, 180, 1]);
+        expect(planeContains(PM, child, 0, 365, 215, { x0: -60, x1: 60, y0: -40, y1: 40 })).toBe(true);
+    });
     it('preserves full matrix composition for every rotation axis, skew, anchors and reflections', () => {
         const identity = () => [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
         const multiply = (a: number[], b: number[]) => Array.from({ length: 16 }, (_, index) => {

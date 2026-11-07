@@ -15,6 +15,7 @@ import { normalizeExportDefaults, type ExportDefaults } from '../core/export-def
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import { migrateProjectTextTiming, migrateTextAnimatorTiming } from './core/text-animation';
+import { migrateInherited3D, SWITCH_3D_VERSION } from './core/switch-3d-migration';
 import { sanitizeMemory } from '../core/memory';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
@@ -36,6 +37,9 @@ const document = window.document;
 type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any; phase?: string; recoverySaved?: boolean };
 const fileStates = new Map<string, FileState>();
 const comparisonVersions = new Map<string, number>();
+// Read-only file comparisons can overlap Close without changing the document.
+const editVersions = new Map<string, number>();
+const comparedHashes = new Map<string, string>();
 const pendingDiscards = new Set<string>();
 const closeFileDiscards = new Set<string>();
 function resumeDiscardedAutosaves(ids: string[]) {
@@ -137,6 +141,9 @@ async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean, pr
   // Concurrent comparisons of the same content are not edits. Only the
   // latest comparison may publish state, but both can answer Close correctly.
   if (comparisonVersions.get(project.id) !== version) return dirty;
+  const previousHash = comparedHashes.get(project.id);
+  if (previousHash !== undefined && previousHash !== hash) editVersions.set(project.id, (editVersions.get(project.id) || 0) + 1);
+  comparedHashes.set(project.id, hash);
   state.dirty = dirty;
   if (PM.proj.id === project.id) fileUI();
   else PM.bus.emit('projects:open');
@@ -235,6 +242,8 @@ function* hydrateSteps(p: any): Generator<void, any> {
   Object.assign(base, p);
   // Loading an old file must not inherit the new-project implicit camera.
   base.scene3dDefaultsVersion = p.scene3dDefaultsVersion === 2 ? 2 : 1;
+  // Older files let 3D groups override members' switches; migrated below.
+  base.switch3DVersion = p.switch3DVersion === SWITCH_3D_VERSION ? SWITCH_3D_VERSION : 1;
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   if (Array.isArray(p.memory)) base.memory = sanitizeMemory(p.memory);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
@@ -444,7 +453,7 @@ function* hydrateSteps(p: any): Generator<void, any> {
   for (const container of [base, ...Object.values(base.comps)] as any[]) {
     (container.layers || []).forEach((L: any) => { if (L.type === 'precomp' && !(L.d && loaded(L.d.comp))) L.d.comp = null; });
   }
-  return migrateProjectTextTiming(base);
+  return migrateInherited3D(migrateProjectTextTiming(base));
 }
 function hydrate(p: any) {
   const steps = hydrateSteps(p);
@@ -725,14 +734,14 @@ function captureProjectSession(persist = true) {
   return saved;
 }
 
-async function captureProjectSessionAsync(isCurrent: () => boolean) {
+async function captureProjectSessionAsync(isCurrent: () => boolean, forceCheckpoint = false) {
   if (!isCurrent()) return false;
   if (!PM.store.setSnapshotAsync) return captureProjectSession();
   const project = PM.proj;
   if (!project?.id || project.id === homeProjectId || discardedProjects.has(project.id)) return true;
   PM.bus.emit('project:flush-edits');
   if (PM.Projects.recoverAsync) {
-    if (!await PM.Projects.recoverAsync(project, undefined, isCurrent)) return false;
+    if (!await PM.Projects.recoverAsync(project, undefined, isCurrent, forceCheckpoint)) return false;
   } else if (!await PM.store.setSnapshotAsync(`project.${project.id}`, { v: PM.version, proj: project }, isCurrent)) return false;
   if (!isCurrent() || PM.proj !== project) return false;
   // recoverAsync retires only its durably checkpointed journal prefix.
@@ -756,7 +765,11 @@ PM.flushProject = async (preparation?: ClosePreparation, isCurrent = () => true)
   if (!await run('Saving your work', () => captureProjectSessionAsync(current)) || !current()) {
     throw new Error('The project changed while closing. Your edits are still open; try Close again.');
   }
-  if (hostBridge()?.projectSave && !closeFileDiscards.has(PM.proj.id)) await run('Finishing project save', async () => {
+  const queued = backgroundSaves.state(PM.proj.id);
+  const pendingFileEdit = fileState().dirty || queued && (queued.phase === 'saving' || queued.revision > queued.persisted);
+  // Recovery above is required even for a clean document. Rewriting its native
+  // file is only needed for pending edits, and may require unavailable media.
+  if (pendingFileEdit && hostBridge()?.projectSave && !closeFileDiscards.has(PM.proj.id)) await run('Finishing project save', async () => {
     if (!await backgroundSaves.flush(PM.proj.id, () => performSave({ projectId: PM.proj.id, background: true }))) throw new Error('Project save failed. Your edits are still open.');
   });
   await run('Finishing up', () => PM.store.flush?.());
@@ -780,6 +793,7 @@ PM.autosave = () => {
   APP.dirty = true;
   fileState().dirty = true;
   comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
+  editVersions.set(PM.proj.id, (editVersions.get(PM.proj.id) || 0) + 1);
   fileUI();
   const generation = ++saveGeneration, project = PM.proj, projectId = project.id;
   window.clearTimeout(APP.saveTimer);
@@ -807,9 +821,10 @@ PM.autosave = () => {
   }, 550);
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
-['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
-// Disposable decoder previews change runtime readiness, not saved project data.
-PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly) PM.autosave(); });
+['project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+// Initial layout paint and disposable decoders change runtime readiness,
+// not saved project data. Ordinary layer/media changes still autosave.
+['layers','assets'].forEach(ev => PM.bus.on(ev, (change: any) => { if (!change?.runtimeOnly) PM.autosave(); }));
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id, signal, background = false, cancelled = () => {} }: any = {}): Promise<boolean> {
   // A live background tab may be ahead of its recovery checkpoint.
@@ -889,7 +904,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id, signal, bac
           const recoveryProject = PM.proj, recoveryGeneration = saveGeneration;
           // False means a newer autosave, flush or tab switch took over the
           // checkpoint. Only a thrown write error means recovery failed.
-          await captureProjectSessionAsync(() => PM.proj === recoveryProject && saveGeneration === recoveryGeneration);
+          await captureProjectSessionAsync(() => PM.proj === recoveryProject && saveGeneration === recoveryGeneration, !background);
         }
         await PM.store.flush?.();
       } catch (error) {
@@ -1342,6 +1357,9 @@ PM.confirmCloseProject = async (id: string, preparation?: ClosePreparation) => {
   if (id === homeProjectId) return true;
   PM.bus.emit('project:flush-edits');
   await run('Waiting for imports', () => APP.importQueue);
+  // Opening returns before background media metadata repair finishes. Settle
+  // that repair before comparing content and pinning the close generation.
+  if (id === PM.proj.id) await run('Preparing media', () => PM.projectAssetsReady);
   // Join an existing save, but cancelling Close never cancels that file write.
   if (activeSave) await run('Waiting for the current save', () => activeSave);
   preparation?.check();
@@ -1403,7 +1421,7 @@ PM.prepareToClose = (options: { id?: string; flush?: boolean } = {}): Promise<bo
   const current = () => closeAttempt?.preparation === preparation && !preparation.controller.signal.aborted
     && PM.proj === project && editVersion === PM.animVersion?.()
     && ids.length === new Set([PM.proj.id, ...tabIds]).size
-    && ids.every(id => (id === PM.proj.id || tabIds.includes(id)) && versions.get(id) === (comparisonVersions.get(id) || 0));
+    && ids.every(id => (id === PM.proj.id || tabIds.includes(id)) && versions.get(id) === (editVersions.get(id) || 0));
   const attempt = { preparation, current, ids, native: !!options.flush, ready: false, committed: false, promise: null as unknown as Promise<boolean> };
   closeAttempt = attempt;
   attempt.promise = Promise.resolve().then(async () => {
@@ -1411,7 +1429,7 @@ PM.prepareToClose = (options: { id?: string; flush?: boolean } = {}): Promise<bo
     for (const id of ids) {
       if (!await PM.confirmCloseProject(id, preparation)) return false;
       preparation.check();
-      versions.set(id, comparisonVersions.get(id) || 0);
+      versions.set(id, editVersions.get(id) || 0);
     }
     editVersion = PM.animVersion?.();
     if (!current()) throw new Error('The project changed while closing. Your edits are still open; try Close again.');
@@ -2041,7 +2059,7 @@ window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
   if (!PM.projectLoading) document.getElementById('boot-ghost')?.remove();
   viewerService(PM)?.layout();
   timelineService(PM)?.frameView();
-  PM.bus.emit('layers');
+  PM.bus.emit('layers', { runtimeOnly: true });
   PM.bus.emit('sel');
   inspectorService(PM)?.refresh();
   PM.invalidate('all');
@@ -2052,7 +2070,9 @@ window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
      black placeholder even though the viewer becomes healthy a moment later. */
   window.requestAnimationFrame(() => {
     lastThumbAt = 0;
-    persistCurrent(true);
+    // The document is already recovered. A preview must not supersede a
+    // yielding close checkpoint by writing the same document again.
+    projectThumb();
     PM.bus.emit('projects:open');
   });
 }));

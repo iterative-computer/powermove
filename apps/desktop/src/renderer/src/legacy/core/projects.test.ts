@@ -67,6 +67,24 @@ describe('legacy project registry install', () => {
     expect(PM.Projects.get('P1')).toEqual(project);
   });
 
+  it('checkpoints direct keyframe changes at an explicit save even with a compact journal', async () => {
+    const { PM, memory } = projectsRegistry();
+    const project = { id: 'P1', name: 'Before zero', revision: 1,
+      layers: [{ id: 'solid', from: -9, p: { opacity: { v: 100, kf: [{ i: 'key', t: 1, v: 50 }] } } }] };
+    memory.set('project.P1', { proj: { ...project, layers: [{ ...project.layers[0], p: { opacity: { v: 100, kf: [] } } }] } });
+    memory.set('projectJournal.P1', [{ revision: 1, patches: [{ path: ['layers', 0, 'from'], exists: true, value: -9 }] }]);
+    PM.store.has = (key: string) => memory.has(key);
+    PM.store.setSnapshotAsync = vi.fn(async (key: string, value: any) => { memory.set(key, structuredClone(value)); return true; });
+    // Background recovery can keep its compact patch path.
+    expect(await PM.Projects.recoverAsync(project, undefined, () => true)).toBe(true);
+    expect(PM.store.setSnapshotAsync).not.toHaveBeenCalled();
+    // Explicit Save must also preserve edits outside typed journal patches.
+    expect(await PM.Projects.recoverAsync(project, undefined, () => true, true)).toBe(true);
+    expect(PM.store.setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(PM.Projects.get('P1')).toEqual(project);
+    expect(memory.has('projectJournal.P1')).toBe(false);
+  });
+
   it('keeps recovery patches when a checkpoint is superseded or fails', async () => {
     const { PM, memory } = projectsRegistry();
     const project = { id: 'P1', revision: 50, layers: [] };

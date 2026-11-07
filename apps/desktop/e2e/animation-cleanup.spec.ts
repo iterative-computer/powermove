@@ -118,7 +118,8 @@ for (const mode of ['skip', 'escape', 'reduce'] as const) {
   });
 }
 
-test('tab motion stops on preference changes and reduced-motion reorders remain immediate', async ({ session }) => {
+// bf26d9b3e replaced project tabs with the title's Open Projects menu.
+test('project ordering updates immediately in the title menu with reduced motion', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   const ids = await page.evaluate(async () => {
@@ -129,14 +130,19 @@ test('tab motion stops on preference changes and reduced-motion reorders remain 
     }
     return ids;
   });
-  await page.evaluate(id => (window as any).PM.Tabs.move(id, 0), ids[2]);
-  await expect.poll(() => page.locator('#tabs .project-doc').evaluateAll(nodes => nodes[0]?.getAttribute('data-tab-id'))).toBe(ids[2]);
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect.poll(() => page.locator('#tabs').evaluate(el => el.getAnimations({ subtree: true }).filter(animation =>
-    (animation.effect as KeyframeEffect).getKeyframes().some(frame => 'transform' in frame)).length)).toBe(0);
-  await page.evaluate(id => (window as any).PM.Tabs.move(id, 0), ids[1]);
-  await expect.poll(() => page.locator('#tabs .project-doc').evaluateAll(nodes => nodes[0]?.getAttribute('data-tab-id'))).toBe(ids[1]);
-  expect(await page.locator('#tabs').evaluate(el => el.getAnimations({ subtree: true }).filter(animation =>
-    (animation.effect as KeyframeEffect).getKeyframes().some(frame => 'transform' in frame)).length)).toBe(0);
+  for (const [id, expected] of [[ids[2], ['Motion third', 'E2E composition', 'Motion second']],
+    [ids[1], ['Motion second', 'Motion third', 'E2E composition']]] as const) {
+    if (id === ids[1]) await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.evaluate(id => (window as any).PM.Tabs.move(id, 0), id);
+    await page.locator('.tb-title-btn').click();
+    const menu = page.locator('[data-svelte-overlay-menu] .menu-panel[data-level="0"]');
+    await expect.poll(() => menu.locator('.di .label').allTextContents()).toEqual([
+      ...expected, 'New Project', 'All Projects…', 'Rename Project…', 'Move to New Window', 'Close Project', 'Close Other Projects'
+    ]);
+    if (id === ids[1]) expect(await menu.evaluate(el => el.getAnimations({ subtree: true }).filter(animation =>
+      (animation.effect as KeyframeEffect).getKeyframes().some(frame => 'transform' in frame)).length)).toBe(0);
+    await page.keyboard.press('Escape');
+  }
+  await expect(page.locator('#tabs')).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

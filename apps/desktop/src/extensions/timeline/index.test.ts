@@ -351,6 +351,21 @@ describe('timeline extension', () => {
     expect(body.querySelector<HTMLElement>('#tl-head')?.style.getPropertyValue('--tl-ruler')).toBe('28px');
   });
 
+  it('keeps transport named and clickable while its hover tooltip holds the title', () => {
+    const value = activate();
+    const body = build(value);
+    const play = body.querySelector<HTMLButtonElement>('.tl-transport button')!;
+    // This is what the shared tooltip does while the pointer stays on Pause.
+    play.removeAttribute('title');
+    expect(play.getAttribute('aria-label')).toBe('Play / Pause (Space)');
+    play.click();
+    expect(value.api.transport.toggle).toHaveBeenCalledOnce();
+    value.emit('transport', { playing: true });
+    expect(play.getAttribute('aria-label')).toBe('Play / Pause (Space)');
+    play.click();
+    expect(value.api.transport.toggle).toHaveBeenCalledTimes(2);
+  });
+
   it('switches between the layer and track timelines from the panel and the command palette', () => {
     const value = activate();
     const body = build(value);

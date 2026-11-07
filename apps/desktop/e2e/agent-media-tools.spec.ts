@@ -147,8 +147,15 @@ test('the agent watches and listens to imported footage through the media tools'
 
     }
 
-    // With the original gone, tools read the library file directly. No second
-    // media copy or renderer download is needed.
+    // bf26d9b3e links user-selected originals. Make this fixture an owned
+    // library copy before removing the original, as a portable import would.
+    await page.evaluate(async assetId => {
+      const PM = (window as any).PM, meta = PM.proj.assets[assetId];
+      const blob = await PM.MediaStore.get(meta.storageKey);
+      if (!blob || !await PM.MediaStore.put(meta.storageKey, blob)) throw new Error('Could not retain the fixture in the library');
+      delete meta.sourcePath;
+    }, asset);
+    // The next tool reads that library file directly, without renderer copies.
     await rm(media);
     await page.evaluate(() => {
       const store = (window as any).PM.MediaStore;
@@ -171,7 +178,7 @@ test('the agent watches and listens to imported footage through the media tools'
     }
     await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.phase), { timeout: 30_000 }).not.toBe('running');
     const followUp = seen.slice(before).at(-1).messages.filter((message: any) => message.role === 'tool').map(toolResult).at(-1);
-    expect(followUp.ok).toBe(true);
+    expect(followUp.ok, followUp.error).toBe(true);
     expect(followUp.json.frames.map((frame: any) => frame.time)).toEqual([2, 4, 6]);
     const staged = await page.evaluate(async (assetId) => {
       const response = await (window as any).PM.AgentHarness.test.handleLiveAgentTool({ runId: 'staging', callId: 'c', tool: '__media_source', arguments: { assetId }, baseRevision: 0 });

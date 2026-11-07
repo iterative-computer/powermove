@@ -55,7 +55,8 @@ test('dropping a project opens it once and keeps the previous composition intact
   });
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.proj.name)).toBe('Dropped project');
   await expect(session.page.locator('#projects-screen')).not.toHaveClass(/\bon\b/);
-  await expect(session.page.locator('#tabs .project-doc')).toHaveCount(2);
+  // bf26d9b3e replaces the tab strip with the title menu; both documents remain open.
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list())).toEqual([before, await session.page.evaluate(() => (window as any).PM.proj.id)]);
   expect(await session.page.evaluate(() => (window as any).PM.proj.id)).not.toBe(before);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

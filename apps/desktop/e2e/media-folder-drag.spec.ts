@@ -21,6 +21,7 @@ test('dragging selected media into a folder moves the batch and one Undo restore
     PM.bus.emit('assets'); PM.touch(); PM.invalidate(); PM.hist.clear();
     return { ids: Object.keys(PM.proj.assets), folder: 'destination' };
   });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   const cards = page.locator('.asset-card[data-asset-id]');
   const first = page.locator(`[data-asset-id="${fixture.ids[0]}"]`);
   const second = page.locator(`[data-asset-id="${fixture.ids[1]}"]`);

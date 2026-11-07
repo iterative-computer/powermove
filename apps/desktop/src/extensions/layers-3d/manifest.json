@@ -1,7 +1,7 @@
 {
   "id": "layers-3d",
   "name": "3D Layers",
-  "version": "1.3.1",
+  "version": "1.5.0",
   "apiVersion": 1,
   "description": "Editable 3D model, light and camera layers with materials, textures and composition gizmos.",
   "entry": "index.ts",

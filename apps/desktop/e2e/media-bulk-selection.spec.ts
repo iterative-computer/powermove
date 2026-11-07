@@ -14,6 +14,7 @@ async function importMedia(page: import('@playwright/test').Page, count = 4, tim
     }
     await (window as any).PM.importFiles(files, timeline ? {} : { placement: null });
   }, { count, timeline });
+  await page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
   await expect(page.locator('.asset-card[data-asset-id]')).toHaveCount(count);
 }
 

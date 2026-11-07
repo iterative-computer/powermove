@@ -328,7 +328,7 @@ export const LEGACY_EFFECTS: EffectDefinition[] = Object.entries(FX).map(([id, d
   ...(id === 'sharpen' ? {viewportPaddingPixels: 1} : {}),
 }));
 
-export const EFFECTS: EffectDefinition[] = [...FIGMA_DRAWING_EFFECTS,...reviseShadowRamp(reviseSpatialEffects(reviseCoreEffects(LEGACY_EFFECTS))), ...COLOR_CORRECTION_EFFECTS, ...CORE_IMAGE_EFFECTS, ...SPATIAL_EFFECTS, ...TONAL_EFFECTS, ...LAYER_EFFECTS, COMPOUND_BLUR, SET_CHANNELS, TEXTURIZE, STROKE, APPLY_COLOR_LUT, SOLID_COMPOSITE, ARITHMETIC, ...LAYER_COMPOSITING, ...COLOR_TRANSFORMS, ECHO].map(def=>({...def,sourceProcessing:
+export const EFFECTS: EffectDefinition[] = [...reviseShadowRamp(reviseSpatialEffects(reviseCoreEffects(LEGACY_EFFECTS))), ...COLOR_CORRECTION_EFFECTS, ...CORE_IMAGE_EFFECTS, ...SPATIAL_EFFECTS, ...TONAL_EFFECTS, ...LAYER_EFFECTS, COMPOUND_BLUR, SET_CHANNELS, TEXTURIZE, STROKE, APPLY_COLOR_LUT, SOLID_COMPOSITE, ARITHMETIC, ...LAYER_COMPOSITING, ...COLOR_TRANSFORMS, ECHO, ...FIGMA_DRAWING_EFFECTS].map(def=>({...def,sourceProcessing:
  def.sourceProcessing??(def.id==='compoundBlur'?{padding:['maximumBlur'],factor:1.5}:
  def.id==='displacementMap'?{padding:['maxHorizontal','maxVertical'],factor:1,when:'expand'}:
  {padding:def.viewportPadding??[],factor:def.viewportPaddingFactor??2,pixels:def.viewportPaddingPixels??0})}));

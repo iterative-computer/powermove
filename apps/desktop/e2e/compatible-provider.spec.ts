@@ -28,10 +28,11 @@ test('connects a local model, streams chat, recovers after a broken stream and r
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
-    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
-    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('local-test');
+    // 25d92afc5 renamed the fields; Model now offers datalist suggestions.
+    await settings.getByRole('textbox', { name: 'API address', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
+    await settings.getByRole('combobox', { name: 'Model', exact: true }).fill('local-test');
     await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
-    await expect(settings).toContainText('Connected model: local-test');
+    await expect(settings).toContainText('Connected: local-test');
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.locator('.agent-modelbar select[aria-label="Provider"]')).toHaveValue('compatible');
     await session.openAgent();
@@ -78,11 +79,12 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
-    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
-    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('gpt-6-astra');
+    // 25d92afc5 renamed the fields; Model now offers datalist suggestions.
+    await settings.getByRole('textbox', { name: 'API address', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
+    await settings.getByRole('combobox', { name: 'Model', exact: true }).fill('gpt-6-astra');
     await settings.getByRole('checkbox', { name: 'This model supports images', exact: true }).uncheck();
     await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
-    await expect(settings).toContainText('Connected model: gpt-6-astra');
+    await expect(settings).toContainText('Connected: gpt-6-astra');
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await session.openAgent();
     await page.evaluate(() => {

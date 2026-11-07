@@ -867,6 +867,7 @@ let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
 let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null,gizmoView:any=null,gizmoViewHost:HTMLElement|null=null;
 const freeView=()=>api.scene3d?.getView?.()==='editor';
+const isExtrudedArtwork=(layer:any)=>(layer?.type==='text'||layer?.type==='shape')&&layer.d?.extrusion?.enabled===true&&layer.threeD===true;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
@@ -1283,7 +1284,7 @@ function drawOverlayContent(): boolean | void {
   const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
   sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
   sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
-  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object');
+  const has3D=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object' || isExtrudedArtwork(l));
   for(const host of [gizmoToolbarHost,gizmoViewHost])if(host)host.style.display=has3D?'flex':'none';
 
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -1349,10 +1350,13 @@ function drawOverlayContent(): boolean | void {
   }
 
   const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  /* Extruded text and shapes are drawn by the scene camera, so the 3D layer
+     overlay outlines their real mesh; a flat plane outline would not line up. */
+  const meshOutlined = gizmoVisible && sels.length > 0 && sels.every(isExtrudedArtwork);
   const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
-  if (sels.length > 1 || !selection) for (const L of sels) {
+  if ((sels.length > 1 || !selection) && !meshOutlined) for (const L of sels) {
     const b = layerBounds(api, L, api.transport.time());
     if (!b) continue;
     const m = api.anim.worldMatrix(L, api.transport.time());
@@ -1373,7 +1377,7 @@ function drawOverlayContent(): boolean | void {
   // With the Anchor Point tool the marker is the thing to grab: draw it larger.
   const anchorTool = (V.temporaryTool || toolService()?.tool) === 'anchor';
   const ring = (anchorTool ? 7 : 5) * anchorUnit, arm = (anchorTool ? 11 : 8) * anchorUnit;
-  for (const layer of sels) {
+  for (const layer of meshOutlined ? [] : sels) {
     if (!layerBounds(api, layer, api.transport.time())) continue;
     const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
@@ -1420,6 +1424,7 @@ function drawOverlayContent(): boolean | void {
     c.stroke();
     c.restore();
   }
+  if (selection && meshOutlined) { c.restore(); return; }
   if (selection) {
     c.strokeStyle = selectionInk;
     c.lineWidth = 1.4 / Math.max(.02, V.shown);
@@ -1874,6 +1879,21 @@ function bindStage(stage: any, inner: any): () => void {
       e.stopPropagation();
       api.commands.run('openComposition', hit.d.comp);
       return;
+    }
+    /* Double-clicking an imported model picks the part under the pointer
+       (outer part first, then a level deeper each time), so the 3D handles
+       move that part, like entering a group in a design tool. */
+    if (hit?.d?.definition === 'powermove.3d.object' && api.scene3d?.pickPart) {
+      const part = api.scene3d.pickPart(hit.id, x, y);
+      if (part) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!api.selection.layers().includes(hit.id) || api.selection.layers().length !== 1) selectLayers(hit.id);
+        api.scene3d.setActivePart(hit.id, part);
+        refreshInspector();
+        invalidate();
+        return;
+      }
     }
     /* Double-clicking a 3D scene layer opens it in the 3D Scene editor; a
        legacy OBJ layer is first converted to a scene (one Undo). */

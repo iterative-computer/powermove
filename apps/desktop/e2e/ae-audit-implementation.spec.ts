@@ -24,9 +24,10 @@ test('editable Pen, canvas text, graph and preview controls render coherently',a
  await page.screenshot({path:path.join(evidence,'text-animator.png')});
  await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);
- const full=await page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height]);
+ // Preview dimensions are rounded once from the visible crop (354c7202a).
+ const quarter=await page.evaluate(()=>{const PM=(window as any).PM,v=PM.GL.previewViewport,dpr=Math.min(2,Math.max(1,devicePixelRatio));return v?[Math.round(v.cssWidth*dpr*.25),Math.round(v.cssHeight*dpr*.25)]:[Math.round(PM.proj.w*.25),Math.round(PM.proj.h*.25)];});
  await page.locator('#viewer-foot select[aria-label="Preview resolution"]').selectOption('0.25');
- await expect.poll(()=>page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height])).toEqual(full.map(n=>Math.round(n*.25)));
+ await expect.poll(()=>page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height])).toEqual(quarter);
  const geometry=await page.locator('#tl-head').evaluate(el=>{const r=el.getBoundingClientRect();return [...el.querySelectorAll('button,input,select')].filter((e:any)=>getComputedStyle(e).display!=='none').map(e=>({name:e.getAttribute('aria-label')||e.getAttribute('title'),right:e.getBoundingClientRect().right,bound:r.right}));});
  expect(geometry.every((r:any)=>r.right<=r.bound+1)).toBe(true);
  expect(session.diagnostics.pageErrors).toEqual([]);

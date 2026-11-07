@@ -37,7 +37,7 @@ test('referenced video samples exact shutter times through reverse seeks and rep
    }finally{PM.GL.cancelInputPreview();PM.Export.busy=false;PM.agentFrameCapture=true;}
    const nativeOptions={mblur:true,mbSamples:16,shutter:1,opaque:true,topDownOpaque:true},native:number[]=[];
    for(const time of [0,.25,.5,.75]){await PM.prepareFrame(time,nativeOptions);native.push(...PM.GL.renderToPixels(time,64,32,nativeOptions));}
-   const exported=await PM.Export.run({format:'mp4',alpha:false,scale:1,fps:4,range:'all',quality:'draft',audio:false,mblur:true});
+   PM.agentFrameCapture=false;const exported=await PM.Export.run({format:'mp4',alpha:false,scale:1,fps:4,range:'all',quality:'draft',audio:false,mblur:true});
    const child={...project,id:PM.uid('comp'),w:32,h:32,layers:[group,owner,video],comps:{}};project.comps[child.id]=child;
    const a=PM.mkLayer('precomp',{name:'A',d:{comp:child.id,w:32,h:32,trim:.25},p:{'position.x':0,'position.y':0}},project),b=PM.mkLayer('precomp',{name:'B',d:{comp:child.id,w:32,h:32,trim:0},p:{'position.x':32,'position.y':0}},project);b.p['position.x'].v=32;project.layers=[a,b];PM.touch();
    const options={mblur:true,mbSamples:4,shutter:1,transparent:true};await PM.prepareFrame(.25,options);let p;try{p=PM.GL.renderToPixels(.25,64,32,options);}catch(e:any){throw Error(e.message+' Prepared: '+JSON.stringify([...PM.preparedVideoFrames.keys()]));}

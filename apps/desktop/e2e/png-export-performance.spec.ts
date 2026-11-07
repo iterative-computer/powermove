@@ -30,7 +30,7 @@ test('reuses and releases one opaque PNG surface while preserving every animated
       encodes++; surfaces.add(this); return (encode as any).apply(this, args);
     };
     try {
-      const result = await PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 6, range: 'all', audio: false, mblur: false });
+      const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 6, range: 'all', audio: false, mblur: false }));
       return { result, expected, captures, encodes, surfaces: surfaces.size,
         released: [...surfaces].every(canvas => canvas.width === 0 && canvas.height === 0) };
     } finally { PM.GL.renderToPixels = capture; HTMLCanvasElement.prototype.toBlob = encode; }
@@ -81,7 +81,7 @@ for (const { alpha, depth } of [{ alpha: false, depth: 16 }, { alpha: true, dept
     HTMLCanvasElement.prototype.toBlob = function (...args: any[]) { encodes++; return (encode as any).apply(this, args); };
     try {
       const start = performance.now();
-      const result = await PM.Export.run({ format: 'png', alpha, scale: 1, fps: 24, range: 'all', audio: false, mblur: false });
+      const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'png', alpha, scale: 1, fps: 24, range: 'all', audio: false, mblur: false }));
       return { result, captures, encodes, ms: performance.now() - start };
     } finally {
       PM.GL.renderToPixels = capture;
@@ -112,7 +112,7 @@ for (const alpha of [false, true]) test(`PNG reuse preserves fractional layer en
     if (alpha) project.backgroundFill = { type: 'none', stops: [], angle: 0 };
     project.layers = [PM.mkLayer('solid', { from: .5 + .5e-6, dur: 1, d: { color: '#ff0000' } }, project)];
     PM.proj = project; PM.touch();
-    return PM.Export.run({ format: 'png', alpha, scale: 1, fps: 10, range: 'all', audio: false, mblur: false });
+    return (PM.agentFrameCapture=false,PM.Export.run({ format: 'png', alpha, scale: 1, fps: 10, range: 'all', audio: false, mblur: false }));
   }, alpha)).toEqual({ cancelled: false });
   const decoded = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'),
     ['-v', 'error', '-i', path.join(session.userData, 'Cuts_%05d.png'), '-vf', 'scale=1:1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1']);
@@ -141,7 +141,7 @@ test('PNG reuse preserves grouped motion blur with a negative shutter', async ({
       const canvas = PM.renderFrameTo(project.work[0] + index / 240, 64, 64, { mblur: true });
       return [...canvas.getContext('2d').getImageData(32, 32, 1, 1).data];
     });
-    const result = await PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 240, range: 'work', audio: false, mblur: true });
+    const result = await (PM.agentFrameCapture=false,PM.Export.run({ format: 'png', alpha: false, scale: 1, fps: 240, range: 'work', audio: false, mblur: true }));
     return { result, pixels };
   });
   expect(reference.result).toEqual({ cancelled: false });

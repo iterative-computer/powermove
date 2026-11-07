@@ -72,7 +72,7 @@
   function timing(animator: any) {
     const time = transport.time;
     const values = Object.fromEntries(['delay', 'duration', 'stagger'].map((key) => [key, Number(value(animator, key)) || 0]));
-    const lines = api.render.textLayout(layer, time)?.lines
+    const lines = api.render.textLayout?.(layer, time)?.lines
       ?? String(api.anim.evP(layer, layer.d.text, time, 'c.text') ?? '').split('\n').map((text) => ({ text }));
     const unit = animator.unit ?? (animator.p?.unit?.v === 'words' || animator.p?.unit?.v === 'lines' ? animator.p.unit.v : 'characters');
     const count = Math.max(countTextUnits(lines, unit) + Math.max(0, Math.floor(Number(animator.unitOffset) || 0)), Math.floor(Number(animator.unitTotal) || 0), 1);

@@ -8,30 +8,23 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await page.evaluate(() => (window as any).PM.Kernel.loader.builtinsReady);
-  await session.app.evaluate(({ Menu }) => {
-    (globalThis as any).__menuRequests = 0;
-    Menu.prototype.popup = function (options) {
-      (globalThis as any).__menuRequests++;
-      options?.callback?.();
-    };
-  });
-  let menuRequests = 0;
-  // The panel pool also keeps offscreen panels mounted; exercise the workspace.
+  // 06d25cf64 moved menus into the shared overlay. Exercise real visible
+  // triggers; pooled hidden panels are not controls the user can press.
+  const menu = page.locator('[data-svelte-overlay-menu] .menu-panel[data-level="0"]');
   const triggers = page.locator('#body button[aria-haspopup="menu"], #body button.panel-options');
   expect(await triggers.count()).toBeGreaterThan(5);
   const checked: string[] = [];
   for (let index = 0; index < await triggers.count(); index++) {
     const trigger = triggers.nth(index);
     if (!await trigger.isVisible() || !await trigger.isEnabled()) continue;
-    const label = await trigger.getAttribute('aria-label');
-    await test.step(label || `Dropdown ${index}`, async () => {
-      await trigger.scrollIntoViewIfNeeded();
-      for (let click = 0; click < 3; click++) {
-        await trigger.click();
-        await expect.poll(() => session.app.evaluate(() => (globalThis as any).__menuRequests)).toBe(++menuRequests);
-      }
-    });
-    checked.push(label || String(index));
+    await trigger.scrollIntoViewIfNeeded();
+    for (let open = 0; open < 3; open++) {
+      await trigger.click();
+      await expect(menu).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(menu).toHaveCount(0);
+    }
+    checked.push(await trigger.getAttribute('aria-label') || String(index));
   }
   await test.info().attach('checked-dropdowns', { body: JSON.stringify(checked, null, 2), contentType: 'application/json' });
 
@@ -48,6 +41,8 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
     await page.keyboard.press('Escape');
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   }
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#agent-popover')).toBeHidden();
   await page.evaluate(() => (window as any).PM.cmd('newText'));
   const font = page.locator('button.font-select').first();
   await expect(font).toBeVisible();
@@ -59,25 +54,34 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   await expect(page.locator('.font-menu')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.locator('.font-menu')).toHaveCount(0);
-  // Older installed viewer extensions still emit inline background shorthand.
-  // Verify the shell CSS also works without remounting those controls.
-  await page.evaluate(() => {
+  // 21dd50aca removes the legacy preview wrapper from the modern viewer.
+  // Exercise its still-supported CSS with an explicit old-extension fixture,
+  // then choose values through the real current viewer dropdowns below.
+  const legacyStyles = await page.evaluate(() => {
     document.documentElement.dataset.theme = 'dark';
-    for (const el of document.querySelectorAll<HTMLElement>('#composition-zoom,#preview-controls select')) {
-      el.style.background = 'color-mix(in srgb,var(--tx) 5%,var(--bg-panel))';
-      el.style.padding = '0 10px';
-    }
+    const preview = document.createElement('div'); preview.id = 'preview-controls';
+    const quality = document.createElement('select'); quality.dataset.native = '';
+    preview.append(quality); document.body.append(preview);
+    try {
+      return [quality, document.querySelector<HTMLElement>('#composition-zoom')!].map(control => {
+        control.style.background = 'color-mix(in srgb,var(--tx) 5%,var(--bg-panel))';
+        control.style.padding = '0 10px';
+        const style = getComputedStyle(control);
+        return { image: style.backgroundImage, appearance: style.appearance, right: style.paddingRight, arrow: style.backgroundPosition };
+      });
+    } finally { preview.remove(); }
   });
-  for (const selector of ['#preview-controls select', '#composition-zoom']) {
-    const control = page.locator(selector);
-    expect(await control.evaluate(el => getComputedStyle(el).backgroundImage)).toContain('data:image/svg+xml');
-    expect(await control.evaluate(el => ({ appearance: getComputedStyle(el).appearance, right: getComputedStyle(el).paddingRight, arrow: getComputedStyle(el).backgroundPosition }))).toEqual({ appearance: 'none', right: '26px', arrow: 'calc(100% - 10px) 50%' });
+  for (const { image, ...style } of legacyStyles) {
+    expect(image).toContain('data:image/svg+xml');
+    expect(style).toEqual({ appearance: 'none', right: '26px', arrow: 'calc(100% - 10px) 50%' });
   }
-  await page.locator('#preview-controls select').selectOption('0.25');
-  await expect(page.locator('#preview-controls select')).toHaveValue('0.25');
-  await page.locator('#composition-zoom').selectOption('1');
+  const quality = page.getByRole('combobox', { name: 'Preview resolution', exact: true });
+  await quality.click(); await page.getByRole('option', { name: 'Quarter', exact: true }).click();
+  await expect(page.locator('#preview-resolution')).toHaveValue('0.25');
+  const zoom = page.getByRole('combobox', { name: 'Composition zoom', exact: true });
+  await zoom.click(); await page.getByRole('option', { name: '100%', exact: true }).click();
   await expect(page.locator('#composition-zoom')).toHaveValue('1');
-  await page.locator('#preview-controls').screenshot({ path: '/private/tmp/pm-dropdown-padding-after.png' });
-  await page.locator('#composition-zoom').screenshot({ path: '/private/tmp/pm-dropdown-zoom-after.png' });
+  await quality.screenshot({ path: test.info().outputPath('dropdown-preview.png') });
+  await zoom.screenshot({ path: test.info().outputPath('dropdown-zoom.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

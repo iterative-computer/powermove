@@ -23,7 +23,9 @@
   .inspector-section-heading.is-empty :global(.sec) { height: 33px; padding-top: 0; }
   /* Empty headings are one-line bands: after rows they keep the usual 8px
      gap, but a run of them (Fill, Stroke) stacks rule to rule. */
-  .inspector-section-heading.is-empty + .inspector-section-heading.is-empty :global(.sec) { margin-top: 0; }
+  /* The sibling is another component instance; keep that part global so
+     Svelte does not prune the rule as an impossible local sibling. */
+  .inspector-section-heading.is-empty + :global(.inspector-section-heading.is-empty .sec) { margin-top: 0; }
   .inspector-section-heading :global(.section-action) {
     display: grid;
     flex: none;

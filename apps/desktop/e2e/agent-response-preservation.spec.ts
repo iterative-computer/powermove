@@ -13,7 +13,7 @@ for (const context of ['app', 'project'] as const) {
   for (const theme of ['dark', 'light'] as const) {
     test(`keeps the complete ${context} answer after completion and follow-ups in ${theme} mode`, async ({ session }, testInfo) => {
       if (context === 'project') await session.openEditor();
-      await session.openAgent();
+      await session.openAgent({ context });
       const { page } = session;
       await page.evaluate(({ theme, context }) => {
         const PM = (window as any).PM;
@@ -27,7 +27,7 @@ for (const context of ['app', 'project'] as const) {
       const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
       await composer.fill('where is the artifacts folder');
       await composer.press('Enter');
-      await session.openAgent();
+      await session.openAgent({ context });
       await expect.poll(() => page.evaluate(() => (window as any).__preservationRuns.length)).toBe(1);
       await page.evaluate(text => {
         const run = (window as any).__preservationRuns[0];
@@ -64,7 +64,7 @@ for (const context of ['app', 'project'] as const) {
       for (const prompt of ['ok', 'One more question']) {
         await composer.fill(prompt);
         await composer.press('Enter');
-        await session.openAgent();
+        await session.openAgent({ context });
         await expect.poll(() => page.evaluate(() => (window as any).__preservationRuns.length)).toBe(prompt === 'ok' ? 2 : 3);
         expect(await response.innerText()).toBe(before);
         await response.locator('p').last().scrollIntoViewIfNeeded();
@@ -88,7 +88,7 @@ for (const context of ['app', 'project'] as const) {
 for (const context of ['app', 'project'] as const) {
   test(`keeps ${context} result notes after sending a message and reopening history`, async ({ session }) => {
     if (context === 'project') await session.openEditor();
-    await session.openAgent();
+    await session.openAgent({ context });
     const { page } = session;
     await page.evaluate(context => {
       const PM = (window as any).PM;
@@ -103,7 +103,7 @@ for (const context of ['app', 'project'] as const) {
     const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     await composer.fill('where is the artifacts folder');
     await composer.press('Enter');
-    await session.openAgent();
+    await session.openAgent({ context });
     await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe('result');
     const log = page.getByRole('log', { name: 'Agent conversation' });
     await expect(log).toContainText('The other empty folder can be ignored.');
@@ -111,7 +111,7 @@ for (const context of ['app', 'project'] as const) {
     await page.evaluate(() => { (window as any).PM.CodexBridge.request = () => new Promise(() => {}); });
     await composer.fill('ok');
     await composer.press('Enter');
-    await session.openAgent();
+    await session.openAgent({ context });
     await expect(log).toContainText('Subfolders: logos, harnesses, fonts, and screens.');
     await expect(log).toContainText('I could not open Finder for you.');
     await expect(log).toContainText('The other empty folder can be ignored.');
@@ -124,7 +124,7 @@ for (const context of ['app', 'project'] as const) {
     await expect(log).toContainText('The other empty folder can be ignored.');
     if (context === 'app') {
       await session.relaunch();
-      await session.openAgent();
+      await session.openAgent({ context });
       const restoredLog = session.page.getByRole('log', { name: 'Agent conversation' });
       await expect.poll(() => session.page.evaluate(() => (window as any).PM.AgentUI.state.threadId)).toBe(threadId);
       await expect(restoredLog).toContainText('Subfolders: logos, harnesses, fonts, and screens.');

@@ -1,3 +1,4 @@
+import { nativeSceneBridge } from './native-transform';
 import * as THREE from 'three';
 import { EXTRUSION_SURFACES, isExtrudedLayer, isShared3DPlane, EXTRUSION_DEFAULTS, surfaceFields, type ExtrusionSurface } from './extrusion-data';
 import { layerExtrusionOutlines, type ExtrusionOutlineSample } from './extrusion-outlines';
@@ -10,8 +11,7 @@ export interface ExtrusionMeshSample extends ExtrusionOutlineSample {
   plane?:CompositionTextureFrame;id:string;name:string;matrix:THREE.Matrix4;opacity:number;surfaces:Partial<Record<ExtrusionSurface,{maps:MaterialMaps;values:Partial<MaterialPropertyValues>&{color?:string}}>>;
 }
 export function compositionExtrusions(PM:any,comp:any,time:number):ExtrusionMeshSample[]{
-  const out:ExtrusionMeshSample[]=[],unit=6/Math.max(1,comp.h);
-  const bridge=new THREE.Matrix4().makeTranslation(-comp.w*unit/2,3,0).multiply(new THREE.Matrix4().makeScale(unit,-unit,-unit));
+  const out:ExtrusionMeshSample[]=[],bridge=nativeSceneBridge(comp);
   for(const layer of comp.layers || [])if((isExtrudedLayer(layer) || isShared3DPlane(comp,layer)) && (PM.active?PM.active(layer,time):layer.on!==false)){
     let sample= isExtrudedLayer(layer)?layerExtrusionOutlines(PM,layer,time):null;
     let plane:CompositionTextureFrame|undefined;

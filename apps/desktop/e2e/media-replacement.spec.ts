@@ -4,7 +4,10 @@ import { expect, test, chooseNativeMenu } from './helpers/app';
 import { importFixture } from './helpers/media';
 import { MEDIA_ACCEPT } from '../src/shared/media-formats';
 
-test.beforeEach(async ({ session }) => { await session.openEditor(); });
+test.beforeEach(async ({ session }) => {
+  await session.openEditor();
+  await session.page.evaluate(() => (window as any).PM.Layout.activateTab('assets'));
+});
 
 test('replacement uses the import picker, progress, and image sequence flow', async ({ session }) => {
   const { page } = session;
@@ -33,13 +36,14 @@ test('replacement uses the import picker, progress, and image sequence flow', as
     (window as any).releaseReplacement = () => { PM.MediaStore.put = original; release(); };
   });
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
-  const progress = page.getByRole('status', { name: 'Importing image sequence', exact: true });
+  await page.locator('.task-pill').click();
+  const progress = page.getByRole('group', { name: 'Running tasks' });
   try {
-    await expect(progress).toContainText('Importing image sequence');
+    await expect(progress).toContainText('Saving media · frame sequence.webm');
     await progress.screenshot({ path: test.info().outputPath('replacement-progress.png') });
     expect(await page.evaluate(id => (window as any).PM.proj.assets[id].name, before.id)).toBe('h264-aac.mp4');
   } finally { await page.evaluate(async () => { (window as any).releaseReplacement(); await (window as any).PM.app.importQueue; }); }
-  await expect(progress).toHaveCount(0);
+  await expect(progress.getByRole('progressbar')).toHaveCount(0);
   expect(await page.evaluate(id => {
     const PM = (window as any).PM;
     return { name: PM.proj.assets[id].name, sequence: PM.proj.assets[id].imageSequence, layers: JSON.stringify(PM.proj.layers), count: Object.keys(PM.proj.assets).length };
@@ -63,7 +67,7 @@ test('replacement picker remains bound to its original project', async ({ sessio
   await picker.setFiles(path.join(__dirname, './fixtures/tone.mp3'));
   await page.evaluate(() => (window as any).PM.app.importQueue);
   expect(await page.evaluate(() => Object.keys((window as any).PM.proj.assets))).toEqual([]);
-  await expect(page.locator('.import-progress')).toHaveCount(0);
+  await expect(page.locator('.task-pop [role=progressbar]')).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
   // Project-close behavior is covered separately; finish this isolated picker session.
   await session.app.evaluate(({ app }) => app.exit(0)).catch(() => undefined);
@@ -164,7 +168,7 @@ test('replacement picker cancellation and unreadable or incompatible files leave
   expect(outcomes).toEqual({ project: before.project, runtimeName: 'tone.wav' });
   await page.evaluate(id => (window as any).PM.importFiles([new File(['invalid'], 'broken.wav', { type: 'audio/wav' })], { replaceAssetId: id }), before.id);
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before.project);
-  await expect(page.locator('.import-progress')).toHaveCount(0);
+  await expect(page.locator('.task-pop [role=progressbar]')).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

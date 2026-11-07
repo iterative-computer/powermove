@@ -397,6 +397,18 @@ export interface Scene3DAPI {
   /** null index = whole-model material; null map restores the original source slot. */
   setMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,map:import('../core/scene3d/material-maps').MaterialMap|null,meta?:EditMeta):EditResult;
   isGroup(layerId:string):boolean;
+  /** Parts of an imported model (its file's node tree), in tree order. */
+  listParts(layerId:string):import('../core/scene3d/model-parts').ModelPart[];
+  /** A part's evaluated offsets; installed is false until it is first edited. */
+  getPart(layerId:string,key:string,time?:number):{installed:boolean;channels:Record<string,any>|null;values:import('../core/scene3d/model-parts').PartValues;paths:Record<keyof import('../core/scene3d/model-parts').PartValues,string>};
+  /** Edit a part's offsets (values or channels); null removes them. */
+  setPart(layerId:string,key:string,patch:Partial<Record<keyof import('../core/scene3d/model-parts').PartValues,unknown>>|null,meta?:EditMeta):EditResult;
+  /** The part the viewer gizmo and Properties are editing, per model layer. */
+  getActivePart(layerId:string):string|null;
+  setActivePart(layerId:string,key:string|null):void;
+  onActivePartChange(listener:()=>void):Disposable;
+  /** The part under a composition point (double-click: outer part first, then deeper). */
+  pickPart(layerId:string,x:number,y:number):string|null;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;

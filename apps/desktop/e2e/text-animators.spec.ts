@@ -46,13 +46,16 @@ test('a stagger preset plays without keyframes and its timeline band edits timin
       const next = masks.nextElementSibling as HTMLElement;
       const action = header.querySelector<HTMLElement>('button')!;
       const h = header.getBoundingClientRect(), a = action.getBoundingClientRect();
-      return { height: h.height, footprint: animator.getBoundingClientRect().height, gap: masks.getBoundingClientRect().top - animator.getBoundingClientRect().bottom,
+      return { height: h.height, footprint: animator.getBoundingClientRect().height, // 4f5cf623d keeps an 8px margin after rows and inserts Effects before Masks.
+        effectsBetween: animator.nextElementSibling?.textContent?.trim() === 'Effects'
+          && animator.nextElementSibling?.nextElementSibling?.hasAttribute('data-effects-section')
+          && animator.nextElementSibling?.nextElementSibling?.nextElementSibling === masks,
         centered: Math.abs((a.top + a.height / 2) - (h.top + h.height / 2)) < 1,
         maskButtons: masks.querySelectorAll('button').length,
         nextGap: next.getBoundingClientRect().top - masks.getBoundingClientRect().bottom,
         matchingTitleColor: getComputedStyle(header).color === getComputedStyle(next).color };
     });
-    expect(layout).toEqual({ height: 33, footprint: 33, gap: 0, centered: true, maskButtons: 1, nextGap: 0, matchingTitleColor: true });
+    expect(layout).toEqual({ height: 33, footprint: 41, effectsBetween: true, centered: true, maskButtons: 1, nextGap: 0, matchingTitleColor: true });
     await page.locator('[data-empty-section="Masks"]').scrollIntoViewIfNeeded();
     const a = (await empty.boundingBox())!;
     const m = (await page.locator('[data-empty-section="Masks"]').boundingBox())!;

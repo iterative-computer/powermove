@@ -19,6 +19,7 @@ describe('audio import project safety oracle', () => {
       setTimeout, clearTimeout,
     });
     const preparation = deferred<any>();
+    const decodingStarted = deferred<void>();
     const disposed: any[] = [];
     const projectA = { id: 'A', assets: {}, layers: [] };
     const projectB = { id: 'B', assets: {}, layers: [] };
@@ -27,7 +28,7 @@ describe('audio import project safety oracle', () => {
     PM.uid = () => 'asset-new';
     PM.Audio = {
       accepts: () => true,
-      prepareAsset: () => preparation.promise,
+      prepareAsset: () => { decodingStarted.resolve(); return preparation.promise; },
       disposeAsset: (asset: any) => disposed.push(asset),
       rebalanceCache() {},
     };
@@ -42,7 +43,9 @@ describe('audio import project safety oracle', () => {
     PM.touch = () => {};
 
     const importing = PM.assets.add({ name: 'slow.mp3', type: 'audio/mpeg', size: 10 });
-    await new Promise((resolve) => setImmediate(resolve));
+    // Media preparation now yields before decoding (bf26d9b3e); switch only once
+    // the slow decode is actually in flight, so disposal remains exercised.
+    await decodingStarted.promise;
     PM.proj = projectB;
     PM.assets.clear();
     const prepared = { id: 'asset-new', name: 'slow.mp3', kind: 'audio' };

@@ -3,8 +3,9 @@ import { expect, test } from './helpers/app';
 test.beforeEach(async ({ session }) => { await session.openEditor(); await session.openAgent(); });
 
 test.describe('@prompt-glow run halo around the prompt being answered', () => {
-  test('wraps the live prompt, stays out of the way, and settles out when the run lands', async ({ session }) => {
+  for (const theme of ['light', 'dark'] as const) test(`wraps the live prompt, stays out of the way, and settles out in ${theme}`, async ({ session }) => {
     const { page } = session;
+    await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
     await page.evaluate(() => {
       const PM = (window as any).PM;
       // Deterministic stalled run; no real Codex call or user-data writes.
@@ -55,14 +56,23 @@ test.describe('@prompt-glow run halo around the prompt being answered', () => {
       element.parentElement!.querySelector('.agent-bubble')!.textContent
     )).toBe('Actually make them larger too');
 
-    await page.evaluate(() => {
+    await page.screenshot({ path: test.info().outputPath('active-prompt-halo.png') });
+    const fade = await page.evaluate(async () => {
+      const signal = document.querySelector('.agent-prompt-signal')!;
+      const started = new Promise(resolve => signal.addEventListener('outrostart', () => queueMicrotask(() => {
+        resolve({ connected: signal.isConnected, canvas: !!signal.querySelector('canvas'),
+          duration: signal.getAnimations()[0]?.effect?.getTiming().duration });
+      }), { once: true }));
       (window as any).__glowRun.resolve({
         text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] })
       });
+      return started;
     });
+    // Observe the actual 220ms exit, rather than racing it across IPC.
+    await page.screenshot({ path: test.info().outputPath(`prompt-halo-exit-${theme}.png`) });
+    expect(fade).toEqual({ connected: true, canvas: true, duration: 220 });
     // The halo fades out rather than blinking off, and takes its canvas with it
     // when it goes, so a finished run costs no frames.
-    await expect(glow).toHaveCount(1);
     await expect(glow).toHaveCount(0, { timeout: 5_000 });
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

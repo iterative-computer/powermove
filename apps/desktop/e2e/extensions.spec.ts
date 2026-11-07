@@ -170,6 +170,8 @@ export default function activate(api: PowermoveAPI) {
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await settings.getByRole('button', { name: 'Extensions', exact: true }).click();
     await settings.screenshot({ path: '/private/tmp/powermove-extension-list.png' });
+    // bf26d9b3e groups installed extensions behind category disclosures.
+    await settings.getByRole('button', { name: 'Panels, 1 extension', exact: true }).click();
     await settings.getByRole('button', { name: 'Open Interface cleanup', exact: true }).click();
     const row = settings.locator('.settings-extension-detail[data-extension-id="settings-override"]');
     await expect(row).toContainText('Replaces');
@@ -183,8 +185,9 @@ export default function activate(api: PowermoveAPI) {
     await expect(row).toBeVisible();
     await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
     await row.getByRole('button', { name: 'Delete extension', exact: true }).click();
-    await expect(row).toHaveCount(0);
-    await expect(settings.locator('[data-extension-id="settings-override"]')).toHaveCount(0);
+    // The reusable details dialog closes; the installed row is removed.
+    await expect(row).toBeHidden();
+    await expect(settings.locator('.settings-extension-list [data-extension-id="settings-override"]')).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('timeline');
     await expect(page.locator('#panel-timeline #tl-canvas')).toHaveCount(1);
     expect(session.diagnostics.pageErrors).toEqual([]);

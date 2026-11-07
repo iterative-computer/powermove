@@ -6,6 +6,7 @@
   import Turn from './Turn.svelte';
   import ResultActions from './ResultActions.svelte';
   import { groupConversation, workDuration } from './work-groups';
+  import { prefersReducedMotion } from './motion';
 
   /* `welcome` replaces the default empty state, for hosts that already know what is being changed. */
   let { PM, welcome }: { PM: Record<string, any>; welcome?: Snippet } = $props();
@@ -31,8 +32,20 @@
     ? agentState.conversation.reduce((found, message, index) => message.role === 'user' ? index : found, -1)
     : -1);
 
+  // Let the answered prompt's existing local halo exit finish before moving
+  // steering messages into folded work. Removing its ancestor bypasses that
+  // transition; making it global can retain other retiring conversation rows.
+  let settlingFrom = $state<number | null>(null);
+  $effect(() => {
+    if (answeringIndex >= 0) {
+      settlingFrom = agentState.conversation[answeringIndex]?.steering ? answeringIndex : null;
+      return;
+    }
+    const timer = setTimeout(() => { settlingFrom = null; }, prefersReducedMotion() ? 0 : 220);
+    return () => clearTimeout(timer);
+  });
   /* A finished turn folds its work behind one row; the running turn stays open. */
-  const entries = $derived(groupConversation(agentState.conversation, answeringIndex >= 0 ? answeringIndex : null));
+  const entries = $derived(groupConversation(agentState.conversation, answeringIndex >= 0 ? answeringIndex : settlingFrom));
   // The panel remounts this per thread, so keys never cross threads.
   let opened = $state<Record<string, boolean>>({});
 </script>

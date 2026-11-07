@@ -24,6 +24,29 @@ afterEach(() => {
 });
 
 describe('installKernel', () => {
+  it('marks definition refreshes as runtime-only while preserving real parameter migrations', () => {
+    const PM = fakePM();
+    PM.proj.layers = [];
+    installed = installKernel(PM);
+    const emit = vi.spyOn(PM.bus, 'emit');
+    const api = installed.api('layer-fixture');
+    const definition = { id: 'fixture.layer', label: 'Fixture', version: 1,
+      params: [{ k: 'amount', label: 'Amount', min: 0, max: 100, def: 25 }],
+      renderer: { kind: 'fragment' as const, fragment: 'void main(){ fragColor=vec4(1.); }' } };
+    const registered = api.layers.register(definition);
+    expect(emit).toHaveBeenLastCalledWith('layers', { runtimeOnly: true });
+    const layer = { type: 'extension', d: { definition: definition.id, params: {} } };
+    PM.proj.layers.push(layer);
+    const override = api.layers.register({ ...definition, label: 'Updated' });
+    expect(layer.d.params).toEqual({ amount: { v: 25, kf: [], expr: null } });
+    expect(emit).toHaveBeenLastCalledWith('layers', { runtimeOnly: false });
+    override.dispose();
+    expect(emit).toHaveBeenLastCalledWith('layers', { runtimeOnly: true });
+    registered.dispose();
+    expect(emit).toHaveBeenLastCalledWith('layers', { runtimeOnly: true });
+    expect(layer.d.params).toEqual({ amount: { v: 25, kf: [], expr: null } });
+  });
+
   it('routes native and API raster calls through disposable extension overrides', () => {
     const PM = fakePM();
     const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10 }));

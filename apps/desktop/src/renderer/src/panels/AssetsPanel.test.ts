@@ -568,7 +568,8 @@ describe('AssetsPanel', () => {
     expect(PM.confirm).toHaveBeenCalledOnce();
     expect(PM.confirm.mock.calls[0][0]).toEqual({
       message: 'Delete “Backdrop.png”?',
-      detail: 'This also removes 1 layer that uses this media. You can undo this.',
+      // bf26d9b3e added effect-source references to the deletion explanation.
+      detail: 'Layers using this media are removed. Effects using it keep a missing source until it is restored. You can undo this.',
       confirmLabel: 'Delete'
     });
 

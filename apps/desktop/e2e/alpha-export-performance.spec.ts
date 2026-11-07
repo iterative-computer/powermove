@@ -118,6 +118,8 @@ for (const depth of [16, 32]) for (const { groupedBlur, still, width, height } o
       } : undefined;
       PM.GL.createAlphaReadback = undefined;
       try {
+        // Setup capture is finished; the exporter correctly rejects an active capture.
+        PM.agentFrameCapture = false;
         const result = await PM.Export.run({ format: still ? 'still' : 'prores', alpha: true, scale: 1, fps: frames,
           range: 'all', audio: false, mblur: groupedBlur });
         return { result, images, surfaces: surfaces.size, sessions, captures, disposals, buffers,
@@ -223,6 +225,8 @@ for (const depth of [16, 32]) test(`rejects GPU loss during a large ${depth}-bit
     };
     PM.GL.createAlphaReadback = undefined;
     try {
+      // Setup capture is finished; the exporter correctly rejects an active capture.
+      PM.agentFrameCapture = false;
       const result = await PM.Export.run({ format: 'prores', alpha: true, scale: 1, fps: 2,
         range: 'all', audio: false, mblur: false });
       return { result, integerReads, captures, disposed, busy: PM.Export.busy };
@@ -247,6 +251,8 @@ for (const depth of [16, 32]) test(`rejects GPU loss during a large ${depth}-bit
     };
     PM.GL.createAlphaReadback = undefined;
     try {
+      // Setup capture is finished; the exporter correctly rejects an active capture.
+      PM.agentFrameCapture = false;
       const result = await PM.Export.run({ format: 'prores', alpha: true, scale: 1, fps: 2,
         range: 'all', audio: false, mblur: false });
       return { result, integerReads, validationReads };
@@ -263,7 +269,7 @@ for (const depth of [16, 32]) test(`rejects GPU loss during a large ${depth}-bit
     const PM = (window as any).PM, name = depth === 32 ? 'createFloatReadback' : 'createHalfReadback', factory = PM.GL[name], asyncFactory = PM.GL.createAlphaReadback;
     PM.GL[name] = undefined;
     PM.GL.createAlphaReadback = undefined;
-    try { return await PM.Export.run({ format: 'prores', alpha: true, scale: 1, fps: 2,
+    try { PM.agentFrameCapture = false; return await PM.Export.run({ format: 'prores', alpha: true, scale: 1, fps: 2,
       range: 'all', audio: false, mblur: false }); }
     finally { PM.GL[name] = factory; PM.GL.createAlphaReadback = asyncFactory; }
   }, depth)).toEqual({ cancelled: false });

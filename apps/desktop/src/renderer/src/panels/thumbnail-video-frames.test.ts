@@ -224,6 +224,7 @@ describe('private thumbnail video frames', () => {
     expect(original.currentTime).toBe(.8); result.dispose(); expect(canvases[0]?.width).toBe(0);
   });
 
+  // bf26d9b3e shares frame requests with temporal rendering, including layer and local time.
   it('plans precomp retiming in the nested scope used by the real expression evaluator', () => {
     const PM: any = makePM('core/easing', 'core/model', 'core/anim', 'gl/compositor');
     PM.proj = PM.mkProject({ dur: 10 }); PM.proj.params.gain = { value: 2 };
@@ -233,7 +234,7 @@ describe('private thumbnail video frames', () => {
     const parent = PM.mkLayer('precomp', { d: { comp: sub.id, timeRemap: PM.P(true), sourceTime: PM.P(0) } });
     parent.d.sourceTime.expr = 'param("gain")'; PM.proj.layers = [parent];
     const asset = { el: {}, dur: 20 }; PM.assets.get = () => asset;
-    expect(PM.GL.thumbnailVideoRequests(PM.proj, 2)).toEqual([{ key: parent.id + '/' + video.id + '@4', asset, at: 4 }]);
+    expect(PM.GL.thumbnailVideoRequests(PM.proj, 2)).toEqual([{ key: parent.id + '/' + video.id + '@4', layer: video, time: 4, asset, at: 4 }]);
     expect(PM.scope).toEqual([]); expect(PM.expressionErrors.get(parent.d.sourceTime)).toBeUndefined();
   });
 
@@ -245,7 +246,7 @@ describe('private thumbnail video frames', () => {
     const plate = PM.mkLayer('solid'), other = PM.mkLayer('solid'); plate.matteSource = matte.id;
     PM.proj.layers = [matte, plate, other];
     const asset = { el: {}, dur: 20 }; PM.assets.get = () => asset;
-    expect(PM.GL.thumbnailVideoRequests(PM.proj, 2)).toEqual([{ key: matte.id + '@2', asset, at: 3 }]);
+    expect(PM.GL.thumbnailVideoRequests(PM.proj, 2)).toEqual([{ key: matte.id + '@2', layer: matte, time: 2, asset, at: 3 }]);
     expect(PM.scope).toEqual([]); expect(matte.on).toBe(false); expect(PM.expressionErrors.get(matte.d.sourceTime)).toBeUndefined();
   });
 

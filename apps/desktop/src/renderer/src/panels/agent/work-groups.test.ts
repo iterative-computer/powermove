@@ -42,6 +42,19 @@ describe('groupConversation', () => {
     ])).toEqual(['user-0', { work: ['trace-1'], durationMs: undefined }, 'assistant-2', 'user-3', 'assistant-4']);
   });
 
+  it('keeps published visual replies visible with the same key after completion', () => {
+    const conversation: AgentMessage[] = [
+      { role: 'user', text: 'Show the timing' },
+      { role: 'assistant', visualReplies: [{ version: 1, id: 'chart', runId: 'run', title: 'Chart', html: '<h1>Chart</h1>', height: 300 }] },
+      { role: 'trace', steps: [tool('publish')], durationMs: 1000 },
+      { role: 'assistant', text: 'Here is the timing.' }
+    ];
+    expect(shape(conversation, 0)).toEqual(['user-0', 'assistant-1', 'trace-2', 'assistant-3']);
+    expect(shape(conversation)).toEqual([
+      'user-0', { work: ['trace-2'], durationMs: 1000 }, 'assistant-1', 'assistant-3'
+    ]);
+  });
+
   it('leaves the running turn and silent runs open', () => {
     const running: AgentMessage[] = [
       { role: 'user', text: 'Old' }, { role: 'trace', steps: [tool('a'), text('ok')] },

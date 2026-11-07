@@ -39,6 +39,16 @@ test('restart restores one project from the last focused window', async ({ sessi
     await PM.flushProject();
     return first.id;
   });
+  // 921687251 makes restored documents load asynchronously. Establish both
+  // windows before choosing the last-focused one; this is a restart test.
+  await expect.poll(() => session.app.windows().length).toBe(2);
+  for (const page of session.app.windows()) {
+    await page.waitForFunction(() => Boolean((window as any).PM?.app));
+    await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      await PM.projectReady; await PM.projectAssetsReady; await PM.Kernel.loader.builtinsReady;
+    });
+  }
   const window = await session.app.browserWindow(session.page);
   await window.evaluate(window => window.emit('focus'));
   await session.relaunch();

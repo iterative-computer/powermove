@@ -46,7 +46,7 @@ for (const alpha of [false, true]) {
       const PM = (window as any).PM;
       const asset = [...PM.assets.map.values()].find((item: any) => item.name === name) as any;
       const source = await PM.MediaStore.get(PM.proj.assets[asset.id]);
-      const key = `${asset.storageKey}:preview:intra-1280-v1:${asset.playbackProxyVersion || 0}:${source.size}`;
+      const key = `${asset.storageKey}:preview:intra-1280-v2:${asset.playbackProxyVersion || 0}:${source.size}`;
       // Installation emits before the optional cache write settles.
       let cached: Blob | null = null;
       for (let attempt = 0; attempt < 100 && !cached; attempt++) {

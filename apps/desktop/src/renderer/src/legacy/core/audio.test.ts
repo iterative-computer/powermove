@@ -90,7 +90,12 @@ describe('legacy audio install', () => {
     });
     const host = {
       AudioContext: createContext,
-      requestIdleCallback: vi.fn((callback: Function) => { callbacks.push(callback); return callbacks.length; }),
+      // bf26d9b3e also schedules decoder prefetch with a timeout. These tests
+      // drive device warmup; leave the independent prefetch task pending.
+      requestIdleCallback: vi.fn((callback: Function, options?: { timeout: number }) => {
+        if (!options) callbacks.push(callback);
+        return callbacks.length + (options ? 100 : 0);
+      }),
       cancelIdleCallback: vi.fn(),
     };
     return { callbacks, resume, createContext, host };
@@ -100,20 +105,20 @@ describe('legacy audio install', () => {
     const f = idleAudio();
     const PM = audioRegistry({ host: f.host, layers: [audioLayer()] });
     PM.bus.emit('assets'); PM.bus.emit('layers');
-    expect(f.host.requestIdleCallback).toHaveBeenCalledTimes(1);
+    expect(f.callbacks).toHaveLength(1);
     expect(f.createContext).not.toHaveBeenCalled();
     f.callbacks.shift()!();
     expect(f.createContext).toHaveBeenCalledTimes(1);
     expect(f.resume).not.toHaveBeenCalled();
     expect(PM.Audio.inspect().running).toBe(false);
     PM.bus.emit('assets');
-    expect(f.host.requestIdleCallback).toHaveBeenCalledTimes(1);
+    expect(f.callbacks).toHaveLength(0);
   });
 
   it('does not prepare audio for a silent project or after audio ownership changes', () => {
     const f = idleAudio();
     const PM = audioRegistry({ host: f.host });
-    expect(f.host.requestIdleCallback).not.toHaveBeenCalled();
+    expect(f.callbacks).toHaveLength(0);
     PM.proj.layers.push(audioLayer()); PM.bus.emit('layers');
     PM.proj.layers = []; PM.bus.emit('layers');
     f.callbacks.shift()!();

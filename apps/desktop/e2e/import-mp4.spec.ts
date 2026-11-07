@@ -14,7 +14,7 @@ test.describe('@import-mp4 H.264 import smoke', () => {
     });
   });
 
-  test('keeps imported video playable after the source is removed and the app closes',async({session}) => {
+  test('keeps an owned imported video playable after the source is removed and the app closes',async({session}) => {
     const source=path.join(session.userData,'temporary-import.mp4');
     await copyFile(fixturePath('h264-aac.mp4'),source);
     const chooser=session.page.waitForEvent('filechooser');
@@ -22,8 +22,14 @@ test.describe('@import-mp4 H.264 import smoke', () => {
     await (await chooser).setFiles(source);
     await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l:any) => l.name==='temporary-import.mp4'));
     const id=await session.page.evaluate(() => (window as any).PM.proj.id);
-    // A successful import promises an app-owned copy, not a session-only URL or
-    // a dependency on the original in Downloads. No test-only store flush.
+    // bf26d9b3e links selected originals. Explicitly retain an owned copy,
+    // as a portable import does, before testing independence from that source.
+    await session.page.evaluate(async () => {
+      const PM = (window as any).PM, meta = Object.values(PM.proj.assets).find((asset: any) => asset.name === 'temporary-import.mp4') as any;
+      const blob = await PM.MediaStore.get(meta.storageKey);
+      if (!blob || !await PM.MediaStore.put(meta.storageKey, blob)) throw new Error('Could not retain the fixture in the library');
+      delete meta.sourcePath;
+    });
     await unlink(source);
     await session.app.evaluate(({ dialog }, filePath) => {
       dialog.showSaveDialog = async () => ({ canceled: false, filePath });

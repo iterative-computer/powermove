@@ -22,7 +22,8 @@ async function expectTimelineScheme(page: Page, scheme: 'light' | 'dark') {
     return {
       scheme: PM.theme.current,
       gutter: matches(15, reversed ? '--bg-panel-2' : '--bg-panel'),
-      tracks: matches(timeline.gut + 23, reversed ? '--bg-panel' : '--bg-panel-2'),
+      // 4f5cf623d gives the gutter and tracks the same panel material.
+      tracks: matches(timeline.gut + 23, reversed ? '--bg-panel-2' : '--bg-panel'),
     };
   })).toEqual({ scheme, gutter: true, tracks: true });
 }

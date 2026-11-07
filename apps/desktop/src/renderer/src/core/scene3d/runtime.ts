@@ -2,6 +2,7 @@ import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
 import { applyMaterialProperties } from './material-properties';
+import { applyParts, captureRestPose, restoreParts } from './model-parts';
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { type MaterialMap } from './material-maps';
@@ -9,7 +10,7 @@ import type { CompositionTextureFrame } from './composition-textures';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
 export type SceneEvaluator = (property: any,path: string) => any;
-export type SceneCompositionGetter = (objectId:string,map:MaterialMap)=>CompositionTextureFrame|null;
+export type SceneCompositionGetter = (objectId:string,map:MaterialMap)=>CompositionTextureFrame|null|'loading';
 export type SceneAssetGetter = (id: string) => any;
 const radians = THREE.MathUtils.degToRad;
 let outputRenderer:THREE.WebGLRenderer|null=null;
@@ -78,16 +79,26 @@ export class SceneRuntime {
   private mixers = new Map<string,{mixer:THREE.AnimationMixer;clips:THREE.AnimationClip[]}>();
   warnings: string[] = [];
   revision = 0;
+  /** Loading captures must be retried even when project/time are unchanged. */
+  materialsPending = false;
 
   constructor() { this.scene.add(this.ambient); }
 
   private texture(id: MaterialMap|undefined,colorSpace: boolean,objectId:string,imported=false,binding='',original?:THREE.Texture|null,nativeArtwork=false): THREE.Texture|null {
     if (!id) return null;
     if(typeof id==='object'){
-      const frame=this.compositionGetter(objectId,id);if(!frame){this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
-      const key=`comp:${objectId}:${JSON.stringify(id)}:${imported}:${binding}`;this.usedTextures.add(key);
+      const key=`comp:${objectId}:${imported}:${binding}`;
+      const frame=this.compositionGetter(objectId,id);
+      if(frame==='loading'){
+        this.materialsPending=true;this.usedTextures.add(key);
+        return this.textures.get(key)?.texture ?? null;
+      }
+      if(!frame){this.warnings.push(`Missing material texture: ${JSON.stringify(id)}`);return null;}
+      this.usedTextures.add(key);
       let entry=this.textures.get(key);
-      if(!entry){
+      if(!entry || entry.texture.image.width!==frame.width || entry.texture.image.height!==frame.height){
+        // GPU data-texture storage has fixed dimensions after its first upload.
+        entry?.texture.dispose();
         const texture=new THREE.DataTexture(frame.pixels,frame.width,frame.height,THREE.RGBAFormat);
         texture.colorSpace=THREE.SRGBColorSpace;texture.flipY=!imported && !nativeArtwork;
         texture.minFilter=THREE.LinearFilter;texture.magFilter=THREE.LinearFilter;
@@ -126,6 +137,7 @@ export class SceneRuntime {
         // Clones own geometry/material lifetime, never the asset store's resources.
         object.traverse((c:any)=> { if (c.geometry) c.geometry=c.geometry.clone();
           if (c.material) c.material=Array.isArray(c.material) ? c.material.map((m:any)=>m.clone()) : c.material.clone(); });
+        captureRestPose(object);
         if (asset.animations?.length) {
           const mixer = new THREE.AnimationMixer(object);
           for (const clip of asset.animations) mixer.clipAction(clip).play();
@@ -152,7 +164,7 @@ export class SceneRuntime {
     // Channel edits mutate the original scene; retain those live channels.
     const data = raw as Scene3D;
     const validated = this.parsed!;
-    this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();
+    this.getter=assets;this.evaluation=evaluate;this.warnings=[];this.compositionGetter=compositionGetter;this.usedTextures.clear();this.materialsPending=false;
     const keep = new Set([...validated.objects,...validated.lights,...extrusions].map(o=>o.id));
     for (const [id,object] of this.objects) if (!keep.has(id)) this.remove(id,object);
     const values = (p:any,prefix:string) => Object.fromEntries(Object.entries<any>(p || {}).map(([k,v])=>{
@@ -235,7 +247,11 @@ export class SceneRuntime {
         }
         applyMaterialProperties(material,properties(0),{opacity:m.opacity,transparent:m.opacity<1,depthWrite:m.opacity>=1,roughness:m.roughness,metalness:m.metalness});
       });
+      // Part offsets sit on top of the file's pose and its own animation.
+      restoreParts(object);
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
+      const parts=(node as any).parts as Record<string,{p:any}>|undefined;
+      if(parts && Object.keys(parts).length)applyParts(object,Object.fromEntries(Object.entries(parts).map(([key,part])=>[key,values(part.p,`o.${node.id}.pt.${key}`)])));
     }
     let nativeVertices=0;
     for(const sample of extrusions){
@@ -408,6 +424,10 @@ export class SceneRuntime {
     return this.renderer.domElement;
   }
   pick(x:number,y:number,ids?:Set<string>,camera=this.camera): string|null {
+    return this.pickHit(x,y,ids,camera)?.id ?? null;
+  }
+  /** The nearest visible mesh under a normalized device point, and its layer. */
+  pickHit(x:number,y:number,ids?:Set<string>,camera=this.camera): {id:string;object:THREE.Object3D}|null {
     this.scene.updateMatrixWorld(true);camera.updateMatrixWorld(true);
     const ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(x,y),camera);
     for (const hit of ray.intersectObjects([...this.objects.values()],true)) {
@@ -416,7 +436,7 @@ export class SceneRuntime {
         if(materials && (Array.isArray(materials)?materials:[materials]).every(m=>m.opacity<=0))continue;
         let visible=true,parent:THREE.Object3D|null=hit.object;
         while(parent){if(!parent.visible)visible=false;parent=parent.parent;}
-        if (visible) return hit.object.userData.sceneId;
+        if (visible) return {id:hit.object.userData.sceneId,object:hit.object};
       }
     }
     return null;

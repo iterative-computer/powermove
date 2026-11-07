@@ -129,7 +129,7 @@
   .visual-expand-icon :global(svg){width:13px;height:13px}
   .visual-attachment-open:hover .visual-expand-icon{color:var(--tx)}
   dialog{display:block;position:static;inset:auto;margin:0;padding:0;width:100%;max-width:none;max-height:none;border:0;background:transparent;color:inherit}
-  dialog[open]{display:flex;flex-direction:column;position:fixed;inset:0;margin:auto;width:90vw;height:90vh;max-height:calc(100vh - 32px);background:var(--bg-float);border-radius:var(--r-xl);box-shadow:var(--visual-modal-shadow,var(--shadow-float));overflow:hidden;transform-origin:center}
+  dialog[open]{display:flex;flex-direction:column;position:fixed;inset:0;margin:auto;width:90vw;height:90vh;max-height:calc(100vh - 32px);background:var(--bg-panel);border-radius:var(--r-xl);box-shadow:var(--visual-modal-shadow,var(--shadow-float));overflow:hidden;transform-origin:center}
   dialog::backdrop{background:rgb(var(--ink-rgb) / .32);backdrop-filter:blur(3px)}
   :global(:root[data-theme="dark"]) dialog::backdrop{background:rgb(0 0 0 / .5)}
   .visual-dialog-toolbar{display:flex;align-items:center;flex:none;gap:var(--gap);padding:12px 18px;color:var(--tx);font:var(--fw-semibold) var(--fs-lg)/var(--lh-tight) var(--f-ui)}

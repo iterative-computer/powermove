@@ -168,9 +168,9 @@ export function registerProjectOpenPathIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx
 }
 
 export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcContext): void {
-  const pending = new Map<object, symbol>();
-  const claimPending = (owner: object) => { const marker = Symbol(); pending.set(owner, marker); return marker; };
-  const releasePending = (owner: object, marker: symbol) => { if (pending.get(owner) === marker) pending.delete(owner); };
+  const pending = new Map<object, { marker: symbol; exporting: boolean }>();
+  const claimPending = (owner: object, exporting = false) => { const marker = Symbol(); pending.set(owner, { marker, exporting }); return marker; };
+  const releasePending = (owner: object, marker: symbol) => { if (pending.get(owner)?.marker === marker) pending.delete(owner); };
   const destinations = new Map<object, { token: string; path: string; directory: boolean }>();
   const watchedOwners = new WeakSet<object>();
   const uploads = new Map<object, { id: string; ready: Promise<FileUpload>; timer: ReturnType<typeof setTimeout>; disposing?: Promise<void> }>();
@@ -327,10 +327,13 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (!isRecord(request)) throw new Error('Invalid export destination');
     const name = sanitizeSaveName(request.name);
     if (!name || (request.directory !== undefined && typeof request.directory !== 'boolean')) throw new Error('Invalid export destination');
-    if (pending.has(event.sender) || destinations.has(event.sender)) throw new Error('An export is already in progress.');
+    if (destinations.has(event.sender) || pending.get(event.sender)?.exporting) throw new Error('An export is already in progress.');
+    // File saves and destination dialogs share this slot. The renderer can
+    // wait for that work without confusing it with another active export.
+    if (pending.has(event.sender)) throw new Error('A save is already in progress.');
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
-    const marker = claimPending(event.sender);
+    const marker = claimPending(event.sender, true);
     watchOwner(event.sender);
     let rendererGone = false;
     const gone = () => { rendererGone = true; };

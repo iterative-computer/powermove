@@ -394,6 +394,18 @@ describe('export delivery', () => {
     expect(release).toHaveBeenCalledWith('destination');
   });
 
+  it('waits for a pending file save before choosing the export destination', async () => {
+    const { X } = setup();
+    const choose = vi.fn().mockRejectedValueOnce(new Error('A save is already in progress.')).mockResolvedValue('destination');
+    const release = vi.fn(async () => {}), saveFile = vi.fn(async () => ({ ok: true }));
+    (window as any).powermove = { exportDestination: { choose, release }, saveFile };
+    expect(await X.run({ ...options, format: 'still' })).toEqual({ cancelled: false });
+    expect(choose).toHaveBeenCalledTimes(2);
+    expect(saveFile).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledWith('destination');
+    expect(X.busy).toBe(false);
+  });
+
   it('releases the destination after rendering fails and allows another export', async () => {
     const { X, PM } = setup();
     const release = vi.fn(async () => {});

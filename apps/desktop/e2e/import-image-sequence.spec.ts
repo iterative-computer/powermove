@@ -38,21 +38,27 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
     (window as any).releaseSequence = () => { window.createImageBitmap = original; release(); };
     (window as any).sequenceProgress = [];
     const observer = new MutationObserver(() => {
-      const card = document.querySelector('.toast[aria-label="Importing image sequence"]');
+      const card = document.querySelector('.task-pop');
       if (card) (window as any).sequenceProgress.push(Number(card.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') || 0));
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
     (window as any).sequenceObserver = observer;
   });
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
-  const progress = page.getByRole('status', { name: 'Importing image sequence', exact: true });
+  // bf26d9b3e moved long imports from toasts into the titlebar task popover.
+  await page.locator('.task-pill').click();
+  const progress = page.getByRole('group', { name: 'Running tasks', exact: true });
   try {
-    await expect(progress).toContainText('Importing image sequence');
-    await expect(progress.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
+    // bf26d9b3e checks source availability before decoding the first frame.
+    // That stage is intentionally indeterminate; later numeric progress remains checked.
+    await expect(progress).toContainText('Checking file availability · frame_009.png');
+    const checking = progress.getByRole('progressbar', { name: 'Checking file availability · frame_009.png', exact: true });
+    await expect(checking).toBeVisible();
+    expect(await checking.getAttribute('aria-valuenow')).toBeNull();
     await progress.screenshot({ path: test.info().outputPath('sequence-progress.png') });
   } finally { await page.evaluate(() => (window as any).releaseSequence()); }
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'frame sequence.webm'));
-  await expect(progress).toHaveCount(0);
+  await expect(progress.getByRole('progressbar')).toHaveCount(0);
   const statuses = await page.evaluate(() => {
     (window as any).sequenceObserver.disconnect();
     return (window as any).sequenceProgress as number[];

@@ -96,7 +96,7 @@ for (const { format, alpha } of formats) test(`retains static bitmap ${format} p
         HTMLCanvasElement.prototype.toBlob = function (...args: any[]) { state.encodes++; return (encode as any).apply(this, args); };
         const before = PM.serialize(), time = PM.time, quality = PM.quality;
         try {
-          const result = await PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false });
+          const result = await (PM.agentFrameCapture=false,PM.Export.run({ format, alpha, scale: 1, fps: 4, range: 'all', quality: 'draft', audio: false, mblur: false }));
           return { result, ...state, preserved: before === PM.serialize() && time === PM.time && quality === PM.quality };
         } finally {
           PM.GL.renderToPixels = pixels; PM.GL.render = render; HTMLCanvasElement.prototype.toBlob = encode;
@@ -189,8 +189,8 @@ for (const format of ['mp4', 'png']) test(`static image ${format} refreshes reta
     await session.page.evaluate(format => {
       const PM = (window as any).PM;
       (window as any).__staticImageResult = null;
-      (window as any).__staticImageJob = PM.Export.run({ format, alpha: false, scale: 1, fps: 4,
-        range: 'all', quality: 'draft', audio: false, mblur: false }).then((result: any) => {
+      (window as any).__staticImageJob = (PM.agentFrameCapture=false,PM.Export.run({ format, alpha: false, scale: 1, fps: 4,
+        range: 'all', quality: 'draft', audio: false, mblur: false })).then((result: any) => {
           (window as any).__staticImageResult = result; return result;
         });
     }, format);
