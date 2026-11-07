@@ -46,10 +46,10 @@ export const sourceSchema = z.union([
   z.object({ lathe: points2, segments: z.number().int().min(3).max(128).optional() }).strict(),
   z.object({ extrude: points2.refine(v => v.length >= 3), depth: num(.0001,10000), bevel: num(0,100).optional() }).strict()
 ]);
-export const materialMapSchema = z.union([z.string().min(1).max(160),z.object({compositionId:z.string().min(1).max(160)}).strict()]);
+export const materialMapSchema = z.union([z.string().min(1).max(160),z.object({compositionId:z.string().min(1).max(160)}).strict(),z.object({layerId:z.string().min(1).max(160)}).strict()]);
 const mapsSchema=z.object(Object.fromEntries(MATERIAL_SLOTS.map(k=>[k,materialMapSchema.optional()]))).strict().superRefine((maps,ctx)=>{
   for(const [slot,map] of Object.entries(maps))if(typeof map==='object' && slot!=='color' && slot!=='emissive')
-    ctx.addIssue({code:'custom',message:'Composition textures support base color and emissive slots',path:[slot]});
+    ctx.addIssue({code:'custom',message:'Composition and layer textures support base color and emissive slots',path:[slot]});
 });
 export const materialSchema = z.object({
   p: p({ color: [color,'#C7C4FF'], roughness: [num(.02,1),.4], metalness: [num(0,1),.1],
@@ -57,10 +57,17 @@ export const materialSchema = z.object({
   maps: mapsSchema.default({}),
   doubleSided: z.boolean().default(true)
 }).strict();
+/** Sparse overrides preserve imported material values and all old documents. */
+export const intrinsicPropertiesSchema = z.object({
+  opacity: channel(num(0,100)).optional(), roughness: channel(num(0,1)).optional(), metallic: channel(num(0,1)).optional(),
+  emissionColor: channel(color).optional(), emissionIntensity: channel(num(0,100)).optional(), ambientResponse: channel(num(0,100)).optional()
+}).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
   useSourceMaterials: z.boolean().default(false),
+  materialProperties: intrinsicPropertiesSchema.default({}),
+  sourceMaterialProperties: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),intrinsicPropertiesSchema).default({}),
   sourceMaterials: z.record(z.string().regex(/^(0|[1-9][0-9]{0,4})$/),mapsSchema).default({}),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
@@ -153,13 +160,15 @@ export function sceneProperties(layer: any): any[] {
     for (const [key,prop] of Object.entries<any>(node?.p || {})) if (prop && Array.isArray(prop.kf))
       out.push({key:`${prefix}.${key}`,prop,label:key,group:name});
   };
-  for (const o of scene.objects || []) { collect(o,`o.${o.id}`,o.name);collect(o.material,`o.${o.id}.m`,`${o.name} material`); }
+  for (const o of scene.objects || []) { collect({p:o.materialProperties},`o.${o.id}.mi`,`${o.name} material`);for(const [index,p] of Object.entries(o.sourceMaterialProperties || {}))collect({p},`o.${o.id}.mi.${index}`,`${o.name} material ${index}`); collect(o,`o.${o.id}`,o.name);collect(o.material,`o.${o.id}.m`,`${o.name} material`); }
   for (const l of scene.lights || []) collect(l,`light.${l.id}`,l.name);
   collect(scene.camera,'camera','Camera');collect(scene.environment,'environment','Scene');
   return out;
 }
 
 export function validateSceneChannel(path:string,property:unknown):void {
+  const intrinsic=/^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?([^.]+)$/.exec(path);
+  if(intrinsic){const field=intrinsicPropertiesSchema.shape[intrinsic[1]! as keyof typeof intrinsicPropertiesSchema.shape];if(!field)throw new Error(`Unknown material property: ${path}`);field.unwrap().parse(property);return;}
   if(/^m\.[^.]+$/.test(path)) { const field=materialSchema.shape.p.unwrap().shape[path.slice(2)]; if(!field)throw new Error(`Unknown 3D channel: ${path}`); field.parse(property); return; }
   if(/^(light|camera|environment)\.[^.]+$/.test(path)){
     const [prefix,key]=path.split('.');

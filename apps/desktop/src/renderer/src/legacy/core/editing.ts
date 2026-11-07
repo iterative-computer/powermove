@@ -50,7 +50,7 @@ const LAYER_FIELDS: any = new Set([
 let live: any = null;
 
 const validateInputGraphs = (commands?: any[]) => {
-  if(!commands || commands.some(command=>['add_layer','set_content'].includes(command.type)))validateCompositionMaps(PM.proj);
+  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && command.patch?.matteSource!==undefined))validateCompositionMaps(PM.proj);
   // Scalar drags cannot change texture dependencies. Keep graph validation off
   // their critical path, and allow ordinary edits to imported invalid data.
   if (commands && !commands.some(command => ['add_effect','apply_preset','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)

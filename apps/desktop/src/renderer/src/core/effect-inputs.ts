@@ -1,3 +1,4 @@
+import { remapMaterialLayerLinks } from './scene3d/material-maps';
 import type { EffectLayerInput, EffectInputStage, EffectInputSpace, EffectInput } from './types/project';
 
 export class EffectInputError extends Error { override name = 'EffectInputError'; }
@@ -66,6 +67,7 @@ export function validateEffectInputs(value:unknown):Record<string,EffectInput>{
 export const referencedPath=(layer:any,id:string)=>{const mask=layer?.masks?.find((m:any)=>m.id===id);if(mask)return{mask,path:mask.path};const path=layer?.d?.paths?.find((p:any)=>p.id===id);return path?{path}:null;};
 
 export function remapLayerInputs(layer: any, ids: ReadonlyMap<string, string>): void {
+  remapMaterialLayerLinks(layer,ids);
   for (const fx of layer.fx || []) for (const ref of Object.values<any>(fx.inputs || {}))
     if (ref && ids.has(ref.layerId)) ref.layerId = ids.get(ref.layerId);
 }
