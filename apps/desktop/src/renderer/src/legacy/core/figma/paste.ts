@@ -3,6 +3,7 @@ import { isFieldTarget, selectableTextRoot } from '../../../kernel/keychord';
 import type { FigmaSelection } from './clipboard';
 import { clipboardDoc } from './adapter';
 import { applyFigmaPlan, figmaMatches, materializeFigma } from './convert';
+import { figmaImportSummary } from './summary';
 import {
   clipboardFallbacks,
   convertFigma,
@@ -209,24 +210,37 @@ export async function receiveFigma(
     throw error;
   }
   const flattened = plan.issues.length;
-  const details = flattened
-    ? ` · ${flattened} flattened (${plan.issues
-        .slice(0, 3)
-        .map((i) => `${i.name}: ${i.reason}`)
-        .join('; ')})${doc.source === 'clipboard' ? '. Send to Powermove gives better results.' : ''}`
-    : '';
-  PM.toast(
-    `${update ? 'Updated' : 'Imported'} ${plan.layers.length} ${plan.layers.length === 1 ? 'layer' : 'layers'}${details}${missing.length ? ` · Kept missing layers: ${missing.join(', ')}` : ''}`,
-    8000,
-    {
-      key: FIGMA_NOTICE,
-      kind: 'status',
-      ...(doc.source === 'clipboard' && flattened
-        ? { action: { label: 'Connect Figma', run: () => PM.openFigmaConnect?.() } }
+  const warnings = plan.warnings ?? [];
+  const summary = figmaImportSummary({
+    update,
+    layers: plan.layers.length,
+    issues: plan.issues,
+    missing,
+    warnings,
+    clipboard: doc.source === 'clipboard',
+  });
+  // Warnings name source refs; show the layers they became.
+  const warnedLayers = summary.warned
+    .map((ref) => plan.layers[neutral.commands.findIndex((command) => command.ref === ref)]?.id)
+    .filter((id): id is string => typeof id === 'string');
+  PM.toast(summary.message, warnings.length ? 12000 : 8000, {
+    key: FIGMA_NOTICE,
+    kind: 'status',
+    ...(doc.source === 'clipboard' && flattened
+      ? { action: { label: 'Connect Figma', run: () => PM.openFigmaConnect?.() } }
+      : warnedLayers.length
+        ? {
+            action: {
+              label: warnedLayers.length === 1 ? 'Show Layer' : 'Show Layers',
+              run: () => {
+                const present = warnedLayers.filter((id) => PM.L?.(id));
+                if (present.length) PM.selectLayers?.(present);
+              },
+            },
+          }
         : {}),
-    },
-  );
-  return { layers: plan.layers.length, flattened, missing, warnings:plan.warnings??[] };
+  });
+  return { layers: plan.layers.length, flattened, missing, warnings };
 }
 function inlinePng(html: string): File | undefined {
   const data = /<img\b[^>]*\bsrc\s*=\s*["']data:image\/png;base64,([A-Za-z0-9+/=]+)["']/i.exec(html)?.[1];
