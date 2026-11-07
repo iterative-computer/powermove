@@ -15,7 +15,7 @@ import { CHECK_PROJECT_TOOL, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type Agen
 import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
-import { validateEffect } from '../../kernel/glsl';
+import { validateEffect, effectValidationWarnings } from '../../kernel/glsl';
 import { applyMemoryOperation, listMemory, memoryEnabled, memoryIndex, MEMORY_DISABLED_MESSAGE, type MemoryOperation } from '../../core/memory';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
@@ -669,7 +669,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === 'validate_effect') {
     const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
     return { ok: true, content: [toolText({
-      valid: true, id: definition.id, parameterCount: definition.params.length,
+      valid: true, id: definition.id, parameterCount: definition.params.length, warnings: effectValidationWarnings(definition),
       note: 'Definition validation only. This does not register the effect or compile/render its shader.'
     })], revision: currentRevision() };
   }

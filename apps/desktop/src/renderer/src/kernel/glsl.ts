@@ -63,7 +63,22 @@ function validateFrag(frag: unknown, what: string): string {
   return frag;
 }
 
-export function validateEffect(def: EffectDefinition): EffectDefinition {
+export interface EffectValidationWarning {code:'effect-pixel-scale';message:string;fix:string}
+/** Heuristic only: arbitrary GLSL cannot be unit-checked. Ignore comments and
+ * declarations so merely declaring a scale uniform does not silence the hint. */
+export function effectValidationWarnings(def: EffectDefinition): EffectValidationWarning[] {
+  const body=def.frag.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,' ').replace(/\buniform\s+[^;]+;/g,' ');
+  const coordinates=/\bgl_FragCoord\b/.test(body) && !/\b(?:u_pixelScale|effectPixel)\b/.test(body);
+  const pixels=/\bu_(?:texel|resolution|res)\b/.test(body)
+    || /\b(?:radius|blurRadius|pixelRadius)\s*=\s*\d+(?:\.\d*)?/.test(body)
+    || def.params.some(p=>'unit' in p && p.unit==='px' && new RegExp(`\\bu_${p.k}\\b`).test(body));
+  const unscaled=pixels && !/\b(?:u_pixelScale|u_effectScale)\b/.test(body);
+  return coordinates || unscaled ? [{code:'effect-pixel-scale',
+    message:'Pixel coordinates or radii may change size with viewer zoom or preview resolution.',
+    fix:'Use effectPixel() for stable source/composition coordinates, and offset * u_effectScale * u_texel for pixel sampling. Raw shaders must declare the scale uniforms. See EXTENSIONS.md: u_pixelScale/u_effectScale/effectPixel.'}] : [];
+}
+
+export function validateEffect(def: EffectDefinition, onWarning?:(warning:EffectValidationWarning)=>void): EffectDefinition {
   if (!def || typeof def !== 'object') throw new Error('effect: definition must be an object');
   const what = `effect "${String(def.id)}"`;
   if (typeof def.id !== 'string' || !EFFECT_ID.test(def.id)) throw new Error(`effect: invalid id "${String(def.id)}"`);
@@ -110,7 +125,7 @@ export function validateEffect(def: EffectDefinition): EffectDefinition {
       const older = effectVersion(revision?.version);
       if (!revision || revision.id !== def.id || revision.legacy || revision.version == null
           || older === undefined || older >= version || seen.has(older)) throw new Error(`${what}: invalid historical revision`);
-      seen.add(older); validateEffect(revision);
+      seen.add(older); validateEffect(revision, onWarning);
     }
   }
   if (def.actions != null) {
@@ -121,6 +136,7 @@ export function validateEffect(def: EffectDefinition): EffectDefinition {
           || action.keys.some(key => def.params.find(param => param.k === key)?.type !== 'color')) throw new Error(`${what}: invalid color swap action`);
     }
   }
+  if(onWarning)for(const warning of effectValidationWarnings(def))onWarning(warning);
   return def;
 }
 

@@ -1,6 +1,6 @@
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
 import { intrinsicPropertiesSchema } from './schema';
-import { MATERIAL_SLOTS,compositionById,materialLayerStatus,listModelMaterials,materialReceiverHasUVs } from './material-maps';
+import { canAssignMaterialMap,listModelMaterials } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
@@ -115,17 +115,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   };
   switch(args.operation){
     case 'set_material_map':{
-      if(role!=='object')throw new Error('Choose a model layer');
-      if(!args.slot || !MATERIAL_SLOTS.includes(args.slot))throw new Error('Choose a material map slot');
-      if(args.map && typeof args.map==='object'){
-        if('compositionId' in args.map && !compositionById(PM.proj,args.map.compositionId))throw new Error('Composition is unavailable');
-        if('layerId' in args.map){
-          const status=materialLayerStatus(PM.proj,layer.id,args.map.layerId);
-          if(status==='cycle')throw new Error('Layer material reference would create a cycle');
-          if(status!=='ready')throw new Error('Choose an eligible source layer in the same composition');
-          if(!materialReceiverHasUVs(PM,layer))throw new Error('This mesh needs UV coordinates to receive a layer material');
-        }
-      }
+      const check=canAssignMaterialMap(PM,layer.id,args.materialIndex ?? null,args.slot!,args.map ?? null);
+      if(!check.ok)throw new Error(check.reason);
       let maps=content.object.material.maps;
       if(args.materialIndex!=null){
         if(!Number.isInteger(args.materialIndex) || args.materialIndex<0)throw new Error('Invalid source material index');
@@ -134,7 +125,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
         maps=content.object.sourceMaterials[args.materialIndex] ||= {};
         if(content.object.source.assetId)content.object.useSourceMaterials=true;
       }
-      if(args.map==null)delete maps[args.slot];else maps[args.slot]=clone(args.map);
+      if(args.map==null)delete maps[args.slot!];else maps[args.slot!]=clone(args.map);
       if(args.materialIndex!=null && !Object.keys(maps).length)delete content.object.sourceMaterials[args.materialIndex];
       break;
     }

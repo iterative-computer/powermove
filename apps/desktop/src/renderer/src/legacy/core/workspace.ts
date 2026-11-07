@@ -744,6 +744,8 @@ WS.mutate = (fn: any, opts: any = {}) => {
     copy.id = PM.uid('ws');
     copy.name = w.name + ' (edited)';
     copy.builtin = false;
+    // Capture before the first dock edit, just as Save Changes does explicitly.
+    copy.savedState = savedState(w);
     WS.all.push(copy);
     WS.current = copy;
   }

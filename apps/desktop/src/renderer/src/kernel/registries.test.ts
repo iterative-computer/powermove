@@ -45,6 +45,15 @@ describe('kernel keybindings', () => {
 });
 
 describe('kernel effects & transitions', () => {
+  it('reports scale hints on extension registration without blocking it', () => {
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{}),kernel=createKernel();
+    try {
+      const handle=kernel.registerEffect('third-party',effect({frag:'o = src(v_st + 3. * u_texel);'}));
+      expect(kernel.effects.get('wave')).toBeDefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('[third-party] effect wave:'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('u_effectScale'));handle.dispose();
+    } finally {warn.mockRestore();}
+  });
   it('validates ids, passes, params, and frag size', () => {
     const kernel = createKernel();
     expect(() => kernel.registerEffect('ext', effect({ id: '9bad' }))).toThrow(/invalid id/);

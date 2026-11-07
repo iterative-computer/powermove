@@ -8,6 +8,24 @@ function editor(saved = new Map<string, any>()) {
   PM.Layout = { apply() {} }; PM.perf = {}; PM.proj = {id: 'project'}; PM.WS.init(); return PM;
 }
 describe('workspace preferences', () => {
+  it('resets the first built-in edit to its pre-edit baseline across restart', () => {
+    const saved = new Map<string, any>(), PM = editor(saved);
+    PM.WS.reset('design');
+    const original = structuredClone(PM.WS.current.layout);
+    PM.WS.mutate((w: any) => { w.layout.docks[0].size = 377; });
+    const id = PM.WS.current.id;
+    expect(PM.WS.current.builtin).toBe(false);
+    expect(PM.WS.current.savedState.layout).toEqual(original);
+    const restarted = editor(saved);
+    expect(restarted.WS.reset(id)).toBe(true);
+    expect(restarted.WS.current.layout).toEqual(original);
+    restarted.WS.mutate((w: any) => { w.layout.docks[0].size = 388; });
+    expect(restarted.WS.saveLayout()).toBe(true);
+    restarted.WS.mutate((w: any) => { w.layout.docks[0].size = 399; });
+    restarted.WS.reset();
+    expect(restarted.WS.current.layout.docks[0].size).toBe(388);
+  });
+
   it('uses the last arrangement for a new project after restart', () => {
     const saved = new Map<string, any>(), PM = editor(saved);
     PM.WS.mutate((w: any) => { w.layout.docks[0].size = 377; });

@@ -376,6 +376,12 @@ export interface Scene3DAPI {
   lightViewerGuides(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerGuides|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
   listEligibleSourceLayers(layerId:string):{group:import('../core/scene3d/material-maps').MaterialSourceGroup;layers:import('../core/scene3d/material-maps').MaterialSourceLayer[]}[];
+  /** Asynchronous picker preview. Show a placeholder until resolved; null means unavailable/busy.
+   * 64 CSS px maximum, pixelRatio capped at 2; cache/pending queues bounded to 64 entries. */
+  getMaterialThumbnail(layerId:string,source:import('../core/scene3d/material-maps').MaterialMap,options?:import('../core/scene3d/material-thumbnails').MaterialThumbnailOptions):Promise<import('../core/scene3d/material-thumbnails').MaterialThumbnail|null>;
+  clearMaterialThumbnails():void;
+  /** Pure eligibility/cycle check for drag-over; reason is suitable for a tooltip. */
+  canAssignMaterialMap(layerId:string,materialIndex:number|null,slot:import('../core/scene3d/material-maps').MaterialSlot,source:import('../core/scene3d/material-maps').MaterialMap|null):import('../core/scene3d/material-maps').MaterialAssignmentCheck;
   materialLinks(layerId:string):import('../core/scene3d/material-maps').MaterialLayerLink[];
   getMaterialProperties(layerId:string,materialIndex?:number|null,time?:number):import('../core/scene3d/material-properties').MaterialPropertyState|null;
   setMaterialProperties(layerId:string,materialIndex:number|null,patch:import('../core/scene3d/material-properties').MaterialPropertyPatch,meta?:EditMeta):EditResult;

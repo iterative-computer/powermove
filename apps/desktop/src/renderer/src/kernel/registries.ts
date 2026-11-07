@@ -332,7 +332,7 @@ export function createKernel(): Kernel {
     },
 
     registerEffect(ownerId, def) {
-      validateEffect(def);
+      validateEffect(def, warning=>console.warn(`[${ownerId}] effect ${def.id}: ${warning.message} ${warning.fix}`));
       return effects.register(ownerId, def);
     },
 
