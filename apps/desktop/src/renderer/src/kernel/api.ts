@@ -9,6 +9,8 @@
 
 import type { Component } from 'svelte';
 import type { Scene3D, SceneObject, SceneLight, SceneSource } from '../core/scene3d/schema';
+import type { LightViewerState, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
+export type { LightViewerState, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
 import type { Scene3DEdit } from '../core/scene3d/operations';
 export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
 export type { Scene3DEdit } from '../core/scene3d/operations';
@@ -359,6 +361,10 @@ export interface Scene3DGizmo {
   dispose():void;
 }
 export interface Scene3DAPI {
+  /** Read-only light marker data, using the displayed comp image rectangle. */
+  lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
+  /** Convert pointer coordinates into native Position on a camera-facing plane. */
+  lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
   isGroup(layerId:string):boolean;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;

@@ -232,6 +232,8 @@ function loadBootProject() {
 function* hydrateSteps(p: any): Generator<void, any> {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  // Loading an old file must not inherit the new-project implicit camera.
+  base.scene3dDefaultsVersion = p.scene3dDefaultsVersion === 2 ? 2 : 1;
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   if (Array.isArray(p.memory)) base.memory = sanitizeMemory(p.memory);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
@@ -425,6 +427,7 @@ function* hydrateSteps(p: any): Generator<void, any> {
     c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
     c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
+    c.scene3dDefaultsVersion = c.scene3dDefaultsVersion === 2 ? 2 : 1;
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];

@@ -476,6 +476,8 @@ export interface Comp {
   created: number;
   /** hydrate() supplies this migration default; mkProject itself does not. */
   shutter?: number;
+  /** Absent/1 retains the original angled implicit 3D camera; 2 faces the comp origin. */
+  scene3dDefaultsVersion?: 1 | 2;
   /** Composition output level (linear, 0–4; absent is unity). Applied to the
    * mix wherever the composition plays: preview, export, and when nested. */
   audioGain?: number;

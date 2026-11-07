@@ -69,7 +69,7 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
   layer.d.data=parseLayer3DData(role,layer.d.data);
   layer.threeD=true;
   for(const [path,raw] of Object.entries<any>(properties))if(layer.p[path])layer.p[path]=typeof raw==='object'?clone(raw):{v:raw,kf:[],expr:null};
-  const position=role==='light'?[-3,5,4]:role==='camera'?[3,2,6]:[0,0,0];
+  const position=role==='light'?[-3,5,4]:role==='camera'?[0,0,6]:[0,0,0];
   for(const [key,path] of Object.entries(TRANSFORM_PATHS)){
     const fallback=key.startsWith('s')?100:key==='x'?position[0]:key==='y'?position[1]:key==='z'?position[2]:0;
     const raw=properties[path] ?? fallback;
@@ -113,7 +113,9 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);
     return {...node,id:layer.id,name:layer.name,p:{...p,x:t.x,y:t.y,z:t.z}};
   });
-  const base=parseScene({});
+  // Never replace the implicit camera of a saved, unversioned composition.
+  // Schema defaults remain v1 for legacy scene containers and templates too.
+  const base=parseScene(composition?.scene3dDefaultsVersion===2?{camera:{p:{x:0,y:0,z:6}}}:{});
   const camera=cameraLayer?{...cameraLayer.d.data.camera,p:{...values(cameraLayer,cameraLayer.d.data.camera.p,'camera'),
     ...Object.fromEntries(['x','y','z'].map(key=>[key,transform(cameraLayer)[key]]))}}:base.camera;
   const environment=cameraLayer?{...cameraLayer.d.data.environment,p:values(cameraLayer,cameraLayer.d.data.environment.p,'environment')}:base.environment;
