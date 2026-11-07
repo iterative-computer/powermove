@@ -1,4 +1,5 @@
 import { canAnimateContent, isProperty } from 'powermove';
+import { rawAt } from './figma-data';
 import type { Channel, ChannelValue, ControlEditBinding, EditCommand, Layer, PowermoveAPI } from 'powermove';
 
 export type InspectorAPI = {
@@ -18,6 +19,8 @@ type InspectorLayer = Layer & {
 const inspectable = (layer: Layer): InspectorLayer => layer as InspectorLayer;
 export const isInspectorLayerEditable = (api: Pick<InspectorAPI, 'groups'>, layer: Layer): boolean =>
   !layer.lock && !api.groups.ancestors(layer).some(group => group.lock);
+
+const LAYER_OWN_CONTENT = new Set(['fillGradient', 'strokeGradient', 'strokeStyle', 'arc', 'imageMapping', 'runs']);
 
 type ContentPatch = Extract<EditCommand, { type: 'set_content' }>['patch'];
 
@@ -79,7 +82,7 @@ function currentValue(api: InspectorAPI, layer: Layer | null, command: EditComma
   if (command.type === 'set_property') {
     const prop = api.anim.findProp(layer, command.path) ?? inspectable(layer).p?.[command.path];
     if (prop) return api.anim.evP(layer, prop, command.time ?? time, command.path);
-    if (command.path.startsWith('c.')) return evaluatedValue(api, layer, inspectable(layer).d[command.path.slice(2)], time, command.path);
+    if (command.path.startsWith('c.')) return evaluatedValue(api, layer, rawAt(inspectable(layer), command.path.slice(2)), time, command.path);
     if (command.path.startsWith('l.')) return evaluatedValue(api, layer, layer[command.path.slice(2) as keyof Layer], time, command.path);
   }
   return undefined;
@@ -93,6 +96,30 @@ export function inspectorTargets(api: InspectorAPI, layer: Layer, path: string) 
       const translated = translatePath(layer, candidate, path);
       return translated ? [{ layer: candidate, path: translated, prop: api.anim.findProp(candidate, translated) ?? inspectable(candidate).p?.[translated] }] : [];
     });
+}
+
+/** The layers a shared edit from `layer`'s row reaches: the editable selection, or the layer alone. */
+export function editableSelection(api: InspectorAPI, layer: Layer): Layer[] {
+  const selected = inspectorSelection(api, selectedLayers(api));
+  return (selected.some((candidate) => candidate.id === layer.id) ? selected : [layer]).filter((candidate) => isInspectorLayerEditable(api, candidate));
+}
+
+/**
+ * Commands for a field that may not exist yet on every selected layer. When
+ * it exists everywhere, the primary's channel edit fans out as usual (with
+ * drag offsets); otherwise each layer gets its own command, structural where
+ * it lacks the field.
+ */
+export function perLayerEdit(
+  api: InspectorAPI,
+  layer: Layer,
+  has: (target: Layer) => boolean,
+  build: (target: Layer, exists: boolean) => EditCommand | EditCommand[] | null
+): EditCommand[] {
+  const targets = editableSelection(api, layer);
+  const primary = targets.find((target) => target.id === layer.id) ?? layer;
+  if (targets.every(has)) return ([] as EditCommand[]).concat(build(primary, true) ?? []);
+  return targets.flatMap((target) => ([] as EditCommand[]).concat(build(target, has(target)) ?? []));
 }
 
 export function createInspectorEdit(api: InspectorAPI) {
@@ -127,9 +154,16 @@ export function createInspectorEdit(api: InspectorAPI) {
     const allSelected = selectedLayers(api);
     const selected = inspectorSelection(api, allSelected).filter((layer) => isInspectorLayerEditable(api, layer));
     const first = inspectorSelection(api, allSelected)[0];
-    return ([] as EditCommand[]).concat(input).flatMap((command) => {
+    const commands = ([] as EditCommand[]).concat(input);
+    /* A batch that already addresses other selected layers was built per
+       layer (structural edits from each layer's own data); fanning out the
+       primary's commands would copy its data onto them. */
+    if (first && commands.some((command) => 'target' in command && command.target !== first.id && selected.some((layer) => layer.id === command.target))) return commands;
+    return commands.flatMap((command) => {
       if (!first || !('target' in command) || command.target !== first.id || allSelected.length < 2) return [command];
       if (!['set_property', 'set_expression', 'replace_keyframes', 'set_content', 'set_layer'].includes(command.type)) return [command];
+      // Structural drawing data (a gradient, stroke style, arc, runs) is built from one layer's own data.
+      if (command.type === 'set_content' && Object.keys(command.patch ?? {}).some((key) => LAYER_OWN_CONTENT.has(key))) return [command];
       return selected.flatMap((target) => {
         const sourcePath = 'path' in command ? command.path : null;
         const path = sourcePath ? translatePath(first, target, sourcePath) : null;

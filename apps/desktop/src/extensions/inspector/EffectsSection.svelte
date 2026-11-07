@@ -110,16 +110,70 @@
   }
   function removeMatte(event: MouseEvent): void {
     event.stopPropagation();
-    inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { matteSource: null } }, { label: 'Remove Track Matte', origin: 'inspector' });
+    // Additional mattes intersect with the first; removing it promotes the next.
+    const [next, ...rest] = extraMattes;
+    inspectorEdit.apply(next
+      ? [{ type: 'set_layer', target: layer.id, patch: { matteSource: next.source, matteSources: rest.map(plainMatte) } },
+        { type: 'set_property', target: layer.id, path: 'l.matteMode', value: next.mode as any, time: transport.time, preserveHandEdits: false }]
+      : { type: 'set_layer', target: layer.id, patch: { matteSource: null } }, { label: 'Remove Track Matte', origin: 'inspector' });
     api.transport.invalidate?.();
   }
+
+  /* Additional mattes (`matteSources`) intersect with the first, each with
+     its own layer and mode; they read and reset like the first. */
+  const extraMattes = $derived((inspectorRefresh.version, doc.tick.structure, doc.tick.values, doc.tick.history, doc.proj, transport.time,
+    ((layer.matteSources ?? []) as any[]).map((matte, index) => ({
+      source: String(matte.source),
+      mode: String(evaluatedValue(api, layer, matte.mode, transport.time, `l.matteSources.${index}.mode`) ?? 'alpha')
+    }))));
+  const plainMatte = (matte: { source: string; mode: string }) => ({ source: matte.source, mode: matte.mode as any });
+  const usedMattes = $derived(new Set([matteSource, ...extraMattes.map((matte) => matte.source)].filter(Boolean)));
+  const nextMatte = $derived.by(() => {
+    const layers = api.project.get().layers as any[];
+    const index = layers.findIndex((candidate) => candidate.id === layer.id);
+    const free = (candidate: any) => matteSources.includes(candidate) && !usedMattes.has(candidate.id);
+    return [...layers.slice(0, Math.max(0, index))].reverse().find(free) ?? layers.find(free) ?? null;
+  });
+  const isShape = (id: string | null) => !!id && ['shape', 'text'].includes(api.model.layer(id)?.type ?? '');
+  const useOptions = (id: string | null) => [{ v: 'alpha', label: 'Alpha' }, { v: 'luma', label: 'Luma' }, ...(isShape(id) ? [{ v: 'vector', label: 'Vector' }] : [])];
+  const extraFold = (index: number) => ({ id: `matte-folded:${layer.id}:${index + 1}` }) as any;
+  const extraOpen = (index: number) => { void openVersion; return !api.uiState.getFxOpen(extraFold(index)); };
+  function toggleExtra(event: MouseEvent, index: number): void {
+    event.stopPropagation();
+    api.uiState.setFxOpen(extraFold(index), extraOpen(index));
+    openVersion++;
+  }
+  function setExtras(next: Array<{ source: string; mode: string }>, label: string): void {
+    inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { matteSources: next.map(plainMatte) } }, { label, origin: 'inspector' });
+    api.transport.invalidate?.();
+  }
+  function addMatte(): void {
+    if (!nextMatte) return;
+    setExtras([...extraMattes, { source: nextMatte.id, mode: 'alpha' }], 'Add Track Matte');
+  }
+  function removeExtra(event: MouseEvent, index: number): void {
+    event.stopPropagation();
+    setExtras(extraMattes.filter((_, i) => i !== index), 'Remove Track Matte');
+  }
+  const extraSourceEdit = (index: number): EditBinding => ({
+    mode: 'command', label: 'Track Matte', origin: 'inspector',
+    command: (value) => ({ type: 'set_layer', target: layer.id, patch: { matteSources: extraMattes.map((matte, i) => plainMatte(i === index ? { ...matte, source: String(value) } : matte)) } })
+  });
+  const extraModeEdit = (index: number, mode: (current: string) => string, label: string): EditBinding => ({
+    mode: 'command', label, origin: 'inspector',
+    command: (value) => ({ type: 'set_property', target: layer.id, path: `l.matteSources.${index}.mode`, value: mode(String(value)) as any, time: transport.time, preserveHandEdits: false })
+  });
+  const sourceOptions = (current: string | null) => matteSources
+    .filter((source: any) => source.id === current || !usedMattes.has(source.id))
+    .map((source: any) => ({ v: source.id, label: `${api.project.get().layers.indexOf(source) + 1}. ${source.name}` }));
   const matteModeEdit = (mode: (current: string) => string, label: string): EditBinding => ({
     mode: 'command', label, origin: 'inspector',
     command: (value) => ({ type: 'set_property', target: layer.id, path: 'l.matteMode', value: mode(String(value)) as any, time: transport.time, preserveHandEdits: false })
   });
-  const matteUse = $derived(matteMode.startsWith('luma') ? 'luma' : 'alpha');
+  const matteUse = $derived(matteMode.startsWith('luma') ? 'luma' : matteMode === 'vector' ? 'vector' : 'alpha');
   const matteInverted = $derived(matteMode.endsWith('-inverted'));
-  const modeFor = (use: string, inverted: boolean) => `${use}${inverted ? '-inverted' : ''}`;
+  /* Vector mattes use the source's geometry, so they have no inverted form. */
+  const modeFor = (use: string, inverted: boolean) => `${use}${inverted && use !== 'vector' ? '-inverted' : ''}`;
 
   function remove(event: MouseEvent, effect: any): void {
     event.stopPropagation();
@@ -422,10 +476,41 @@
           options={matteSources.map((source: any) => ({ v: source.id, label: `${api.project.get().layers.indexOf(source) + 1}. ${source.name}` }))} /></Row>
         <Row {api} label="Use"><SelectField {api} {mixed} label="Use" get={() => matteUse}
           edit={matteModeEdit((use) => modeFor(use, matteInverted), 'Matte Use')}
-          options={[{ v: 'alpha', label: 'Alpha' }, { v: 'luma', label: 'Luma' }]} /></Row>
-        <Row {api} label="Invert"><ToggleField {api} {mixed} label="Invert matte" get={() => matteInverted} variant="checkbox"
-          edit={matteModeEdit((on) => modeFor(matteUse, on === 'true'), 'Invert Matte')} /></Row>
+          options={useOptions(matteSource)} /></Row>
+        {#if matteUse !== 'vector'}
+          <Row {api} label="Invert"><ToggleField {api} {mixed} label="Invert matte" get={() => matteInverted} variant="checkbox"
+            edit={matteModeEdit((on) => modeFor(matteUse, on === 'true'), 'Invert Matte')} /></Row>
+        {/if}
       </div>
+    {/if}
+    {#each extraMattes as matte, index (index)}
+      {@const open = extraOpen(index)}
+      {@const use = matte.mode.startsWith('luma') ? 'luma' : matte.mode === 'vector' ? 'vector' : 'alpha'}
+      {@const inverted = matte.mode.endsWith('-inverted')}
+      <div class="row fx-head fx-matte" class:open data-effect-id={`track-matte-${index + 2}`} role="group" aria-label={`Track Matte ${index + 2} effect`}>
+        <button type="button" class="fx-expand" aria-label={`${open ? 'Collapse' : 'Expand'} Track Matte ${index + 2}`} aria-expanded={open} onclick={(event) => toggleExtra(event, index)}>
+          <span class="twirl" aria-hidden="true"><Icon name={open ? 'chevD' : 'chev'} /></span>
+        </button>
+        <span class="fx-badge" aria-hidden="true">fx</span>
+        <span class="k fx-label">Track Matte {index + 2}</span>
+        <button type="button" class="fx-reset" title={`Remove track matte ${index + 2}`} aria-label={`Remove Track Matte ${index + 2}`} onclick={(event) => removeExtra(event, index)}>Reset</button>
+      </div>
+      {#if open}
+        <div class="grp fx-params">
+          <Row {api} label="Matte Layer"><SelectField {api} label={`Matte Layer ${index + 2}`} get={() => matte.source} edit={extraSourceEdit(index)} options={sourceOptions(matte.source)} /></Row>
+          <Row {api} label="Use"><SelectField {api} label={`Use ${index + 2}`} get={() => use}
+            edit={extraModeEdit(index, (next) => modeFor(next, inverted), 'Matte Use')} options={useOptions(matte.source)} /></Row>
+          {#if use !== 'vector'}
+            <Row {api} label="Invert"><ToggleField {api} label={`Invert matte ${index + 2}`} get={() => inverted} variant="checkbox"
+              edit={extraModeEdit(index, (on) => modeFor(use, on === 'true'), 'Invert Matte')} /></Row>
+          {/if}
+        </div>
+      {/if}
+    {/each}
+    {#if nextMatte}
+      <button type="button" class="fx-add fx-add-matte" onclick={addMatte}>
+        <Icon name="plus" /><span>Add Matte</span>
+      </button>
     {/if}
   {/if}
 

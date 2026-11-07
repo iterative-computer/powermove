@@ -23,7 +23,9 @@ export function animateSelection(
 ) {
   const commands: EditCommand[] = [];
   for (const target of selectionChannels(api, layer, paths)) {
-    const value = target.prop ? api.anim.evP(target.layer, target.prop, time, target.path) : fallback;
+    /* A function resolves each target's own static value (nested content paths). */
+    const value = target.prop ? api.anim.evP(target.layer, target.prop, time, target.path)
+      : typeof fallback === 'function' ? fallback(target) : fallback;
     if (value === undefined) continue;
     if (disable) commands.push({ type: 'replace_keyframes', target: target.layer.id, path: target.path, keyframes: [], preserveHandEdits: false });
     commands.push({ type: 'set_property', target: target.layer.id, path: target.path, value: value as ChannelValue, time, mode: disable ? 'static' : 'keyframe', preserveHandEdits: false });

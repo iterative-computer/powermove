@@ -59,8 +59,22 @@ backdrop effect mechanism on a separate shape coverage layer below the fills.
 are new effect IDs; previous Shadow, Gradient Ramp and Blur versions are retained.
 
 Missing font families stay in editable source text and use the renderer's font
-fallback. `receiveFigma` returns a `warnings` array for the host summary; exposing
-those warnings and run/paint controls is a separate UI task.
+fallback. `receiveFigma` returns a `warnings` array; the import toast names the
+missing fonts once each and offers Show Layers.
+
+## Properties controls
+
+The inspector edits these fields with the existing rows (`src/extensions/inspector`):
+Fill and Stroke color switch between a solid and a gradient (type, stop strip,
+stop color/position, Angle and Scale derived from the transform, Opacity); a
+stroke shows Position, Dash/Gap, caps (dash caps on closed shapes, Start/End on
+open paths), Join and Miter limit, and per-side widths on rectangles; ellipses
+show Start/Sweep/Ratio; image fills show Mode and, for tiles, scale and rotation.
+Styled text edits the whole text (Mixed when ranges differ, writing every range)
+and lists its ranges under Styles, each with its own channels. Additional mattes
+appear as further Track Matte entries; groups show Isolate (blending). Structural
+edits (adding a stop, creating a stroke style) are built from each selected
+layer's own data and never copied from the primary layer.
 
 ## Last-resort cases
 

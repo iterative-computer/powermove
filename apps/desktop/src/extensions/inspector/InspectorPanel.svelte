@@ -11,6 +11,7 @@
   import InspectorHeader from './InspectorHeader.svelte';
   import AlignmentStrip from './AlignmentStrip.svelte';
   import LayerOptions from './LayerOptions.svelte';
+  import GroupRows from './GroupRows.svelte';
   import MasksSection from './MasksSection.svelte';
   import ShaderUniforms from './ShaderUniforms.svelte';
   import StructuredSection from './StructuredSection.svelte';
@@ -59,6 +60,7 @@
           <button class="chip" onclick={() => api.selection.select(api.groups.expand([firstLayer.id]).filter((id) => id !== firstLayer.id))}>Select contents</button>
           <button class="chip" onclick={() => api.commands.run('ungroupLayers')}>Ungroup</button>
         </div>
+        <GroupRows layer={firstLayer} />
       {:else if firstLayer.type === 'captions'}
         <CaptionsSection layer={firstLayer} {fontsVersion} />
       {:else}

@@ -4,10 +4,18 @@
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
   import TypeSettings from './TypeSettings.svelte';
   import TextAlignment from './TextAlignment.svelte';
+  import PaintRows from './PaintRows.svelte';
+  import StrokeRows from './StrokeRows.svelte';
+  import ArcRows from './ArcRows.svelte';
+  import ImageMappingRows from './ImageMappingRows.svelte';
+  import TextRunList from './TextRunList.svelte';
+  import Choice from './Choice.svelte';
+  import { editableSelection } from './multi-edit';
+  import { propertyCommand, rawAt, RUN_FIELDS, VERTICAL_ALIGN, DECORATIONS, TEXT_CASES } from './figma-data';
   import { precompCarriesAudio } from './audio';
   import { axisContentKey, type FontStyle } from 'powermove';
 
-  const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
+  const { api, doc, sel, transport, mixed, edit: inspectorEdit } = inspectorContext();
   const { ColorField, FontField, NumField, Section, SelectField, SliderField, ToggleField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
   const weightLabels: Record<number, string> = {
@@ -41,6 +49,51 @@
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
     contentBinding(layer.id, key, { label, origin: 'inspector' });
+
+  /* Styled (rich) text keeps per-range styles in `runs`, which override the
+     layer's base style. Its whole-text rows show the shared value ("Mixed"
+     when ranges differ) and an edit sets the base and every range at once. */
+  const runs = $derived((layer.type === 'text' && content.richText && Array.isArray(content.runs) ? content.runs : []) as Array<Record<string, any>>);
+  const rich = $derived(runs.length > 0);
+  const runValue = (run: Record<string, any>, key: string) => {
+    if (key === 'leading') {
+      const size = Number(run.size ?? content.size) || 1;
+      return Math.round(((Number(run.leading) || (Number(content.leading) || 1.2) * size) / size) * 100) / 100;
+    }
+    return run[key] ?? content[key];
+  };
+  const shared = (key: string, fallback?: unknown) => () => rich ? runValue(runs[0]!, key) ?? fallback : (content[key] == null ? fallback : content[key]);
+  const runsDiffer = (key: string) => rich && runs.some((run) => JSON.stringify(runValue(run, key)) !== JSON.stringify(runValue(runs[0]!, key)));
+  const richMixed = (key: string | string[]) => (binding: EditBinding, value: unknown) =>
+    [key].flat().some(runsDiffer) || mixed(binding, value);
+  const runCommands = (target: any, patch: Record<string, unknown>) => {
+    const now = api.anim.resolveContent(target, transport.time) as Record<string, any>;
+    if (!now.richText) return [];
+    return Object.entries(patch).flatMap(([key, value]) => (RUN_FIELDS as readonly string[]).includes(key)
+      ? ((now.runs ?? []) as Array<Record<string, any>>).flatMap((run, index) => rawAt(target, `runs.${index}.${key}`) === undefined ? []
+        : [propertyCommand(target.id, `c.runs.${index}.${key}`, key === 'leading' ? Math.round(Number(value) * (Number(run.size ?? now.size) || 0) * 100) / 100 : value, transport.time)])
+      : []);
+  };
+  /* Wrap a base-field binding so it also writes every range, on each selected
+     text layer from its own ranges. */
+  const richEdit = (binding: EditBinding): EditBinding => !rich || binding.mode !== 'command' ? binding : {
+    ...binding,
+    command: (value) => {
+      const base = ([] as any[]).concat(typeof binding.command === 'function' ? binding.command(value) : binding.command);
+      const texts = editableSelection(api, api.model.layer(layer.id) ?? layer).filter((target: any) => target.type === 'text');
+      return texts.flatMap((target: any) => base.flatMap((command) => [
+        { ...command, target: target.id },
+        ...(command.type === 'set_content' ? runCommands(target, command.patch ?? {}) : [])
+      ]));
+    }
+  };
+  /* One range keys its own channel; several ranges key per style, below. */
+  const richPath = (key: string) => !rich ? `c.${key}` : runs.length === 1 && rawAt(layer, `runs.0.${key}`) !== undefined ? `c.runs.0.${key}` : undefined;
+  const textWeight = $derived(Number(rich ? runValue(runs[0]!, 'weight') : content.weight) || 400);
+  const textItalic = $derived(!!(rich ? runValue(runs[0]!, 'italic') : content.italic));
+  const multiline = $derived(String(content.text ?? '').includes('\n'));
+  const truncating = $derived(String(content.truncation ?? 'DISABLED') === 'ENDING');
+  const advancedPaths = $derived(layer.type === 'shape' && !!layer.d.paths?.length && !!(content.fillGradient || content.strokeGradient || content.strokeStyle || content.compound));
 
   const CORNERS = [['radiusTL', 'Top left'], ['radiusTR', 'Top right'], ['radiusBL', 'Bottom left'], ['radiusBR', 'Bottom right']] as const;
 
@@ -109,7 +162,7 @@
      same slope wins first, then the nearest weight. */
   const styleKey = (style: { weight: number; italic: boolean }) => `${style.weight}${style.italic ? ' italic' : ''}`;
   const currentStyle = $derived.by(() => {
-    const weight = Number(content.weight) || 400, italic = !!content.italic;
+    const weight = textWeight, italic = textItalic;
     const slope = fontStyles.filter((style) => style.italic === italic);
     return (slope.length ? slope : fontStyles).reduce<FontStyle | null>((best, style) =>
       !best || Math.abs(style.weight - weight) < Math.abs(best.weight - weight) ? style : best, null);
@@ -159,7 +212,7 @@
 
 </script>
 
-{#if !modelLayer && !(layer.type === 'shape' && layer.d.paths?.length)}<Section {api} title="Content" />{/if}
+{#if !modelLayer && !(layer.type === 'shape' && layer.d.paths?.length && !advancedPaths)}<Section {api} title="Content" />{/if}
 
 <div class="content-rows">
 {#if layer.type === 'text'}
@@ -176,31 +229,31 @@
     onkeydown={(event) => event.stopPropagation()}
   ></textarea>
   </AnimatedRow>
-  <AnimatedRow {layer} label="Font" path="c.font">
+  <AnimatedRow {layer} label="Font" path={richPath('font')}>
     {#key fontsVersion}
       <FontField
         {api}
-        {mixed}
+        mixed={richMixed('font')}
 
-        get={get('font', '')}
-        edit={edit('font', 'Font')}
+        get={shared('font', '')}
+        edit={richEdit(edit('font', 'Font'))}
         label="Font"
-        weight={() => Number(content.weight) || 400}
-        styleName={() => currentStyle?.name ?? weightLabels[Number(content.weight) || 400] ?? ''}
+        weight={() => textWeight}
+        styleName={() => runsDiffer('weight') || runsDiffer('italic') ? '' : currentStyle?.name ?? weightLabels[textWeight] ?? ''}
       />
     {/key}
   </AnimatedRow>
-  <AnimatedRow {layer} label="Size" path="c.size"><NumField {api} {mixed} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Color" path="c.color"><ColorField {api} {mixed} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
+  <AnimatedRow {layer} label="Size" path={richPath('size')}><NumField {api} mixed={richMixed('size')} get={shared('size', 0)} edit={richEdit(edit('size', 'Size'))} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Color" path={richPath('color')}><ColorField {api} mixed={richMixed('color')} get={shared('color', '#F2F2F2')} edit={richEdit(edit('color', 'Text color'))} label="Text color" /></AnimatedRow>
   <!-- Text, Font, Size and Color first, then the rest of the type settings. -->
   {#if !hasVariableWeight && content[axisContentKey('wght')] == null && fontStyles.length}
-    <AnimatedRow {layer} label="Style" path="c.weight">
+    <AnimatedRow {layer} label="Style" path={richPath('weight')}>
       <SelectField
         {api}
-        {mixed}
+        mixed={richMixed(['weight', 'italic'])}
 
         get={() => currentStyle ? styleKey(currentStyle) : null}
-        edit={styleEdit}
+        edit={richEdit(styleEdit)}
         options={fontStyles.map((style) => ({ v: styleKey(style), label: style.name }))}
         label="Style"
         onChange={(value: unknown) => {
@@ -210,26 +263,53 @@
       />
     </AnimatedRow>
   {:else if !hasVariableWeight && content[axisContentKey('wght')] == null}
-    {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
-    <AnimatedRow {layer} label="Weight" path="c.weight">
+    {@const weights = [...new Set([textWeight, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
+    <AnimatedRow {layer} label="Weight" path={richPath('weight')}>
       <SelectField
         {api}
-        {mixed}
+        mixed={richMixed('weight')}
 
-        get={get('weight', 400)}
-        edit={edit('weight', 'Weight')}
+        get={shared('weight', 400)}
+        edit={richEdit(edit('weight', 'Weight'))}
         options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
         label="Weight"
         onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
       />
     </AnimatedRow>
   {/if}
-  <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
+  <AnimatedRow {layer} label="Tracking" path={richPath('tracking')}><NumField {api} mixed={richMixed('tracking')} get={shared('tracking', 0)} edit={richEdit(edit('tracking', 'Tracking'))} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Leading" path={rich ? undefined : 'c.leading'}><NumField {api} mixed={richMixed('leading')} get={shared('leading', 0)} edit={richEdit(edit('leading', 'Leading'))} label="Leading" step={0.02} precision={2} /></AnimatedRow>
   <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
+  {#if rich}
+    <AnimatedRow {layer} label="Decoration" path={richPath('decoration')}><SelectField {api} mixed={richMixed('decoration')} get={shared('decoration', 'NONE')} edit={richEdit(edit('decoration', 'Decoration'))} options={DECORATIONS} label="Decoration" /></AnimatedRow>
+    <AnimatedRow {layer} label="Case" path={richPath('textCase')}><SelectField {api} mixed={richMixed('textCase')} get={shared('textCase', 'ORIGINAL')} edit={richEdit(edit('textCase', 'Case'))} options={TEXT_CASES} label="Case" /></AnimatedRow>
+    {#if Number(content.boxHeight) > 0}
+      <AnimatedRow {layer} label="Vertical" path="c.verticalAlign"><Choice value={String(content.verticalAlign ?? 'top')} options={VERTICAL_ALIGN} label="Vertical alignment" edit={edit('verticalAlign', 'Vertical alignment')} /></AnimatedRow>
+    {/if}
+    {#if multiline || runs.some((run) => Number(runValue(run, 'paragraphSpacing')) || Number(runValue(run, 'paragraphIndent')))}
+      <AnimatedRow {layer} label="Spacing" path={richPath('paragraphSpacing')}><NumField {api} mixed={richMixed('paragraphSpacing')} get={shared('paragraphSpacing', 0)} edit={richEdit(edit('paragraphSpacing', 'Paragraph spacing'))} label="Paragraph spacing" step={1} min={0} unit="px" /></AnimatedRow>
+      <AnimatedRow {layer} label="Indent" path={richPath('paragraphIndent')}><NumField {api} mixed={richMixed('paragraphIndent')} get={shared('paragraphIndent', 0)} edit={richEdit(edit('paragraphIndent', 'Paragraph indent'))} label="Paragraph indent" step={1} unit="px" /></AnimatedRow>
+    {/if}
+    <AnimatedRow {layer} label="Truncate" path="c.truncation"><ToggleField {api} {mixed} get={() => truncating} edit={{ mode: 'command', label: 'Truncate text', origin: 'inspector', command: (value: unknown) => ({ type: 'set_content', target: layer.id, patch: { truncation: value === true || value === 'true' ? 'ENDING' : 'DISABLED' } }) }} label="Truncate text" /></AnimatedRow>
+    {#if truncating || Number(content.maxLines) > 0}
+      <AnimatedRow {layer} label="Max lines" path="c.maxLines"><NumField {api} {mixed} get={() => Number(content.maxLines) || 0} edit={edit('maxLines', 'Max lines')} label="Max lines" step={1} min={0} precision={0} /></AnimatedRow>
+    {/if}
+  {/if}
+  {#if layer.d.textStroke !== undefined}
+    <AnimatedRow {layer} label="Stroke" path="c.textStroke"><NumField {api} {mixed} get={get('textStroke', 0)} edit={edit('textStroke', 'Text stroke')} label="Text stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
+    {#if Number(content.textStroke) > 0}
+      <AnimatedRow {layer} label="Stroke color" path="c.textStrokeColor"><ColorField {api} {mixed} get={get('textStrokeColor', '#000000')} edit={edit('textStrokeColor', 'Text stroke color')} label="Text stroke color" /></AnimatedRow>
+    {/if}
+  {/if}
   <TypeSettings {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} onStyles={(styles) => { fontStyles = styles; }} />
+  <!-- Ranges belong to one layer's words; a selection edits whole texts above. -->
+  {#if runs.length > 1 && sel.layers.length < 2}<TextRunList {layer} {content} {fontsVersion} />{/if}
 {:else if (layer.type === 'solid' || layer.type === 'shape' || layer.type === 'null') && !layer.d.paths?.length}
-  <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {api} {mixed} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
+  {#if layer.type === 'shape' && shape !== 'line'}
+    <PaintRows {layer} {content} kind="fill" label="Fill" />
+  {:else}
+    <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {api} {mixed} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
+  {/if}
   {#if layer.type === 'shape'}
     <AnimatedRow {layer} label="Shape" path="c.shape"><SelectField {api} {mixed} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></AnimatedRow>
   {/if}
@@ -268,19 +348,34 @@
         <i class="smoothing-ios" class:hit={Number(content.smoothing) === IOS_SMOOTHING} style={`left:${IOS_SMOOTHING}%`} aria-hidden="true"></i>
       </div>
     </AnimatedRow>
+  {:else if layer.type === 'shape' && shape === 'ellipse'}
+    <ArcRows {layer} {content} />
   {:else}
     <AnimatedRow {layer} label="Corner radius" path="c.radius"><NumField {api} {mixed} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
   {/if}
   {#if layer.type === 'shape'}
-    <AnimatedRow {layer} label="Stroke" path="c.stroke"><NumField {api} {mixed} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
-    <AnimatedRow {layer} label="Stroke color" path="c.strokeColor"><ColorField {api} {mixed} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
+    {#if shape === 'line'}
+      <AnimatedRow {layer} label="Stroke" path="c.stroke"><NumField {api} {mixed} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
+      <AnimatedRow {layer} label="Stroke color" path="c.strokeColor"><ColorField {api} {mixed} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
+    {:else}
+      <StrokeRows {layer} {content} />
+    {/if}
     {#if shape === 'polygon' || shape === 'star'}
       <AnimatedRow {layer} label="Points" path="c.points"><NumField {api} {mixed} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></AnimatedRow>
     {/if}
   {/if}
+{:else if advancedPaths}
+  <!-- Imported vector paths paint as one shape: its fill, stroke and stroke style. -->
+  <PaintRows {layer} {content} kind="fill" label="Fill" />
+  <StrokeRows {layer} {content} />
 {:else if layer.type === 'image' || layer.type === 'video'}
   <AnimatedRow {layer} label="Source"><SelectField {api} {mixed} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" onChange={(value: unknown) => selectSource(layer.type, value)} /></AnimatedRow>
-  <AnimatedRow {layer} label="Fit" path="c.fit"><SelectField {api} {mixed} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
+  {#if layer.type === 'image' && content.imageMapping}
+    <!-- A Figma image fill maps by its own mode; Fit does not apply. -->
+    <ImageMappingRows {layer} {content} />
+  {:else}
+    <AnimatedRow {layer} label="Fit" path="c.fit"><SelectField {api} {mixed} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
+  {/if}
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
   {#if layer.type === 'video'}
