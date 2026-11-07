@@ -801,6 +801,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .new-project-form .segmented{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
 .new-project-form .segmented button{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .precompose-note{margin:0 0 6px;color:var(--tx-3);font-size:var(--fs-sm);line-height:1.45;text-wrap:pretty}
+.precompose-summary{margin:6px 0 0;padding-top:10px;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
 .new-project-field.is-dim{opacity:.45;transition:opacity var(--dur-1)}
 /* Palette: the same filled surfaces as the library, with concentric radii. */
 #palette{--pal-gutter:8px;--pal-r:24px;top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);max-height:64vh;

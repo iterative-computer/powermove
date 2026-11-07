@@ -1,6 +1,5 @@
 <script lang="ts">
   import AnimatedRow from './AnimatedRow.svelte';
-  import { anchorPicker, mountOverlayOnBody } from 'powermove';
   import { onDestroy } from 'svelte';
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
   import TypeSettings from './TypeSettings.svelte';
@@ -9,7 +8,7 @@
   import { axisContentKey, type FontStyle } from 'powermove';
 
   const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
-  const { ColorField, FontField, NumField, Section, SelectField, ToggleField } = api.ui.controls;
+  const { ColorField, FontField, NumField, Section, SelectField, SliderField, ToggleField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
   const weightLabels: Record<number, string> = {
     100: 'Thin',
@@ -44,7 +43,6 @@
     contentBinding(layer.id, key, { label, origin: 'inspector' });
 
   const CORNERS = [['radiusTL', 'Top left'], ['radiusTR', 'Top right'], ['radiusBL', 'Bottom left'], ['radiusBR', 'Bottom right']] as const;
-  const IOS_SMOOTHING = 60;
 
   /* Turning independent corners on seeds every corner from the current
      uniform radius so the shape does not change until a corner is edited. */
@@ -63,19 +61,17 @@
     radiusBL: 'M3 3v6a4 4 0 0 0 4 4h6'
   } as const;
   const ALL_CORNERS_GLYPH = 'M2.5 5.5V4a1.5 1.5 0 0 1 1.5-1.5h1.5M10.5 2.5H12A1.5 1.5 0 0 1 13.5 4v1.5M13.5 10.5V12a1.5 1.5 0 0 1-1.5 1.5h-1.5M5.5 13.5H4A1.5 1.5 0 0 1 2.5 12v-1.5';
-  let smoothingOpen = $state(false);
-  /* Centre of a 16px range thumb at `value`%, so the fill and iOS tick line up with it. */
-  const thumbAt = (value: number) => `calc(8px + (100% - 16px) * ${value / 100})`;
-
-  let smoothingTrigger: HTMLButtonElement | undefined = $state();
+  /* Smoothing is Figma's corner smoothing: 0% is a circular arc, about 60%
+     matches Apple's continuous (squircle) corners, 100% is the smoothest. */
+  const IOS_SMOOTHING = 60;
+  const SMOOTHING_HINT = 'Corner smoothing blends each rounded corner into its straight edges, like the continuous corners on iOS and in Figma. 0% is a circular corner; about 60% matches iOS. Works on pills too.';
 
   const cornerSummary = $derived.by(() => {
     const values = CORNERS.map(([key]) => Number(content[key] ?? content.radius) || 0);
     return values.every((v) => v === values[0]) ? `${values[0]}px` : 'Mixed';
   });
 
-  /* A narrow inspector cannot fit the field plus two toggles beside the label:
-     below this width the independent-corners toggle moves into the popover. */
+  /* A narrow inspector drops the glyph inside the radius field. */
   const CORNER_COMPACT_WIDTH = 120;
   let cornerCompact = $state(false);
   function measureCorners(node: HTMLElement) {
@@ -83,37 +79,6 @@
     observer.observe(node);
     return { destroy: () => observer.disconnect() };
   }
-
-  /* The popover floats on the body so the inspector's clipped scroller cannot
-     cut it off; a press outside it (other than its own toggle) or Escape closes it. */
-  function dismissOutside(node: HTMLElement) {
-    const close = () => { smoothingOpen = false; };
-    const onDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!node.contains(target) && !smoothingTrigger?.contains(target)) close();
-    };
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); close(); smoothingTrigger?.focus(); } };
-    document.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('keydown', onKey, true);
-    return { destroy: () => { document.removeEventListener('pointerdown', onDown, true); window.removeEventListener('keydown', onKey, true); } };
-  }
-  let draggingSmoothing = false;
-
-  function dragSmoothing(event: Event): void {
-    let value = Number((event.currentTarget as HTMLInputElement).value);
-    if (Math.abs(value - IOS_SMOOTHING) <= 2) value = IOS_SMOOTHING;
-    if (!draggingSmoothing) { inspectorEdit.begin('Corner smoothing', { origin: 'inspector' }); draggingSmoothing = true; }
-    inspectorEdit.dispatch({ type: 'set_content', target: layer.id, patch: { smoothing: value } });
-    api.transport.invalidate?.('render');
-  }
-
-  function endSmoothing(): void {
-    if (!draggingSmoothing) return;
-    draggingSmoothing = false;
-    inspectorEdit.commit('Corner smoothing');
-  }
-
-  onDestroy(endSmoothing);
 
   function beginText(): void {
     if (editingText) return;
@@ -271,47 +236,6 @@
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
   {#if layer.type === 'shape' && shape === 'rect'}
-    {#snippet independentButton()}
-      <button type="button" class="corner-btn" class:on={!!content.independentCorners} title="Independent corners" aria-label="Independent corners" aria-pressed={!!content.independentCorners}
-        onclick={() => inspectorEdit.apply(independentPatch(!content.independentCorners), { label: 'Independent corners', origin: 'inspector' })}>
-        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d={ALL_CORNERS_GLYPH}/></svg>
-      </button>
-    {/snippet}
-    {#snippet smoothingButton()}
-      <div class="corner-pop-anchor">
-        <button type="button" bind:this={smoothingTrigger} class="corner-btn" class:on={smoothingOpen} class:set={!smoothingOpen && Number(content.smoothing) > 0} title="Corner smoothing" aria-label="Corner smoothing" aria-expanded={smoothingOpen}
-          onclick={() => (smoothingOpen = !smoothingOpen)}>
-          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M5 2.5v11M11 2.5v11"/><circle cx="5" cy="9.5" r="1.6" fill="currentColor" stroke="none"/><circle cx="11" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
-        </button>
-        {#if smoothingOpen}
-          <div class="corner-pop" role="dialog" aria-label="Corner smoothing" tabindex="-1" use:mountOverlayOnBody use:anchorPicker={smoothingTrigger} use:dismissOutside>
-            <div class="corner-pop-head">
-              <span>{cornerCompact && !content.independentCorners ? 'Corners' : 'Corner smoothing'}</span>
-              <button type="button" class="corner-pop-close" aria-label="Close" onclick={() => (smoothingOpen = false)}>
-                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
-              </button>
-            </div>
-            {#if cornerCompact && !content.independentCorners}
-              <div class="corner-pop-toggle">
-                <span>Independent corners</span>
-                {@render independentButton()}
-              </div>
-            {/if}
-            <div class="corner-pop-body">
-              <div class="corner-slider" style={`--fill:${thumbAt(Number(content.smoothing) || 0)}`}>
-                <input type="range" min="0" max="100" step="1" aria-label="Corner smoothing" value={Number(content.smoothing) || 0}
-                  oninput={dragSmoothing} onchange={endSmoothing} />
-                <i class="corner-ios-tick" class:hit={Number(content.smoothing) === IOS_SMOOTHING} style={`left:${thumbAt(IOS_SMOOTHING)}`}></i>
-                <span class="corner-ios" style={`left:${thumbAt(IOS_SMOOTHING)}`}>iOS</span>
-              </div>
-              <div class="corner-pop-value">
-                <NumField {api} {mixed} get={get('smoothing', 0)} edit={edit('smoothing', 'Corner smoothing')} label="Corner smoothing" ariaLabel="Corner smoothing percent" step={1} min={0} max={100} unit="%" />
-              </div>
-            </div>
-          </div>
-        {/if}
-      </div>
-    {/snippet}
     <AnimatedRow {layer} label="Corner radius" path="c.radius">
       <div class="corner-inline" class:compact={cornerCompact} use:measureCorners>
         <div class="corner-well" title="Corner radius">
@@ -322,8 +246,10 @@
             <NumField {api} {mixed} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" />
           {/if}
         </div>
-        {#if !cornerCompact}{@render independentButton()}{/if}
-        {@render smoothingButton()}
+        <button type="button" class="corner-btn" class:on={!!content.independentCorners} title="Independent corners" aria-label="Independent corners" aria-pressed={!!content.independentCorners}
+          onclick={() => inspectorEdit.apply(independentPatch(!content.independentCorners), { label: 'Independent corners', origin: 'inspector' })}>
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d={ALL_CORNERS_GLYPH}/></svg>
+        </button>
       </div>
     </AnimatedRow>
     {#if content.independentCorners}
@@ -336,6 +262,12 @@
         {/each}
       </div>
     {/if}
+    <AnimatedRow {layer} label="Smoothing" path="c.smoothing">
+      <div class="smoothing" title={SMOOTHING_HINT} data-smoothing-control>
+        <SliderField {api} {mixed} get={get('smoothing', 0)} edit={edit('smoothing', 'Corner smoothing')} label="Smoothing" min={0} max={100} step={1} unit="%" />
+        <i class="smoothing-ios" class:hit={Number(content.smoothing) === IOS_SMOOTHING} style={`left:${IOS_SMOOTHING}%`} aria-hidden="true"></i>
+      </div>
+    </AnimatedRow>
   {:else}
     <AnimatedRow {layer} label="Corner radius" path="c.radius"><NumField {api} {mixed} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
   {/if}
@@ -431,50 +363,12 @@
   }
   .corner-btn:hover { background: rgb(var(--ink-rgb) / .08); color: var(--tx); }
   .corner-btn.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent-tx); }
-  .corner-btn.set { color: var(--accent-tx); }
-  .corner-pop-anchor { position: relative; flex: none; }
-  .corner-pop {
-    position: fixed; z-index: 470; width: 240px; overflow: auto;
-    border-radius: var(--r-md, 8px); background: var(--bg-float, var(--bg-panel)); box-shadow: var(--shadow-float);
-    outline: none;
-    transform-origin: top right; animation: pm-menu-in .18s cubic-bezier(.23, 1, .32, 1) both;
+  /* Smoothing: the shared filled slider, with a hairline tick at the iOS value. */
+  .smoothing { position: relative; flex: 1; min-width: 0; display: flex; }
+  .smoothing-ios {
+    position: absolute; bottom: 0; width: 1px; height: 6px; transform: translateX(-50%);
+    background: rgb(var(--ink-rgb) / .38); pointer-events: none;
   }
-  @media (prefers-reduced-motion: reduce) { .corner-grid, .corner-pop { animation: none; } }
-  .corner-pop-head {
-    display: flex; align-items: center; justify-content: space-between; height: 40px; padding: 0 8px 0 14px;
-    font-size: var(--fs-sm, var(--fs-xs)); font-weight: var(--fw-medium); color: var(--tx);
-    border-bottom: 1px solid var(--line);
-  }
-  .corner-pop-close {
-    width: 24px; height: 24px; display: grid; place-items: center; padding: 0;
-    border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-2); cursor: pointer;
-  }
-  .corner-pop-close:hover { background: rgb(var(--ink-rgb) / .08); color: var(--tx); }
-  .corner-pop-toggle { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 0 14px; font-size: var(--fs-xs); color: var(--tx-2); }
-  .corner-pop-body { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px 10px; }
-  .corner-pop-value { width: 56px; flex: none; display: flex; }
-  .corner-slider { position: relative; flex: 1; min-width: 0; height: 40px; }
-  .corner-slider input[type=range] {
-    -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 28px; margin: 0;
-    background: transparent; cursor: pointer;
-  }
-  .corner-slider input[type=range]::-webkit-slider-runnable-track {
-    height: 16px; border-radius: 8px;
-    background: linear-gradient(90deg, rgb(var(--ink-rgb) / .22) var(--fill), rgb(var(--ink-rgb) / .08) var(--fill));
-  }
-  .corner-slider input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
-    background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .35);
-  }
-  .corner-slider input[type=range]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
-  /* The tick sits on the track at the iOS value; the thumb snaps to it. */
-  .corner-ios-tick {
-    position: absolute; top: 12px; width: 4px; height: 4px; border-radius: 50%;
-    transform: translateX(-50%); background: rgb(var(--ink-rgb) / .45); pointer-events: none;
-  }
-  .corner-ios-tick.hit { opacity: 0; }
-  .corner-ios {
-    position: absolute; bottom: 0; transform: translateX(-50%);
-    font-size: var(--fs-xs); color: var(--tx-3); pointer-events: none;
-  }
+  .smoothing-ios.hit { background: var(--accent-tx); }
+  @media (prefers-reduced-motion: reduce) { .corner-grid { animation: none; } }
 </style>

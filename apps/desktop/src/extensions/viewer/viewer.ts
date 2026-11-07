@@ -19,6 +19,7 @@ export function selectionOutlineColor(project: any): string {
 
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
+import { resizeParametricShape } from 'powermove';
 import { collectLightMarkers, drawLightMarkers, markerAt, markerTitle, type LightMarker } from './light-markers';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
@@ -328,6 +329,8 @@ const VIEWER_RUNTIME_TOKEN = Symbol('powermove.viewer.runtime');
 type ViewerRuntime = ViewerService & {
   dispose(): void;
   activePath: string | null;
+  /** Live Width × Height while a handle drag edits a shape's own Size. */
+  sizeReadout?: { w: number; h: number } | null;
   finishCanvasText?: (() => void) | null;
   textSelection?: { layer: string; start: number; end: number } | null;
   textSession?: TextEditSession | null;
@@ -602,6 +605,56 @@ export function resizeCursorForHandle(matrix: AffineMatrix, handle: ResizeHandle
 /** Text handles resize layout; intrinsic media keeps its aspect ratio. */
 export function resizeLocksAspect(type: string, shiftKey = false): boolean {
   return shiftKey || type === 'image' || type === 'video';
+}
+
+const SIZE_PATHS = ['c.w', 'c.h', 'position.x', 'position.y', 'anchor.x', 'anchor.y', 'rotation', 'skew', 'scale.x', 'scale.y'] as const;
+
+export function formatShapeSize(size: { w: number; h: number }): string {
+  const value = (n: number) => String(Math.round(n * 10) / 10);
+  return `${value(size.w)} × ${value(size.h)}`;
+}
+
+export interface ShapeSizeDrag {
+  /** Width/height and the edit commands for a pointer delta (composition px) from the gesture start. */
+  resize(delta: Point, modifiers: { shift?: boolean; alt?: boolean }): { width: number; height: number; commands: EditCommand[] } | null;
+}
+
+/**
+ * Selection-tool handles on a parametric 2D shape (rectangle, rounded
+ * rectangle, capsule, ellipse, polygon, star) edit the shape's own Size, as
+ * After Effects' shape Size and Figma's frame handles do; its Scale stays at
+ * what the user set. Returns null when Size cannot be edited directly (paths,
+ * lines, 3D, expression-driven size or position, a collapsed transform): those
+ * handles keep resizing through Scale instead.
+ *
+ * Every evaluation is frozen at the gesture start, so the engine always
+ * resolves from the same snapshot and never accumulates rounding.
+ */
+export function beginShapeSizeDrag(api: PowermoveAPI, layer: any, handle: ResizeHandle, time: number,
+  parentMatrix: readonly number[] | null): ShapeSizeDrag | null {
+  if (layer?.type !== 'shape') return null;
+  const content = resolvedContent(api, layer, time);
+  const start: Record<string, number> = {};
+  for (const path of SIZE_PATHS) {
+    start[path] = path.startsWith('c.') ? Number(content[path.slice(2)]) : Number(api.anim.ev(layer, path, time));
+  }
+  /* A detached copy: the engine reads the gesture-start layer, not the one being edited. */
+  const snapshot = structuredClone(layer);
+  const context = {
+    time, parentMatrix: parentMatrix ?? undefined,
+    evaluate: (_layer: any, path: string) => start[path] ?? NaN,
+  };
+  if (!resizeParametricShape(snapshot, handle, { x: 0, y: 0 }, {}, context)) return null;
+  return {
+    resize(delta, modifiers) {
+      const result = resizeParametricShape(snapshot, handle, delta, modifiers, context);
+      if (!result) return null;
+      const commands = result.commands.map((command) => ({
+        ...command, value: Math.round(command.value * 1000) / 1000, preserveHandEdits: false, markIntent: 'human',
+      })) as unknown as EditCommand[];
+      return { width: result.width, height: result.height, commands };
+    },
+  };
 }
 
 export interface ResizeCalculation {
@@ -1380,11 +1433,37 @@ function drawOverlayContent(): boolean | void {
       c.fillRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
       c.strokeRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
     });
+    if (V.sizeReadout) drawSizeReadout(c, selection, V.sizeReadout);
   }
   c.restore();
 }
 const HANDLES: readonly (readonly [number, number])[] = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
 const MOVE_DRAG_THRESHOLD_PX = 3;
+
+/* Figma-style dimension badge: while a handle edits Size, the new Width ×
+   Height sits centred under the box, upright and a constant screen size. */
+function drawSizeReadout(c: any, selection: SelectionGeometry, size: { w: number; h: number }) {
+  const unit = 1 / Math.max(.02, V.shown);
+  const bottom = Math.max(...selection.corners.map((point) => point.y));
+  const centerX = selection.corners.reduce((sum, point) => sum + point.x, 0) / selection.corners.length;
+  const text = formatShapeSize(size);
+  c.save();
+  c.font = `500 ${11 * unit}px ui-monospace, "SF Mono", Menlo, monospace`;
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const width = c.measureText(text).width + 14 * unit, height = 20 * unit;
+  const x = centerX - width / 2, y = bottom + 10 * unit;
+  c.fillStyle = 'rgba(28,28,30,.9)';
+  c.beginPath();
+  if (c.roundRect) c.roundRect(x, y, width, height, 5 * unit); else c.rect(x, y, width, height);
+  c.fill();
+  c.strokeStyle = 'rgba(255,255,255,.14)';
+  c.lineWidth = unit;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.fillText(text, centerX, y + height / 2 + .5 * unit);
+  c.restore();
+}
 
 function rotationHandlePoint(selection: SelectionGeometry): Point {
   const nw = selection.corners[0]!, ne = selection.corners[1]!;
@@ -2541,8 +2620,12 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
   };
   const textContent0 = L.type === 'text' ? resolvedContent(api, L, T) : null;
   const textPadding = textContent0 ? api.util.clamp(Number(textContent0.size) * .055, 3, 12) * 2 : 0;
-  const shapeContent0 = L.type === 'shape' && !L.d?.paths?.length ? resolvedContent(api, L, T) : null;
-  const shapeStroke = shapeContent0 ? Math.max(0, Number(shapeContent0.stroke) || 0) : 0;
+  /* Parametric shapes resize their own Size through the engine; anything the
+     engine declines (paths, lines, expressions) falls back to Scale below. */
+  const sizeDrag = !hit.rotate && hit.handle ? beginShapeSizeDrag(api, L, hit.handle, T, parentWorldMatrix(L, T)) : null;
+  /* Lines keep their length-based resize: Scale would thicken the stroke. */
+  const lineContent0 = !sizeDrag && L.type === 'shape' && L.d?.shape === 'line' && !L.d?.paths?.length ? resolvedContent(api, L, T) : null;
+  const lineStroke = lineContent0 ? Math.max(0, Number(lineContent0.stroke) || 0) : 0;
   const m = [...api.anim.worldMatrix(L, T)] as [number, number, number, number, number, number];
   const pivotWorld = selection.pivotWorld;
   const pointerStart = pointerComp(e);
@@ -2554,20 +2637,27 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
     : { x: 0, y: 0 };
   const applied = {
     sx: s0.sx, sy: s0.sy, x: s0.x, y: s0.y,
-    width: Number(textContent0?.boxWidth ?? shapeContent0?.w) || 0, height: Number(textContent0?.boxHeight ?? shapeContent0?.h) || 0,
+    width: Number(textContent0?.boxWidth ?? lineContent0?.w) || 0, height: Number(textContent0?.boxHeight ?? lineContent0?.h) || 0,
   };
   const applyValue = (path: string, value: number, key: keyof typeof applied) => {
     if (Math.abs(value - applied[key]) < .0005) return;
     setOrKey(L, path, value, T);
     applied[key] = value;
   };
-  api.edit.begin(hit.rotate ? 'Rotate layer' : shapeContent0 ? 'Resize shape' : textContent0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
+  api.edit.begin(hit.rotate ? 'Rotate layer' : sizeDrag || lineContent0 ? 'Resize shape' : textContent0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
   let moved = false;
+  const endSize = () => { if (V.sizeReadout) { V.sizeReadout = null; invalidate(); } };
   beginDrag(e, {
     cursor: cursorForHit(selection, hit),
     move: (dx: any, dy: any, ev: any) => {
       moved = true;
-      if (hit.rotate) {
+      if (sizeDrag) {
+        const pointer = pointerComp(ev);
+        const next = sizeDrag.resize({ x: pointer.x - pointerStart.x, y: pointer.y - pointerStart.y }, { shift: ev.shiftKey, alt: ev.altKey });
+        if (!next) return;
+        for (const command of next.commands) api.edit.dispatch(command);
+        V.sizeReadout = { w: next.width, h: next.height };
+      } else if (hit.rotate) {
         const pointer = pointerComp(ev);
         const a = pointerAngleInParentSpace(L, T, pivotWorld, pointer);
         if (a == null || a0 == null) return;
@@ -2580,9 +2670,9 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
         const pointerLocal = invertPoint(m, pointerWorld);
         if (!pointerLocal) return;
         const next = calculateResize(b, hit.corner, pointerLocal, grabOffset,
-          { x: textContent0 || shapeContent0 ? 1 : s0.sx, y: textContent0 || shapeContent0 ? 1 : s0.sy }, {
+          { x: textContent0 || lineContent0 ? 1 : s0.sx, y: textContent0 || lineContent0 ? 1 : s0.sy }, {
             fromCenter: ev.altKey,
-            minScale: textContent0 || shapeContent0 ? .001 : undefined,
+            minScale: textContent0 || lineContent0 ? .001 : undefined,
             lockAspect: resizeLocksAspect(L.type, ev.shiftKey),
           });
         // Width-only paragraph resizing grows downward as lines wrap.
@@ -2609,10 +2699,10 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
             ];
             renderedPivotLocal = pointInBounds(resizedBounds, pivotRatio);
           }
-        } else if (shapeContent0) {
+        } else if (lineContent0) {
           // Selection bounds include half the stroke on each side.
-          applyValue('c.w', api.util.round(Math.max(1, b.w * next.scaleX - shapeStroke), 3), 'width');
-          applyValue('c.h', api.util.round(Math.max(1, b.h * next.scaleY - shapeStroke), 3), 'height');
+          applyValue('c.w', api.util.round(Math.max(1, b.w * next.scaleX - lineStroke), 3), 'width');
+          applyValue('c.h', api.util.round(Math.max(1, b.h * next.scaleY - lineStroke), 3), 'height');
           const resizedBounds = layerBounds(api, L, T);
           if (resizedBounds) {
             const pivotRatio: Corner = [
@@ -2639,8 +2729,8 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
       }
       invalidate();
     },
-    up: () => { moved ? api.edit.commit() : api.edit.cancel(); refreshInspector(); },
-    cancel: () => { api.edit.cancel(); refreshInspector(); },
+    up: () => { endSize(); moved ? api.edit.commit() : api.edit.cancel(); refreshInspector(); },
+    cancel: () => { endSize(); api.edit.cancel(); refreshInspector(); },
   });
 }
 

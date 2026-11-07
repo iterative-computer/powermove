@@ -2,6 +2,7 @@
    and Pre-compose. The model lives in core/compositions. */
 import type { PMRegistry } from '../registry';
 import { createNewProjectForm } from './project-settings';
+import { selectionBounds } from '../core/selection-bounds';
 
 /** Composition ▸ New Composition (⌘N) / Composition Settings (⌥⌘K). */
 export function compositionSettingsDialog(PM: PMRegistry, id?: string | null): void {
@@ -66,7 +67,20 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
      selected one does. Keeping attributes needs a single layer with a source. */
   let mode: 'move' | 'leave' = 'move';
   let adjustDuration = false;
+  let sizeToSelection = false;
   let openAfter = false;
+  /* What “Move layers” would create, measured the same way the engine does,
+     so the dialog can say the new size before anything changes. */
+  const picked = (() => {
+    const expanded = new Set(PM.expandGroups ? PM.expandGroups(targets) : targets);
+    return PM.proj.layers.filter((layer: any) => expanded.has(layer.id));
+  })();
+  let fitted: { w: number; h: number } | null = null, sizeIssue = '';
+  try { fitted = selectionBounds(PM, picked, PM.time); } catch (error) { sizeIssue = error instanceof Error ? error.message : String(error); }
+  const timed = picked.filter((layer: any) => layer.type !== 'group');
+  const fittedDuration = timed.length
+    ? Math.max(1 / PM.proj.fps, Math.max(...timed.map((layer: any) => layer.from + layer.dur)) - Math.min(...timed.map((layer: any) => layer.from)))
+    : PM.proj.dur;
   const layerName = single ? `“${single.name}”` : 'the layer';
   const modes = [
     { id: 'move', label: 'Move layers', note: 'Moves the selected layers, with their transforms and effects, into a new composition.' },
@@ -82,9 +96,16 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
     return button;
   });
   const field = (label: string, control: HTMLElement) => h('div.new-project-field', h('span', label), control);
-  const adjust = PM.toggleField(() => adjustDuration, (value: boolean) => { adjustDuration = value; }, { local: true, label: 'Fit duration to layers' });
+  const adjust = PM.toggleField(() => adjustDuration, (value: boolean) => { adjustDuration = value; sync(); }, { local: true, label: 'Fit duration to layers' });
   const openToggle = PM.toggleField(() => openAfter, (value: boolean) => { openAfter = value; }, { local: true, label: 'Open new composition' });
+  const sizeToggle = PM.toggleField(() => sizeToSelection, (value: boolean) => { sizeToSelection = value; sync(); }, { local: true, label: 'Fit size to layers' });
   const adjustRow = field('Fit duration to layers', adjust);
+  const sizeRow = field('Fit size to layers', sizeToggle);
+  sizeRow.dataset.precomposeSize = '';
+  /* After Effects' “Adjust composition size to the selected layers”. */
+  sizeRow.title = sizeIssue || 'Crops the new composition to the selected layers’ bounds. The pre-comp layer is placed so everything stays exactly where it is.';
+  const summary = h('p.precompose-note.precompose-summary', { 'aria-live': 'polite' });
+  const seconds = (value: number) => `${Number(value.toFixed(2))} s`;
   function sync(): void {
     buttons.forEach((button: HTMLButtonElement, index: number) => {
       const on = modes[index]!.id === mode;
@@ -95,13 +116,22 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
     // Duration fitting only applies when the layers move.
     adjustRow.classList.toggle('is-dim', mode !== 'move');
     adjust.querySelectorAll('button').forEach((button: HTMLButtonElement) => { button.disabled = mode !== 'move'; });
+    // Size fitting also needs the layers to move, and layers it can measure.
+    const sizeable = mode === 'move' && !!fitted;
+    sizeRow.classList.toggle('is-dim', !sizeable);
+    sizeToggle.querySelectorAll('button').forEach((button: HTMLButtonElement) => { button.disabled = !sizeable; });
+    const w = sizeToSelection && fitted ? fitted.w : PM.proj.w, hgt = sizeToSelection && fitted ? fitted.h : PM.proj.h;
+    summary.textContent = `New composition: ${w} × ${hgt} px, ${seconds(adjustDuration ? fittedDuration : PM.proj.dur)}`;
+    summary.hidden = mode !== 'move';
   }
   const body = h('div.new-project-form.precompose-form',
     h('label.new-project-field', h('span', 'Name'), name),
     field('Attributes', segmented),
     note,
     adjustRow,
-    field('Open new composition', openToggle));
+    sizeRow,
+    field('Open new composition', openToggle),
+    summary);
   sync();
   PM.modal({
     title: 'Pre-compose', body, width: 440,
@@ -122,6 +152,7 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
           name: name.value.trim() || `Pre-comp ${n}`,
           mode,
           adjustDuration: mode === 'move' && adjustDuration,
+          sizeToSelection: mode === 'move' && sizeToSelection && !!fitted,
           open: openAfter,
         });
         if (!created) throw new Error('These layers could not be pre-composed');
