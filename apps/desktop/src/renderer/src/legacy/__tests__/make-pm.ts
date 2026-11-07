@@ -14,6 +14,7 @@ import { install as installHistory } from '../core/history';
 import { install as installLibrary } from '../core/library';
 import { install as installProjects } from '../core/projects';
 import { install as installEditing } from '../core/editing';
+import { install as installPresets } from '../core/presets';
 import { install as installCapabilities } from '../core/capabilities';
 import { install as installMedia } from '../core/media';
 import { install as installAudio } from '../core/audio';
@@ -47,6 +48,7 @@ const INSTALLS = [
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
+  ['core/presets', installPresets],
   ['core/capabilities', installCapabilities],
   ['core/media', installMedia],
   ['core/audio', installAudio],

@@ -7,6 +7,12 @@ it.each(['extensionWorkspaceAppearance', 'extensionThemeAppearance'])('persists 
   expect(storeFileName(parsed!)).toBe(`${key}.json`);
 });
 
+it('persists user effect and animation presets', () => {
+  const parsed = parseStoreKey('animationPresets');
+  expect(parsed).toEqual({kind: 'static', key: 'animationPresets'});
+  expect(storeFileName(parsed!)).toBe('animationPresets.json');
+});
+
 it('accepts the global panel visibility preference', () => {
   expect(parseStoreKey('panelVisibility')).toEqual({ kind: 'static', key: 'panelVisibility' });
 });

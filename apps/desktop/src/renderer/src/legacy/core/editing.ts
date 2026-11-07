@@ -51,7 +51,7 @@ let live: any = null;
 const validateInputGraphs = (commands?: any[]) => {
   // Scalar drags cannot change texture dependencies. Keep graph validation off
   // their critical path, and allow ordinary edits to imported invalid data.
-  if (commands && !commands.some(command => ['add_effect','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
+  if (commands && !commands.some(command => ['add_effect','apply_preset','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
     || command.type === 'set_effect' && (command.patch?.inputs !== undefined || command.patch?.enabled !== undefined)
     || command.type === 'set_layer' && command.patch?.matteSource !== undefined
     || ['set_property','set_expression'].includes(command.type) && String(command.path || command.channel).endsWith('.$enabled'))) return;
@@ -1077,6 +1077,17 @@ function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
     case 'ungroup_layers': data = PM.ungroupLayers(command.targets); break;
     case 'move_to_group': data = PM.moveToGroup(command.targets, command.group); break;
     case 'reorder_layer': data = reorderLayer(command); break;
+    case 'apply_preset': {
+      const layer = findLayer(command.target);
+      if (!layer) throw new Error('Layer not found');
+      const previousSpeed = constantVideoSpeed(layer);
+      data = PM.Presets.applyToLayer(command.preset, layer, command.time);
+      resizeVideoForSpeed(layer, previousSpeed);
+      if (layer3DRole(layer) || layer.d?.definition === SCENE3D_DEFINITION) {
+        for (const {key, prop} of PM.allProps(layer)) validate3DChannel(layer, key, prop);
+      }
+      break;
+    }
     case 'add_effect': data = addEffect(command); break;
     case 'remove_effect': data = removeEffect(command); break;
     case 'set_effect': data = setEffect(command); break;
@@ -1124,7 +1135,7 @@ function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions', 'edit_captions'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
     PM.ProjectIndex?.invalidate();
-  } else if (['replace_keyframes', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
+  } else if (['replace_keyframes', 'apply_preset', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
       || command.type === 'set_property' && command.mode === 'keyframe') {
     PM.ProjectIndex?.invalidateKeyframes();
   }
@@ -1300,6 +1311,7 @@ const Edit: any = {
     ungroup_layers: { target: 'project', fields: ['targets'] },
     move_to_group: { target: 'project', fields: ['targets', 'group'] },
     add_effect: { target: 'layer', fields: ['effect', 'parameters', 'inputs'] },
+    apply_preset: { target: 'layer', fields: ['preset', 'time'] },
     remove_effect: { target: 'layer', fields: ['effect'] },
     set_effect: { target: 'layer', fields: ['effect', 'patch'] },
     set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },

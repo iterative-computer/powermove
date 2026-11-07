@@ -64,12 +64,12 @@ preserveHandEdits: false only for explicitly requested hand-edited channel chang
 inputs/powermove-project.json is read-only. For scene edits return typed commands, also in extension runs.
 
 LIVE POWERMOVE TOOLS
-get_project_state target paging: layerId/propertyOffset/propertyLimit/keyframeLimit. Edit: apply_commands/edit_video; review: render_frames. Panels: get_panel_layout/open_panel/get_panel_state/interact_panel/capture_panel/computer_use_panel. Selection/errors: get_workspace_state. After live edits return commands: []. Media: list_media, replace_media {assetId,path}, import_media {path}, manage_media. Never embed media in extensions/retry successful imports. Panel/media: Undo; rollback_changes: project-only.
+get_project_state target paging: layerId/propertyOffset/propertyLimit/keyframeLimit. Edit: apply_commands/edit_video; review: render_frames. Panels: get_panel_layout/open_panel/get_panel_state/interact_panel/capture_panel/computer_use_panel. Selection/errors: get_workspace_state. After edits return commands: []. Media: list_media, replace_media {assetId,path}, import_media {path}, manage_media. Never embed media in extensions/retry successful imports. Panel/media: Undo; rollback_changes: project-only.
 
 ${profile.footage ? AGENT_WATCH_AND_LISTEN_INSTRUCTIONS : ''}
 
 DELIVERY
-Project runs have tools; never ask to configure MCP. Verify frames/audio, then export_video/save_project (.pmv). Verified paths (desktop: ~/Powermove), no picker. Use the current blank project; never switch.
+Project runs have tools; never ask to configure MCP. Verify frames/audio, then export_video/save_project (.pmv). Verified paths (desktop: ~/Powermove), no picker. Use the blank project; never switch.
 
 VERIFICATION
 Check API pack/get_workspace_state before claiming unavailable. Panel targets: select_layers. Reproduce failures; inspect output, not just builds/clicks. Tracking/rotoscoping: source-colored moving cutouts at start/middle/end; white mattes/outlines fail. After failures inspect errors/capture_panel.

@@ -238,6 +238,16 @@ interface WorkspaceManifestBase {
   custom: GeneratedSection[];
   hiddenPanels: HiddenPanel[];
   layout: WorkspaceLayout;
+  /** Explicit Reset baseline; live layout continues to autosave independently. */
+  savedState?: {
+    layout: WorkspaceLayout;
+    hiddenPanels: HiddenPanel[];
+    chrome: WorkspaceChrome;
+    density: WorkspaceDensity;
+    theme: WorkspaceTheme;
+    features: WorkspaceFeatures;
+    custom: GeneratedSection[];
+  };
   builtin?: boolean;
   base?: string;
   deletedAt?: number;

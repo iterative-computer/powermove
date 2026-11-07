@@ -104,6 +104,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
   ungroup_layers: ['type', 'targets'],
   move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
+  apply_preset: ['type', 'target', 'preset', 'time'],
   add_effect: ['type', 'target', 'effect', 'version', 'parameters', 'inputs', 'open', 'enabled'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
@@ -133,6 +134,7 @@ const AGENT_COMMAND_FIELDS = {
   move_to_group: COMMAND_FIELDS.move_to_group,
   reorder_layer: COMMAND_FIELDS.reorder_layer,
   add_effect: COMMAND_FIELDS.add_effect,
+  apply_preset: COMMAND_FIELDS.apply_preset,
   remove_effect: COMMAND_FIELDS.remove_effect,
   set_effect: COMMAND_FIELDS.set_effect,
   set_transition: COMMAND_FIELDS.set_transition,
@@ -1182,6 +1184,17 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
       return { type: source.type, targets: source.targets as string[], ...(source.name !== undefined ? {name: source.name as string} : {}), ...(source.type === 'move_to_group' ? {group: source.group as string | null} : {}) };
     }
     case 'reorder_layer': return parseReorderLayer(source);
+    case 'apply_preset': {
+      const preset = requiredString(source.preset, 'preset');
+      if (preset instanceof ValidationError) return preset;
+      const out: import('../types/commands').ApplyPresetCommand = {type: 'apply_preset', preset};
+      const error = optionalTarget(source, out); if (error) return error;
+      if (source.time !== undefined) {
+        const time = finite(source.time, 'time'); if (time instanceof ValidationError) return time;
+        out.time = time;
+      }
+      return out;
+    }
     case 'add_effect': return parseAddEffect(source);
     case 'remove_effect': return parseRemoveEffect(source);
     case 'set_effect': return parseSetEffect(source);

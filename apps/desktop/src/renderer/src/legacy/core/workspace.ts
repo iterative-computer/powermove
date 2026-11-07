@@ -571,6 +571,61 @@ const WS: any = {
 };
 PM.WS = WS;
 
+// Keep the saved baseline alongside the existing workspace manifest. Dock edits
+// still update the live layout; Reset uses this explicitly saved arrangement.
+const savedState = (w: any) => copy(Object.fromEntries(
+  ['layout', 'hiddenPanels', 'chrome', 'density', 'theme', 'features', 'custom'].map(key => [key, w[key]])));
+WS.defaultId = () => {
+  const id = PM.store.get('defaultWorkspace', null);
+  return WS.get(id) ? id : null;
+};
+WS.setDefault = (id: string | null) => {
+  if (id !== null && !WS.get(id)) return false;
+  PM.store.set('defaultWorkspace', id);
+  PM.bus.emit('workspaces');
+  return true;
+};
+WS.preferredId = () => WS.defaultId() || (WS.get(PM.store.get('workspace', null))?.id) || WS.get(WS.current?.id)?.id || 'design';
+WS.openForProject = (snapshot?: any) => snapshot ? WS.restoreSnapshot(snapshot) : WS.activate(WS.preferredId(), true);
+WS.saveCurrent = (name: string) => {
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 80) throw new Error('Name the workspace (up to 80 characters).');
+  if (!WS.current || WS.editing) throw new Error('Finish editing the workspace first.');
+  return WS.create({ ...copy(WS.current), name: name.trim(), scope: 'global', projectId: null });
+};
+WS.saveLayout = (id: string = WS.current?.id) => {
+  const w = WS.get(id);
+  if (!w || w.builtin || WS.editing) return false;
+  w.savedState = savedState(w); WS.save(); return true;
+};
+WS.reset = (id: string = WS.current?.id) => {
+  const w = WS.get(id);
+  if (!w || WS.editing) return false;
+  if (w.builtin) return WS.resetBuiltin(id);
+  if (!w.savedState) return false;
+  const restored = normalizeWorkspace({ ...w, ...copy(w.savedState) }, w);
+  WS.all[WS.all.indexOf(w)] = restored;
+  if (WS.current?.id === id) WS.current = restored;
+  WS.activate(id, true); WS.save(); return true;
+};
+PM.bus.on?.('store:external', (keys: string[]) => {
+  if (keys.includes('workspaces')) {
+    const saved = PM.store.get('workspaces', null);
+    if (Array.isArray(saved)) {
+      WS.all = saved.map((w: any) => normalizeWorkspace(migrateDockedAgent(w)));
+      // Mounted docks still reference this window's active object. Retain it
+      // until the next activation, while accepting library names/baselines.
+      const index = WS.all.findIndex((w: any) => w.id === WS.current?.id);
+      if (index >= 0 && !WS.editing) {
+        const incoming = WS.all[index];
+        WS.current.name = incoming.name;
+        if (incoming.savedState) WS.current.savedState = copy(incoming.savedState);
+        WS.all[index] = WS.current;
+      }
+    }
+  }
+  if (keys.some(key => ['workspaces', 'defaultWorkspace', 'workspace'].includes(key))) PM.bus.emit('workspaces');
+});
+
 /* The first agent-authored Gradient workspace used a two-dock layout that put
    the canvas, timeline, Layers, and Inspector into one vertical stack. Replace
    only that recognizable legacy shape with the shared repaired preset. */
@@ -587,7 +642,8 @@ WS.isLegacyGradient = (w: any) => {
 
 WS.init = () => {
   const saved: any = PM.store.get('workspaces', null);
-  WS.all = saved && saved.length ? saved.map((w: any) => normalizeWorkspace(migrateDockedAgent(w))) : PRESETS();
+  WS.all = Array.isArray(saved) && saved.length ? saved.map((w: any) => normalizeWorkspace(migrateDockedAgent(w))) : PRESETS();
+  WS.all.forEach((w: any) => { if (!w.builtin && !w.savedState) w.savedState = savedState(w); });
   const lastSavedId: any = PM.store.get('workspace', 'design');
   const legacyGradientIds: any = new Set(WS.all.filter(WS.isLegacyGradient).map((w: any) => w.id));
   if (legacyGradientIds.size) WS.all = WS.all.filter((w: any) => !legacyGradientIds.has(w.id));
@@ -609,7 +665,7 @@ WS.activate = (id: any, silent: any) => {
   WS.registerCustom(w);
   applyFeatures(w);
   PM.Layout.apply(w);
-  PM.store.set('workspace', id);
+  if (!WS.editing) PM.store.set('workspace', id);
   if (!silent) persistProjectWorkspace();
   PM.bus.emit('workspaces');
   if (!silent) PM.toast('Workspace · ' + w.name, 2200, { error: false });
@@ -625,22 +681,27 @@ WS.historySnapshot = () => ({
 WS.restoreHistorySnapshot = (snapshot: any) => {
   if (!snapshot || !Array.isArray(snapshot.all)) return false;
   WS.all = snapshot.all.map((workspace: any) => normalizeWorkspace(workspace));
-  WS.save();
   const target: any = WS.get(snapshot.currentId) || WS.get('design') || WS.all[0];
   if (!target) return false;
   WS.activate(target.id, true);
+  WS.save();
   return true;
 };
 WS.restoreSnapshot = (snapshot: any) => {
   if (!snapshot || typeof snapshot !== 'object') return WS.activate('design', true);
+  if (WS.trashList().some((w: any) => w.id === snapshot.id)) return WS.openForProject();
   // A project keeps its own saved workspace, which needs the same one-time migrations.
   const restored: any = normalizeWorkspace(migrateDockedAgent(snapshot));
   const index: any = WS.all.findIndex((item: any) => item.id === restored.id);
-  if (index >= 0) WS.all[index] = restored; else WS.all.push(restored);
+  if (index >= 0) {
+    if (WS.all[index].savedState) restored.savedState = copy(WS.all[index].savedState);
+    WS.all[index] = restored;
+  } else WS.all.push(restored);
   WS.current = restored;
   /* Phase 4: routes through the patched public property */
   WS.registerCustom(restored); applyFeatures(restored); PM.Layout.apply(restored);
-  PM.bus.emit('workspaces');
+  WS.save();
+  if (!WS.editing) PM.store.set('workspace', restored.id);
   return restored;
 };
 
@@ -657,6 +718,7 @@ function applyFeatures(w: any) {
 }
 
 WS.save = () => {
+  WS.all.forEach((w: any) => { if (!w.builtin && !w.savedState) w.savedState = savedState(w); });
   PM.store.set('workspaces', WS.all);
   // Persist layout separately from the large project/history snapshot. Closing
   // a panel must survive a restart even if the document has not been edited.
@@ -677,7 +739,7 @@ WS.mutate = (fn: any, opts: any = {}) => {
     return WS.current;
   }
   const w: any = WS.current;
-  if (w.builtin && !opts.inPlace) {
+  if ((w.builtin || !WS.get(w.id)) && !opts.inPlace) {
     const copy: any = JSON.parse(JSON.stringify(w));
     copy.id = PM.uid('ws');
     copy.name = w.name + ' (edited)';
@@ -701,6 +763,7 @@ WS.create = (spec: any) => {
   const w: any = Object.assign(base, spec, { id: PM.uid('ws'), builtin: false });
   w.name = spec.name || 'Workspace';
   const normalized: any = normalizeWorkspace(w, base);
+  normalized.savedState = savedState(normalized);
   WS.all.push(normalized);
   WS.save();
   WS.activate(normalized.id);
@@ -714,8 +777,9 @@ WS.remove = (id: any) => {
   trash.unshift({ ...copy(w), deletedAt: Date.now() });
   PM.store.set(WS.trashKey, trash);
   WS.all = WS.all.filter((x: any) => x.id !== id);
+  if (PM.store.get('defaultWorkspace', null) === id) WS.setDefault(null);
+  if (WS.current?.id === id) WS.activate('design', true);
   WS.save();
-  if (WS.current.id === id) WS.activate('design');
   PM.bus.emit('workspaces');
 };
 
@@ -733,8 +797,8 @@ WS.restore = (id: any) => {
 };
 WS.rename = (id: any, name: any) => {
   const workspace: any = WS.get(id);
-  if (!workspace || workspace.builtin) return false;
-  workspace.name = text(name, workspace.name); WS.save(); return true;
+  if (!workspace || workspace.builtin || typeof name !== 'string' || !name.trim() || name.trim().length > 80) return false;
+  workspace.name = name.trim(); WS.save(); return true;
 };
 WS.duplicate = (id: any, options: any = {}) => {
   const source: any = WS.get(id); if (!source) return null;
@@ -742,6 +806,7 @@ WS.duplicate = (id: any, options: any = {}) => {
     ...copy(source), id: PM.uid('ws'), name: options.name || source.name + ' copy', builtin: false,
     scope: options.scope || source.scope || 'global', projectId: options.projectId || source.projectId || null,
   }, source);
+  workspace.savedState = savedState(workspace);
   WS.all.push(workspace); WS.save(); return workspace;
 };
 WS.resetBuiltin = (id: any) => {
@@ -749,7 +814,8 @@ WS.resetBuiltin = (id: any) => {
   const index: any = WS.all.findIndex((workspace: any) => workspace.id === id);
   if (index >= 0) WS.all[index] = normalizeWorkspace(preset);
   else WS.all.push(normalizeWorkspace(preset));
-  WS.save(); if (WS.current?.id === id) WS.activate(id, true); return true;
+  if (WS.current?.id === id) WS.activate(id, true);
+  WS.save(); return true;
 };
 
 WS.beginEdit = (id: any = WS.current.id) => {
@@ -778,7 +844,8 @@ WS.saveEdit = (asNew: any = false, name: any) => {
     saved.id = source.id; saved.name = text(name, source.name); saved.builtin = false;
     const index: any = WS.all.findIndex((workspace: any) => workspace.id === source.id); WS.all[index] = saved;
   }
-  WS.editing = null; WS.save(); WS.activate(saved.id, true); PM.toast('Workspace saved'); return saved;
+  saved.savedState = savedState(saved);
+  WS.editing = null; WS.activate(saved.id, true); WS.save(); PM.toast('Workspace saved'); return saved;
 };
 
 WS.saveAsNew = () => {
