@@ -4,8 +4,8 @@
     "treeSha": "9e28780905d3c390b03db03ba41546d15a1cd284"
   },
   "inspector": {
-    "version": "1.7.3",
-    "treeSha": "29c277ef288ec80a8900b28664ef487b2a5bf1ee"
+    "version": "1.7.4",
+    "treeSha": "b1190649923fd4b61b543a4ba2eb5b3dc7e1605b"
   },
   "keymap-default": {
     "version": "1.0.5",
@@ -25,7 +25,7 @@
   },
   "timeline": {
     "version": "1.1.10",
-    "treeSha": "d0a4c99f37a963052c5e0228b8591fe06e7b5538"
+    "treeSha": "7a9a73b4cb1cf59228e50aa65f70562807ad2941"
   },
   "toolbar": {
     "version": "1.0.2",

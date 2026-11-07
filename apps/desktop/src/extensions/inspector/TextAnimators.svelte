@@ -233,7 +233,9 @@
         <Row {api} label="Direction">
           {@render segmented([{ v: 'in', label: 'In' }, { v: 'out', label: 'Out' }], view.direction, 'Direction', (direction) => setDirection(animator, direction))}
         </Row>
-        {@render number(animator, 'delay', 'Start', 's', { step: 0.01, precision: 2 })}
+        <!-- Exits are timed back from the layer's out point, so trimming the end carries them.
+             Migrated legacy exits keep their original start-based channel until re-timed. -->
+        {@render number(animator, 'delay', view.direction === 'out' && !animator.legacyStartDuration ? 'End offset' : 'Start', 's', { step: 0.01, precision: 2 })}
         {@render number(animator, 'duration', 'Duration', 's', { step: 0.01, min: 0, precision: 2 })}
         {@render number(animator, 'stagger', 'Stagger', 's', { step: 0.005, min: 0, precision: 3 })}
         <fieldset disabled={!editable}><Row {api} label="Easing">
