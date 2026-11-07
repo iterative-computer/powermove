@@ -1044,10 +1044,17 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
       safe, padding: safe ? effectViewportPadding(api, p, time) : 0 };
   }
   const viewportSafe = viewportPlan.safe, effectPadding = viewportPlan.padding;
-  const renderDensity = Math.min(2, Math.max(1, dpr)) * Math.max(.25, Math.min(1, api.transport.quality));
-  const viewport = viewportSafe
-    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding / renderDensity, api.render.gl.previewViewport as PreviewViewport | null)
+  const candidate = viewportSafe
+    // The support contract is in composition pixels; overscan is in CSS pixels.
+    // Zoom scales the neighborhood even when preview quality is reduced.
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding * z, api.render.gl.previewViewport as PreviewViewport | null)
     : null;
+  const limits = effectPadding > 0 ? api.render.gl.previewLimits?.() : undefined;
+  // Very wide kernels can require most of the composition outside the view.
+  // Reuse the ordinary full-frame preview instead of allocating a magnified
+  // effect buffer beyond the renderer's texture or working-memory limits.
+  const viewport = candidate && limits && (candidate.renderWidth > limits.maxSize || candidate.renderHeight > limits.maxSize
+    || candidate.renderWidth * candidate.renderHeight > limits.maxPixels) ? null : candidate;
   requestedViewport = viewport;
   visibleRegion = { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
     right: Math.min(p.w, (r.width - position.x) / z), bottom: Math.min(p.h, (r.height - position.y) / z) };

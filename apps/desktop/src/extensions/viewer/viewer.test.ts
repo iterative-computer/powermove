@@ -272,6 +272,32 @@ describe('viewer runtime', () => {
     h.runtime.dispose();
   });
 
+  it('keeps the full effect neighborhood outside the visible crop at every zoom and quality', () => {
+    const h=overlayHarness();
+    (h.api as any).effects={get:()=>({viewportSafe:true,viewportPadding:['radius']})};
+    h.api.project.get().layers=[{type:'shape',fx:[{id:'fx',type:'blur',on:true,p:{radius:{v:80}}}]}] as any;
+    for(const quality of [1,.5,.25])for(const zoom of [2,4,8]){
+      h.api.transport.quality=quality;h.runtime.setZoom(zoom);h.runtime.layout(true);
+      const v=h.api.render.gl.previewViewport!;
+      // The stage is centered: reserve at least 80 composition pixels on
+      // either side, independently of the framebuffer's downsample factor.
+      expect(v.width).toBeGreaterThanOrEqual(h.rect.width/zoom+160);
+      expect(v.height).toBeGreaterThanOrEqual(h.rect.height/zoom+160);
+    }
+    h.runtime.dispose();
+  });
+
+  it('uses the existing full-frame path when kernel support exceeds the GPU preview budget', () => {
+    const h=overlayHarness();
+    (h.api as any).effects={get:()=>({viewportSafe:true,viewportPadding:['radius']})};
+    h.api.project.get().layers=[{type:'shape',fx:[{id:'fx',type:'blur',on:true,p:{radius:{v:400}}}]}] as any;
+    h.api.render.gl.previewLimits=()=>({maxPixels:4_000_000,maxSize:4096});
+    h.runtime.setZoom(8);
+    expect(h.api.render.gl.previewViewport).toBeNull();
+    expect(h.runtime.el.width).toBe(1920);
+    h.runtime.dispose();
+  });
+
   it('still draws paused scrub and selection changes without a compositor event', () => {
     const h = overlayHarness();
     h.handlers.get('time')?.(2);

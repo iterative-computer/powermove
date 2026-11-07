@@ -359,6 +359,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       init: (...args) => !!PM?.GL?.init?.(...args),
       resize: (...args) => !!PM?.GL?.resize?.(...args),
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
+      previewLimits: () => PM?.GL?.previewLimits?.(),
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       get context() { return PM?.GL?.gl ?? null; }
     },

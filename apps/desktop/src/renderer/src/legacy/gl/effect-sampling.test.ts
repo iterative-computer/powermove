@@ -1,5 +1,11 @@
 import { expect, it } from 'vitest';
-import { gridSize, mipBytes, sampleLod } from './effect-sampling';
+import { effectPixelScale, gridSize, mipBytes, sampleLod } from './effect-sampling';
+it('converts effect pixels once through preview density and owner axes', () => {
+  expect(effectPixelScale([.25,.25])).toEqual([.25,.25]);
+  expect(effectPixelScale([8,8])).toEqual([8,8]);
+  expect(effectPixelScale([.5,.25],[0,2,-3,0,100,200])).toEqual([.5,1.5]);
+  expect(effectPixelScale([4,4],[1,0,0,1,0,0])).toEqual([4,4]);
+});
 it('bounds wide kernels by projected radius and available mip dimensions', () => {
   expect(sampleLod(100, 3, 32, [1, 1], 512, 256)).toBe(4);
   expect(sampleLod(100, 3, 32, [.5, .5], 256, 128)).toBe(3);

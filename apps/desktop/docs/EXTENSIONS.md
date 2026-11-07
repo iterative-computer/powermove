@@ -476,6 +476,19 @@ in-realm API after the person installing the extension accepts the trust dialog.
   `sampling.space: 'layer'` projects radii through the layer transform;
   `sampling.firstPass` skips mip preparation before the first neighborhood pass.
   All textures retain working precision and their mip storage is budgeted.
+  `effects.supportsEffectScale === true` exposes a consistent pixel contract to
+  raw and generated effect shaders. `u_pixelScale` is raster pixels per
+  composition pixel (or native source pixel for source owners), including zoom
+  and preview downsampling. `u_effectScale` also includes the projected owner
+  axes when `sampling.space: 'layer'`. Use `offset * u_effectScale * u_texel`
+  for texture offsets specified in effect pixels. Generated shaders provide
+  `effectPixel()` for stable composition/source coordinates (e.g. noise seeds).
+  Raw shaders use `v_px / u_pixelScale + u_effectOrigin`; the latter accounts
+  for source padding. `v_px`, `u_coordRes`, and layer-coordinate matrices keep
+  their virtual raster pixel units. Avoid using `gl_FragCoord` as a noise seed
+  or `u_res` as the logical composition size. Viewport origin and canvas size
+  change during navigation. Third-party shaders must adopt this contract;
+  the host cannot infer the units of arbitrary GLSL expressions.
   Crop-safe definitions can declare `viewportPadding` keys, a
   `viewportPaddingFactor`, and fixed `viewportPaddingPixels` in composition
   pixels. Enabled stack and containing-group support is accumulated.

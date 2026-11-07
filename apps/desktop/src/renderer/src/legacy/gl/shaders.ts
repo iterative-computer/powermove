@@ -35,10 +35,14 @@ uniform vec2 u_res;
 uniform vec2 u_coordRes;     // full composition pixel size for cropped effects
 uniform vec2 u_pxOrigin;     // cropped viewport origin in composition pixels
 uniform vec2 u_texel;
+uniform vec2 u_pixelScale;    // raster pixels per composition/source pixel
+uniform vec2 u_effectScale;   // raster pixels per effect pixel (including layer space)
+uniform vec2 u_effectOrigin;  // source raster origin in native source pixels
 uniform float u_time;
 uniform float u_prog;
 out vec4 o;
 vec4 src(vec2 uv){ return texture(u_tex, uv); }
+vec2 effectPixel(){ return v_px / u_pixelScale + u_effectOrigin; }
 float luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }
 vec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }
 vec3 rgb2hsv(vec3 c){

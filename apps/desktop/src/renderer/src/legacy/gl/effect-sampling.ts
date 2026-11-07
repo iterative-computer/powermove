@@ -1,6 +1,15 @@
 import type { ColorDepth } from '../../core/color-depth';
 import { colorBufferBytes } from '../../core/color-depth';
 
+/** Raster pixels per logical effect pixel. The raster density already includes
+ * preview downsampling and the viewport zoom. Layer-space kernels additionally
+ * project the owner's axes; source-owner rasters pass an identity transform. */
+export function effectPixelScale(raster: readonly number[], world?: readonly number[]): [number, number] {
+  return world
+    ? [Math.hypot(world[0]! * raster[0]!, world[1]! * raster[1]!), Math.hypot(world[2]! * raster[0]!, world[3]! * raster[1]!)]
+    : [raster[0]!, raster[1]!];
+}
+
 export function sampleLod(radius: number, support: number, maxRadius: number, scale: readonly number[], width: number, height: number): number {
   const extent = Number.isFinite(radius) ? Math.abs(radius) * support * Math.max(...scale.map(Math.abs)) : 0;
   return Math.min(Math.floor(Math.log2(Math.max(1, width, height))), Math.max(0, Math.ceil(Math.log2(Math.max(1, extent / maxRadius)))));

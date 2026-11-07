@@ -22,16 +22,27 @@ test('adding a neutral effect preserves sharp text at 800% zoom', async ({ sessi
     const blurEffect = PM.mkEffect('blur'); blurEffect.p.amount.v = 24;
     text.fx.push(blurEffect); PM.touch();
     const blur = capture();
+    let blurExportMax = 0;
+    if (!blur.viewport) {
+      const reference = PM.GL.renderToPixels(0, 640, 360, { mblur: false });
+      for (let i = 0; i < reference.length; i++) if (i % 4 !== 3)
+        blurExportMax = Math.max(blurExportMax, Math.abs(blur.pixels[i]! - reference[i]!));
+    }
     let different = 0, max = 0;
     if (before.pixels.length === after.pixels.length) for (let i = 0; i < before.pixels.length; i++) {
       const delta = Math.abs(before.pixels[i] - after.pixels[i]); if (delta > 1) different++; max = Math.max(max, delta);
     }
-    return { before: { ...before, pixels: undefined }, after: { ...after, pixels: undefined }, blur: { ...blur, pixels: undefined }, different, max };
+    return { before: { ...before, pixels: undefined }, after: { ...after, pixels: undefined }, blur: { ...blur, pixels: undefined }, blurExportMax, different, max };
   });
   for (const key of ['before', 'after', 'blur'] as const) await testInfo.attach(key, { body: Buffer.from(result[key].image.split(',')[1]!, 'base64'), contentType: 'image/png' });
   expect(result.after.viewport).not.toBeNull();
-  expect(result.blur.viewport).not.toBeNull();
-  expect(result.blur.width).toBeGreaterThan(result.after.width);
+  if (result.blur.viewport) expect(result.blur.width).toBeGreaterThan(result.after.width);
+  else {
+    // A padded kernel can exceed the GPU's preview budget at 800%. Its
+    // bounded full-frame fallback must match the exported frame exactly.
+    expect([result.blur.width,result.blur.height]).toEqual([640,360]);
+    expect(result.blurExportMax).toBe(0);
+  }
   expect([result.after.width, result.after.height]).toEqual([result.before.width, result.before.height]);
   expect(result.different).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);

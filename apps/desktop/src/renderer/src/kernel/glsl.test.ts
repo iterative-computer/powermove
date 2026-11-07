@@ -84,6 +84,8 @@ describe('toLegacyFx', () => {
     expect(() => validateEffect(effect({ params: [params[0]!, params[0]!] }))).toThrow(/duplicate param key/);
     expect(() => validateEffect(effect({ frag: '' }))).toThrow(/non-empty/);
     expect(() => validateEffect(effect({ backdrop: 'yes' as never }))).toThrow(/backdrop/);
+    for (const k of ['pixelScale','effectScale','effectOrigin'])
+      expect(() => validateEffect(effect({params:[{k,label:k,def:1,min:0,max:1}]}))).toThrow(/reserved effect scale/);
   });
 });
 

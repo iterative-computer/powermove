@@ -2,7 +2,7 @@ import {brushGeometry,brushBounds,rasterBrush} from './effect-path';
 import { createAutomaticPreviewVideos } from '../core/automatic-preview-video';
 import { motionBlurTimes } from '../../core/render-samples';
 import { layerInputPlan, hasLayerInputs, inputKey, assertInputBudget, temporalTimes, EffectInputError, referenceParam, referencedPath } from '../../core/effect-inputs';
-import { sampleLod, mipBytes, gridSize } from './effect-sampling';
+import { effectPixelScale, sampleLod, mipBytes, gridSize } from './effect-sampling';
 import {viewportCamera,viewportRevision,getViewportMode} from '../../core/scene3d/viewport';
 import { effectProgramKey } from '../../kernel/effect-versions';
 import { availableColorDepth, colorBufferBytes, normalizeColorDepth, supportedColorDepths } from '../../core/color-depth';
@@ -493,6 +493,12 @@ function workingColorDepth() {
   GL.colorDepth = actual;
   return actual;
 }
+GL.previewLimits = () => ({
+  // Leave room for accumulation, source/original, ping-pong passes, retained
+  // presentation and mip storage in the current working precision.
+  maxPixels: Math.floor((PM.Memory?.budget?.('framebuffers') ?? MAX_FBO_BYTES) / (8 * colorBufferBytes(1, 1, workingColorDepth()))),
+  maxSize: GL.maxTextureSize ||= GL.gl?.getParameter(GL.gl.MAX_TEXTURE_SIZE) || 4096,
+});
 function grab(w: any, h: any, depth = false, colorDepth = workingColorDepth()) {
   const gl = GL.gl;
   if (layerInputRendering) {
@@ -612,6 +618,16 @@ function effectViewportCoordinates(W: number, H: number): { uv: [number, number,
     resolution,
     uv: [origin[0] / resolution[0], origin[1] / resolution[1], W / resolution[0], H / resolution[1]],
   };
+}
+
+/** One coordinate contract for ordinary, multi-pass and temporal effects. */
+function uploadEffectCoordinates(g: any, W: number, H: number,
+  coordinates: ReturnType<typeof effectViewportCoordinates>, scale: [number, number], kernelScale = scale) {
+  g.u('u_uv', ...coordinates.uv);
+  g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
+  g.u('u_pixelScale', ...scale); g.u('u_effectScale', ...kernelScale); g.u('u_sourceRes', W, H);
+  const raster = activeSourceRaster(), extent = raster?.extent ?? raster?.bounds;
+  g.u('u_effectOrigin', extent?.x0 ?? 0, extent?.y0 ?? 0);
 }
 
 /** Map composition pixels back to the layer's uncropped, normalized bounds.
@@ -1540,6 +1556,7 @@ function runTemporalEffect(L:any,fx:any,def:any,index:number,T:number,src:any,W:
  const p=program(effectProgramKey(fx.type,fx.version,PM.Kernel?.effects?.get?.(fx.type)),def.frag);
  if(!p)return src;
  const owner=effectLayerCoordinates(L,T,W,H),raster=activeSourceRaster();
+ const coordinates=effectViewportCoordinates(W,H),scale=outputScale(W,H);
  if(raster?.domain)raster.domain=sourceEffectDomain(L,fx,def,T,raster.domain);
  let acc:any=null;
  try{
@@ -1553,7 +1570,8 @@ function runTemporalEffect(L:any,fx:any,def:any,index:number,T:number,src:any,W:
    }
    const out=grab(W,H);bind(out);clear();const g=use(p);
    bindTex(0,acc?.tex||src.tex);setI(p,'u_tex',0);bindTex(1,frame.tex);setI(p,'u_temporal',1);
-   g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);g.u('u_time',T);
+   g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_time',T);
+   uploadEffectCoordinates(g,W,H,coordinates,scale);g.u('u_texel',1/W,1/H);
    g.u('u_temporalIndex',sample);g.u('u_temporalCount',times.length);g.u('u_temporalValid',valid?1:0);
    g.u('u_temporalSource',space==='source'?1:0);g.u('u_temporalDirect',sample===0?1:0);
    const currentBounds=GL.bounds(L,T),pastBounds=GL.bounds(L,at);
@@ -1598,7 +1616,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
     const orig = def.keepOrig ? cur : null;
     const scale = outputScale(W, H);
     const world = def.sampling?.space === 'layer' ? activeSourceRaster()?.layer===L ? [1,0,0,1,0,0] : PM.worldMatrix(L, T) : undefined;
-    const kernelScale = world ? [Math.hypot(world[0] * scale[0], world[1] * scale[1]), Math.hypot(world[2] * scale[0], world[3] * scale[1])] : scale;
+    const kernelScale = effectPixelScale(scale, world);
     const parameter = (name: string) => {
       const pd = def.params.find((param: any) => param.k === name);
       return pd ? effectParamValue(PM, L, fx, pd, T) : 0;
@@ -1618,9 +1636,8 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
       try {
         if (orig) { bindTex(1, orig.tex); setI(p, 'u_orig', 1); }
         if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
-        g.u('u_m', fullQuad(targetW, targetH)); g.u('u_res', targetW, targetH); g.u('u_uv', ...coordinates.uv);
-        g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
-        g.u('u_pixelScale', ...scale); g.u('u_sourceRes', W, H); g.u('u_sampleLod', lod);
+        g.u('u_m', fullQuad(targetW, targetH)); g.u('u_res', targetW, targetH);
+        uploadEffectCoordinates(g,W,H,coordinates,scale,kernelScale);g.u('u_sampleLod', lod);
         if (grid) g.u('u_gridRes', ...grid);
         if (inputParams.length) {
           const owner = effectLayerCoordinates(L, T, W, H);

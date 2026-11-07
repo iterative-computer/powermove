@@ -23,6 +23,9 @@ uniform vec2 u_res;
 uniform vec2 u_coordRes;
 uniform vec2 u_pxOrigin;
 uniform vec2 u_texel;
+uniform vec2 u_pixelScale;
+uniform vec2 u_effectScale;
+uniform vec2 u_effectOrigin;
 uniform float u_time;
 uniform float u_prog;
 out vec4 o;
@@ -60,7 +63,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
         if (i < -N || i > N) continue;
         float x = float(i) / float(N) * r;
         float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));
-        sum += texture(u_tex, v_st + dir * u_texel * x) * w; wsum += w;
+        sum += texture(u_tex, v_st + dir * u_texel * u_effectScale * x) * w; wsum += w;
       }
       o = sum / max(wsum, 1e-4);`, 'uniform float u_p0; uniform int u_pass;'),
   },
@@ -69,7 +72,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
     params: [{ k: 'amount', label: 'Length', def: 30, min: 0, max: 300, step: 1, unit: 'px' },
              { k: 'angle', label: 'Direction', def: 0, min: -360, max: 360, step: 1, unit: '°' }],
     frag: F(`
-      float a = radians(u_p1); vec2 dir = vec2(cos(a), sin(a)) * u_texel * u_p0;
+      float a = radians(u_p1); vec2 dir = vec2(cos(a), sin(a)) * u_texel * u_effectScale * u_p0;
       vec4 s = vec4(0.);
       for (int i = 0; i < 17; i++) { float t = (float(i)/16.0 - .5); s += texture(u_tex, v_st + dir * t); }
       o = s / 17.0;`, 'uniform float u_p0,u_p1;'),
@@ -79,8 +82,9 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
     params: [{ k: 'amount', label: 'Amount', def: 40, min: 0, max: 300, step: 1, unit: '%' }],
     frag: F(`
       vec4 c = texture(u_tex, v_st);
-      vec4 b = texture(u_tex,v_st+vec2(u_texel.x,0.))+texture(u_tex,v_st-vec2(u_texel.x,0.))
-             + texture(u_tex,v_st+vec2(0.,u_texel.y))+texture(u_tex,v_st-vec2(0.,u_texel.y));
+      vec2 stepPx = u_texel * u_effectScale;
+      vec4 b = texture(u_tex,v_st+vec2(stepPx.x,0.))+texture(u_tex,v_st-vec2(stepPx.x,0.))
+             + texture(u_tex,v_st+vec2(0.,stepPx.y))+texture(u_tex,v_st-vec2(0.,stepPx.y));
       o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);`, 'uniform float u_p0;'),
   },
   glow: {
@@ -100,7 +104,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
       vec4 sum = vec4(0.); float ws = 0.;
       for (int i = -20; i <= 20; i++) {
         float x = float(i)/20.0*r; float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));
-        sum += texture(u_tex, v_st + dir*u_texel*x) * w; ws += w;
+        sum += texture(u_tex, v_st + dir*u_texel*u_effectScale*x) * w; ws += w;
       }
       o = sum / max(ws,1e-4);
       if (u_pass == 2) o = texture(u_orig, v_st) + o * (u_p2/100.);`,
@@ -153,8 +157,34 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
              { k: 'size', label: 'Size', def: 1.4, min: .3, max: 8, step: .1, unit: '' }],
     frag: F(`
       vec4 c = texture(u_tex, v_st);
-      float n = hash(floor(v_px/max(u_p1,.1)) + fract(u_time)*137.0) - .5;
-      o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);`, 'uniform float u_p0,u_p1;'),
+      vec2 pixel = v_px / u_pixelScale + u_effectOrigin;
+      float n = filteredGrain(pixel);
+      o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);`, `uniform float u_p0,u_p1;
+      float grainAt(vec2 cell){return hash(floor((cell+.5)/max(u_p1,.1))+fract(u_time)*137.)-.5;}
+      float filteredGrain(vec2 pixel){
+        // Reconstruct the native export's noise lattice when magnifying.
+        // At native density this is exactly the original grain sample.
+        if(all(greaterThanEqual(u_pixelScale,vec2(1.)))){
+          vec2 p=pixel-.5,cell=floor(p),f=fract(p);
+          return mix(mix(grainAt(cell),grainAt(cell+vec2(1.,0.)),f.x),
+            mix(grainAt(cell+vec2(0.,1.)),grainAt(cell+1.),f.x),f.y);
+        }
+        // Reduced previews average native pixels rather than reseeding a
+        // coarser screen grid. The viewer's minimum density is .05 (20 px).
+        vec2 halfPixel=.5/max(u_pixelScale,vec2(.05));
+        vec2 lo=pixel-halfPixel,hi=pixel+halfPixel,base=floor(lo);
+        float sum=0.,total=0.;
+        for(int y=0;y<22;y++){
+          float cy=base.y+float(y);if(cy>=hi.y)break;
+          float wy=max(0.,min(cy+1.,hi.y)-max(cy,lo.y));
+          for(int x=0;x<22;x++){
+            float cx=base.x+float(x);if(cx>=hi.x)break;
+            float weight=wy*max(0.,min(cx+1.,hi.x)-max(cx,lo.x));
+            sum+=grainAt(vec2(cx,cy))*weight;total+=weight;
+          }
+        }
+        return sum/max(total,1e-6);
+      }`),
   },
   vignette: {
     label: 'Vignette', group: 'Light & Shadow', passes: 1,
@@ -172,7 +202,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
     params: [{ k: 'amount', label: 'Amount', def: 6, min: 0, max: 80, step: .5, unit: 'px' }],
     frag: F(`
       vec2 dir = (vec2(v_uv.x, 1. - v_uv.y) - .5);
-      vec2 d = dir * u_texel * u_p0 * 2.0;
+      vec2 d = dir * u_texel * u_effectScale * u_p0 * 2.0;
       float r = texture(u_tex, v_st + d).r;
       vec4 g = texture(u_tex, v_st);
       float b = texture(u_tex, v_st - d).b;
@@ -183,8 +213,8 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
     params: [{ k: 'size', label: 'Block Size', def: 16, min: 1, max: 200, step: 1, unit: 'px' }],
     frag: F(`
       float block = max(u_p0, 1.);
-      vec2 local = v_px - u_pxOrigin;
-      vec2 center = (floor(local / block) + .5) * block;
+      vec2 pixel = v_px / u_pixelScale + u_effectOrigin;
+      vec2 center = ((floor(pixel / block) + .5) * block - u_effectOrigin) * u_pixelScale - u_pxOrigin;
       vec2 uv = vec2(center.x / u_res.x, 1. - center.y / u_res.y);
       o = texture(u_tex, uv);`, 'uniform float u_p0;'),
   },
@@ -203,7 +233,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
              { k: 'speed', label: 'Evolution', def: .4, min: -4, max: 4, step: .05, unit: '' }],
     frag: F(`
       vec2 p = vec2(v_uv.x, 1. - v_uv.y) * u_p1 * 3.0 + vec2(u_time * u_p2, u_time * u_p2 * .7);
-      vec2 d = vec2(fbm(p) - .5, fbm(p + 31.7) - .5) * u_p0 * u_texel * 2.0;
+      vec2 d = vec2(fbm(p) - .5, fbm(p + 31.7) - .5) * u_p0 * u_texel * u_effectScale * 2.0;
       o = texture(u_tex, v_st + d);`, 'uniform float u_p0,u_p1,u_p2;'),
   },
   shadow: {
@@ -215,14 +245,14 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
              { k: 'color', label: 'Color', def: '#000000', type: 'color' }],
     frag: F(`
       if (u_pass == 0) {
-        float a = radians(u_p1); vec2 off = vec2(cos(a), -sin(a)) * u_p0 * u_texel;
+        float a = radians(u_p1); vec2 off = vec2(cos(a), -sin(a)) * u_p0 * u_texel * u_effectScale;
         o = vec4(0.,0.,0., texture(u_tex, v_st - off).a);
         return;
       }
       vec2 dir = u_pass == 1 ? vec2(1.,0.) : vec2(0.,1.);
       float r = max(u_p2, .5); float sigma = r*.5; vec4 sum = vec4(0.); float ws = 0.;
       for (int i=-18;i<=18;i++){ float x=float(i)/18.*r; float w=exp(-(x*x)/(2.*sigma*sigma+1e-4));
-        sum += texture(u_tex, v_st + dir*u_texel*x)*w; ws+=w; }
+        sum += texture(u_tex, v_st + dir*u_texel*u_effectScale*x)*w; ws+=w; }
       vec4 sh = sum/max(ws,1e-4);
       if (u_pass == 2) {
         vec4 o0 = texture(u_orig, v_st);
@@ -271,7 +301,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
         ? length(p * vec2(u_layerRes.x / max(u_layerRes.y, 1.), 1.)) * 2. / span
         : dot(p, vec2(cos(a), -sin(a))) / span + .5;
       /* Static per-pixel jitter breaks 8-bit banding without shimmering. */
-      t = clamp(t + (hash(v_px) - .5) * u_dither * .004, 0., 1.);
+      t = clamp(t + (hash(floor(v_px/u_pixelScale+u_effectOrigin)+.5) - .5) * u_dither * .004, 0., 1.);
       t = pow(t, log(.5) / log(clamp(u_midpoint / 100., .01, .99)));
       vec3 g = mix(u_startColor, u_endColor, t);
       if (u_shade > .5) { vec3 h = rgb2hsv(g); g = hsv2rgb(vec3(h.x, h.y, rgb2hsv(max(x, 0.)).z)); }
@@ -294,6 +324,7 @@ export const LEGACY_EFFECTS: EffectDefinition[] = Object.entries(FX).map(([id, d
   rawShader: true,
   viewportSafe: true,
   viewportPadding: VIEWPORT_PADDING[id] || [],
+  ...(id === 'sharpen' ? {viewportPaddingPixels: 1} : {}),
 }));
 
 export const EFFECTS: EffectDefinition[] = [...reviseShadowRamp(reviseSpatialEffects(reviseCoreEffects(LEGACY_EFFECTS))), ...COLOR_CORRECTION_EFFECTS, ...CORE_IMAGE_EFFECTS, ...SPATIAL_EFFECTS, ...TONAL_EFFECTS, ...LAYER_EFFECTS, COMPOUND_BLUR, SET_CHANNELS, TEXTURIZE, STROKE, APPLY_COLOR_LUT, SOLID_COMPOSITE, ARITHMETIC, ...LAYER_COMPOSITING, ...COLOR_TRANSFORMS, ECHO].map(def=>({...def,sourceProcessing:

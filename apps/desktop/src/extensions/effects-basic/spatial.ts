@@ -12,7 +12,7 @@ in vec2 v_st;
 in vec2 v_px;
 uniform sampler2D u_tex;
 uniform sampler2D u_orig;
-uniform vec2 u_res, u_sourceRes, u_pxOrigin, u_pixelScale, u_layerRes, u_gridRes;
+uniform vec2 u_res, u_sourceRes, u_pxOrigin, u_pixelScale, u_effectScale, u_layerRes, u_gridRes;
 uniform mat3 u_layerUV;
 uniform float u_sampleLod;
 uniform int u_pass;
@@ -51,7 +51,7 @@ const blur: EffectDefinition={
   frag:PRE+uniforms(blurParams)+gaussian+`
 void main() {
   bool inactive=(u_dimensions>.5&&u_dimensions<1.5&&u_pass==1)||(u_dimensions>1.5&&u_pass==0);
-  float scale=u_pass==0 ? u_pixelScale.x : u_pixelScale.y;
+  float scale=u_pass==0 ? u_effectScale.x : u_effectScale.y;
   float sigma=max(0.,u_amount)*.5*scale;
   if(sigma<.01||inactive){o=texture(u_tex,v_st);return;}
   bool repeatEdges=u_repeatEdgePixels>.5;
@@ -103,7 +103,7 @@ const unsharp: EffectDefinition={
   frag:PRE+uniforms(unsharpParams)+gaussian+`
 void main() {
   vec4 original=texture(u_orig,v_st);
-  float scale=u_pass==0 ? u_pixelScale.x : u_pixelScale.y;
+  float scale=u_pass==0 ? u_effectScale.x : u_effectScale.y;
   float sigma=max(0.,u_radius)*scale;
   if(sigma<.01||u_amount<=0.){o=original;return;}
   vec4 blurred=gaussian(sigma,false,mat3(1.));
