@@ -60,6 +60,7 @@ describe('legacy editing install', () => {
     expect(PM.Edit.operations.set_transition).toEqual({
       target: 'layer', fields: ['layer', 'edge', 'transition'],
     });
-    expect(Object.keys(PM.Edit.operations)).toHaveLength(26);
+    expect(PM.Edit.operations.apply_preset).toEqual({ target: 'layer', fields: ['preset', 'time'] });
+    expect(Object.keys(PM.Edit.operations)).toHaveLength(27);
   });
 });

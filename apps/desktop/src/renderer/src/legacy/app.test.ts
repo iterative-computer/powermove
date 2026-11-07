@@ -166,7 +166,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
       return (Array.isArray(keys) ? keys : []).filter((key: any) =>
         key && Number.isFinite(key.t) && key.t >= minTime && typeof key.v === typeof fallback);
     },
-    WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), get: (id: string) => ({ id }), activate() {}, editing: false },
+    WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), get: (id: string) => ({ id }), activate() {}, openForProject(this: any) { this.activate('design', true); }, editing: false },
     selectLayers() {},
     L: () => null,
     sel: { layers: [], keys: [], chan: null },
