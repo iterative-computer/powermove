@@ -205,7 +205,7 @@ describe('timeline runtime', () => {
     expect(JSON.stringify(layer.p)).toBe(before);
   });
 
-  it('shows Position per axis by default and as one row when its dimensions are joined', () => {
+  it('shows Position as one row by default and per axis when its dimensions are separated', () => {
     const harness = fakePowermoveAPI(vi);
     const key = (i: string, t: number, v: number) => ({ i, t, v, eo: [0, 0], ei: [1, 1], hold: false });
     const layer: any = { id: 'card', threeD: true, p: {
@@ -216,10 +216,7 @@ describe('timeline runtime', () => {
     } };
     harness.state.project.layers = [layer];
     const before = JSON.stringify(layer.p);
-    expect(timelineProperties(harness.api, layer).map(row => row.key)).toEqual(['position.x', 'position.y', 'position.z', 'opacity']);
-    expect(expandScaleKeyIds(harness.api, ['x0'])).toEqual(['x0']);
-
-    layer.separateDimensions = false;
+    // Off by default, as in After Effects: one Position row.
     const rows = timelineProperties(harness.api, layer);
     expect(rows.map(row => row.key)).toEqual(['position', 'opacity']);
     const position = rows[0];
@@ -229,6 +226,12 @@ describe('timeline runtime', () => {
     expect(position.prop.kf[0].members.map((member: any) => member.key.v)).toEqual([10, 20]);
     // A joined Position key selects every axis's key at that time.
     expect(expandScaleKeyIds(harness.api, ['x0']).sort()).toEqual(['x0', 'y0']);
+    layer.separateDimensions = false;
+    expect(timelineProperties(harness.api, layer).map(row => row.key)).toEqual(['position', 'opacity']);
+
+    layer.separateDimensions = true;
+    expect(timelineProperties(harness.api, layer).map(row => row.key)).toEqual(['position.x', 'position.y', 'position.z', 'opacity']);
+    expect(expandScaleKeyIds(harness.api, ['x0'])).toEqual(['x0']);
     expect(JSON.stringify(layer.p)).toBe(before);
   });
 
