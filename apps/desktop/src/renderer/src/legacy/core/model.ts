@@ -61,7 +61,7 @@ const PAIRS = [
 ];
 PM.CH = CH; PM.PAIRS = PAIRS;
 
-const BLENDS = ['normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'];
+const BLENDS = ['normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken', 'colorburn', 'colordodge', 'hardlight', 'exclusion', 'hue', 'saturation', 'color', 'luminosity', 'linearburn'];
 PM.BLENDS = BLENDS;
 
 const TYPE_META: any = {

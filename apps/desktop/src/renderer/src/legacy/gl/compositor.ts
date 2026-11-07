@@ -1,3 +1,5 @@
+import { BLEND_NAMES } from '../../../../shared/blend';
+import { rasterImageFill } from './drawing';
 import { isExtrudedLayer, isShared3DPlane } from '../../core/scene3d/extrusion-data';
 import {brushGeometry,brushBounds,rasterBrush} from './effect-path';
 import { createAutomaticPreviewVideos } from '../core/automatic-preview-video';
@@ -1104,7 +1106,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
   if (L.type === 'solid') {
     return { solid: PM.hex2rgb(d.color), solidAlpha: PM.hexAlpha(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
-  if (L.type === 'shape' && L.d.paths?.length && activePreviewViewport(W, H)
+  if (L.type === 'shape' && !L.d.compound && L.d.paths?.length && activePreviewViewport(W, H)
       && (PM.previewResolution === '1' || PM.perf?.auto === false && PM.quality === 1)) {
     return viewportPathQuad(L, T, W, H, maxSourceBytes);
   }
@@ -1162,7 +1164,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     // Keep small path bitmaps reusable across animated transforms. Oversized
     // plain backgrounds only need visible pixels; a full 8192² bitmap can
     // otherwise evict all the sources prepared for the next scene.
-    const clipLargePaths = canClipPreviewSources(W, H) && L.d.paths?.length && !is3DLayer(PM, L)
+    const clipLargePaths = canClipPreviewSources(W, H) && !L.d.compound && L.d.paths?.length && !is3DLayer(PM, L)
       && !hasRenderableEffects(L.fx, PM, L, T) && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut;
     const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop,
       clipLargePaths ? Math.min(maxSourceBytes, 4 * 1024 * 1024) : maxSourceBytes);
@@ -1227,6 +1229,11 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
       textureSource = raster.cv;
       textureKey = 'r:' + raster.key;
     }
+    if (L.type === 'image' && d.imageMapping) {
+      const density = continuousRasterScale(scaledWorld(L,T,W,H));
+      textureKey = 'r:image-fill:'+JSON.stringify([a.id,bw,bh,d.imageMapping,density]);
+      textureSource = GL.texes.has(textureKey) ? el : rasterImageFill(el,sw,sh,bw,bh,d.imageMapping,density);
+    }
     const videoVersion = shared ? shared.version : L.type === 'video' ? (decoded ? `decoded:${decoded.timestamp}` : playbackFrame ? `play:${playbackFrame.version}` : captured ? `seek:${captured.version}` : el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
     // A seek can be pending while the previous decoded frame is still usable.
     // Gate on available pixels, not seeking, or seek-driven playback freezes.
@@ -1238,7 +1245,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     try { tex = texFor(textureKey, textureSource, { version: waiting ? GL.texes.get(textureKey).v : videoVersion }); }
     finally { decoded?.close(); }
     let uv = [0, 0, 1, 1];
-    if (d.fit === 'cover' || d.fit === 'contain') {
+    if (!d.imageMapping && (d.fit === 'cover' || d.fit === 'contain')) {
       const ar = sw / sh, br = bw / bh;
       if (d.fit === 'cover') {
         if (ar > br) { const s = br / ar; uv = [(1 - s) / 2, 0, s, 1]; }
@@ -1601,6 +1608,13 @@ function runTemporalEffect(L:any,fx:any,def:any,index:number,T:number,src:any,W:
 }
 
 /* ── effects chain ─────────────────────────────────────── */
+/** A group's local stack is transparent, but backdrop effects must also see
+ * the already-composited stack below that group. Never bake those lower pixels
+ * into the group itself: group opacity/blending is applied only once. */
+function effectBackdrop(acc:any,W:number,H:number,opt:any):{frame:any;owned:boolean}{
+  if(!opt.groupBackdrop)return {frame:acc,owned:false};
+  const frame=copyFbo(opt.groupBackdrop,W,H);bind(frame);drawFbo(acc,W,H,1);return {frame,owned:true};
+}
 function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = null, prefix?:number) {
   let cur = srcF;
   const coordinates = effectViewportCoordinates(W, H);
@@ -1646,6 +1660,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
       try {
         if (orig) { bindTex(1, orig.tex); setI(p, 'u_orig', 1); }
         if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
+        if (fx.type==='figmaShadow'||fx.type==='figmaBackdropBlur') {bindTex(3,srcF.tex);setI(p,'u_sourceShape',3);}
         g.u('u_m', fullQuad(targetW, targetH)); g.u('u_res', targetW, targetH);
         uploadEffectCoordinates(g,W,H,coordinates,scale,kernelScale);g.u('u_sampleLod', lod);
         if (grid) g.u('u_gridRes', ...grid);
@@ -1801,11 +1816,24 @@ function applyPathMasks(L:any,T:number,srcF:any,W:number,H:number,masks:any[]) {
   bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,coverage);setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
 }
 function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:any) {
+  let result=applyOneTrackMatte(L,T,srcF,W,H,proj,opt);
+  for(const m of L.matteSources??[]){const next=applyOneTrackMatte({...L,matteSource:m.source,matteMode:m.mode},T,result,W,H,proj,opt);if(result!==srcF&&next!==result)free(result);result=next;}
+  return result;
+}
+function applyOneTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:any) {
   const source=proj.layers.find((l:any)=>l.id===L.matteSource);
   const mode=evaluatedValue(PM,L,L.matteMode,T,'l.matteMode')||'alpha';
-  if(!source || (opt.matteDepth||0)>=8)return srcF;
-  const retained = layerInputs?.project === proj ? layerInputs!.frames.get(inputKey(source.id, 'effects','composition',T)) : null;
-  const matte=retained || GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,explicitLayers:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
+  if(!source || (opt.matteDepth||0)>=proj.layers.length || opt.matteSeen?.has(source.id))return srcF;
+  const retained = mode!=='vector' && layerInputs?.project === proj ? layerInputs!.frames.get(inputKey(source.id, 'effects','composition',T)) : null;
+  const seen=new Set(opt.matteSeen??[]);seen.add(source.id);
+  const vectorIds=new Set<string>();
+  if(mode==='vector'){vectorIds.add(source.id);let prior=0;while(prior!==vectorIds.size){prior=vectorIds.size;for(const l of proj.layers)if(vectorIds.has(l.group))vectorIds.add(l.id);}}
+  const geometric=(l:any)=>{
+    if(!vectorIds.has(l.id))return l.id===source.id?{...l,on:true}:l;
+    const d={...l.d,color:'#FFFFFFFF',fillGradient:undefined,strokeGradient:undefined,stroke:0,runs:l.d.runs?.map((r:any)=>({...r,color:'#FFFFFFFF',fillGradient:undefined,paints:[{color:'#FFFFFFFF'}]}))};
+    return {...l,on:true,blend:'normal',fx:[],p:{...l.p,opacity:PM.P(100)},type:l.type==='image'?'shape':l.type,d:l.type==='image'?{...d,shape:'rect'}:d};
+  };
+  const matte=retained || GL.renderProject({...proj,layers:proj.layers.map(geometric)},T,W,H,{...opt,transparent:true,inputLayer:source.id,inputStage:'effects',mattePass:true,matteDepth:(opt.matteDepth||0)+1,matteSeen:seen,matteProject:proj});
   const out=grab(W,H);bind(out);clear();const p=program('trackMatte',PM.GLSL_PRE+'uniform sampler2D u_matte; uniform int u_luma; uniform int u_invert; void main(){vec4 m=texture(u_matte,v_st);float a=u_luma==1?dot(m.rgb,vec3(.2126,.7152,.0722)):m.a;if(u_invert==1)a=1.-a;o=texture(u_tex,v_st)*clamp(a,0.,1.);}');
   const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,matte.tex);setI(p,'u_matte',1);setI(p,'u_luma',mode.startsWith('luma')?1:0);setI(p,'u_invert',mode.endsWith('inverted')?1:0);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);if(!retained)free(matte);return out;
 }
@@ -1880,7 +1908,7 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
 }
 
 /* ── main render ───────────────────────────────────────── */
-const BLEND_ID = { normal: 0, add: 1, screen: 2, multiply: 3, overlay: 4, softlight: 5, difference: 6, lighten: 7, darken: 8 };
+const BLEND_ID = Object.fromEntries(BLEND_NAMES.map((name,index)=>[name,index]));
 const PC_MAX_DEPTH = 6;
 let pcDepth = 0;
 
@@ -1977,7 +2005,7 @@ function groupCreatesCompositingBoundary(L: any, T: any, opt: any): boolean {
   const opacity = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
   const blend = isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend;
   const motionBlur = isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur;
-  return opacity < 1 - 1e-6
+  return evaluatedValue(PM,L,L.d?.isolate,T,'c.isolate')===true || opacity < 1 - 1e-6
     || hasRenderableEffects(L.fx || [], PM, L, T)
     || (L.masks || []).some((mask: any) => evaluatedValue(PM, L, mask.on, T, `m.${mask.id}.on`) !== false)
     || !!L.matteSource
@@ -1990,7 +2018,8 @@ function groupCreatesCompositingBoundary(L: any, T: any, opt: any): boolean {
  * becomes an offscreen boundary only on frames where one of its visual layer
  * properties needs the combined descendant image. */
 function compositingPass(layers: any[], parentGroup: string | null, T: any, opt: any): any[] {
-  return compositingLayers(layers, parentGroup, layer => groupCreatesCompositingBoundary(layer, T, opt));
+  const sources=new Set(layers.flatMap((l:any)=>[l.matteSource,...(l.matteSources??[]).map((m:any)=>m.source)]));
+  return compositingLayers(layers, parentGroup, layer => sources.has(layer.id)||groupCreatesCompositingBoundary(layer, T, opt));
 }
 
 /** Plan thumbnail source frames with the same passes, eligibility and scope
@@ -2013,7 +2042,7 @@ GL.frameVideoRequests = (comp: any, time: number, options: any = {}) => {
     const orderedLayers=proj.layers||[];
     const layers=opt.inputLayer ? orderedLayers.filter((l:any)=>l.id===opt.inputLayer)
       : opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers,opt.groupParent||null,T,opt);
-    const solo=orderedLayers.some((l:any)=>l.solo), matteSources=new Set(orderedLayers.map((l:any)=>l.matteSource));
+    const solo=orderedLayers.some((l:any)=>l.solo), matteSources=new Set(orderedLayers.flatMap((l:any)=>[l.matteSource,...(l.matteSources??[]).map((m:any)=>m.source)]));
     const content = (L:any,at:number) => {
       if (L.type==='video') {
         const asset=PM.assets.get(resolveContent(PM,L,at).asset),key=path+L.id+'@'+at;
@@ -2142,7 +2171,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const solo = orderedLayers.some((layer: any) => layer.solo);
   // Rebuild per composition/pass so edits and nested mattes cannot leave a
   // stale index. One scan replaces a full stack scan for every rendered layer.
-  const matteSources = new Set(orderedLayers.map((layer: any) => layer.matteSource));
+  const matteSources = new Set(orderedLayers.flatMap((layer:any)=>[layer.matteSource,...(layer.matteSources??[]).map((m:any)=>m.source)]));
   // Keep the invariant lower stack resident. An animated foreground then
   // costs one GPU copy plus its own draws, regardless of background density.
   let prefixStart = layers.length, prefixKey: string | null = null;
@@ -2236,7 +2265,8 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       const bakedPlane=isShared3DPlane(proj,L);
       const hasFx = !bakedPlane && (!opt.inputLayer || opt.inputStage === 'effects') && hasRenderableEffects(opt.inputPrefix===undefined?L.fx:L.fx.slice(0,opt.inputPrefix), PM, L, T);
       const hasMasks = !bakedPlane && (!opt.inputLayer || opt.inputStage !== 'source') && (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
-      const blend = opt.inputLayer ? 0 : (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
+      let blend = opt.inputLayer ? 0 : (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
+      if(blend===5&&L.blendVersion===2)blend=18;
       const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
       const transition = opt.inputLayer ? null : activeTransition(L, T);
 
@@ -2277,18 +2307,21 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
           bind(lf);drawContent(L,at,W,H,PM.clamp(PM.ev(L,'opacity',at)/100,0,1)/times.length,undefined,mb,{tex:frame.tex,w:e.w,h:e.h,ax:-e.x0,ay:-e.y0,uv:[0,0,1,1],fromFbo:true,tmp:frame});
         }
       }else if (L.type === 'group') {
+        const lower=effectBackdrop(acc,W,H,opt);
+        try{
         if (mb) {
           lf = grab(W, H); bind(lf); clear();
           const times = motionBlurTimes(T, proj.fps, opt), n = times.length;
           for (const at of times) {
             const sample = GL.renderProject(proj, at, W, H, {
-              ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj && layerInputs?.time === at ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id, mblur: false,
+              ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj && layerInputs?.time === at ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id, groupBackdrop:lower.frame, mblur: false,
             });
             bind(lf); drawFbo(sample, W, H, 1 / n, true); free(sample);
           }
         } else {
-          lf = GL.renderProject(proj, T, W, H, { ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id });
+          lf = GL.renderProject(proj, T, W, H, { ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id,groupBackdrop:lower.frame });
         }
+        }finally{if(lower.owned)free(lower.frame);}
       } else {
         lf = grab(W, H);
         bind(lf); clear();
@@ -2302,7 +2335,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
       let res = lf;
       if (hasMasks&&!sourceOwner) res = applyMasks(L, T, res, W, H);
-      if (hasFx&&!sourceOwner) { const prior=res;res = runEffects(L, T, res, W, H, acc, opt.inputPrefix);if(prior!==lf && res!==prior)free(prior); }
+      if (hasFx&&!sourceOwner) { const prior=res,needsBackdrop=L.fx.some((fx:any)=>PM.effectDef?.(fx)?.backdrop);const lower=needsBackdrop?effectBackdrop(acc,W,H,opt):{frame:acc,owned:false};try{res = runEffects(L, T, res, W, H, lower.frame, opt.inputPrefix);}finally{if(lower.owned)free(lower.frame);}if(prior!==lf && res!==prior)free(prior); }
       if (L.matteSource && opt.inputPrefix===undefined && (!opt.inputLayer || opt.inputStage === 'effects')) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
 
       let withLayer = acc;

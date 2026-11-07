@@ -4,10 +4,12 @@ export type RasterWindow ={ x: number; y: number; width: number; height: number 
 
 /** Keep the crop on the original bitmap's pixel grid, including ceil rounding. */
 export function shapeRasterGeometry(d: any, scale: number) {
-  const pad = Math.ceil((d.stroke || 0) / 2) + 4;
+  const outside = d.strokeStyle?.align === 'inside' ? 0 : d.strokeStyle?.align === 'outside' ? 1 : .5;
+  const reach = d.strokeStyle?.join === 'miter' ? Math.max(1, Math.min(100, d.strokeStyle.miterLimit ?? 4)) : 1;
+  const pad = Math.ceil((d.stroke || 0) * Math.max(.5,outside) * reach) + 4;
   const w = d.w + pad * 2, h = d.h + pad * 2;
   const density = Math.min(scale, 8192 / w, 8192 / h);
-  const stroke = Math.max(0, Number(d.stroke) || 0) / 2;
+  const stroke = Math.max(0, Number(d.stroke) || 0) * outside;
   const selection = {
     x0: -d.w / 2 - stroke, y0: -d.h / 2 - stroke,
     x1: d.w / 2 + stroke, y1: d.h / 2 + stroke,
@@ -39,7 +41,7 @@ export function previewShapeRaster(d: any, scale: number, m: readonly number[], 
   // Exclude strokes, corners and raster sampling margins conservatively.
   const inset = cornerInset(d)
     + Math.max(0, Number(d.stroke) || 0) / 2 + 8 / geometry.density;
-  if (d.shape === 'rect' && /^#[0-9a-f]{6}$/i.test(d.color)
+  if (!d.fillGradient && !d.strokeStyle && !d.arc && d.shape === 'rect' && /^#[0-9a-f]{6}$/i.test(d.color)
       && x0 > -d.w / 2 + inset && x1 < d.w / 2 - inset
       && y0 > -d.h / 2 + inset && y1 < d.h / 2 - inset) return { kind: 'solid' };
 

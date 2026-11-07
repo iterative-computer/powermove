@@ -124,6 +124,7 @@ export interface LayerPatch {
   shy?: boolean;
   solo?: boolean;
   matteSource?: string | null;
+  matteSources?: Array<{source:string;mode?:'alpha'|'alpha-inverted'|'luma'|'luma-inverted'|'vector'}>;
   blend?: BlendMode;
   motionBlur?: boolean;
   parent?: LayerTarget;

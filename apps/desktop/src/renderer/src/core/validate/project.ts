@@ -375,7 +375,7 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
         weight: finite(source.weight, 600), size: finite(source.size, 128),
         tracking: finite(source.tracking, -2), leading: finite(source.leading, 1.1),
         color: stringOr(source.color, '#F2F2F2'),
-        align: source.align === 'left' || source.align === 'right' ? source.align : 'center',
+        align: source.align === 'left' || source.align === 'right' || source.align === 'justify' ? source.align : 'center',
         italic: !!source.italic
       };
     case 'shape': {
@@ -516,6 +516,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
         },
       } : {}),
     type,
+    ...(source.blendVersion===2?{blendVersion:2 as const}:{}),
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
     from: finite(source.from),
     dur: Math.max(0.01, finite(source.dur, 5)),
@@ -526,6 +527,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     ...(type === 'precomp' && source.continuousRaster === true ? { continuousRaster: true } : {}),
     solo: !!source.solo,
     ...(source.effectSpace === undefined ? {} : {effectSpace:source.effectSpace as any}),
+    matteSources: Array.isArray(source.matteSources) ? source.matteSources.slice(0,5000).filter((m:any)=>m&&typeof m.source==='string').map((m:any)=>({source:m.source,mode:sanitizeLooseChannel(m.mode,'alpha')})) : undefined,
     matteSource: typeof source.matteSource === 'string' ? source.matteSource : null,
     matteMode: sanitizeLooseChannel(source.matteMode, 'alpha') as any,
     group: typeof source.group === 'string' && source.group !== id ? source.group : null,

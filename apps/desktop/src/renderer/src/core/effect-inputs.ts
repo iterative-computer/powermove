@@ -123,7 +123,7 @@ export function layerInputPlan(project: any, options: Options) {
     }
     if(node.stage==='masks'){node.deps.push(add(layer,'source',space,time));return;}
     node.deps.push(add(layer,'masks',space,time));
-    if(prefix===undefined&&space==='composition'&&layer.matteSource&&byId.has(layer.matteSource))node.deps.push(request(byId.get(layer.matteSource),'effects','composition',time));
+    if(prefix===undefined&&space==='composition')for(const id of [layer.matteSource,...(layer.matteSources??[]).map((m:any)=>m.source)])if(id&&byId.has(id))node.deps.push(request(byId.get(id),'effects','composition',time));
     if(!options.topologyOnly&&node.layer.effectSpace!==undefined&&!['composition','source'].includes(node.layer.effectSpace))throw new EffectInputError(`${node.layer.name}: unsupported effect processing space`);
     if(!options.topologyOnly&&node.layer.effectSpace==='source'&&(node.layer.threeD||['group','adjustment','audio','null'].includes(node.layer.type)))throw new EffectInputError(`${node.layer.name}: source owner processing requires a 2D content layer`);
     for (const [index,fx] of (node.layer.fx || []).entries()) {

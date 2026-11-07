@@ -1,3 +1,4 @@
+import { contentSlot, drawingProperties } from './content-properties';
 import { createPathTiming, type PathTiming } from '../../core/anim/motion-path';
 import { structuredProperties } from './vector-paths';
 import { sceneProperties } from '../../core/scene3d/schema';
@@ -30,7 +31,7 @@ let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
-const colorChannel=(key:any)=>/^ms\.(front|bevel|side|back)\.(color|emissionColor)$/.test(key || '') || key==='c.color' || key==='c.strokeColor' || /^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?emissionColor$/.test(key || '');
+const colorChannel=(key:any)=>/(?:^|\.)(?:color|strokeColor|textStrokeColor|secondaryColor|startColor|endColor)$/.test(key||'') || /^ms\.(front|bevel|side|back)\.(color|emissionColor)$/.test(key || '') || key==='c.color' || key==='c.strokeColor' || /^(?:o\.[^.]+\.)?mi\.(?:[0-9]+\.)?emissionColor$/.test(key || '');
 function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
@@ -529,6 +530,8 @@ PM.allProps = (L: any) => {
     const transition = L[field];
     for (const k in transition?.p || {}) out.push({ key: `${field}.p.${k}`, prop: transition.p[k], label: k, group: label });
   }
+  for(const [i,m] of (L.matteSources??[]).entries())if(isProperty(m.mode))out.push({key:`l.matteSources.${i}.mode`,prop:m.mode,label:'Matte mode',group:'Layer'});
+  out.push(...drawingProperties(L));
   out.push(...structuredProperties(L));
   out.push(...sceneProperties(L));
   return out;
@@ -538,8 +541,10 @@ PM.findProp = (L: any, key: any) => {
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;
+  const matteMode=/^l\.matteSources\.(\d+)\.mode$/.exec(key);if(matteMode)return L.matteSources?.[Number(matteMode[1])]?.mode??null;
   if (key.startsWith('c.')) {
-    const value = L.d?.[key.slice(2)];
+    const slot = contentSlot(L,key.slice(2));
+    const value = slot?.owner[slot.key];
     return isProperty(value) ? value : null;
   }
   const transition = /^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/.exec(String(key));

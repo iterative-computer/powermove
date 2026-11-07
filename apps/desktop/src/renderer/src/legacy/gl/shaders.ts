@@ -1,3 +1,4 @@
+import { BLEND_GLSL } from '../../../../shared/blend';
 import {referenceParam,emptyReference} from '../../core/effect-inputs';
 import { effectDefaultDimensions, effectParameterDefault } from '../../kernel/effect-defaults';
 /* Ported from js/gl/shaders.js — behavior-preserving. */
@@ -66,17 +67,7 @@ PM.FRAG_COMPOSITE = PRE + `
 uniform sampler2D u_dst;
 uniform float u_alpha;
 uniform int u_blend;
-vec3 blend(vec3 b, vec3 s, int m){
-  if(m==1) return b+s;
-  if(m==2) return 1.-(1.-b)*(1.-s);
-  if(m==3) return b*s;
-  if(m==4) return mix(2.*b*s, 1.-2.*(1.-b)*(1.-s), step(.5,b));
-  if(m==5) return mix(2.*b*s+b*b*(1.-2.*s), sqrt(b)*(2.*s-1.)+2.*b*(1.-s), step(.5,s));
-  if(m==6) return abs(b-s);
-  if(m==7) return max(b,s);
-  if(m==8) return min(b,s);
-  return s;
-}
+${BLEND_GLSL}
 void main(){
   vec4 s = texture(u_tex, v_st);
   vec4 d = texture(u_dst, v_st);

@@ -1,5 +1,6 @@
 import type { ExportDefaults } from '../export-defaults';
 import type { CaptionsContent } from './captions';
+import type { GradientPaint, ShapeStroke, ImageMapping, Value } from './drawing';
 
 export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './captions';
 
@@ -42,7 +43,8 @@ export type NonTransformableLayerType = {
 }[LayerType];
 
 export const BLEND_MODES = [
-  'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
+  'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken',
+  'colorburn', 'colordodge', 'hardlight', 'exclusion', 'hue', 'saturation', 'color', 'luminosity', 'linearburn'
 ] as const;
 export type BlendMode = (typeof BLEND_MODES)[number];
 
@@ -182,11 +184,30 @@ export interface TextContent {
   /** Line height as a multiple of size: 1.2 means 120%, not 120. */
   leading: number;
   color: string;
-  align: 'left' | 'center' | 'right';
+  align: 'left' | 'center' | 'right' | 'justify';
+  richText?: boolean;
+  fillGradient?: GradientPaint;
+  strokeGradient?: GradientPaint;
+  strokeStyle?: ShapeStroke;
+  textStroke?: Value<number>;
+  textStrokeColor?: Value<string>;
+  textPaint?: 'fill' | 'stroke';
+  runs?: Array<{start:number;end:number;[key:string]:unknown}>;
+  paragraphSpacing?: Value<number>;
+  paragraphIndent?: Value<number>;
+  verticalAlign?: Value<'top'|'center'|'bottom'>;
+  truncation?: Value<string>;
+  maxLines?: Value<number>;
   italic: boolean;
 }
 
 export interface ShapeContent {
+  fillGradient?: GradientPaint;
+  strokeGradient?: GradientPaint;
+  strokeStyle?: ShapeStroke;
+  compound?: boolean;
+  fillRule?: Value<'evenodd' | 'nonzero'>;
+  arc?: { start: Value<number>; end: Value<number>; inner: Value<number> };
   paths?: VectorPath[];
   [key: string]: unknown;
   shape: 'rect' | 'ellipse' | 'polygon' | 'star' | 'line';
@@ -208,6 +229,7 @@ export interface ShapeContent {
 }
 
 export interface ImageContent {
+  imageMapping?: ImageMapping;
   [key: string]: unknown;
   asset: string | null;
   fit: 'cover' | 'contain' | 'stretch';
@@ -275,6 +297,8 @@ export interface NullContent {
 }
 
 export interface GroupContent {
+  /** Figma NORMAL groups isolate child blends; absent preserves legacy pass-through groups. */
+  isolate?: Value<boolean>;
   [key: string]: unknown;
 }
 
@@ -310,7 +334,8 @@ interface LayerBase<T extends LayerType, D extends object> {
   shy: boolean;
   effectSpace?: EffectInputSpace;
   matteSource?: string | null;
-  matteMode?: Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'>;
+  matteSources?: Array<{source:string;mode:Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'|'vector'>}>;
+  matteMode?: Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'|'vector'>;
   solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
@@ -321,6 +346,7 @@ interface LayerBase<T extends LayerType, D extends object> {
    * so scaling it up stays sharp (After Effects' Continuously Rasterize). */
   continuousRaster?: boolean;
   color: string;
+  blendVersion?:2;
   blend: BlendMode;
   mblur: boolean;
   group?: string | null;

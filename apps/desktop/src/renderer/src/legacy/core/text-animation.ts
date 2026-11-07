@@ -358,7 +358,7 @@ export function animatedGlyphs(PM: any, layer: any, time: number, d: any, layout
   state = textAnimationState(PM, layer, time, layout)) {
   const size = Math.max(1, num(d.size, 16)), pivotY = -size * .35;
   const glyphs = layout.characters.map((glyph: any) => {
-    let style = { ...d };
+    let style = { ...d, ...glyph.style };
     for (const range of state.styles) if (glyph.sourceStart >= range.start && glyph.sourceStart < range.end) style = { ...style, ...range.p };
     let matrix: Matrix = [1, 0, 0, 1, 0, 0], opacity = 1, blur = 0, tracking = 0, color: string | null = null;
     for (const animator of state.animators) {

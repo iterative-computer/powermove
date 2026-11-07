@@ -61,11 +61,11 @@ const LAYER_TYPES = new Set<LayerType>([
   'solid', 'text', 'shape', 'image', 'video', 'audio', 'adjustment', 'shader', 'extension', 'null', 'precomp', 'group', 'captions'
 ]);
 const BLEND_MODES = new Set([
-  'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
+  'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken', 'colorburn', 'colordodge', 'hardlight', 'exclusion', 'hue', 'saturation', 'color', 'luminosity', 'linearburn'
 ]);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'solo', 'effectSpace', 'continuousRaster'
+  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'solo', 'matteSource', 'matteSources', 'effectSpace', 'continuousRaster'
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
@@ -451,6 +451,8 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (!BLEND_MODES.has(blend)) return invalid('is not a known blend mode', 'patch.blend');
     out.blend = blend as BlendMode;
   }
+  if(owns(patch,'matteSource')){if(patch.matteSource!==null&&typeof patch.matteSource!=='string')return invalid('must be a layer ID or null','patch.matteSource');out.matteSource=patch.matteSource as string|null;}
+  if(owns(patch,'matteSources')){if(!Array.isArray(patch.matteSources)||patch.matteSources.length>5000||patch.matteSources.some((m:any)=>!m||typeof m!=='object'||typeof m.source!=='string'||m.mode!==undefined&&!['alpha','alpha-inverted','luma','luma-inverted','vector'].includes(m.mode)))return invalid('invalid matte intersections','patch.matteSources');out.matteSources=patch.matteSources as any;}
   if (owns(patch, 'parent')) {
     const parent = target(patch.parent, 'patch.parent');
     if (parent instanceof ValidationError) return parent;

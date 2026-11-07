@@ -1,3 +1,5 @@
+import { layoutRichText, type RichLayout } from '../core/rich-text';
+import { compositePaint, gradientStyle, paintShape, shapeOutline } from './drawing';
 import {parseCube,MAX_CUBE_BYTES} from '../../core/cube-lut';
 import { yieldMediaWork } from '../core/media-work';
 import { webmTimestampScale } from '../../../../shared/video-timing';
@@ -149,7 +151,7 @@ function fontStr(d: any) {
     .filter(Boolean)
     .map((family) => `"${cssString(family)}"`)
     .join(', ');
-  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px ${families}, -apple-system, sans-serif`;
+  return `${d.italic ? 'italic ' : ''}${String(d.textCase).startsWith('SMALL_CAPS')?'small-caps ':''}${d.weight || 500} ${d.size}px ${families}, -apple-system, sans-serif`;
 }
 
 function resolvedTextContent(input: any, time = PM.time) {
@@ -196,6 +198,8 @@ interface CaretLayout { lines: CaretLine[]; lineHeight: number; size: number; le
    layer's local space: the first baseline is at size * .82 below the origin
    and x is measured from the alignment origin. */
 function textCaretLayout(d: any): CaretLayout {
+  if(d.richText){const layout:RichLayout=textGeometry(d).layout;return {lines:layout.lines.map(line=>({text:line.glyphs.map(g=>g.text).join(''),start:line.glyphs[0]?.sourceStart??0,x:line.glyphs[0]?.x??0,y:line.y,baseline:line.glyphs[0]?.baseline??0,width:line.width,boundaries:line.glyphs.map(g=>({index:g.sourceStart,x:g.x})).concat(line.glyphs.length?[{index:line.glyphs.at(-1)!.sourceEnd,x:line.glyphs.at(-1)!.x+line.glyphs.at(-1)!.width}]:[])})),lineHeight:d.size*d.leading,size:d.size,length:String(d.text).length,align:d.align,boxWidth:d.boxWidth,boxHeight:d.boxHeight};}
+
   const size = Math.max(1, Number(d.size) || 16);
   const meas = getCanvas(8, 8).getContext('2d') as any;
   const align = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
@@ -225,6 +229,12 @@ PM.textCaretLayout = (input: any, time = PM.time) => textCaretLayout(resolvedTex
    tool needs to reason about glyph placement. The returned offsets are in the
    source text layer's local coordinate system, before its transform. */
 function textLayout(d: any) {
+  if(d.richText){
+    const layout:RichLayout=textGeometry(d).layout,characters:any[]=[],words:any[]=[];let word=-1,wasSpace=true,priorLine=-1;
+    for(const g of layout.glyphs){if(g.line!==priorLine){wasSpace=true;priorLine=g.line;}const space=/^\s+$/u.test(g.text);if(!space){if(wasSpace){word++;words.push({text:'',sourceStart:g.sourceStart,x:g.x,y:g.baseline-d.size*.82,w:0,line:g.line,index:word});}const item=words[word];item.text+=g.text;item.w=g.x+g.width-item.x;characters.push({...g,index:characters.length,lineUnit:g.line,word,w:g.width,y:g.baseline-d.size*.82});}wasSpace=space;}
+    return {characters,words,lines:layout.lines.map((l,index)=>({x:l.glyphs[0]?.x??0,y:l.y,w:l.width,index,line:index}))};
+  }
+
   const meas = getCanvas(8, 8).getContext('2d') as any;
   meas.font = fontStr(d);
   meas.textBaseline = 'alphabetic';
@@ -237,6 +247,7 @@ PM.textLayout = (input: any, time = PM.time) => textLayout(resolvedTextContent(i
 // separate from bitmap eviction so panning does not repeatedly measure text.
 const textGeometryCache = new Map<string, any>();
 function textGeometry(d: any) {
+  if(d.richText){const key='rich|'+JSON.stringify(d, (k,v)=>['animators','styles','fontAnchorBounds'].includes(k)?undefined:v);const cached=textGeometryCache.get(key);if(cached)return cached;const geometry=richGeometry(d);if(key.length<65536){textGeometryCache.set(key,geometry);if(textGeometryCache.size>512)textGeometryCache.delete(textGeometryCache.keys().next().value!);}return geometry;}
   const key = JSON.stringify([d.text, d.boxWidth, d.boxHeight, d.paragraph, d.font, d.weight, d.size, d.tracking, d.leading, d.align, d.italic, variationSettings(d)]);
   const cached = textGeometryCache.get(key);
   if (cached) { textGeometryCache.delete(key); textGeometryCache.set(key, cached); return cached; }
@@ -373,16 +384,234 @@ function rasterText(d: any, scale: number, crop?: RasterWindow) {
   return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection, blank, sourceWindow };
 }
 
+function richLayout(d: any) {
+  const meas = getCanvas(8, 8).getContext("2d")!;
+  return layoutRichText(d, (text, style) => {
+    meas.font = fontStr(style);
+    if ("letterSpacing" in meas)
+      (meas as any).letterSpacing = (style.tracking ?? 0) + "px";
+    const m = meas.measureText(text);
+    return {
+      width: m.width,
+      ascent: m.actualBoundingBoxAscent || style.size * 0.82,
+      descent: m.actualBoundingBoxDescent || style.size * 0.18,
+    };
+  });
+}
+function richGeometry(d: any) {
+  const layout = richLayout(d),
+    size = Math.max(1, d.size),
+    pad =
+      Math.ceil(
+        Math.max(
+          size,
+          ...(d.runs ?? []).map((r: any) => Number(r.size) || size),
+        ) * 0.6,
+      ) +
+      24 +
+      Math.ceil(
+        (d.textStroke ?? 0) *
+          (d.strokeStyle?.align === "inside"
+            ? 0
+            : d.strokeStyle?.align === "outside"
+              ? 1
+              : 0.5) *
+          Math.max(1, d.strokeStyle?.miterLimit ?? 1),
+      ),
+    w = Math.ceil(layout.width) + pad * 2,
+    h = Math.ceil(layout.height) + pad * 2;
+  const align = d.align === "center" ? 0.5 : d.align === "right" ? 1 : 0,
+    anchorX = pad + layout.width * align,
+    anchorY = pad;
+  const selection = {
+    x0: -layout.width * align,
+    y0: 0,
+    x1: layout.width * (1 - align),
+    y1: layout.height,
+    w: layout.width,
+    h: layout.height,
+  };
+  return {
+    layout,
+    w,
+    h,
+    pad,
+    size,
+    anchorX,
+    anchorY,
+    selection,
+    lines: layout.lines.map((l) => l.glyphs.map((g) => g.text).join("")),
+    lh: layout.lines[0]?.height ?? size * d.leading,
+    align: d.align,
+    x: anchorX,
+  };
+}
+function rasterRichText(d: any, scale: number, crop?: RasterWindow) {
+  const g = textGeometry(d) as ReturnType<typeof richGeometry>,
+    density = Math.min(scale, 8192 / g.w, 8192 / g.h),
+    width = Math.ceil(g.w * density),
+    height = Math.ceil(g.h * density),
+    cv = getCanvas(crop?.width ?? width, crop?.height ?? height),
+    c = cv.getContext("2d")!;
+  if (crop) c.translate(-crop.x, -crop.y);
+  c.scale(density, density);
+  c.translate(g.anchorX, g.anchorY);
+  const painted: any[] = [];
+  if (d.boxWidth > 0 && d.boxHeight > 0) {
+    c.beginPath();
+    c.rect(
+      -g.layout.width *
+        (d.align === "center" ? 0.5 : d.align === "right" ? 1 : 0),
+      0,
+      d.boxWidth,
+      d.boxHeight,
+    );
+    c.clip();
+  }
+  for (const line of g.layout.lines) {
+    if (line.marker) {
+      const first = line.glyphs[0];
+      if (first) {
+        c.font = fontStr(first.style);
+        c.fillStyle = first.style.color;
+        c.fillText(line.marker, first.x - 20, first.baseline);
+      }
+    }
+    let i = 0;
+    while (i < line.glyphs.length) {
+      const first = line.glyphs[i]!,
+        style = first.style;
+      let text = first.text,
+        j = i + 1;
+      // Paint contiguous styled runs together: kerning, ligatures and Arabic
+      // shaping remain the browser's responsibility rather than per-letter PNGs.
+      while (
+        j < line.glyphs.length &&
+        JSON.stringify(line.glyphs[j]!.style) === JSON.stringify(style) &&
+        Math.abs(
+          line.glyphs[j]!.x -
+            (line.glyphs[j - 1]!.x + line.glyphs[j - 1]!.width),
+        ) < 0.01
+      ) {
+        text += line.glyphs[j++]!.text;
+      }
+      c.font = fontStr(style);
+      if ("letterSpacing" in c)
+        (c as any).letterSpacing = (style.tracking ?? 0) + "px";
+      painted.push({ text, x: first.x, y: first.baseline, style });
+      const paints = style.paints?.length
+        ? style.paints
+        : [{ color: style.color, gradient: style.fillGradient }];
+      for (const paint of [...paints].reverse()) {
+        c.fillStyle = paint.gradient
+          ? gradientStyle(
+              c,
+              paint.gradient,
+              d.boxWidth || g.layout.width,
+              d.boxHeight || g.layout.height,
+            )
+          : paint.color;
+        if (d.textPaint !== "stroke") compositePaint(c,paint.blend,target=>target.fillText(text,first.x,first.baseline));
+      }
+
+      if (
+        d.textPaint !== "stroke" &&
+        (style.decoration === "UNDERLINE" ||
+          style.decoration === "STRIKETHROUGH")
+      ) {
+        c.fillStyle = paints[0]?.gradient
+          ? gradientStyle(c,paints[0].gradient,d.boxWidth||g.layout.width,d.boxHeight||g.layout.height)
+          : (paints[0]?.color??style.color);
+        const y =
+          first.baseline +
+          (style.decoration === "UNDERLINE"
+            ? style.size * 0.1
+            : -style.size * 0.3);
+        c.fillRect(
+          first.x,
+          y,
+          line.glyphs.slice(i, j).reduce((sum, g) => sum + g.width, 0),
+          Math.max(1, style.size / 16),
+        );
+      }
+      i = j;
+    }
+  }
+  if (d.textStroke > 0) {
+    const stroke = getCanvas(cv.width, cv.height),
+      mask = getCanvas(cv.width, cv.height),
+      s = stroke.getContext("2d")!,
+      m = mask.getContext("2d")!,
+      style = d.strokeStyle ?? {};
+    s.setTransform(c.getTransform());
+    m.setTransform(c.getTransform());
+    s.strokeStyle = "#fff";
+    m.fillStyle = "#fff";
+    s.lineJoin = style.join ?? "miter";
+    s.miterLimit = style.miterLimit ?? 4;
+    s.setLineDash(style.dashes ?? []);
+    s.lineWidth =
+      d.textStroke *
+      (style.align === "inside" || style.align === "outside" ? 2 : 1);
+    for (const item of painted) {
+      s.font = m.font = fontStr(item.style);
+      if ("letterSpacing" in s) {
+        (s as any).letterSpacing = (m as any).letterSpacing =
+          (item.style.tracking ?? 0) + "px";
+      }
+      m.fillText(item.text, item.x, item.y);
+      s.strokeText(item.text, item.x, item.y);
+    }
+    if (style.align === "inside" || style.align === "outside") {
+      s.save();
+      s.resetTransform();
+      s.globalCompositeOperation =
+        style.align === "inside" ? "destination-in" : "destination-out";
+      s.drawImage(mask, 0, 0);
+      s.restore();
+    }
+    s.globalCompositeOperation = "source-in";
+    s.fillStyle = d.strokeGradient
+      ? gradientStyle(
+          s,
+          d.strokeGradient,
+          d.boxWidth || g.layout.width,
+          d.boxHeight || g.layout.height,
+        )
+      : (d.textStrokeColor ?? "#000");
+    s.fillRect(-g.anchorX, -g.anchorY, g.w, g.h);
+    c.save();
+    c.resetTransform();
+    c.drawImage(stroke, 0, 0);
+    c.restore();
+    stroke.width = mask.width = 0;
+  }
+  return {
+    cv,
+    w: g.w,
+    h: g.h,
+    anchorX: g.anchorX,
+    anchorY: g.anchorY,
+    selection: g.selection,
+    ...(crop ? { sourceWindow: [crop.x, crop.y, width, height] } : {}),
+  };
+}
+
 /* The raster cache key needs each animated text layer's unit counts every
    frame; measure its layout once per typography rather than per frame. */
 const textLayoutCache = new Map<string, any>();
 function cachedTextLayout(d: any) {
-  const key = JSON.stringify(d, (name, value) => name === 'animators' || name === 'styles' || name === 'fontAnchorBounds' ? undefined : value);
+  const key = JSON.stringify(d, (name, value) =>
+    name === "animators" || name === "styles" || name === "fontAnchorBounds"
+      ? undefined
+      : value,
+  );
   let layout = textLayoutCache.get(key);
   if (!layout) {
     layout = textLayout(d);
     textLayoutCache.set(key, layout);
-    if (textLayoutCache.size > 128) textLayoutCache.delete(textLayoutCache.keys().next().value!);
+    if (textLayoutCache.size > 128)
+      textLayoutCache.delete(textLayoutCache.keys().next().value!);
   }
   return layout;
 }
@@ -393,27 +622,203 @@ function textAnimation(layer: any, d: any, time: number): TextAnimation {
   return { ...textAnimationState(PM, layer, time, layout), layout };
 }
 
-function rasterAnimatedText(layer:any,d:any,time:number,scale:number,animation:TextAnimation) {
-  const glyphs=animatedGlyphs(PM,layer,time,d,animation.layout,animation),measure=getCanvas(8,8).getContext('2d')!;
+function rasterAnimatedText(
+  layer: any,
+  d: any,
+  time: number,
+  scale: number,
+  animation: TextAnimation,
+) {
+  const glyphs = animatedGlyphs(
+      PM,
+      layer,
+      time,
+      d,
+      animation.layout,
+      animation,
+    ),
+    measure = getCanvas(8, 8).getContext("2d")!;
   // A settled animation renders exactly like plain text, so reuse that path.
-  if(!animation.styles.length&&glyphs.every(isIdentityGlyph))return rasterText(d,scale);
+  if (!animation.styles.length && glyphs.every(isIdentityGlyph))
+    return d.richText ? rasterRichText(d, scale) : rasterText(d, scale);
   // Range font metrics contribute to the following characters' advances.
-  for(const line of new Set(glyphs.map((g:any)=>g.line))){
-    const run=glyphs.filter((g:any)=>g.line===line);let advance=0;
-    for(const glyph of run){glyph.x+=advance;measure.font=fontStr(d);const base=measure.measureText(glyph.text).width;measure.font=fontStr(glyph.style);advance+=measure.measureText(glyph.text).width-base;}
-    const align=d.align==='center'?.5:d.align==='right'?1:0;for(const glyph of run)glyph.x-=advance*align;
-  }
-  let x0=0,y0=0,x1=1,y1=Math.max(1,d.size);
-  const records=glyphs.filter((g:any)=>g.opacity>0).map((g:any)=>{measure.font=fontStr(g.style);const w=measure.measureText(g.text).width,h=Number(g.style.size)||d.size,baseline=g.y+d.size*.82,m=g.matrix,pad=4+g.blur*2;
-    for(const [x,y] of ([[0,-h],[w,-h],[0,h*.3],[w,h*.3]] as Array<[number,number]>)){const xx=g.x+m[0]*x+m[2]*y+m[4],yy=baseline+m[1]*x+m[3]*y+m[5];x0=Math.min(x0,xx-pad);y0=Math.min(y0,yy-pad);x1=Math.max(x1,xx+pad);y1=Math.max(y1,yy+pad);}return {...g,baseline};});
-  const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0),density=Math.min(scale,8192/w,8192/h),cv=getCanvas(Math.ceil(w*density),Math.ceil(h*density)),ctx=cv.getContext('2d')!;
-  for(const g of records){ctx.save();ctx.setTransform(density,0,0,density,-x0*density,-y0*density);ctx.translate(g.x,g.baseline);ctx.transform(...(g.matrix as [number,number,number,number,number,number]));ctx.globalAlpha=g.opacity;
+  if (!d.richText)
+    for (const line of new Set(glyphs.map((g: any) => g.line))) {
+      const run = glyphs.filter((g: any) => g.line === line);
+      let advance = 0;
+      for (const glyph of run) {
+        glyph.x += advance;
+        measure.font = fontStr(d);
+        const base = measure.measureText(glyph.text).width;
+        measure.font = fontStr(glyph.style);
+        advance += measure.measureText(glyph.text).width - base;
+      }
+      const align = d.align === "center" ? 0.5 : d.align === "right" ? 1 : 0;
+      for (const glyph of run) glyph.x -= advance * align;
+    }
+  let x0 = 0,
+    y0 = 0,
+    x1 = 1,
+    y1 = Math.max(1, d.size);
+  const records = glyphs
+    .filter((g: any) => g.opacity > 0)
+    .map((g: any) => {
+      measure.font = fontStr(g.style);
+      const w = measure.measureText(g.text).width,
+        h = Number(g.style.size) || d.size,
+        baseline = g.y + d.size * 0.82,
+        m = g.matrix,
+        pad = 4 + g.blur * 2 + (d.textStroke??0)*Math.max(1,d.strokeStyle?.miterLimit??1);
+      for (const [x, y] of [
+        [0, -h],
+        [w, -h],
+        [0, h * 0.3],
+        [w, h * 0.3],
+      ] as Array<[number, number]>) {
+        const xx = g.x + m[0] * x + m[2] * y + m[4],
+          yy = baseline + m[1] * x + m[3] * y + m[5];
+        x0 = Math.min(x0, xx - pad);
+        y0 = Math.min(y0, yy - pad);
+        x1 = Math.max(x1, xx + pad);
+        y1 = Math.max(y1, yy + pad);
+      }
+      return { ...g, baseline };
+    });
+  const w = Math.max(1, x1 - x0),
+    h = Math.max(1, y1 - y0),
+    density = Math.min(scale, 8192 / w, 8192 / h),
+    cv = getCanvas(Math.ceil(w * density), Math.ceil(h * density)),
+    ctx = cv.getContext("2d")!;
+  for (const g of records) {
+    ctx.save();
+    ctx.setTransform(density, 0, 0, density, -x0 * density, -y0 * density);
+    ctx.translate(g.x, g.baseline);
+    ctx.transform(
+      ...(g.matrix as [number, number, number, number, number, number]),
+    );
+    ctx.globalAlpha = g.opacity;
     // Canvas filters measure in device pixels, independent of the transform.
-    if(g.blur>0.01)ctx.filter=`blur(${g.blur*density}px)`;
-    ctx.font=fontStr(g.style);ctx.fillStyle=g.color??g.style.color;ctx.fillText(g.text,0,0);ctx.restore();}
+    if (g.blur > 0.01) ctx.filter = `blur(${g.blur * density}px)`;
+    ctx.font = fontStr(g.style);
+    if ("letterSpacing" in ctx)
+      (ctx as any).letterSpacing = (g.style.tracking ?? 0) + "px";
+    const paints = g.color
+      ? [{ color: g.color }]
+      : g.style.paints?.length
+        ? g.style.paints
+        : [{ color: g.style.color, gradient: g.style.fillGradient }];
+    for (const paint of [...paints].reverse()) {
+      ctx.fillStyle = paint.gradient
+        ? gradientStyle(
+            ctx,
+            paint.gradient,
+            d.boxWidth || textGeometry(d).selection.w,
+            d.boxHeight || textGeometry(d).selection.h,
+            -g.x,
+            -g.baseline,
+          )
+        : paint.color;
+      compositePaint(ctx,paint.blend,target=>target.fillText(g.text,0,0));
+    }
+    if (
+      g.style.decoration === "UNDERLINE" ||
+      g.style.decoration === "STRIKETHROUGH"
+    ) {
+      ctx.fillStyle = g.color ?? g.style.color;
+      ctx.fillRect(
+        0,
+        g.style.decoration === "UNDERLINE"
+          ? g.style.size * 0.1
+          : -g.style.size * 0.3,
+        measure.measureText(g.text).width,
+        Math.max(1, g.style.size / 16),
+      );
+    }
+    if (d.textStroke > 0) paintAnimatedTextStroke(ctx, d, g, scale);
+    ctx.restore();
+  }
   // Select the resting text box: it neither collapses while glyphs are hidden
   // nor jumps when the animation settles onto the plain-text path.
-  return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:animation.styles.length?{x0,y0,x1,y1,w,h}:textGeometry(d).selection};
+  return {
+    cv,
+    w,
+    h,
+    anchorX: -x0,
+    anchorY: -y0,
+    selection: animation.styles.length
+      ? { x0, y0, x1, y1, w, h }
+      : textGeometry(d).selection,
+  };
+}
+
+function paintAnimatedTextStroke(
+  ctx: CanvasRenderingContext2D,
+  d: any,
+  g: any,
+  scale: number,
+) {
+  const meas = getCanvas(8, 8).getContext("2d")!;
+  meas.font = fontStr(g.style);
+  const metrics = meas.measureText(g.text),
+    style = d.strokeStyle ?? {},
+    pad = Math.ceil(d.textStroke * Math.max(1, style.miterLimit ?? 1)) + 4;
+  const x0 = -metrics.actualBoundingBoxLeft - pad,
+    y0 = -metrics.actualBoundingBoxAscent - pad,
+    w = Math.ceil(
+      metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight + 2 * pad,
+    ),
+    h = Math.ceil(
+      metrics.actualBoundingBoxAscent +
+        metrics.actualBoundingBoxDescent +
+        2 * pad,
+    ),
+    density = Math.min(scale, 8192 / w, 8192 / h);
+  const stroke = getCanvas(
+      Math.max(1, Math.ceil(w * density)),
+      Math.max(1, Math.ceil(h * density)),
+    ),
+    mask = getCanvas(stroke.width, stroke.height),
+    s = stroke.getContext("2d")!,
+    m = mask.getContext("2d")!;
+  for (const c of [s, m]) {
+    c.scale(density, density);
+    c.translate(-x0, -y0);
+    c.font = fontStr(g.style);
+    c.fillStyle = "#fff";
+    if ("letterSpacing" in c)
+      (c as any).letterSpacing = (g.style.tracking ?? 0) + "px";
+  }
+  m.fillText(g.text, 0, 0);
+  s.strokeStyle = "#fff";
+  s.lineWidth =
+    d.textStroke *
+    (style.align === "inside" || style.align === "outside" ? 2 : 1);
+  s.lineJoin = style.join ?? "miter";
+  s.miterLimit = style.miterLimit ?? 4;
+  s.setLineDash(style.dashes ?? []);
+  s.strokeText(g.text, 0, 0);
+  if (style.align === "inside" || style.align === "outside") {
+    s.save();
+    s.resetTransform();
+    s.globalCompositeOperation =
+      style.align === "inside" ? "destination-in" : "destination-out";
+    s.drawImage(mask, 0, 0);
+    s.restore();
+  }
+  s.globalCompositeOperation = "source-in";
+  s.fillStyle = d.strokeGradient
+    ? gradientStyle(
+        s,
+        d.strokeGradient,
+        d.boxWidth || textGeometry(d).selection.w,
+        d.boxHeight || textGeometry(d).selection.h,
+        -g.x,
+        -g.baseline,
+      )
+    : (d.textStrokeColor ?? "#000");
+  s.fillRect(x0, y0, w, h);
+  ctx.drawImage(stroke, x0, y0, w, h);
+  stroke.width = mask.width = 0;
 }
 
 /* ── shapes ────────────────────────────────────────────── */
@@ -463,6 +868,35 @@ function rasterShape(d: any, scale: any, crop?: RasterWindow) {
   c.fill();
   if (d.stroke > 0) c.stroke();
   return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection, uv };
+}
+
+/** Compound contours share one fill operation, so holes retain their winding. */
+function rasterDrawing(d: any, geometry: any, paths: any[] | null, crop?: RasterWindow) {
+  const primitive = !paths;
+  const {width,height,w,h,density} = geometry;
+  const x0 = primitive ? -geometry.pad : geometry.x0, y0 = primitive ? -geometry.pad : geometry.y0;
+  const cv = getCanvas(crop?.width ?? width,crop?.height ?? height), ctx=cv.getContext('2d')!;
+  if(crop)ctx.translate(-crop.x,-crop.y);
+  ctx.scale(density,density);ctx.translate(-x0,-y0);
+  const outline = primitive ? shapeOutline(d) : new Path2D(), ends:any[]=[],fills=new Map<string,{path:Path2D;rule:string}>();
+  if(paths)for(const record of paths) {
+    const v=record.values,vs=v.vertices,p=new Path2D(); if(!vs.length)continue;
+    p.moveTo(vs[0].x,vs[0].y);
+    for(let i=0;i<vs.length-(v.closed?0:1);i++){const a=vs[i],b=vs[(i+1)%vs.length];p.bezierCurveTo(a.x+a.outX,a.y+a.outY,b.x+b.inX,b.y+b.inY,b.x,b.y);}
+    if(v.closed)p.closePath();
+    outline.addPath(p,new DOMMatrix(record.matrix));
+    const key=String(v.fillGroup??'0'),fill=fills.get(key)??{path:new Path2D(),rule:v.fillRule??d.fillRule};fill.path.addPath(p,new DOMMatrix(record.matrix));fills.set(key,fill);
+    if(!v.closed&&vs.length>1)for(const [index,next,start] of [[0,1,true],[vs.length-1,vs.length-2,false]] as const){
+      const a=vs[index],b=vs[next],tx=start?a.outX:a.inX,ty=start?a.outY:a.inY;
+      const tangent=Math.hypot(tx,ty)>1e-8?[tx,ty]:[b.x-a.x,b.y-a.y];
+      const angle=Math.atan2(tangent[1],tangent[0])+Math.PI;
+      const m=record.matrix; ends.push({x:m[0]*a.x+m[2]*a.y+m[4],y:m[1]*a.x+m[3]*a.y+m[5],angle:Math.atan2(m[1]*Math.cos(angle)+m[3]*Math.sin(angle),m[0]*Math.cos(angle)+m[2]*Math.sin(angle)),cap:start?(v.startCap??d.strokeStyle?.startCap):(v.endCap??d.strokeStyle?.endCap)});
+    }
+  }
+  if(paths&&fills.size>1){for(const fill of fills.values())paintShape(ctx,fill.path,{...d,stroke:0,fillRule:fill.rule},{x:x0,y:y0,w,h});paintShape(ctx,outline,{...d,color:'#00000000',fillGradient:undefined},{x:x0,y:y0,w,h},ends);}
+  else paintShape(ctx,outline,d,{x:x0,y:y0,w,h},ends);
+  return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:geometry.selection??{x0,y0,x1:x0+w,y1:y0+h,w,h},
+    ...(crop?{uv:[-crop.x/crop.width,-crop.y/crop.height,width/crop.width,height/crop.height]}:{})};
 }
 
 /* ── captions ──────────────────────────────────────────── */
@@ -522,8 +956,9 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   const rasterScale = L.type === 'shape' && !L.d.paths?.length ? shapeRasterGeometry(d, scale).density
     : L.type === 'text' && !L.d.animators?.length && !L.d.styles?.length ? textRasterGeometry(d, scale).density
     : scale;
+  const advanced = L.type === 'shape' && !!(d.compound || d.fillGradient || d.strokeGradient || d.strokeStyle || d.arc);
   const paths = L.d.paths?.length ? L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})) : null;
-  const key = (paths ? 'paths|'+JSON.stringify(paths)+'|'+scale : L.type === 'text'
+  const key = (d.richText ? 'rich|'+JSON.stringify([d,animation])+ '|' + scale : advanced ? 'drawing|'+JSON.stringify([d,paths])+ '|' + scale : paths ? 'paths|'+JSON.stringify(paths)+'|'+scale : L.type === 'text'
     ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), animation ? textAnimationKey(animation) : '', rasterScale].join('|')
     : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.independentCorners ? cornerRadii(d).join(',') : '', d.smoothing, d.stroke, d.strokeColor, d.points, rasterScale].join('|'))
     + (crop ? `|crop:${crop.x},${crop.y},${crop.width},${crop.height}` : '');
@@ -538,13 +973,15 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:record.values,matrix:record.matrix})))
+    const strokeReach = Math.max(1,d.strokeStyle?.join==='miter'?Math.min(100,d.strokeStyle.miterLimit??4):1,
+      [d.strokeStyle?.cap,d.strokeStyle?.startCap,d.strokeStyle?.endCap,...(paths??[]).flatMap((r:any)=>[r.values.startCap,r.values.endCap])].some(c=>/ARROW|TRIANGLE|DIAMOND|CIRCLE/.test(c??''))?4:1);
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:advanced?{...record.values,strokeWidth:Math.max(record.values.strokeWidth,(d.stroke??0)*strokeReach)}:record.values,matrix:record.matrix})))
       : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
     if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
     // Animated text can paint beyond the ordinary text geometry; leave that
     // source to the visible render when speculation has a finite budget.
     if (animation && Number.isFinite(maxSourceBytes)) return null;
-    e = paths ? rasterPaths(PM,L,time,scale,geometry) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
+    e = d.richText && !animation ? rasterRichText(d,scale,crop) : advanced ? rasterDrawing(d,geometry,paths,crop) : paths ? rasterPaths(PM,L,time,scale,geometry) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);

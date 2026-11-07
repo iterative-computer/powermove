@@ -1,3 +1,4 @@
+import { contentSlot } from './content-properties';
 import { extrusionEligible, parseExtrusion } from '../../core/scene3d/extrusion-data';
 import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
 import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
@@ -6,7 +7,7 @@ import { captureFontAnchor } from './font-anchor';
 import { drawnShapeCommand } from './parametric-shapes';
 import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
-import { validMatteSource } from './matte';
+import { validMatteSource,validMatteSources,MATTE_MODES } from './matte';
 import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
 import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
@@ -46,13 +47,13 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'solo', 'blend',
-  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'effectSpace',
+  'motionBlur', 'parent', 'matteSource', 'matteSources', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'effectSpace',
   'continuousRaster',
 ]);
 let live: any = null;
 
 const validateInputGraphs = (commands?: any[]) => {
-  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && command.patch?.matteSource!==undefined))validateCompositionMaps(PM.proj);
+  if(!commands || commands.some(command=>['add_layer','set_content','add_effect','set_effect','apply_preset'].includes(command.type) || command.type==='set_layer' && (command.patch?.matteSource!==undefined||command.patch?.matteSources!==undefined)))validateCompositionMaps(PM.proj);
   // Scalar drags cannot change texture dependencies. Keep graph validation off
   // their critical path, and allow ordinary edits to imported invalid data.
   if (commands && !commands.some(command => ['add_effect','apply_preset','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
@@ -183,7 +184,8 @@ const property: any = (layer: any, path: any) => {
     const key = channel.slice(2);
     /* Optional levels are unity until first set, so they can be keyframed from absent. */
     if (canAnimateContent(layer, key) && layer.d[key] == null && key === 'audioGain') layer.d[key] = 1;
-    if (canAnimateContent(layer, key) && !isProperty(layer.d[key]) && layer.d[key] != null) layer.d[key] = PM.P(layer.d[key]);
+    const slot = contentSlot(layer,key);
+    if (slot && canAnimateContent(layer,key) && !isProperty(slot.owner[slot.key]) && slot.owner[slot.key] != null) slot.owner[slot.key] = PM.P(slot.owner[slot.key]);
   }
   if (channel === 'l.blend' || channel === 'l.mblur' || channel === 'l.matteMode') {
     const key = channel.slice(2);
@@ -587,6 +589,7 @@ function setLayer(command: any) {
     if (isProperty(layer.mblur)) setProperty({ target: layer.id, path: 'l.mblur', value: !!patch.motionBlur, preserveHandEdits: false });
     else layer.mblur = !!patch.motionBlur;
   }
+  if(patch.matteSources!==undefined){if(!Array.isArray(patch.matteSources)||patch.matteSources.length>5000||patch.matteSources.some((m:any)=>!m||typeof m.source!=='string'||!MATTE_MODES.includes(isProperty(m.mode)?m.mode.v:m.mode??'alpha'))||!validMatteSources(PM.proj.layers,layer,patch.matteSources,patch.matteSource!==undefined?patch.matteSource:layer.matteSource))throw new Error('Invalid matte source or matte cycle');layer.matteSources=patch.matteSources.map((m:any)=>({...m,mode:isProperty(m.mode)?clone(m.mode):PM.P(m.mode??'alpha')}));}
   if (patch.matteSource !== undefined) {
     if (!validMatteSource(PM.proj.layers,layer,patch.matteSource))throw new Error('Invalid matte source or matte cycle');
     layer.matteSource=patch.matteSource;layer.matteMode ||= PM.P('alpha');

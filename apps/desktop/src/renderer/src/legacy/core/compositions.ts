@@ -378,6 +378,7 @@ export function install(PM: PMRegistry): void {
       if (copy.parent) copy.parent = ids.get(copy.parent) ?? null;
       if (copy.group) copy.group = ids.get(copy.group) ?? null;
       if (copy.matteSource) copy.matteSource = ids.get(copy.matteSource) ?? null;
+      if(copy.matteSources)copy.matteSources=copy.matteSources.filter((m:any)=>ids.has(m.source)).map((m:any)=>({...m,source:ids.get(m.source)}));
       remapLayerInputs(copy, ids);
     }
     return copies;
@@ -473,7 +474,7 @@ export function install(PM: PMRegistry): void {
         const copy = PM.cloneLayer(original);
         copy.name = original.name;
         copy.type = original.type === 'group' ? 'group' : 'null';
-        copy.fx = []; copy.masks = []; copy.matteSource = null;
+        copy.fx = []; copy.masks = []; copy.matteSource = null;copy.matteSources=[];
         copy.transitionIn = null; copy.transitionOut = null;
         if (sharedGroups.has(id)) {
           copy.p.opacity = PM.P(100); copy.blend = 'normal'; copy.mblur = false;
@@ -518,8 +519,8 @@ export function install(PM: PMRegistry): void {
     const styled = (group: any) => {
       const differs = (prop: any, value: any) => prop && typeof prop === 'object'
         ? !!(prop.expr || prop.kf?.length || prop.v !== value) : prop !== value;
-      return differs(group.p.opacity, 100) || group.fx?.length || group.masks?.length
-        || group.matteSource || differs(group.blend, 'normal') || differs(group.mblur, false)
+      return (group.d?.isolate !== undefined && differs(group.d.isolate, false)) || differs(group.p.opacity, 100) || group.fx?.length || group.masks?.length
+        || group.matteSource || group.matteSources?.length || differs(group.blend, 'normal') || differs(group.mblur, false)
         || group.transitionIn || group.transitionOut;
     };
     const ancestors = (item: any) => PM.groupAncestors(item, host.layers) as any[];
@@ -563,6 +564,7 @@ export function install(PM: PMRegistry): void {
         const links = innerRig.links.get(moved);
         if (links) Object.assign(moved, links);
         if (moved.matteSource && !pickedIds.has(moved.matteSource)) moved.matteSource = null;
+        if(moved.matteSources)moved.matteSources=moved.matteSources.filter((m:any)=>pickedIds.has(m.source));
         if (start) shiftLayer(moved, -start);
       }
       if (crop) {
@@ -585,6 +587,7 @@ export function install(PM: PMRegistry): void {
       for (const item of rest) {
         Object.assign(item, outerRig.links.get(item));
         if (pickedIds.has(item.matteSource)) item.matteSource = null;
+        if(item.matteSources)item.matteSources=item.matteSources.filter((m:any)=>!pickedIds.has(m.source));
       }
       rest.splice(Math.max(0, Math.min(index, rest.length)), 0, layer);
       host.layers = [...rest, ...outerRig.copies];
@@ -670,7 +673,7 @@ export function install(PM: PMRegistry): void {
     const offset = start - sourceTime(PM, layer, start);
     const group: any = PM.mkLayer('group', { name: layer.name }, host);
     for (const key of ['id', 'from', 'dur', 'on', 'shy', 'solo', 'color', 'blend', 'mblur', 'parent', 'group', 'p', 'fx',
-      'masks', 'matteSource', 'matteMode', 'transitionIn', 'transitionOut', 'track']) {
+      'masks', 'matteSource', 'matteMode','matteSources', 'transitionIn', 'transitionOut', 'track']) {
       if (layer[key] !== undefined) group[key] = layer[key];
     }
     group.collapsed = false;
