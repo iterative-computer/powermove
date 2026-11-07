@@ -1,9 +1,12 @@
+import { applyPreset } from '../presets/model';
+
 /* FX browser drag payload (see preview-contract.md, "Drag payload"). Lane B
    sets it on the card; the viewer and timeline read it here. */
 
 export const FX_DRAG_MIME = 'application/x-powermove-fx';
 
-export type FxDragPayload = { kind: 'effect' | 'transition'; id: string; label: string };
+/** `preset` is one of My Presets (PM.Presets): effects and keyframes applied from the playhead. */
+export type FxDragPayload = { kind: 'effect' | 'transition' | 'preset'; id: string; label: string };
 
 /** True when a dragover/drop event carries an FX payload (data is unreadable during dragover; types are). */
 export function hasFxDrag(dt: DataTransfer | null | undefined): boolean {
@@ -20,7 +23,7 @@ export function readFxDrag(dt: DataTransfer | null | undefined): FxDragPayload |
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
-    if (parsed.kind !== 'effect' && parsed.kind !== 'transition') return null;
+    if (parsed.kind !== 'effect' && parsed.kind !== 'transition' && parsed.kind !== 'preset') return null;
     if (typeof parsed.id !== 'string' || !parsed.id) return null;
     return { kind: parsed.kind, id: parsed.id, label: typeof parsed.label === 'string' && parsed.label ? parsed.label : parsed.id };
   } catch {
@@ -84,6 +87,9 @@ export function applyFxDrop(payload: FxDragPayload, layerId: string | null | und
   const toast = (text: string) => PM.toast?.(text);
   const layer = layerId ? PM.L?.(layerId) ?? PM.proj?.layers?.find((l: any) => l.id === layerId) : null;
   if (!layer) { toast('Select a layer to apply ' + payload.label); return false; }
+  /* A preset may carry only transform keyframes, so the engine decides what
+     fits this layer and reports anything it skipped. */
+  if (payload.kind === 'preset') return applyPreset(PM, payload.id, layer.id);
   const meta = PM.TYPE_META?.[layer.type];
   if (layer.type === 'audio' || meta?.effects === false) {
     toast(`${meta?.label || 'Audio'} layers do not support ${payload.kind === 'effect' ? 'effects' : 'transitions'}`);

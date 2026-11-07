@@ -1,6 +1,7 @@
 <script lang="ts">
   import { doc } from '../state/document.svelte';
   import Icon from './Icon.svelte';
+  import { workspaceManageItems } from '../shell/workspace-actions';
   import type { PanelProps } from './registerSveltePanel';
 
   interface Workspace {
@@ -20,7 +21,8 @@
     doc.proj;
     return {
       workspaces: [...((PM.WS.all ?? []) as Workspace[])],
-      currentId: PM.WS.current?.id as string | undefined
+      currentId: PM.WS.current?.id as string | undefined,
+      defaultId: (PM.WS.defaultId?.() ?? null) as string | null
     };
   });
 
@@ -57,6 +59,13 @@
     });
   }
 
+  /* Right-click a workspace for the same commands as the titlebar menu. */
+  function rowMenu(event: MouseEvent, workspace: Workspace): void {
+    if (!PM.menu || !PM.WS.get) return;
+    event.preventDefault();
+    PM.menu(event.currentTarget as HTMLElement, [{ header: workspace.name }, ...workspaceManageItems(PM, workspace.id)], { x: event.clientX, y: event.clientY });
+  }
+
   function saveCurrent(): void {
     PM.WS.saveAsNew();
     status = 'Save workspace dialog opened';
@@ -70,7 +79,7 @@
 
 <div class="simple-panel-list" data-svelte-panel={panelId}>
   {#each model.workspaces as workspace (workspace.id)}
-    <div class:sel={workspace.id === model.currentId} class="lyr simple-panel-row">
+    <div class:sel={workspace.id === model.currentId} class="lyr simple-panel-row" role="group" aria-label={workspace.name} oncontextmenu={(event) => rowMenu(event, workspace)}>
       <button
         class="simple-row-action"
         type="button"
@@ -78,6 +87,7 @@
         onclick={() => activate(workspace)}
       >
         <span class="nm" title={workspace.name}>{workspace.name}</span>
+        {#if workspace.id === model.defaultId}<span class="ws-default" title="New windows and projects open in this workspace">Default</span>{/if}
       </button>
       {#if !workspace.builtin}
         <button class="stopwatch" type="button" aria-label={`Delete ${workspace.name}`} title={`Delete ${workspace.name} workspace`} onclick={(event) => remove(event, workspace)}>
@@ -99,3 +109,13 @@
   <div class="simple-panel-hint">Ask the Powermove agent to redesign or add an interface section.</div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>
+
+<style>
+  /* Meta sits right, quiet, as in the other simple list panels. */
+  .ws-default {
+    flex: none;
+    margin-left: auto;
+    color: var(--tx-3);
+    font-size: var(--fs-xs);
+  }
+</style>

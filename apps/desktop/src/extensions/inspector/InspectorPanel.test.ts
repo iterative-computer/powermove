@@ -952,6 +952,31 @@ describe('InspectorPanel', () => {
     );
   });
 
+  it('saves the selected effects, or a property row, as an animation preset', () => {
+    const candidate = layer('A');
+    candidate.fx.push(
+      { id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 1, kf: [], expr: null } } },
+      { id: 'fx-2', type: 'blur', on: true, p: { amount: { v: 2, kf: [], expr: null } } }
+    );
+    const { api, menu } = setup([candidate], ['A'], { effects: true });
+    const run = vi.spyOn(api.commands, 'run').mockImplementation(() => undefined);
+    const first = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
+    const second = target.querySelector<HTMLElement>('[data-effect-id="fx-2"]')!;
+    first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    second.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }));
+    flushSync();
+    second.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    let items = menu.mock.calls.at(-1)![1] as Array<{ header?: string; label?: string; run?: () => void }>;
+    expect(items[0]).toEqual({ header: '2 Effects' });
+    items.find((item) => item.label === 'Save Animation Preset…')!.run!();
+    expect(run).toHaveBeenLastCalledWith('saveAnimationPreset', { layerId: 'A', effectIds: ['fx-1', 'fx-2'] });
+
+    channelRow('A', 'opacity').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: () => void }>;
+    items.find((item) => item.label === 'Save Animation Preset…')!.run!();
+    expect(run).toHaveBeenLastCalledWith('saveAnimationPreset', { layerId: 'A', paths: ['opacity'] });
+  });
+
   it('selects multiple effects and routes copy, paste, and delete before layer shortcuts', () => {
     const candidate = layer('A');
     const channel = (value: number, id: string) => ({

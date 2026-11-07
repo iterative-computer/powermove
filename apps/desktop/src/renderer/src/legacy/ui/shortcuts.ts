@@ -1,3 +1,4 @@
+import { openSavePresetSheet } from '../../presets/save-preset';
 import { remapLayerInputs } from '../../core/effect-inputs';
 import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
@@ -462,6 +463,10 @@ def('releasePrecomp', 'Release pre-comp', null, (id?: any) => {
   if (issue) { PM.toast?.(issue); return; }
   try { PM.Comps.release(layer.id); } catch (error) { PM.toast?.(error instanceof Error ? error.message : String(error), 4000, { error: true }); }
 }, 'Layer');
+/* After Effects' Animation ▸ Save Animation Preset…: from the Layer menu, a
+   layer's context menu, Effect Controls or a Properties row (which pass what
+   was pointed at), or ⌘K. */
+def('saveAnimationPreset', 'Save animation preset…', null, (request?: any) => openSavePresetSheet(PM, request && typeof request === 'object' ? request : {}), 'Layer');
 /* The timeline's layer switches as commands, so ⌘K and menus reach them. */
 const toggleLayerSwitch = (field: 'threeD' | 'continuousRaster', label: string, applies: (layer: any) => boolean) => {
   const layers = (PM.sel.layers as string[]).map((id) => PM.L(id)).filter((layer: any) => layer && applies(layer));

@@ -81,12 +81,14 @@ describe('inspector context menu locks', () => {
     expect(JSON.stringify(layer.p.opacity)).toBe(before);
   });
 
-  it('disables editing choices for protected layers while keeping graph inspection available', () => {
+  it('disables editing choices for protected layers while keeping graph inspection and preset saving available', () => {
     const { items } = fixture('nested group');
-    for (const item of items.filter(item => item.run && item.label !== 'Show in Graph Editor')) {
+    // Neither reading choice edits the layer: one inspects keys, the other copies them into My Presets.
+    const reading = ['Show in Graph Editor', 'Save Animation Preset…'];
+    for (const item of items.filter(item => item.run && !reading.includes(item.label))) {
       expect(item.disabled, item.label).toBe(true);
     }
-    expect(items.find(item => item.label === 'Show in Graph Editor').disabled).not.toBe(true);
+    for (const label of reading) expect(items.find(item => item.label === label).disabled).not.toBe(true);
   });
 
   it('still adds a key to an unlocked layer and supports one-step Undo', () => {

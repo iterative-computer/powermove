@@ -16,7 +16,7 @@ test('Command+V pastes text into a panel search field without pasting layers', a
   const effectsPanel = page.locator('.panel[data-panel="fxbrowser"]');
   await expect(effectsPanel).toBeVisible();
   // The search field is always in view.
-  const field = effectsPanel.getByRole('searchbox', { name: 'Search effects', exact: true });
+  const field = effectsPanel.getByRole('searchbox', { name: 'Search effects and presets', exact: true });
   await field.fill('Before ');
   await session.app.evaluate(({ clipboard }) => clipboard.writeText('pasted text'));
   await session.app.evaluate(({ BrowserWindow }) => {
