@@ -17,6 +17,10 @@ export function isModelGroup(PM:any,layer:any):boolean {
     && (PM.groupAncestors?.(child) || []).some((group:any)=>group.id===layer.id)) || [];
   return members.length>0 && members.every((child:any)=>!!layer3DRole(child));
 }
+/** Model-only groups cannot flatten their contents, just like models themselves. */
+export function isAlways3DLayer(PM:any,layer:any):boolean {
+  return !!layer3DRole(layer) || isModelGroup(PM,layer);
+}
 export const TRANSFORM_PATHS: Record<string,string> = {x:'position.x',y:'position.y',z:'position.z',rx:'rotation.x',ry:'rotation.y',rz:'rotation',sx:'scale.x',sy:'scale.y',sz:'scale.z'};
 const clone = (v:any) => JSON.parse(JSON.stringify(v));
 

@@ -2353,8 +2353,9 @@ function switchAreaWidth(L: any): number {
   const needed = (T.style?.showSwitches === false ? 0 : SWITCH_WIDTH * 2) + audio + status;
   return clamp(T.gut - 386, needed, Math.max(needed, 108));
 }
-/** Models, lights and cameras are always 3D; they have no switch to flip. */
-const always3D = (L: any): boolean => L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.');
+/** Models, lights, cameras and model-only groups have no 2D switch. */
+const always3D = (L: any): boolean => (L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.'))
+  || (L.type === 'group' && api.scene3d.isGroup(L.id));
 function rowSwitches(L: any): RowSwitch[] {
   if (!layerSupportsTransform(L.type) || T.style?.showSwitches === false) return [];
   const out: RowSwitch[] = [];

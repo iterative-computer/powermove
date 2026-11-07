@@ -6,6 +6,7 @@ function setup(){
  const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
  PM.proj=PM.mkProject({w:640,h:360,dur:2,fps:10});PM.time=0;
  const a=PM.mkLayer('shape',{name:'A',p:{'position.x':250}}),b=PM.mkLayer('shape',{name:'B',p:{'position.x':390}});
+ a.threeD=true;b.threeD=true;
  PM.proj.layers=[a,b];PM.ProjectIndex.invalidate();const g=PM.groupLayers([a.id,b.id]);
  g.threeD=true;g.p['rotation.y'].v=35;g.p['rotation.x'].v=15;g.p['position.z'].v=140;PM.touch();
  return {PM,a,b,g};
@@ -32,10 +33,17 @@ describe('2.5D groups',()=>{
   expect(child.p.perspective.kf.length).toBeGreaterThan(0);
  });
 
- it('projects 2D children through a shared group transform without changing their switches',()=>{
-  const {PM,a,b,g}=setup();expect(is3DLayer(PM,a)).toBe(true);expect(a.threeD).toBeFalsy();
-  const ca=projectPoint(planeMatrix(PM,a,0),{x:0,y:0}),cb=projectPoint(planeMatrix(PM,b,0),{x:0,y:0});expect(ca.x).not.toBe(250);expect(cb.x).not.toBe(390);
-  g.threeD=false;PM.touch();expect(projectPoint(planeMatrix(PM,a,0),{x:0,y:0})).toEqual({x:250,y:180});
+ it('only projects children whose own 3D switches are on, including after undo and save',()=>{
+  const {PM,a,b,g}=setup();expect(is3DLayer(PM,a)).toBe(true);
+  expect(projectPoint(planeMatrix(PM,a,0),{x:0,y:0}).x).not.toBe(250);
+  expect(PM.Edit.apply({type:'set_layer',target:a.id,patch:{threeD:false}}).ok).toBe(true);
+  expect(is3DLayer(PM,a)).toBe(false);expect(projectPoint(planeMatrix(PM,a,0),{x:0,y:0})).toEqual({x:250,y:180});
+  expect(projectPoint(planeMatrix(PM,b,0),{x:0,y:0}).x).not.toBe(390);
+  PM.hist.undo();expect(is3DLayer(PM,PM.L(a.id))).toBe(true);
+  PM.hist.redo();expect(is3DLayer(PM,PM.L(a.id))).toBe(false);
+  PM.replaceProject(PM.deserialize(PM.serialize()));
+  expect(projectPoint(planeMatrix(PM,PM.L(a.id),0),{x:0,y:0})).toEqual({x:250,y:180});
+  PM.L(g.id).threeD=false;PM.touch();expect(projectPoint(planeMatrix(PM,PM.L(b.id),0),{x:0,y:0})).toEqual({x:390,y:180});
  });
  it('preserves group 3D channels, key identities and membership through sanitization',()=>{
   const {PM,a,g}=setup();g.p['rotation.x'].kf=[PM.KF(0,0),PM.KF(1,60)];
@@ -54,12 +62,12 @@ describe('2.5D groups',()=>{
   const {PM,a,g}=setup(),before=world3D(PM,a,0);
   const result=PM.Edit.apply({type:'move_to_group',targets:[a.id],group:null});expect(result.ok,result.message).toBe(true);
   close(world3D(PM,PM.L(a.id),0),before);expect(PM.L(a.id).threeD).toBe(true);
-  PM.hist.undo();expect(PM.L(a.id).group).toBe(g.id);expect(PM.L(a.id).threeD).toBeFalsy();close(world3D(PM,PM.L(a.id),0),before);
+  PM.hist.undo();expect(PM.L(a.id).group).toBe(g.id);expect(PM.L(a.id).threeD).toBe(true);close(world3D(PM,PM.L(a.id),0),before);
  });
- it('moves a 2D member into a rotated 3D group without changing its pose',()=>{
+ it('moves a 2D member into a rotated 3D group without changing its pose or switch',()=>{
   const {PM,g}=setup();const c=PM.mkLayer('shape',{name:'Outside',p:{'position.x':100}});PM.proj.layers.push(c);PM.touch();
-  const before=world3D(PM,c,0);const result=PM.Edit.apply({type:'move_to_group',targets:[c.id],group:g.id});
-  expect(result.ok,result.message).toBe(true);expect(PM.L(c.id).threeD).toBe(true);close(world3D(PM,PM.L(c.id),0),before);
+  const before=PM.worldMatrix(c,0);const result=PM.Edit.apply({type:'move_to_group',targets:[c.id],group:g.id});
+  expect(result.ok,result.message).toBe(true);expect(PM.L(c.id).threeD).toBeFalsy();close(PM.worldMatrix(PM.L(c.id),0),before);
  });
  it('ungroups into editable 3D channels while preserving the rendered world pose',()=>{
   const {PM,a,b,g}=setup(),before=[world3D(PM,a,0),world3D(PM,b,0)];

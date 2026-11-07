@@ -8,7 +8,7 @@ import { convertLegacyScene } from './migration';
 import { editScene } from './operations';
 import { startTransform,constrainTransform,typeTransform,transformAmount,transformComponents } from './modal-transform';
 import { makePM } from '../../legacy/__tests__/make-pm';
-import { world3D,parent3D } from '../../legacy/core/space-3d';
+import { world3D,parent3D,planeMatrix } from '../../legacy/core/space-3d';
 
 function editor() {
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
@@ -18,6 +18,21 @@ function editor() {
 }
 
 describe('individual 3D layers and guarded edits',()=>{
+  it.each(['model','camera'])('keeps switched-off artwork affine when parented to a %s',parent=>{
+    const PM=editor();
+    editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});
+    editScene(PM,{operation:'add_camera',id:'camera'});
+    PM.Edit.apply({type:'add_layer',id:'art',layerType:'shape'});
+    expect(PM.Edit.apply({type:'set_layer',target:'art',patch:{parent,threeD:true}}).ok).toBe(true);
+    expect(PM.Edit.apply({type:'set_layer',target:'art',patch:{threeD:false}}).ok).toBe(true);
+    const before=planeMatrix(PM,PM.L('art'),0);
+    expect(PM.Edit.apply(['rotation.x','rotation.y','position.z'].map(path=>({type:'set_property',target:parent,path,value:45}))).ok).toBe(true);
+    expect(planeMatrix(PM,PM.L('art'),0)).toEqual(before);
+    // Ordinary XY parenting is retained; no perspective or out-of-plane tilt.
+    PM.Edit.apply({type:'set_property',target:parent,path:'position.x',value:30});
+    const m=PM.worldMatrix(PM.L('art'),0);
+    expect(planeMatrix(PM,PM.L('art'),0)).toEqual([m[0],m[1],0,m[2],m[3],0,m[4],m[5],1]);
+  });
   it('groups models around their world-space center without changing their pose',()=>{
     const PM=editor();
     expect(editScene(PM,{operation:'add_object',object:{id:'a',source:{primitive:'box'},p:{x:-1,z:2}}}).ok).toBe(true);
@@ -27,6 +42,9 @@ describe('individual 3D layers and guarded edits',()=>{
     const grouped=PM.Edit.apply({type:'group_layers',targets:['a','b']});expect(grouped.ok,grouped.message).toBe(true);
     const group=PM.proj.layers.find((l:any)=>l.type==='group');
     expect(group.threeD).toBe(true);
+    const beforeOff=PM.serialize();
+    expect(PM.Edit.apply({type:'set_layer',target:group.id,patch:{threeD:false}})).toMatchObject({ok:false});
+    expect(PM.serialize()).toBe(beforeOff);
     expect(['x','y','z'].map(axis=>group.p[`anchor.${axis}`].v)).toEqual([0,0,3]);
     ['a','b'].forEach((id,i)=>expect(world3D(PM,PM.L(id),0)).toEqual(before[i]));
     expect(PM.Edit.apply({type:'set_property',target:group.id,path:'rotation.y',value:90}).ok).toBe(true);

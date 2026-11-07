@@ -14,7 +14,7 @@ import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
 import { initializeTextAnimatorTiming } from './text-animation';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
-import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
+import { layer3DRole, isAlways3DLayer, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateCompositionMaps } from '../../core/scene3d/material-maps';
 import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
@@ -601,7 +601,7 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
-  if (patch.threeD === false && layer3DRole(layer)) throw new Error('Models, lights and cameras are always 3D layers');
+  if (patch.threeD === false && isAlways3DLayer(PM,layer)) throw new Error('Models, lights, cameras and model-only groups are always 3D layers');
   if (patch.threeD != null) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
