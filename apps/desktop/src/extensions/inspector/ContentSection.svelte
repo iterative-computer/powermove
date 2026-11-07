@@ -64,7 +64,7 @@
   /* Smoothing is Figma's corner smoothing: 0% is a circular arc, about 60%
      matches Apple's continuous (squircle) corners, 100% is the smoothest. */
   const IOS_SMOOTHING = 60;
-  const SMOOTHING_HINT = 'Corner smoothing blends each rounded corner into its straight edges, like the continuous corners on iOS and in Figma. 0% is a circular corner; about 60% matches iOS. Works on pills too.';
+  const SMOOTHING_HINT = 'Corner smoothing blends each rounded corner into its straight edges, like the continuous corners on iOS and in Figma. 0% is a circular corner; about 60% matches iOS. Pills keep perfectly round ends at any smoothing.';
 
   const cornerSummary = $derived.by(() => {
     const values = CORNERS.map(([key]) => Number(content[key] ?? content.radius) || 0);
