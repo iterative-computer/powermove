@@ -84,3 +84,57 @@ export function lightPositionFromViewer(PM: any, layerId: string, time: number, 
   const position=new THREE.Vector3(...['x','y','z'].map(axis=>Number(PM.ev(layer,`position.${axis}`,time))) as [number,number,number]).add(delta);
   return position.toArray().every(Number.isFinite) ? point(position) : null;
 }
+
+export interface LightViewerGuides {
+  layerId: string;
+  /** Spot only: outer cone rim at the aim distance, projected; null where a rim point is behind the camera. */
+  rim: (Point2D | null)[] | null;
+  /** Spot only: the full-intensity inner rim (cone angle reduced by penumbra). */
+  innerRim: (Point2D | null)[] | null;
+  /** Spot/sun aim point, projected; null for point lights or behind the camera. */
+  aim: Point2D | null;
+  /** Point/spot light with a finite Range: projected sphere silhouette radius around the light. */
+  range: { center: Point2D; radius: number } | null;
+}
+
+const RIM_SEGMENTS=48;
+/** Read-only drawing guides for the viewer overlay: spot cone and point range. */
+export function lightViewerGuides(PM: any, layerId: string, time: number, rect: Scene3DViewerRect, view: LightViewCamera='viewer'): LightViewerGuides | null {
+  const state=lightViewerState(PM,layerId,time,rect,view);
+  if(!state)return null;
+  const layer=PM.L(layerId),camera=cameraFor(PM,time,view);
+  const project=(world: THREE.Vector3): Point2D | null => {
+    if(world.clone().applyMatrix4(camera.matrixWorldInverse).z>=-1e-6)return null;
+    const ndc=world.clone().project(camera);
+    if(![ndc.x,ndc.y].every(Number.isFinite))return null;
+    return {x:rect.x+(ndc.x+1)*rect.width/2,y:rect.y+(1-ndc.y)*rect.height/2};
+  };
+  const origin=new THREE.Vector3(state.worldPosition.x,state.worldPosition.y,state.worldPosition.z);
+  const target=new THREE.Vector3(...['X','Y','Z'].map(axis=>channel(PM,layer,`target${axis}`,time)) as [number,number,number])
+    .applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,layer,time)));
+  const out: LightViewerGuides={layerId,rim:null,innerRim:null,aim:state.type==='point' ? null : project(target),range:null};
+  if(state.type==='spot' && state.direction && state.coneAngleDegrees!=null){
+    const direction=new THREE.Vector3(state.direction.x,state.direction.y,state.direction.z);
+    const length=Math.min(25,Math.max(.25,origin.distanceTo(target)));
+    const helper=Math.abs(direction.y)<.99 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+    const u=new THREE.Vector3().crossVectors(direction,helper).normalize(),v=new THREE.Vector3().crossVectors(direction,u).normalize();
+    const center=origin.clone().addScaledVector(direction,length);
+    const penumbra=Math.min(1,Math.max(0,Number(channel(PM,layer,'penumbra',time)) || 0));
+    const ring=(degrees: number)=>{
+      const radius=length*Math.tan(THREE.MathUtils.degToRad(degrees));
+      return Array.from({length:RIM_SEGMENTS},(_,i)=>{
+        const a=i/RIM_SEGMENTS*Math.PI*2;
+        return project(center.clone().addScaledVector(u,Math.cos(a)*radius).addScaledVector(v,Math.sin(a)*radius));
+      });
+    };
+    out.rim=ring(state.coneAngleDegrees);
+    out.innerRim=penumbra>.02 ? ring(state.coneAngleDegrees*(1-penumbra)) : null;
+  }
+  const range=Number(channel(PM,layer,'distance',time));
+  if(state.type!=='sun' && range>0 && state.inFront && state.viewerPosition){
+    const right=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,0).normalize();
+    const edge=project(origin.clone().addScaledVector(right,range));
+    if(edge)out.range={center:state.viewerPosition,radius:Math.hypot(edge.x-state.viewerPosition.x,edge.y-state.viewerPosition.y)};
+  }
+  return out;
+}

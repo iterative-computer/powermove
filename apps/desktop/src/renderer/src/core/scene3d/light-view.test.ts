@@ -4,7 +4,7 @@ import { makePM } from '../../legacy/__tests__/make-pm';
 import { LAYER3D_DEFINITIONS, compositionScene } from './layers';
 import { editScene } from './operations';
 import { compositionRuntime, disposeSceneRuntimes } from './service';
-import { lightPositionFromViewer, lightViewerState } from './light-view';
+import { lightPositionFromViewer, lightViewerGuides, lightViewerState } from './light-view';
 import { makeScene3DAPI } from './api';
 import { applyViewportPose } from './viewport';
 
@@ -136,5 +136,41 @@ describe('light viewer data and drag conversion',()=>{
     const reparented=PM.Edit.apply({type:'set_layer',target:'lamp',patch:{parent:'parent'}});expect(reparented.ok,reparented.message).toBe(true);
     editScene(PM,{operation:'update_object',target:'parent',patch:{p:{sx:0}}});
     expect(lightPositionFromViewer(PM,'lamp',0,{x:500,y:275},rect)).toBeNull();
+  });
+});
+
+describe('light viewer guides',()=>{
+  it('projects a spot cone rim around its aim point and a softer inner rim',()=>{
+    const PM=editor();
+    expect(editScene(PM,{operation:'add_light',light:{id:'spot',type:'spot',p:{x:0,y:2,z:0,targetX:0,targetY:0,targetZ:0,angle:30,penumbra:.5}}}).ok).toBe(true);
+    const guides=lightViewerGuides(PM,'spot',0,rect)!;
+    const state=lightViewerState(PM,'spot',0,rect)!;
+    expect(guides.rim).toHaveLength(48);expect(guides.innerRim).toHaveLength(48);
+    const aim=guides.aim!;expect(aim.x).toBeCloseTo(rect.x+rect.width/2,6);expect(aim.y).toBeCloseTo(rect.y+rect.height/2,6);
+    // Seen from the front, the rim straddles the aim point horizontally; the inner rim is narrower.
+    const xs=guides.rim!.map(p=>p!.x),inner=guides.innerRim!.map(p=>p!.x);
+    expect(Math.min(...xs)).toBeLessThan(aim.x);expect(Math.max(...xs)).toBeGreaterThan(aim.x);
+    expect(Math.max(...inner)-Math.min(...inner)).toBeLessThan(Math.max(...xs)-Math.min(...xs));
+    expect(state.viewerPosition!.y).toBeLessThan(aim.y);
+    expect(guides.range).toBeNull();
+  });
+
+  it('draws a point light range only when Range is finite, scaled with distance to the camera',()=>{
+    const PM=editor();
+    expect(lightViewerGuides(PM,'lamp',0,rect)).toMatchObject({rim:null,innerRim:null,aim:null,range:null});
+    expect(editScene(PM,{operation:'update_light',target:'lamp',patch:{p:{distance:1}}}).ok).toBe(true);
+    const near=lightViewerGuides(PM,'lamp',0,rect)!.range!;
+    expect(near.center.x).toBeCloseTo(rect.x+rect.width/2,6);expect(near.radius).toBeGreaterThan(10);
+    expect(editScene(PM,{operation:'update_light',target:'lamp',patch:{p:{z:-6}}}).ok).toBe(true);
+    expect(lightViewerGuides(PM,'lamp',0,rect)!.range!.radius).toBeLessThan(near.radius);
+  });
+
+  it('drops rim points behind the camera and returns null for invalid input',()=>{
+    const PM=editor();
+    expect(editScene(PM,{operation:'add_light',light:{id:'spot',type:'spot',p:{x:0,y:0,z:5,targetX:0,targetY:0,targetZ:20,angle:60}}}).ok).toBe(true);
+    const guides=lightViewerGuides(PM,'spot',0,rect)!;
+    expect(guides.aim).toBeNull();expect(guides.rim!.every(p=>p===null)).toBe(true);
+    expect(lightViewerGuides(PM,'missing',0,rect)).toBeNull();
+    expect(lightViewerGuides(PM,'lamp',0,{...rect,width:0})).toBeNull();
   });
 });

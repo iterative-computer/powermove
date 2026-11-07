@@ -9,8 +9,8 @@
 
 import type { Component } from 'svelte';
 import type { Scene3D, SceneObject, SceneLight, SceneSource } from '../core/scene3d/schema';
-import type { LightViewerState, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
-export type { LightViewerState, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
+import type { LightViewerState, LightViewerGuides, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
+export type { LightViewerState, LightViewerGuides, Scene3DViewerRect, LightViewCamera, Point2D, Point3D } from '../core/scene3d/light-view';
 import type { Scene3DEdit } from '../core/scene3d/operations';
 export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
 export type { Scene3DEdit } from '../core/scene3d/operations';
@@ -365,6 +365,8 @@ export interface Scene3DAPI {
   lightViewerState(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerState|null;
   /** Convert pointer coordinates into native Position on a camera-facing plane. */
   lightPositionFromViewer(layerId:string,time:number,pointer:Point2D,rect:Scene3DViewerRect,view?:LightViewCamera):Point3D|null;
+  /** Projected spot cone rims, aim point and point-light range for viewer drawing. */
+  lightViewerGuides(layerId:string,time:number,rect:Scene3DViewerRect,view?:LightViewCamera):LightViewerGuides|null;
   listMaterials(layerId:string):import('../core/scene3d/material-maps').SourceMaterialInfo[];
   listValidCompositions(layerId:string):{id:string;name:string;w:number;h:number;fps:number;dur:number}[];
   /** null index = whole-model material; null map restores the original source slot. */

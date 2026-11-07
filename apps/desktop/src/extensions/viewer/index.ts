@@ -22,6 +22,7 @@ const VIEWER_STYLES = `
   [data-preview-corners="rounded"] #stage-inner{border-radius:var(--r-md);corner-shape:var(--ui-corner-smoothing)}
   #gl{display:block;width:100%;height:100%;background:#000}
   #overlay{position:absolute;inset:0;pointer-events:none}
+  #light-markers{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
   #composition-recovery{position:absolute;z-index:5;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:10px;padding:7px 8px 7px 11px;border:0;border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}
   #composition-recovery[hidden]{display:none}
   #composition-recovery b{padding:4px 7px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent);font-weight:var(--fw-medium)}

@@ -19,6 +19,7 @@ export function selectionOutlineColor(project: any): string {
 
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
+import { collectLightMarkers, drawLightMarkers, markerAt, markerTitle, type LightMarker } from './light-markers';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false, moveSlot: '#viewer-head',
@@ -758,6 +759,11 @@ let pendingResize: { width: number; height: number; viewport: PreviewViewport | 
 /* Stage-relative geometry is owned by layout. Reading DOM bounds while the
    playhead updates can force layout of the entire timeline every frame. */
 let overlayGeometry: { width: number; height: number; x: number; y: number } | null = null;
+/* Light markers drawn on the last overlay paint; hit tests reuse them. */
+let lightMarkers: LightMarker[] = [];
+let lightHoverId: string | null = null;
+let lightAccent: { at: number; value: string } | null = null;
+let lightsPainted = false;
 V.isNavigating = () => !disposed && (!!activeDrag || window.performance.now() < navigationUntil);
 let presentation: { time: number; version: number | undefined; project: any; quality: number; width: number; height: number } | null = null;
 const presentationIsCurrent = () => {
@@ -859,6 +865,12 @@ V.attach = (stage: HTMLElement) => {
     }
     if(api.scene3d?.createGizmo)sceneGizmo=api.scene3d.createGizmo(stage);V.sceneGizmo=sceneGizmo;
     if(api.scene3d?.createNavigation)sceneNavigation=api.scene3d.createNavigation(stage);V.sceneNavigation=sceneNavigation;
+    /* Light markers get their own layer after the gizmo canvas, so a
+       selected light's handle stays on top of the gizmo's arrows. */
+    let lights = stage.querySelector<HTMLCanvasElement>(':scope > #light-markers');
+    if (!lights) { lights = document.createElement('canvas'); lights.id = 'light-markers'; lights.setAttribute('aria-hidden', 'true'); }
+    stage.append(lights);
+    V.lights = lights; V.lctx = lights.getContext('2d');
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     V.recovery = recovery;
     const zoomHost = stage.closest<HTMLElement>('.panel') ?? stage;
@@ -1009,6 +1021,10 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   if (V.ov.width !== overlayWidth) V.ov.width = overlayWidth;
   if (V.ov.height !== overlayHeight) V.ov.height = overlayHeight;
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
+  if (V.lights) {
+    if (V.lights.width !== overlayWidth) { V.lights.width = overlayWidth; lightsPainted = false; }
+    if (V.lights.height !== overlayHeight) { V.lights.height = overlayHeight; lightsPainted = false; }
+  }
   V.updateRecovery?.();
   /* Geometry changes immediately during zoom/pan. Repaint handles and paths in
      the same event so they never lag or blink while the GL frame catches up. */
@@ -1134,17 +1150,60 @@ listen('frame:rendered', (frame: { viewport: PreviewViewport | null; time: numbe
   }
 });
 listen('overlay', () => drawOverlay());
+/* Free View orbits and Active Camera switches move every light marker. */
+if (api.scene3d?.onViewChange) { const view = api.scene3d.onViewChange(() => schedulePresentation()); eventOffs.push(() => view.dispose()); }
 
 function drawOverlay() {
+  if (drawOverlayContent() !== false) drawLights();
+}
+
+/** The accent follows the theme; re-read it at most twice a second. */
+function markerAccent(): string {
+  const now = window.performance.now();
+  if (!lightAccent || now - lightAccent.at > 500) {
+    const value = V.stage ? window.getComputedStyle(V.stage).getPropertyValue('--accent').trim() : '';
+    lightAccent = { at: now, value: value || '#ff7a33' };
+  }
+  return lightAccent.value;
+}
+
+/** Read-only marker snapshot (stage-relative CSS px) for tests and agents. */
+V.lightMarkers = () => lightMarkers.map(({ guides, ...marker }) => ({ ...marker, hasCone: !!guides?.rim, hasRange: !!guides?.range }));
+
+/* Every light shows in the viewer, in screen space above the comp image.
+   Layer Controls (Command+Shift+H) hides them with the other handles. */
+function drawLights() {
+  const c = V.lctx as CanvasRenderingContext2D | null;
+  if (!c || !overlayGeometry) return;
+  const p = api.project.get();
+  lightMarkers = V.showControls === false || V.preview?.activeId ? [] : collectLightMarkers(api,
+    { x: overlayGeometry.x, y: overlayGeometry.y, width: p.w * V.shown, height: p.h * V.shown },
+    { width: overlayGeometry.width, height: overlayGeometry.height },
+    api.transport.time(), { isLocked: (layer: any) => layerIsLocked(api, layer) });
+  if (lightHoverId && !lightMarkers.some(marker => marker.id === lightHoverId)) lightHoverId = null;
+  // Comps without lights never touch this canvas after it is cleared once.
+  if (!lightMarkers.length && !lightsPainted) return;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, V.lights.width, V.lights.height);
+  lightsPainted = lightMarkers.length > 0;
+  if (!lightsPainted) return;
+  const dpr = V.lights.width / overlayGeometry.width;
+  c.save();
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawLightMarkers(c, lightMarkers, { accent: markerAccent() }, lightHoverId);
+  c.restore();
+}
+
+function drawOverlayContent(): boolean | void {
   /* The compositor paints synchronously at the end of its frame. Consume the
      fallback requested by the time event instead of repainting it next RAF.
      Paused edits still use that fallback when no compositor frame is needed. */
   if (presentationFrame) window.cancelAnimationFrame(presentationFrame);
   presentationFrame = 0;
-  const c = V.octx; if (!c) return;
+  const c = V.octx; if (!c) return false;
   /* ResizeObserver, window resize and panel layout events refresh this before
      paint. Pan/zoom call layout directly, so their controls remain immediate. */
-  if (!overlayGeometry) return;
+  if (!overlayGeometry) return false;
   const selectionInk = selectionOutlineColor(api.project.get());
   const p = api.project.get(), dpr = V.ov.width / overlayGeometry.width;
   const gizmoSelection=api.selection.layers();
@@ -1566,6 +1625,8 @@ function bindStage(stage: any, inner: any): () => void {
     // Right-clicking edited text gets the native text services menu.
     if ((event.target as Element)?.closest?.('.canvas-text-input')) return;
     event.preventDefault();
+    const light = lightUnderPointer(event);
+    if (light) { const layer = api.model.layer(light.id); if (layer) { api.ui.showLayerMenu(layer, event, 'viewer'); return; } }
     const point = pointerComp(event);
     const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
     if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
@@ -1595,6 +1656,9 @@ function bindStage(stage: any, inner: any): () => void {
        view a middle-drag pans and the wheel scrolls exactly as in a 2D
        composition, so no gesture ever switches the view by itself. */
     if(freeView()&&sceneNavigation?.pointerDown(event))return;
+    /* A light marker sits on the gizmo's centre: pressing it selects the
+       light and drags it freely; the gizmo's arrows still constrain. */
+    if(lightPointerDown(event)){event.preventDefault();event.stopImmediatePropagation();return;}
     if(sceneGizmo?.pointerDown(event))return;
   }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
@@ -1603,13 +1667,16 @@ function bindStage(stage: any, inner: any): () => void {
     if(navigationMode && navigationMode!=='select' && api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')){
       setStageCursor(navigationMode==='dolly'?'ns-resize':'grab');return;
     }
+    const light=lightUnderPointer(e);
+    setLightHover(light);
+    if(light){setHover(null);hoverPointer=null;setStageCursor(api.selection.layers().includes(light.id)?'move':'pointer');return;}
     if(sceneGizmo?.hover(e.clientX,e.clientY)){setStageCursor('pointer');return;}
     updateStageCursor(e);
     hoverPointer = { clientX: e.clientX, clientY: e.clientY, deep: e.metaKey || e.ctrlKey };
     scheduleHover();
   }), capture);
   listen(stage, 'pointerenter', guarded(() => { V.pointerOver = true; }), capture);
-  listen(stage, 'pointerleave', guarded(() => { V.pointerOver = false; hoverPointer = null; setHover(null); setStageCursor(''); }), capture);
+  listen(stage, 'pointerleave', guarded(() => { V.pointerOver = false; hoverPointer = null; setHover(null); setLightHover(null); setStageCursor(''); }), capture);
   listen(stage, 'wheel', guarded((e: any) => {
     e.preventDefault();
     if(sceneGizmo?.active())return;
@@ -1755,6 +1822,81 @@ function bindStage(stage: any, inner: any): () => void {
     for (const [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
     if (V._boundStage === stage) V._boundStage = null;
   };
+}
+
+/* ── light markers ─────────────────────────────────────── */
+function lightsInteractive(): boolean {
+  return !activeDrag && !V.textSession && V.showControls !== false
+    && (V.temporaryTool || toolService()?.tool || 'select') === 'select';
+}
+
+function lightUnderPointer(e: { clientX: number; clientY: number }): LightMarker | null {
+  if (!lightMarkers.length || !lightsInteractive()) return null;
+  const point = stagePoint(e);
+  return markerAt(lightMarkers, point.x, point.y);
+}
+
+let lightTitle: string | null = null;
+function setLightHover(marker: LightMarker | null): void {
+  const id = marker?.id ?? null;
+  const title = marker ? markerTitle(marker) : null;
+  if (V.stage && title !== lightTitle) {
+    if (title) V.stage.title = title;
+    else if (lightTitle && V.stage.title === lightTitle) V.stage.removeAttribute('title');
+    lightTitle = title;
+  }
+  if (lightHoverId === id) return;
+  lightHoverId = id;
+  schedulePresentation();
+}
+
+function lightPointerDown(e: PointerEvent): boolean {
+  if (e.button !== 0) return false;
+  const marker = lightUnderPointer(e);
+  if (!marker || !api.model.layer(marker.id)) return false;
+  setHover(null);
+  const selected = api.selection.layers();
+  if (e.shiftKey || e.metaKey || e.ctrlKey) {
+    if (selected.includes(marker.id)) api.selection.select(selected.filter(id => id !== marker.id));
+    else selectLayers(marker.id, true);
+    return true;
+  }
+  if (!selected.includes(marker.id)) selectLayers(marker.id);
+  // An edge marker only selects: the light is out of view, so there is nowhere to drag it to.
+  if (marker.edge == null) startLightDrag(e, marker);
+  return true;
+}
+
+/** Drag a light on the camera-facing plane through it, as one Undo step.
+    Position keys at the current time when it is animated. */
+function startLightDrag(e: PointerEvent, marker: LightMarker): void {
+  const T = api.transport.time();
+  const layer = api.model.layer(marker.id);
+  if (!layer || !api.scene3d?.lightPositionFromViewer) return;
+  const start = stagePoint(e), offset = { x: start.x - marker.x, y: start.y - marker.y };
+  api.edit.begin('Move light', { origin: 'canvas' });
+  let moved = false;
+  beginDrag(e, {
+    cursor: 'move',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!moved && !passedMoveDragThreshold(dx, dy)) return;
+      moved = true;
+      if (ev?.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+      const p = api.project.get(), geometry = overlayGeometry;
+      if (!geometry) return;
+      const rect = { x: geometry.x, y: geometry.y, width: p.w * V.shown, height: p.h * V.shown };
+      const position = api.scene3d.lightPositionFromViewer(marker.id, T,
+        { x: start.x + dx - offset.x, y: start.y + dy - offset.y }, rect);
+      if (!position) return;
+      for (const axis of ['x', 'y', 'z'] as const) {
+        const result = setOrKey(layer, `position.${axis}`, Math.round(position[axis] * 1e6) / 1e6, T);
+        if (result && result.ok === false) { api.ui.toast(result.message || 'Could not move the light'); activeDrag?.cancel(); return; }
+      }
+      invalidate();
+    },
+    up: () => { moved ? api.edit.commit('Move light') : api.edit.cancel(); refreshInspector(); schedulePresentation(); },
+    cancel: () => { api.edit.cancel(); refreshInspector(); schedulePresentation(); },
+  });
 }
 
 function setHover(id: string | null): void {
