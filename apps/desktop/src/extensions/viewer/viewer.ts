@@ -1880,6 +1880,21 @@ function bindStage(stage: any, inner: any): () => void {
       api.commands.run('openComposition', hit.d.comp);
       return;
     }
+    /* Double-clicking an imported model picks the part under the pointer
+       (outer part first, then a level deeper each time), so the 3D handles
+       move that part, like entering a group in a design tool. */
+    if (hit?.d?.definition === 'powermove.3d.object' && api.scene3d?.pickPart) {
+      const part = api.scene3d.pickPart(hit.id, x, y);
+      if (part) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!api.selection.layers().includes(hit.id) || api.selection.layers().length !== 1) selectLayers(hit.id);
+        api.scene3d.setActivePart(hit.id, part);
+        refreshInspector();
+        invalidate();
+        return;
+      }
+    }
     /* Double-clicking a 3D scene layer opens it in the 3D Scene editor; a
        legacy OBJ layer is first converted to a scene (one Undo). */
     const renderer = hit?.type === 'extension' ? api.layers.get(String(hit.d?.definition ?? ''))?.renderer.kind : null;

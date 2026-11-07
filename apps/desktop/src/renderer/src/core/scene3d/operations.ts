@@ -1,7 +1,8 @@
 import { extrusionEligible, parseExtrusion } from './extrusion-data';
 import { extrusionCommands } from './extrusion-operations';
 import { materialPropertyPath,readMaterialProperties,type MaterialProperty } from './material-properties';
-import { intrinsicPropertiesSchema } from './schema';
+import { intrinsicPropertiesSchema, partTransformSchema } from './schema';
+import { PART_DEFAULTS, PART_FIELDS, PART_KEY, listLayerParts, partPath, type PartField } from './model-parts';
 import { canAssignMaterialMap,listModelMaterials } from './material-maps';
 import type { MaterialMap, MaterialSlot } from './material-maps';
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
@@ -9,8 +10,10 @@ import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } f
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
-  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties';
+  operation: 'create'|'add_object'|'add_light'|'add_camera'|'update_object'|'update_light'|'remove'|'duplicate'|'set_camera'|'set_environment'|'set_material_map'|'set_material_properties'|'set_extrusion'|'set_surface_material_map'|'set_surface_material_properties'|'set_part';
   target?: string; id?: string; name?: string; object?: any; light?: any; camera?:any; patch?: any; scene?: any; materialIndex?:number|null; slot?:MaterialSlot; map?:MaterialMap|null; surface?:import('./extrusion-data').ExtrusionSurface;
+  /** set_part: the part's key from listParts; patch null removes its offsets. */
+  part?:string;
 }
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const badKeys = new Set(['__proto__','prototype','constructor']);
@@ -29,7 +32,7 @@ const nativeProperties=(p:any={})=>Object.fromEntries(Object.entries<any>(p).fil
 /** Models, lights and cameras are ordinary layers. Commands cross the normal guarded edit boundary. */
 export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): {commands: EditCommand[];id?: string} {
   assertPlain(args);
-  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface']);
+  const keys = new Set(['operation','target','id','name','object','light','camera','patch','scene','materialIndex','slot','map','surface','part']);
   if (Object.keys(args).some(k=>!keys.has(k))) throw new Error('Unknown 3D edit field');
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
@@ -157,6 +160,28 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       if(index!=null && !Object.keys(props).length)delete content.object.sourceMaterialProperties[index];
       break;
     }
+    case 'set_part':{
+      if(role!=='object')throw new Error('Choose a model layer');
+      const key=String(args.part ?? '');
+      if(!PART_KEY.test(key))throw new Error('Choose a part of the model');
+      const parts=(content.object.parts ||= {});
+      if(args.patch===null){delete parts[key];break;}
+      const info=listLayerParts(PM,layer).find(part=>part.key===key);
+      if(!info && !parts[key])throw new Error('That part is not in this model');
+      if(Object.keys(patch).some(field=>!(PART_FIELDS as readonly string[]).includes(field)))throw new Error('Unknown part property');
+      // The first edit installs every channel at its neutral value.
+      if(!parts[key])parts[key]={name:info!.name,p:Object.fromEntries(PART_FIELDS.map(field=>[field,{v:PART_DEFAULTS[field],kf:[],expr:null}]))};
+      for(const [field,value] of Object.entries<any>(patch)){
+        const path=partPath(key,field as PartField);
+        if(value===undefined)continue;
+        partTransformSchema.shape[field as PartField]!.parse(typeof value==='object' && value!==null?value:{v:value,kf:[],expr:null});
+        if(typeof value==='object' && value!==null){
+          commands.push({type:'set_property',target:layer.id,path,value:value.v,mode:'value'});
+          commands.push({type:'replace_keyframes',target:layer.id,path,keyframes:(value.kf || []).map((k:any)=>({time:k.t,value:k.v,ease:k.ease || 'linear',hold:k.hold || false})),expression:value.expr || null});
+        }else commands.push({type:'set_property',target:layer.id,path,value,mode:PM.autokey?'keyframe':'auto'});
+      }
+      break;
+    }
     case 'remove':
       if(meta.origin==='agent' && Object.keys(layer.locked_intent || {}).length)throw new Error('Preserved hand-edited 3D layer');
       commands.push({type:'delete_layers',targets:[layer.id]});break;
@@ -194,8 +219,8 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     }
     default:throw new Error('Unknown 3D operation');
   }
-  if(args.patch?.name!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{name:args.patch.name}});
-  if(args.patch?.parent!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{parent:args.patch.parent}});
+  if(args.operation!=='set_part' && args.patch?.name!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{name:args.patch.name}});
+  if(args.operation!=='set_part' && args.patch?.parent!==undefined)commands.push({type:'set_layer',target:layer.id,patch:{parent:args.patch.parent}});
   const checked=parseLayer3DData(role,content);
   // Validate channel values against their schema before executing any part of a batch.
   const candidate=clone(layer);candidate.d.data=clone(checked);

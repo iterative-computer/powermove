@@ -12,6 +12,8 @@ import { convertLegacyScene } from './migration';
 import { prepareModelImport } from './import-bundle';
 import { compositionScene,layer3DRole,isModelGroup } from './layers';
 import { editScene } from './operations';
+import { viewportCamera } from './viewport';
+import { PART_DEFAULTS, PART_FIELDS, getActivePart, listLayerParts, onActivePartChange, partKeyOf, partPath, partsRoot, pruneActiveParts, setActivePart, type PartValues } from './model-parts';
 import type { Scene3DAPI } from '../../kernel/api';
 import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
@@ -29,6 +31,13 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     for(const listener of materialListeners)listener();
   };
   for(const event of ['project','layers','comps','history:project-patch'])PM.bus?.on?.(event,changed);
+  PM.bus?.on?.('sel',()=>pruneActiveParts(PM,PM.sel?.layers || []));
+  const readPart=(layerId:string,key:string,time=PM.time || 0)=>{
+    const layer=PM.L?.(layerId),part=layer?.d?.data?.object?.parts?.[key];
+    const values={...PART_DEFAULTS} as PartValues;
+    if(part)for(const field of PART_FIELDS){const prop=part.p?.[field];if(prop){const value=PM.evP(layer,prop,time,partPath(key,field));(values as any)[field]=typeof value===typeof PART_DEFAULTS[field]?value:prop.v;}}
+    return {installed:!!part,channels:part?.p ?? null,values,paths:Object.fromEntries(PART_FIELDS.map(field=>[field,partPath(key,field)])) as Record<keyof PartValues,string>};
+  };
   const selection=()=>{
     const ids=(PM.sel?.layers || []).filter((id:string)=>layer3DRole(PM.L?.(id)) || isExtrudedLayer(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id)));
     return {layerId:ids[0] || null,ids};
@@ -66,5 +75,25 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
     describe(){return compositionScene(PM,PM.time);},
+    listParts:layerId=>listLayerParts(PM,PM.L?.(layerId)),
+    getPart:(layerId,key,time)=>readPart(layerId,key,time),
+    setPart:(layerId,key,patch,meta)=>editScene(PM,{operation:'set_part',target:layerId,part:key,patch},{origin:'interface',label:'Edit model part',...meta}),
+    getActivePart:layerId=>getActivePart(PM,layerId),
+    setActivePart:(layerId,key)=>setActivePart(PM,layerId,key),
+    onActivePartChange:listener=>({dispose:onActivePartChange(PM,listener)}),
+    pickPart(layerId,x,y){
+      const layer=PM.L?.(layerId);if(layer3DRole(layer)!=='object')return null;
+      const runtime=compositionRuntime(PM,PM.time),object=runtime.objects.get(layerId);if(!object)return null;
+      const camera=viewportCamera(PM,runtime.camera);runtime.resizeCamera(PM.proj.w,PM.proj.h,camera);
+      const hit=runtime.pickHit(x/PM.proj.w*2-1,1-y/PM.proj.h*2,new Set([layerId]),camera);
+      if(!hit)return null;
+      const root=partsRoot(object),key=partKeyOf(root,hit.object);if(!key)return null;
+      // Like a group in a design tool: the first double-click takes the outer
+      // part, the next one goes a level deeper toward what was clicked.
+      const parts=listLayerParts(PM,layer),chain=key.split('_').map((_,i,all)=>all.slice(0,i+1).join('_')).filter(k=>parts.some(p=>p.key===k));
+      let start=0;while(start<chain.length-1 && parts.filter(p=>p.parent===(start?chain[start-1]:null)).length===1)start++;
+      const current=getActivePart(PM,layerId),at=current?chain.indexOf(current):-1;
+      return chain[at>=0?Math.min(chain.length-1,at+1):start] ?? null;
+    },
     selection,select};
 }

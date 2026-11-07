@@ -17,6 +17,8 @@ export function isModelGroup(PM:any,layer:any):boolean {
     && (PM.groupAncestors?.(child) || []).some((group:any)=>group.id===layer.id)) || [];
   return members.length>0 && members.every((child:any)=>!!layer3DRole(child));
 }
+/** Timeline/inspector names for a part's channels. */
+export const PART_LABELS:Record<string,string>={x:'Position X',y:'Position Y',z:'Position Z',rx:'X Rotation',ry:'Y Rotation',rz:'Z Rotation',scale:'Scale',visible:'Visible'};
 export const TRANSFORM_PATHS: Record<string,string> = {x:'position.x',y:'position.y',z:'position.z',rx:'rotation.x',ry:'rotation.y',rz:'rotation',sx:'scale.x',sy:'scale.y',sz:'scale.z'};
 const clone = (v:any) => JSON.parse(JSON.stringify(v));
 
@@ -54,6 +56,8 @@ export function layer3DProperties(layer: any): any[] {
     collect(data.object?.material?.p,'m','Material');
     collect(data.object?.materialProperties,'mi','Material');
     for(const [index,p] of Object.entries(data.object?.sourceMaterialProperties || {}))collect(p,`mi.${index}`,`Material ${index}`);
+    for(const [key,part] of Object.entries<any>(data.object?.parts || {}))for(const [field,prop] of Object.entries<any>(part?.p || {}))
+      if(prop && Array.isArray(prop.kf))out.push({key:`pt.${key}.${field}`,prop,label:PART_LABELS[field] || field,group:part.name || 'Part'});
   }
   if(role==='light')collect(data.light?.p,'light','Light');
   if(role==='camera'){collect(data.camera?.p,'camera','Camera');collect(data.environment?.p,'environment','Environment');}
@@ -116,7 +120,8 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
     return {...node,id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
       material:{...node.material,p:values(layer,node.material.p,'m')},
       materialProperties:values(layer,node.materialProperties,'mi'),
-      sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)]))};
+      sourceMaterialProperties:Object.fromEntries(Object.entries(node.sourceMaterialProperties || {}).map(([index,p])=>[index,values(layer,p,`mi.${index}`)])),
+      parts:Object.fromEntries(Object.entries<any>(node.parts || {}).map(([key,part])=>[key,{name:part.name,p:values(layer,part.p,`pt.${key}`)}]))};
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);

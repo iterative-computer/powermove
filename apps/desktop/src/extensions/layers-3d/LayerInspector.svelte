@@ -3,6 +3,7 @@
   import type { ControlEditBinding, Layer, PowermoveAPI } from 'powermove';
   import SceneField from './SceneField.svelte';
   import MaterialsSection from './MaterialsSection.svelte';
+  import PartsSection from './PartsSection.svelte';
   import { MATERIAL_FIELDS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
   import type { SceneUiState } from './scene-state.svelte';
   let { api,ui,layerId }:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
@@ -29,6 +30,7 @@
     {/if}
     <Row {api} label="Cast shadows"><ToggleField {api} get={()=>object.castShadow} edit={structural('update_object','castShadow','Cast shadows')} label="Cast shadows" /></Row>
     <Row {api} label="Receive shadows"><ToggleField {api} get={()=>object.receiveShadow} edit={structural('update_object','receiveShadow','Receive shadows')} label="Receive shadows" /></Row>
+    <PartsSection {api} {ui} {layer} />
     <MaterialsSection {api} {ui} {layer} />
   {:else if light}
     <Section {api} title="Light" />
