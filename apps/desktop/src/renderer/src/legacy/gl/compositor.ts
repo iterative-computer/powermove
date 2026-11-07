@@ -342,6 +342,8 @@ let viewportPathVersion = 0;
 
 let useVideoPreviews = false;
 let videoPath = '';
+// A nested material capture may be incomplete without failing the receiver's frame.
+let materialCapture:{loading:boolean}|null=null;
 let previewVideoTimes = new Map<string, number>();
 let isolatedVideoTexturePrefix: string | null = null;
 let isolatedVideoTextureGeneration = 0;
@@ -1233,6 +1235,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const waiting = L.type === 'video' && el === liveVideo
       && (el.readyState < 2 || !el.videoWidth || !el.videoHeight);
     if (waiting) frameVideoExact = false;
+    if(materialCapture && L.type==='video' && el===liveVideo && (waiting || el.seeking))materialCapture.loading=true;
     if (waiting && !GL.texes.get(textureKey)?.bytes) { decoded?.close(); return null; }
     let tex;
     try { tex = texFor(textureKey, textureSource, { version: waiting ? GL.texes.get(textureKey).v : videoVersion }); }
@@ -2688,13 +2691,17 @@ function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () =
 /** Nested material capture preserves the outer compositor's FBO ownership and
  * evaluation scope. renderToPixels is a top-level capture and must not run here. */
 GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,outerTime:number,sourceLayerId?:string) => {
-  const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews;
+  const target=boundFbo,previousPath=videoPath,previousPreviews=useVideoPreviews,previousCapture=materialCapture;
+  const capture={loading:false};materialCapture=capture;
   let frame:any;
   pmScopePush(comp);videoPath+=sourceLayerId?`material-layer:${sourceLayerId}/`:`material:${comp.compId || comp.id}/`;
   PM.beginEval(time);
   try{
     frame=GL.renderProject(comp,time,width,height,{transparent:true,mblur:false,previewReuse:false,
       ...(sourceLayerId?{materialSource:sourceLayerId}:{})});
+    // Do not publish/cache an empty or partially decoded source. The scene
+    // keeps its previous material (or original color) and retries next paint.
+    if(capture.loading)return null;
     if(frame.w!==width || frame.h!==height){const scaled=copyFbo(frame,width,height);free(frame);frame=scaled;}
     bind(frame);
     const pixels=new Uint8Array(width*height*4);
@@ -2713,7 +2720,8 @@ GL.renderMaterialComposition = (comp:any,time:number,width:number,height:number,
     }
     return result;
   }finally{
-    if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;
+    if(frame)free(frame);pmScopePop();videoPath=previousPath;useVideoPreviews=previousPreviews;materialCapture=previousCapture;
+    if(previousCapture && capture.loading)previousCapture.loading=true;
     PM.beginEval(outerTime);bind(target);
   }
 };

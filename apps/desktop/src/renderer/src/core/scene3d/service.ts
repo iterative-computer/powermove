@@ -81,11 +81,11 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
   try {
   scanReferences(PM,comp,scan);
   const assetsChanged=!cached || cached.references.size!==scan.size || scan.records.some(entry=>entry.scan===scan.generation&&cached.references.get(entry.id)!==entry.asset);
-  if(assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
+  if(runtime.materialsPending || assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
     const references=new Map<string,any>();
     for(const id of scan.ids)references.set(id,scan.byId.get(id)!.asset);
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
-    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);return layer?compositionTextureFrame(PM,layer,map,time):null;},compositionExtrusions(PM,comp,time));
+    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0),(id,map)=>{const layer=comp.layers.find((layer:any)=>layer.id===id);if(!layer)return null;let loading=false;const frame=compositionTextureFrame(PM,layer,map,time,()=>{loading=true;});return loading?'loading':frame;},compositionExtrusions(PM,comp,time));
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
     // Use exactly the native layer hierarchy, orientation and anchor matrices.
     // Flattening the evaluated world avoids applying parent transforms twice.
