@@ -15,6 +15,57 @@ export type TextAnimatorMode = 'stagger' | 'range' | 'wave';
 export type TextAnimatorUnit = 'characters' | 'words' | 'lines';
 export type TextAnimatorOrder = 'forward' | 'reverse' | 'center' | 'edges' | 'random';
 export type TextAnimatorShape = 'square' | 'rampUp' | 'rampDown' | 'triangle' | 'round';
+export const TEXT_ANIMATOR_TIMING_VERSION = 2;
+
+/** New stagger timing: delay is a start delay for In, an end offset for Out.
+ * Positive end offsets finish early; negative offsets finish after the edge.
+ * The anchor follows direction unless explicitly overridden by an author. */
+export function animatorAnchor(animator: any): 'in' | 'out' {
+  return animator?.anchor === 'in' || animator?.anchor === 'out' ? animator.anchor
+    : animator?.direction === 'out' ? 'out' : 'in';
+}
+
+/** Commands/presets create v2 timing; absent anchor defaults from direction. */
+export function initializeTextAnimatorTiming(layer: any): void {
+  for (const animator of layer?.d?.animators || [])
+    if (animatorMode(animator) === 'stagger') animator.timingVersion ??= TEXT_ANIMATOR_TIMING_VERSION;
+}
+
+/** Versioned migration. Static timing becomes a normal end offset immediately.
+ * Animated timing and wrapped-line selectors retain a lossless conversion basis
+ * rather than baking frame samples. This survives saving and nested comps. */
+export function migrateTextAnimatorTiming(layer: any): void {
+  for (const animator of layer?.d?.animators || []) {
+    if (animatorMode(animator) !== 'stagger' || animator.timingVersion === TEXT_ANIMATOR_TIMING_VERSION) continue;
+    if (animator.direction === 'out' && animator.anchor == null) {
+      const staticChannel = (p: any) => !p?.expr && !p?.kf?.length;
+      const text = layer.d.text;
+      const unit = animator.unit || animator.p?.unit?.v || 'characters';
+      if (!layer.d.paragraph && staticChannel(text) && ['delay', 'duration', 'stagger'].every(k => staticChannel(animator.p?.[k]))) {
+        const raw = typeof text === 'object' ? text?.v : text;
+        const count = Math.max(countTextUnits(String(raw ?? '').split('\n').map(text => ({ text })), unit), 1);
+        const total = Math.max(count + num(animator.unitOffset), num(animator.unitTotal), 1);
+        const values = Object.fromEntries(Object.entries<any>(animator.p || {}).map(([k, p]) => [k, p?.v]));
+        animator.p ??= {};
+        animator.p.delay = { ...(animator.p.delay || { kf: [], expr: null }),
+          v: num(layer.dur) - num(values.delay) - staggerLength(values, total, animator.order) };
+      } else animator.legacyStartDuration = num(layer.dur);
+    }
+    animator.timingVersion = TEXT_ANIMATOR_TIMING_VERSION;
+  }
+}
+
+/** Migrate every saved layer collection, including reusable library sections. */
+export function migrateProjectTextTiming(project: any): any {
+  const layers = (container: any) => { if (Array.isArray(container?.layers)) container.layers.forEach(migrateTextAnimatorTiming); };
+  layers(project);
+  for (const comp of Object.values(project?.comps || {})) layers(comp);
+  for (const section of project?.library?.sections || []) {
+    layers(section);
+    for (const version of section.versions || []) layers(version);
+  }
+  return project;
+}
 
 /** Offsets are added at full weight; scale and opacity are target percentages. */
 export const TEXT_ANIMATOR_PROPERTIES = {
@@ -36,8 +87,9 @@ export const TEXT_ANIMATOR_SETTINGS: Record<string, string> = {
   speed: 'Speed', spread: 'Spread', unit: 'Based on'
 };
 
-export const textAnimatorLabel = (key: string): string =>
-  (TEXT_ANIMATOR_PROPERTIES as Record<string, { label: string }>)[key]?.label ?? TEXT_ANIMATOR_SETTINGS[key] ?? key;
+export const textAnimatorLabel = (key: string, animator?: any): string =>
+  key === 'delay' && animatorAnchor(animator) === 'out' ? 'End offset'
+    : (TEXT_ANIMATOR_PROPERTIES as Record<string, { label: string }>)[key]?.label ?? TEXT_ANIMATOR_SETTINGS[key] ?? key;
 
 export interface TextAnimatorState {
   id: string;
@@ -171,10 +223,29 @@ export function countTextUnits(lines: Array<{ text: string }>, unit: TextAnimato
   return count;
 }
 
-/** The window a stagger animator occupies, in seconds from the layer's in point. */
-export function staggerWindow(values: any, count: number, order?: TextAnimatorOrder) {
-  const start = num(values.delay), duration = Math.max(0, num(values.duration, .5));
+/** Effective end offset, including the exact conversion of legacy start timing.
+ * UI consumers should use this value for the existing Out timing control. */
+export function staggerEndOffset(animator: any, values: any, count: number, order?: TextAnimatorOrder): number {
+  return Number.isFinite(animator?.legacyStartDuration)
+    ? animator.legacyStartDuration - num(values.delay) - staggerLength(values, count, order)
+    : num(values.delay);
+}
+
+/** Set the existing timing channel from an effective offset without discarding
+ * legacy keyframes/expressions. The legacy start-delay axis runs backwards. */
+export function staggerDelayForOffset(animator: any, values: any, count: number, offset: number, order?: TextAnimatorOrder): number {
+  return Number.isFinite(animator?.legacyStartDuration)
+    ? animator.legacyStartDuration - offset - staggerLength(values, count, order) : offset;
+}
+
+/** Window in seconds from the layer's In point. Overlapping entrances/exits
+ * remain independent and compose normally; short layers do not retime them. */
+export function staggerWindow(values: any, count: number, order?: TextAnimatorOrder, layer?: any, animator?: any) {
+  const duration = Math.max(0, num(values.duration, .5));
   const cascade = Math.max(0, num(values.stagger)) * rankSpan(order, count);
+  const start = animatorAnchor(animator) === 'out'
+    ? num(layer?.dur) - staggerEndOffset(animator, values, count, order) - duration - cascade
+    : num(values.delay);
   return { start, duration, cascade, end: start + duration + cascade };
 }
 
@@ -185,14 +256,15 @@ export function unitWeights(PM: any, layer: any, animator: any, values: any, cou
   const amount = num(values.amount, 100) / 100;
   const order: TextAnimatorOrder | undefined = animator.order;
   const local = time - num(layer.from);
+  const window = mode === 'stagger' ? staggerWindow(values, total, order, layer, animator) : null;
   const weights = new Array(count);
   for (let i = 0; i < count; i++) {
     const rank = unitRank(order, offset + i, total, num(animator.seed, 1));
     let w: number;
     if (mode === 'stagger') {
       const duration = Math.max(0, num(values.duration, .5));
-      const elapsed = local - num(values.delay) - rank * Math.max(0, num(values.stagger));
-      const progress = duration > 0 ? elapsed / duration : elapsed >= 0 ? 1 : 0;
+      const elapsed = local - window!.start - rank * Math.max(0, num(values.stagger));
+      const progress = elapsed >= duration - 1e-12 ? 1 : duration > 0 ? elapsed / duration : 0;
       const eased = easeProgress(PM, animator.easing, progress);
       w = animator.direction === 'out' ? eased : 1 - eased;
     } else if (mode === 'wave') {

@@ -14,6 +14,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
+import { migrateProjectTextTiming, migrateTextAnimatorTiming } from './core/text-animation';
 import { sanitizeMemory } from '../core/memory';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
@@ -417,6 +418,7 @@ function* hydrateSteps(p: any): Generator<void, any> {
         L.d.data = sanitizeJson(L.d.data) || {};
       }
       if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
+      migrateTextAnimatorTiming(L);
       yield;
     }
   }
@@ -442,7 +444,7 @@ function* hydrateSteps(p: any): Generator<void, any> {
   for (const container of [base, ...Object.values(base.comps)] as any[]) {
     (container.layers || []).forEach((L: any) => { if (L.type === 'precomp' && !(L.d && loaded(L.d.comp))) L.d.comp = null; });
   }
-  return base;
+  return migrateProjectTextTiming(base);
 }
 function hydrate(p: any) {
   const steps = hydrateSteps(p);

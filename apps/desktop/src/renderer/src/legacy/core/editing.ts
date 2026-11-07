@@ -11,6 +11,7 @@ import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
+import { initializeTextAnimatorTiming } from './text-animation';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateCompositionMaps } from '../../core/scene3d/material-maps';
@@ -475,6 +476,7 @@ function setContent(command: any, meta: any = {}) {
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else if (layer.type === 'captions') setCaptionsContent(layer, patch);
   else Object.assign(layer.d, patch);
+  initializeTextAnimatorTiming(layer);
   if (Object.hasOwn(patch, 'speed')) resizeVideoForSpeed(layer, previousSpeed);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     shaderHooks(PM)?.syncShaderUniforms(layer);

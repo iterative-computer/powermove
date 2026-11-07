@@ -1,5 +1,5 @@
 import type { PowermoveAPI } from 'powermove';
-import { animatorMode, countTextUnits, staggerWindow } from 'powermove';
+import { animatorAnchor, animatorMode, countTextUnits, staggerWindow } from 'powermove';
 
 /* Stagger text animators have no keyframes, so the clip shows each one as a
    cascade: the first unit's interval along the top edge, the last unit's
@@ -38,7 +38,8 @@ export function createTextStagger(api: PowermoveAPI) {
       .map((animator: any) => {
         const values = Object.fromEntries(TIMING.map((key) => [key,
           animator.p[key] ? Number(api.anim.evP(layer, animator.p[key], time, `ta.${animator.id}.${key}`)) || 0 : 0])) as StaggerBand['values'];
-        return { animator, values, ...staggerWindow(values, units(layer, animator.unit ?? 'characters'), animator.order) };
+        const count = Math.max(units(layer, animator.unit ?? 'characters') + (Number(animator.unitOffset) || 0), Number(animator.unitTotal) || 0, 1);
+        return { animator, values, ...staggerWindow(values, count, animator.order, layer, animator) };
       });
   }
 
@@ -81,12 +82,17 @@ export function createTextStagger(api: PowermoveAPI) {
   /** Timing channel values for a drag of `dt` seconds. */
   function drag(band: StaggerBand, part: StaggerHit['part'], dt: number, fps: number): Partial<StaggerBand['values']> {
     const frame = (seconds: number) => Math.round(seconds * fps) / fps;
-    if (part === 'body') return { delay: frame(band.values.delay + dt) };
+    const out = animatorAnchor(band.animator) === 'out';
+    const legacy = Number.isFinite(band.animator.legacyStartDuration);
+    if (part === 'body') return { delay: frame(band.values.delay + (out && !legacy ? -dt : dt)) };
     const span = band.duration + band.cascade;
-    if (span <= 0) return { duration: Math.max(0, frame(dt)) };
+    if (span <= 0) return { duration: Math.max(0, frame(dt)),
+      ...(out && !legacy ? { delay: frame(band.values.delay - Math.max(0, frame(dt))) } : {}) };
     const scale = Math.max(1 / fps, frame(span + dt)) / span;
     const round = (value: number) => Math.round(value * 1000) / 1000;
-    return { duration: round(band.values.duration * scale), stagger: round(band.values.stagger * scale) };
+    return { duration: round(band.values.duration * scale), stagger: round(band.values.stagger * scale),
+      // Dragging the right end keeps the band's left end fixed for either anchor.
+      ...(out && !legacy ? { delay: frame(band.values.delay - (span * scale - span)) } : {}) };
   }
 
   return { bands, draw, hit, drag };

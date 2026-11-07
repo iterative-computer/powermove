@@ -628,6 +628,8 @@ function splitLayerClone(PM: PMRegistry, layer: any, tail: any, time: number): v
      original entrance on the head and the original exit on the tail. */
   layer.transitionOut = null;
   tail.transitionIn = null;
+  if (Array.isArray(layer.d?.animators)) layer.d.animators = layer.d.animators.filter((a: any) => a.mode !== 'stagger' || a.direction !== 'out');
+  if (Array.isArray(tail.d?.animators)) tail.d.animators = tail.d.animators.filter((a: any) => a.mode !== 'stagger' || a.direction === 'out');
   if (layer.type === 'audio') {
     if (layer.d && typeof layer.d === 'object') layer.d.fadeOut = 0;
     if (tail.d && typeof tail.d === 'object') tail.d.fadeIn = 0;

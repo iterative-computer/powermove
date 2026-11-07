@@ -9,6 +9,7 @@ import { installLayerGroups } from './layer-groups';
 import { installProjectIndex } from './project-index';
 import { timelineService } from './services';
 import { normalizeCaptionsContent, presetStyle } from '../../captions/model';
+import { initializeTextAnimatorTiming, migrateProjectTextTiming } from './text-animation';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
@@ -155,6 +156,7 @@ PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
   const L = baseLayer(type, opts.name || TYPE_META[type].label, comp);
   DEFAULTS[type] && DEFAULTS[type](L, comp);
   if (opts.d) Object.assign(L.d, opts.d);
+  initializeTextAnimatorTiming(L);
   if (type === 'captions') {
     // A partial style fills in from its preset, sized for this composition.
     const requested: any = opts.d && typeof opts.d === 'object' ? opts.d : {};
@@ -281,7 +283,7 @@ PM.cloneLayer = (L: any) => {
 PM.serialize = () => JSON.stringify({ v: PM.version, proj: PM.proj, ws: PM.WS && PM.WS.current }, null, 1);
 PM.deserialize = (json: any) => {
   const o = typeof json === 'string' ? JSON.parse(json) : json;
-  return o.proj || o;
+  return migrateProjectTextTiming(o.proj || o);
 };
 }
 

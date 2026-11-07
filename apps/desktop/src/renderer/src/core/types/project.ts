@@ -147,6 +147,11 @@ export interface TextAnimator {
   seed?:number;
   /** Stagger mode: `in` settles from the animated values, `out` leaves toward them. */
   direction?:'in'|'out';
+  /** Timing v2: delay is seconds after In, or seconds before Out (default 0). */
+  anchor?:'in'|'out';
+  timingVersion?:2;
+  /** Lossless v1 conversion basis; preserves animated timing and line wrapping. */
+  legacyStartDuration?:number;
   easing?:string;
   shape?:'square'|'rampUp'|'rampDown'|'triangle'|'round';
   /** Set on split pieces so they keep their position in the source's sequence. */

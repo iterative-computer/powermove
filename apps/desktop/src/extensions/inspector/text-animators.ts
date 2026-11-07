@@ -1,8 +1,7 @@
 import {
   TEXT_ANIMATOR_PROPERTIES,
+  TEXT_ANIMATOR_TIMING_VERSION,
   animatorMode,
-  countTextUnits,
-  staggerLength,
   type TextAnimatorMode,
   type TextAnimatorOrder,
   type TextAnimatorProperty,
@@ -84,11 +83,10 @@ export const ANIMATOR_PRESETS: AnimatorPreset[] = [
   { id: 'custom-range', label: 'Range selector', group: 'custom', build: () => ({ mode: 'range', unit: 'characters', props: { opacity: 0 } }) }
 ];
 
-/** A delay that lands the last unit of an Out animation on the layer's end.
- *  `lines` are the layer's wrapped lines, so paragraphs count correctly. */
+/** Out timing is measured backwards from the end: zero lands on the Out point.
+ * Retain the signature for inspector extensions using the previous helper. */
 export function outDelay(values: Record<string, number>, lines: Array<{ text: string }>, unit: TextAnimatorUnit, order: TextAnimatorOrder | undefined, layerDuration: number): number {
-  const length = staggerLength(values, Math.max(1, countTextUnits(lines, unit)), order);
-  return Math.max(0, Math.round((layerDuration - length) * 100) / 100);
+  return 0;
 }
 
 export function makeAnimator(P: (value: any) => any, id: string, name: string, preset: AnimatorPreset, size: number) {
@@ -102,7 +100,7 @@ export function makeAnimator(P: (value: any) => any, id: string, name: string, p
     mode: plan.mode,
     unit: plan.unit,
     order: plan.order ?? 'forward',
-    ...(plan.mode === 'stagger' ? { direction: 'in', easing: plan.easing ?? 'cubicOut' } : {}),
+    ...(plan.mode === 'stagger' ? { timingVersion: TEXT_ANIMATOR_TIMING_VERSION, direction: 'in', easing: plan.easing ?? 'cubicOut' } : {}),
     ...(plan.mode === 'range' ? { shape: 'square' } : {}),
     p: Object.fromEntries(Object.entries(channels).map(([key, value]) => [key, P(value)]))
   };
@@ -126,6 +124,6 @@ export function setAnimatorMode(P: (value: any) => any, animator: any, mode: Tex
   for (const [key, value] of Object.entries(MODE_SETTINGS[mode])) animator.p[key] ??= P(value);
   animator.p.amount ??= P(100);
   animator.mode = mode;
-  if (mode === 'stagger') { animator.direction ??= 'in'; animator.easing ??= 'cubicOut'; }
+  if (mode === 'stagger') { animator.direction ??= 'in'; animator.easing ??= 'cubicOut'; animator.timingVersion = TEXT_ANIMATOR_TIMING_VERSION; delete animator.legacyStartDuration; }
   if (mode === 'range') animator.shape ??= 'square';
 }
