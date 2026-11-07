@@ -4,6 +4,8 @@
   export interface SegmentOption {
     id: string;
     label: string;
+    /** Tooltip: "Name — what it does". */
+    title?: string;
   }
 
   let {
@@ -46,6 +48,7 @@
       class:on={option.id === value}
       aria-selected={option.id === value}
       tabindex={option.id === value ? 0 : -1}
+      title={option.title}
       onclick={() => onChange(option.id)}
       onkeydown={(event) => onKey(event, index)}
     >{option.label}</button>

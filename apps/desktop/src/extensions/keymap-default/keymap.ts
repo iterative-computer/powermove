@@ -96,6 +96,10 @@ const NUDGE_KEYS: Array<[string, [number, number]]> = [
   ['up', [0, -1]],
   ['down', [0, 1]]
 ];
+/* AE: Return renames the selected layer (a text layer keeps Enter for
+   editing its text; the command declines and the next binding runs). */
+bind('enter', 'renameLayer');
+
 for (const [key, delta] of NUDGE_KEYS) {
   bind(key, 'nudgeSelection', false, delta);
   bind(`shift+${key}`, 'nudgeSelection', false, [delta[0] * 10, delta[1] * 10]);

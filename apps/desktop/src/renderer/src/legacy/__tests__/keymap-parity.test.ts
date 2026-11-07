@@ -91,6 +91,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+d splits', { key: 'd', metaKey: true, shiftKey: true }, 'split'],
   ['cmd+c copies layers', { key: 'c', metaKey: true }, 'copyLayers'],
   ['cmd+shift+c pre-composes', { key: 'c', metaKey: true, shiftKey: true }, 'precompose'],
+  ['return renames the selected layer', { key: 'Enter' }, 'renameLayer'],
   ['cmd+v routes paste by editing context', { key: 'v', metaKey: true }, 'contextPaste'],
   ['cmd+a selects all', { key: 'a', metaKey: true }, 'selectAll'],
   ['cmd+shift+a deselects all', { key: 'a', metaKey: true, shiftKey: true }, 'deselect'],
