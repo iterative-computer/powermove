@@ -85,7 +85,7 @@ function budgets(radii: CornerRadii, w: number, h: number): number[] {
 const f = (value: number): string => String(Math.round(value * 1e4) / 1e4);
 
 /** SVG path data for the shape's outline with its origin at the top-left corner. */
-export function roundedRectPath(d: any): string {
+export function roundedRectPath(d: any, startAtTopLeft = false): string {
   const w = Number(d.w) || 0, h = Number(d.h) || 0;
   const radii = clampedRadii(d);
   const smoothing = cornerSmoothing(d);
@@ -93,7 +93,9 @@ export function roundedRectPath(d: any): string {
   const [tl, tr, br, bl] = radii.map((r, i) => cornerParams(r, smoothing, budget[i]!)) as [CornerParams, CornerParams, CornerParams, CornerParams];
   const arc = (k: CornerParams, x: number, y: number) => `a ${f(k.r)} ${f(k.r)} 0 0 1 ${f(x)} ${f(y)}`;
   const curve = (...values: number[]) => `c ${values.map(f).join(' ')}`;
-  const segments = [`M ${f(w - tr.p)} 0`];
+  const segments = startAtTopLeft
+    ? [`M ${f(tl.p)} 0`, `L ${f(w - tr.p)} 0`]
+    : [`M ${f(w - tr.p)} 0`];
   segments.push(tr.r
     ? [curve(tr.a, 0, tr.a + tr.b, 0, tr.a + tr.b + tr.c, tr.d), arc(tr, tr.arc, tr.arc),
       curve(tr.d, tr.c, tr.d, tr.b + tr.c, tr.d, tr.a + tr.b + tr.c)].join(' ')

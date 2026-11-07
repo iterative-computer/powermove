@@ -236,17 +236,32 @@ export function layoutRichText(d: any, measure: MeasureRich): RichLayout {
             : 0
         : 0;
   for (const [row, line] of visible.entries()) {
+    // Wrapped trailing whitespace is hanging space: it must not consume a
+    // justification gap or pull the last visible word away from the box edge.
+    if (d.align === "justify" && !line.paragraphEnd) {
+      for (
+        let i = line.glyphs.length - 1;
+        i >= 0 && /^\s+$/u.test(line.glyphs[i]!.text);
+        i--
+      )
+        line.glyphs[i]!.width = 0;
+      line.width = line.glyphs.reduce((sum, g) => sum + g.width, 0);
+    }
+
     const available = boxWidth ? boxWidth - line.indent : line.width,
       align = d.align === "center" ? 0.5 : d.align === "right" ? 1 : 0;
     let x =
       line.indent +
       Math.max(0, available - line.width) * align -
       (boxWidth ? boxWidth * align : line.width * align);
-    const spaces = line.glyphs.filter((g) => /^\s+$/u.test(g.text)).length,
+    const spaces = line.glyphs.filter(
+        (g) => g.width > 0 && /^\s+$/u.test(g.text),
+      ).length,
       justify =
         d.align === "justify" && !line.paragraphEnd && spaces
           ? Math.max(0, available - line.width) / spaces
           : 0;
+    if (justify > 0) line.width += justify * spaces;
     const ascent = Math.max(
         0,
         ...line.glyphs.map(
@@ -268,7 +283,7 @@ export function layoutRichText(d: any, measure: MeasureRich): RichLayout {
       g.y = line.y + vertical;
       g.baseline = baseline;
       g.line = row;
-      x += g.width + (/^\s+$/u.test(g.text) ? justify : 0);
+      x += g.width + (g.width > 0 && /^\s+$/u.test(g.text) ? justify : 0);
       all.push(g);
     }
   }

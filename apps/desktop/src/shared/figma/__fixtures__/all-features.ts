@@ -263,7 +263,9 @@ export function allFeatures(): FigmaDoc {
     },
   };
 }
-/** Independently authored SVG references, not pixels from the Powermove renderer. */
+/** Simplified mock exports for fallback-transport fixtures, NOT Figma-fidelity
+ * references: these deliberately omit blends and most effects. The independent
+ * SVG/Canvas/CSS grid oracle lives in e2e/fixtures/figma-grid-reference.ts. */
 export function referenceSVG(n: FigmaNode): string {
   let defs = '',
     body = `<rect width="90" height="60" fill="#f24d1f"/>`;

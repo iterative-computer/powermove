@@ -1,5 +1,10 @@
 import { it, expect } from "vitest";
-import { gradientParameter, sampleGradient, linearBurnPixel } from "./drawing";
+import {
+  gradientParameter,
+  sampleGradient,
+  linearBurnPixel,
+  triangleCapPoints,
+} from "./drawing";
 it("maps normalized linear, radial, angular and diamond paint coordinates", () => {
   expect(gradientParameter("linear", 0.25, 0.8)).toBe(0.25);
   expect(gradientParameter("radial", 1, 0.5)).toBe(1);
@@ -28,3 +33,20 @@ it("composites linear-burn text paints with straight alpha, including transparen
     0, 0, 0, 0,
   ]);
 });
+
+it.each([0.5, 4, 17])(
+  "equilateral arrow heads have three equal sides at stroke width %s",
+  (width) => {
+    const points = triangleCapPoints("ARROW_EQUILATERAL", width);
+    const sides = points.map((p, i) =>
+      Math.hypot(
+        p[0] - points[(i + 1) % 3]![0],
+        p[1] - points[(i + 1) % 3]![1],
+      ),
+    );
+    expect(sides[0]).toBeCloseTo(sides[1]!, 10);
+    expect(sides[1]).toBeCloseTo(sides[2]!, 10);
+    expect(points[0]).toEqual([0, 0]);
+    expect(points[1]![0]).toBeLessThan(0);
+  },
+);
